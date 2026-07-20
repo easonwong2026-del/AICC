@@ -24,9 +24,10 @@ from services.codex_monitor import monitor as codex_monitor
 from services.collector_manager import CollectorManager
 
 ROOT = Path(__file__).resolve().parent
-DATA_PATH = ROOT / "data" / "status.json"
-DEEPSEEK_HISTORY_PATH = ROOT / "data" / "deepseek_history.json"
-WEB_ROOT = ROOT / "web"
+DATA_ROOT = Path(os.environ.get("EINK_DATA_DIR", ROOT / "data")).expanduser()
+DATA_PATH = DATA_ROOT / "status.json"
+DEEPSEEK_HISTORY_PATH = DATA_ROOT / "deepseek_history.json"
+WEB_ROOT = Path(os.environ.get("EINK_WEB_ROOT", ROOT / "web")).expanduser()
 COLLECTOR_WAIT_SECONDS = max(0, min(5, float(os.environ.get("COLLECTOR_WAIT_SECONDS", "3.2"))))
 MAX_POST_BYTES = 16 * 1024
 mimetypes.add_type("application/manifest+json", ".webmanifest")

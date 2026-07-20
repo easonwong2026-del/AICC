@@ -26,6 +26,7 @@ android/poke-dashboard/.gradle/
 android/poke-dashboard/app/build/
 dist/*.apk
 dist/*.idsig
+dist/*.dmg
 dist/mac/
 
 # Editors
