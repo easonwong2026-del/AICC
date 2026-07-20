@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f7f7f4">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>AI Command</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="dashboard">
+    <header><span class="mark">AI</span><h1>COMMAND</h1><span id="connection" aria-label="Online">●</span></header>
+    <section class="metric" aria-labelledby="codex-title">
+      <div class="section-head"><h2 id="codex-title">CODEX</h2><small id="codex-source">--</small></div>
+      <p id="codex-state">Connecting...</p>
+      <p class="collector-note" id="codex-collector"></p>
+      <h3>剩余用量</h3>
+      <div class="quota-row"><div><strong>5小时</strong><span id="five-hour-reset">--</span></div><b id="five-hour-percent">--%</b></div>
+      <div class="bar"><span id="five-hour-bar"></span></div>
+      <div class="quota-row"><div><strong>1周</strong><span id="weekly-reset">--</span></div><b id="weekly-percent">--%</b></div>
+      <div class="bar"><span id="weekly-bar"></span></div>
+      <div class="codex-extra">
+        <div><span>重置机会</span><strong id="codex-reset-credits">--</strong></div>
+        <small id="codex-reset-expiry">--</small>
+      </div>
+      <p id="codex-buckets"></p>
+    </section>
+    <section class="metric" aria-labelledby="workbuddy-title">
+      <div class="section-head"><h2 id="workbuddy-title">WORKBUDDY</h2><strong id="workbuddy-state">--</strong></div>
+      <div class="points"><span id="workbuddy-points">--</span><small>PTS</small></div>
+      <p><span id="workbuddy-used">--</span> used today · <span id="workbuddy-reset">--</span></p>
+      <p id="workbuddy-source"></p>
+      <p class="collector-note" id="workbuddy-collector"></p>
+    </section>
+    <section class="metric" aria-labelledby="deepseek-title">
+      <div class="section-head"><h2 id="deepseek-title">DEEPSEEK API</h2><strong id="deepseek-state">--</strong></div>
+      <div class="deepseek-money-grid">
+        <div class="deepseek-amount">
+          <div class="deepseek-label">剩余金额</div>
+          <div class="points compact"><span id="deepseek-balance">--</span><small id="deepseek-balance-currency"></small></div>
+        </div>
+        <div class="deepseek-amount">
+          <div class="deepseek-label">使用金额</div>
+          <div class="points compact"><span id="deepseek-usage">--</span><small id="deepseek-usage-currency"></small></div>
+        </div>
+      </div>
+      <p id="deepseek-detail">--</p>
+      <p class="collector-note" id="deepseek-collector"></p>
+    </section>
+    <section class="metric" aria-labelledby="system-title">
+      <div class="section-head"><h2 id="system-title">SYSTEM</h2><strong id="system-state">--</strong></div>
+      <p id="system-label">Loading...</p><p id="system-metrics">--</p><p id="gpu-metrics"></p>
+      <p class="collector-note" id="system-collector"></p>
+    </section>
+    <footer>SYNC <time id="updated-at">--</time></footer>
+  </main>
+  <div id="kiosk-gate" class="kiosk-gate" hidden>
+    <button id="kiosk-start" type="button">进入墨水屏模式</button>
+    <small>全屏显示并保持屏幕唤醒</small>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

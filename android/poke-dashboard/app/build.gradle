@@ -1,0 +1,29 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.aieink.pokedashboard"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.aieink.pokedashboard"
+        minSdk 23
+        targetSdk 35
+        versionCode 8
+        versionName "1.2.2-optimized"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>AI Command 设置</title><link rel="stylesheet" href="/style.css"></head>
+<body class="settings-page"><main class="settings"><a href="/">返回仪表盘</a><h1>仪表盘设置</h1>
+  <p>Codex 自动采集；WorkBuddy 优先读取本机账户，下面的数值只在自动采集不可用时作为后备。</p>
+  <p>修改与重连操作仅允许从 <strong>localhost</strong> 打开的设置页执行。</p>
+  <h2>采集状态</h2>
+  <div id="source-status" class="source-status"></div>
+  <div class="actions"><button id="refresh" type="button">全部刷新</button><button id="reconnect-workbuddy" type="button">重连 WorkBuddy</button></div>
+  <output id="action-notice"></output>
+  <form id="form">
+    <fieldset><legend>WorkBuddy 后备数据</legend><label>可用积分<input name="workbuddy_points" type="number" min="0" required></label><label>今日使用积分<input name="workbuddy_used" type="number" min="0" required></label><label>重置时间 / 备注<input name="workbuddy_reset" maxlength="60"></label></fieldset>
+    <button type="submit">保存</button><output id="notice"></output>
+  </form>
+</main><script src="/settings.js"></script></body>
+</html>

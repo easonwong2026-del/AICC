@@ -1,0 +1,14 @@
+{
+  "name": "AI E-Ink Dashboard",
+  "short_name": "AI Command",
+  "description": "Codex, WorkBuddy and DeepSeek status for an e-ink display",
+  "start_url": "/?kiosk=1",
+  "scope": "/",
+  "display": "fullscreen",
+  "orientation": "portrait",
+  "background_color": "#f7f7f4",
+  "theme_color": "#f7f7f4",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

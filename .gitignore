@@ -1,0 +1,34 @@
+.runtime/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+
+# Local configuration, credentials, and signing material
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.keystore
+*.jks
+local.properties
+
+# Personal runtime data and logs
+data/
+*.log
+*.lock
+
+# Local Android SDK, Gradle, and build output
+.android-sdk/
+.android-tools/
+android/poke-dashboard/.gradle/
+android/poke-dashboard/app/build/
+dist/*.apk
+dist/*.idsig
+
+# Editors
+.idea/
+.vscode/
+*.iml
+*.swp
