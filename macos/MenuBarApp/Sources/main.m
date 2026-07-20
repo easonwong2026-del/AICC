@@ -36,6 +36,10 @@
     if (marker) {
         NSString *path = [NSString stringWithContentsOfURL:marker encoding:NSUTF8StringEncoding error:nil];
         path = [path stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if ([path hasPrefix:@"@resources/"]) {
+            NSString *relative = [path substringFromIndex:@"@resources/".length];
+            return [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:relative isDirectory:YES];
+        }
         if (path.length) { return [NSURL fileURLWithPath:path isDirectory:YES]; }
     }
     return [NSBundle.mainBundle.bundleURL URLByDeletingLastPathComponent].URLByDeletingLastPathComponent.URLByDeletingLastPathComponent;
@@ -128,9 +132,10 @@
 }
 
 - (NSDictionary<NSString *, NSString *> *)codexCacheSummary {
-    NSDictionary *codex = [self jsonAtPath:[self.rootURL.path stringByAppendingPathComponent:@"data/codex_last_success.json"]];
+    NSString *dataPath = self.dataDirectoryURL.path;
+    NSDictionary *codex = [self jsonAtPath:[dataPath stringByAppendingPathComponent:@"codex_last_success.json"]];
     if (![codex isKindOfClass:NSDictionary.class]) {
-        NSDictionary *status = [self jsonAtPath:[self.rootURL.path stringByAppendingPathComponent:@"data/status.json"]];
+        NSDictionary *status = [self jsonAtPath:[dataPath stringByAppendingPathComponent:@"status.json"]];
         NSDictionary *fallback = status[@"codex"];
         codex = [fallback isKindOfClass:NSDictionary.class] ? fallback : nil;
     }
@@ -229,7 +234,21 @@
     NSString *path = env[@"PATH"] ?: @"";
     env[@"PATH"] = [@[path, @"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"] componentsJoinedByString:@":"];
     env[@"PYTHONDONTWRITEBYTECODE"] = @"1";
+    if (self.isBundledServer) {
+        env[@"EINK_DATA_DIR"] = self.dataDirectoryURL.path;
+    }
     return env;
+}
+
+- (BOOL)isBundledServer {
+    return [self.rootURL.path containsString:@".app/Contents/Resources/Server"];
+}
+
+- (NSURL *)dataDirectoryURL {
+    if (self.isBundledServer) {
+        return [NSURL fileURLWithPath:[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/AI-EInk-Dashboard/data"] isDirectory:YES];
+    }
+    return [self.rootURL URLByAppendingPathComponent:@"data" isDirectory:YES];
 }
 
 - (BOOL)isHealthy {

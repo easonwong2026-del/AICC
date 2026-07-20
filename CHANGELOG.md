@@ -5,6 +5,7 @@
 - Add a native 128 KB macOS menu bar app for starting, stopping, restarting, and monitoring the local dashboard service.
 - Show cached Codex quota directly in the menu bar without triggering a quota refresh or collector run.
 - Add a generated monochrome macOS app icon and a reproducible `macos/build-menubar-app.sh` build path.
+- Add `macos/build-dmg.sh` for a self-contained drag-to-Applications DMG whose bundled server stores runtime data in Application Support and can publish into a separate releases directory.
 - Ship Android 1.2.5 Pencil Home UI with the final Poke4S home layout, larger quota typography, corrected reset-credit expiry fallback, and fixed charging status text.
 - Document that the menu bar app is built into `dist/mac/AI E-Ink Dashboard.app` first, with `/Applications` installation kept as an explicit user action.
 
