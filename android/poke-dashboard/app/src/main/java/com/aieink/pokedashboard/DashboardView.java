@@ -10,23 +10,19 @@ import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
 
-/** V1.2 visual language with the allocation-light V2 renderer. */
+/** Direct, allocation-light renderer mapped one-to-one to the Pencil home artboard. */
 final class DashboardView extends View {
     private static final int PAPER = Color.rgb(247, 247, 244);
     private static final int INK = Color.rgb(17, 17, 17);
+    private static final float DESIGN_WIDTH = 758f;
+    private static final float DESIGN_HEIGHT = 1024f;
     private static final Typeface REGULAR = Typeface.DEFAULT;
     private static final Typeface BOLD = Typeface.DEFAULT_BOLD;
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final RectF rect = new RectF();
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private final RectF codexRect = new RectF();
-    private final RectF workBuddyRect = new RectF();
-    private final RectF deepSeekRect = new RectF();
-    private final RectF systemRect = new RectF();
-    private final Runnable endFlash = () -> {
-        flash = false;
-        invalidate();
-    };
+    private final Runnable endFlash = () -> { flash = false; invalidate(); };
 
     private DashboardData data = new DashboardData();
     private boolean flash;
@@ -42,241 +38,135 @@ final class DashboardView extends View {
         setContentDescription("AI COMMAND 仪表盘，长按打开设置");
     }
 
-    void setData(DashboardData value) {
-        data = value;
-        data.offline = false;
-        invalidate();
-    }
-
-    void setOffline(boolean offline) {
-        data.offline = offline;
-        invalidate();
-    }
-
-    void flashRefresh() {
-        handler.removeCallbacks(endFlash);
-        flash = true;
-        invalidate();
-        handler.postDelayed(endFlash, 800);
-    }
-
-    void settleForSleep() {
-        handler.removeCallbacks(endFlash);
-        flash = false;
-        invalidate();
-    }
-
+    void setData(DashboardData value) { data = value; data.offline = false; invalidate(); }
+    void setOffline(boolean offline) { data.offline = offline; invalidate(); }
     void setDeviceBattery(int percent, boolean charging, boolean visible) {
         batteryPercent = percent;
         batteryCharging = charging;
         showDeviceBattery = visible;
         invalidate();
     }
+    void flashRefresh() {
+        handler.removeCallbacks(endFlash);
+        flash = true;
+        invalidate();
+        handler.postDelayed(endFlash, 800);
+    }
+    void settleForSleep() { handler.removeCallbacks(endFlash); flash = false; invalidate(); }
 
-    @Override
-    protected void onDraw(Canvas canvas) {
+    @Override protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
-        if (flash) {
-            canvas.drawColor(INK);
-            return;
-        }
+        if (flash) { canvas.drawColor(INK); return; }
         canvas.drawColor(PAPER);
-        float width = getWidth();
-        float height = getHeight();
-        float unit = Math.min(width, height);
-        float margin = unit * 0.045f;
-        float headerHeight = unit * 0.105f;
-        drawHeader(canvas, margin, headerHeight, unit);
-
-        float top = headerHeight + margin * 0.55f;
-        float bottom = height - margin * 0.6f;
-        float gap = margin * 0.45f;
-        if (width > height) {
-            float cardWidth = (width - margin * 2 - gap) / 2f;
-            float cardHeight = (bottom - top - gap) / 2f;
-            codexRect.set(margin, top, margin + cardWidth, top + cardHeight);
-            workBuddyRect.set(margin + cardWidth + gap, top, width - margin, top + cardHeight);
-            deepSeekRect.set(margin, top + cardHeight + gap, margin + cardWidth, bottom);
-            systemRect.set(margin + cardWidth + gap, top + cardHeight + gap, width - margin, bottom);
-        } else {
-            float available = bottom - top - gap * 2;
-            float codexHeight = available * .36f;
-            float pairHeight = available * .32f;
-            float splitWidth = (width - margin * 2 - gap) / 2f;
-            codexRect.set(margin, top, width - margin, top + codexHeight);
-            float pairTop = codexRect.bottom + gap;
-            workBuddyRect.set(margin, pairTop, margin + splitWidth, pairTop + pairHeight);
-            deepSeekRect.set(margin + splitWidth + gap, pairTop, width - margin, pairTop + pairHeight);
-            systemRect.set(margin, workBuddyRect.bottom + gap, width - margin, bottom);
-        }
-        drawCodex(canvas, codexRect, unit);
-        drawWorkBuddy(canvas, workBuddyRect, unit);
-        drawDeepSeek(canvas, deepSeekRect, unit);
-        drawSystem(canvas, systemRect, unit);
+        float sx = getWidth() / DESIGN_WIDTH;
+        float sy = getHeight() / DESIGN_HEIGHT;
+        canvas.save();
+        canvas.scale(sx, sy);
+        drawHeader(canvas);
+        drawCodex(canvas);
+        drawWorkBuddy(canvas);
+        drawDeepSeek(canvas);
+        drawSystem(canvas);
+        canvas.restore();
     }
 
-    private void drawHeader(Canvas canvas, float margin, float height, float unit) {
-        float box = unit * 0.06f;
+    private void drawHeader(Canvas canvas) {
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(INK);
-        canvas.drawRect(margin, margin * 0.55f, margin + box, margin * 0.55f + box, paint);
-        text(canvas, "AI", margin + box / 2f, margin * 0.55f + box * 0.68f,
-                unit * 0.026f, PAPER, true, Paint.Align.CENTER);
-        text(canvas, "COMMAND", margin + box + unit * 0.025f, margin * 0.55f + box * 0.68f,
-                unit * 0.034f, INK, true, Paint.Align.LEFT);
-        String state = data.offline ? "OFFLINE" : "●";
+        canvas.drawRect(34, 20, 80, 66, paint);
+        text(canvas, "AI", 57, 51, 20, PAPER, true, Paint.Align.CENTER);
+        text(canvas, "COMMAND", 100, 52, 28, INK, true, Paint.Align.LEFT);
+        String state = data.offline ? "OFFLINE" : "SYNC";
         if (data.failedCollectors > 0) state = "CHECK";
         else if (data.refreshingCollectors > 0) state = "SYNC";
         if (showDeviceBattery && batteryPercent >= 0) {
-            state = batteryPercent + "%" + (batteryCharging ? " +" : "") + "   " + state;
+            state = batteryPercent + "%" + (batteryCharging ? " +" : "") + "  " + state;
         }
-        text(canvas, state, getWidth() - margin, margin * 0.55f + box * 0.67f,
-                unit * 0.024f, INK, true, Paint.Align.RIGHT);
-        line(canvas, margin, height, getWidth() - margin, height, unit * 0.004f);
+        textFitRight(canvas, state, 724, 47, 180, 17);
+        filledRect(canvas, 34, 78, 690, 3, INK);
     }
 
-    private void drawCodex(Canvas canvas, RectF rect, float unit) {
-        card(canvas, rect, "CODEX", data.codexState, unit);
-        float left = rect.left + inset(rect);
-        float right = rect.right - inset(rect);
-        int quotaCount = (data.fiveHourRemaining == null ? 0 : 1)
-                + (data.weeklyRemaining == null ? 0 : 1);
-        float footerTop = rect.bottom - rect.height() * .20f;
-        if (quotaCount == 2) {
-            float middle = rect.centerX();
-            quotaColumn(canvas, "5小时", data.fiveHourRemaining, data.fiveHourReset,
-                    left, middle - inset(rect) * .45f, rect, unit);
-            line(canvas, middle, rect.top + rect.height() * .34f, middle,
-                    footerTop - rect.height() * .05f, unit * .0015f);
-            quotaColumn(canvas, "1周", data.weeklyRemaining, data.weeklyReset,
-                    middle + inset(rect) * .45f, right, rect, unit);
-        } else if (quotaCount == 1) {
-            boolean weekly = data.weeklyRemaining != null;
-            String label = weekly ? "1周剩余" : "5小时剩余";
-            int percent = weekly ? data.weeklyRemaining : data.fiveHourRemaining;
-            String reset = weekly ? data.weeklyReset : data.fiveHourReset;
-            text(canvas, label, left, rect.top + rect.height() * .46f,
-                    unit * .023f, INK, true, Paint.Align.LEFT);
-            text(canvas, percent + "%", rect.centerX(), rect.top + rect.height() * .55f,
-                    unit * .070f, INK, true, Paint.Align.CENTER);
-            text(canvas, "额度重置", right, rect.top + rect.height() * .41f,
-                    unit * .016f, INK, true, Paint.Align.RIGHT);
-            textFitRight(canvas, reset, right, rect.top + rect.height() * .53f,
-                    rect.width() * .30f, unit * .017f);
-            quotaBar(canvas, left, right, rect.top + rect.height() * .63f, percent, unit);
-        } else {
-            text(canvas, "等待账户额度…", left, rect.top + rect.height() * .52f,
-                    unit * .026f, INK, false, Paint.Align.LEFT);
-        }
-        line(canvas, left, footerTop, right, footerTop, unit * .0015f);
-        String creditValue = data.resetCreditsProvided && data.resetCreditsCount != null
-                ? data.resetCreditsCount + "次" : "未提供";
-        text(canvas, "重置机会  " + creditValue, left, rect.bottom - rect.height() * .065f,
-                unit * .020f, INK, true, Paint.Align.LEFT);
-        String extra = data.resetCreditsProvided && !"--".equals(data.resetCreditsExpiry)
-                ? "机会到期  " + data.resetCreditsExpiry
-                : (data.limitBucketCount > 1 ? data.limitBucketCount + "组额度" : "");
-        textFitRight(canvas, extra, right, rect.bottom - rect.height() * .065f,
-                rect.width() * .50f, unit * .016f);
+    private void drawCodex(Canvas canvas) {
+        outlinedRect(canvas, 34, 98, 690, 315, 2);
+        text(canvas, "CODEX", 64, 151, 26, INK, true, Paint.Align.LEFT);
+        textFitRight(canvas, data.codexState, 694, 151, 170, 16);
+        filledRect(canvas, 64, 179, 630, 2, INK);
+
+        boolean weekly = data.weeklyRemaining != null || data.fiveHourRemaining == null;
+        int percent = weekly ? valueOrZero(data.weeklyRemaining) : valueOrZero(data.fiveHourRemaining);
+        String reset = weekly ? data.weeklyReset : data.fiveHourReset;
+        text(canvas, weekly ? "1周剩余" : "5小时剩余", 64, 245, 24, INK, true, Paint.Align.LEFT);
+        text(canvas, percent + "%", 369, 267, 60, INK, true, Paint.Align.CENTER);
+        text(canvas, "额度重置", 694, 234, 20, INK, true, Paint.Align.RIGHT);
+        textFitRight(canvas, reset, 694, 265, 190, 16);
+        quotaBar(canvas, 64, 296, 630, percent);
+        filledRect(canvas, 64, 349, 630, 2, INK);
+        String credits = data.resetCreditsProvided && data.resetCreditsCount != null
+                ? "重置机会  " + data.resetCreditsCount + "次" : "重置机会  未提供";
+        textFit(canvas, credits, 129, 385, 210, 18, true);
+        String expiry = data.resetCreditsProvided && hasValue(data.resetCreditsExpiry)
+                ? "机会到期  " + data.resetCreditsExpiry : "机会到期  --";
+        textFitRight(canvas, expiry, 659, 385, 270, 18);
     }
 
-    private void drawWorkBuddy(Canvas canvas, RectF rect, float unit) {
-        String state = data.workBuddyStale ? "CACHED" : data.workBuddyState;
-        card(canvas, rect, "WORKBUDDY", state, unit);
-        float x = rect.left + inset(rect);
-        float y = rect.top + rect.height() * .60f;
-        textFit(canvas, data.workBuddyPoints, x, y, rect.width() * .70f, unit * .060f, true);
-        text(canvas, "PTS", rect.right - inset(rect), y,
-                unit * .019f, INK, true, Paint.Align.RIGHT);
-        text(canvas, "今日使用  " + data.workBuddyUsed, x, rect.bottom - rect.height() * .11f,
-                unit * .019f, INK, false, Paint.Align.LEFT);
+    private void drawWorkBuddy(Canvas canvas) {
+        outlinedRect(canvas, 34, 429, 326, 286, 2);
+        text(canvas, "WORKBUDDY", 49, 480, 26, INK, true, Paint.Align.LEFT);
+        textFitRight(canvas, data.workBuddyStale ? "CACHED" : data.workBuddyState, 343, 480, 142, 13);
+        filledRect(canvas, 49, 503, 295, 2, INK);
+        textFit(canvas, data.workBuddyPoints, 85, 599, 236, 46, true);
+        text(canvas, "PTS", 321, 675, 18, INK, true, Paint.Align.RIGHT);
+        textFit(canvas, "今日使用  " + data.workBuddyUsed, 81, 675, 183, 20, false);
     }
 
-    private void drawDeepSeek(Canvas canvas, RectF rect, float unit) {
-        card(canvas, rect, "DEEPSEEK API", data.deepSeekState, unit);
-        float inset = inset(rect);
-        float middle = rect.centerX();
-        float top = rect.top + rect.height() * .43f;
-        text(canvas, "余额", rect.left + inset, top, unit * .017f, INK, true, Paint.Align.LEFT);
-        text(canvas, "使用", middle + inset * .55f, top, unit * .017f, INK, true, Paint.Align.LEFT);
-        line(canvas, middle, rect.top + rect.height() * .33f, middle,
-                rect.bottom - inset, unit * .002f);
-        float valueY = rect.top + rect.height() * .68f;
-        textFit(canvas, data.deepSeekBalance, rect.left + inset, valueY,
-                rect.width() * .40f, unit * .044f, true);
-        textFit(canvas, data.deepSeekUsage, middle + inset * .55f, valueY,
-                rect.width() * .36f, unit * .044f, true);
-        text(canvas, data.deepSeekCurrency, rect.right - inset, rect.bottom - rect.height() * .11f,
-                unit * .018f, INK, true, Paint.Align.RIGHT);
+    private void drawDeepSeek(Canvas canvas) {
+        outlinedRect(canvas, 379, 429, 345, 286, 2);
+        text(canvas, "DEEPSEEK API", 395, 481, 26, INK, true, Paint.Align.LEFT);
+        textFitRight(canvas, data.deepSeekState, 697, 481, 106, 13);
+        filledRect(canvas, 395, 503, 312, 2, INK);
+        text(canvas, "余额", 408, 533, 17, INK, true, Paint.Align.LEFT);
+        text(canvas, "使用", 573, 533, 17, INK, true, Paint.Align.LEFT);
+        filledRect(canvas, 550, 516, 2, 177, INK);
+        textFit(canvas, data.deepSeekBalance, 411, 611, 106, 40, true);
+        textFit(canvas, data.deepSeekUsage, 613, 617, 61, 40, true);
+        text(canvas, data.deepSeekCurrency, 703, 675, 18, INK, true, Paint.Align.RIGHT);
     }
 
-    private void drawSystem(Canvas canvas, RectF rect, float unit) {
-        card(canvas, rect, "SYSTEM", data.systemState, unit);
-        float x = rect.left + inset(rect);
-        float y = rect.top + rect.height() * .47f;
-        textFit(canvas, data.systemLabel, x, y, rect.width() - inset(rect) * 2,
-                unit * .026f, false);
-        textFit(canvas, "CPU " + data.cpu + "   ·   RAM " + data.ram, x,
-                y + rect.height() * .22f, rect.width() - inset(rect) * 2,
-                unit * .023f, true);
-        if (!data.gpu.isEmpty()) {
-            textFit(canvas, data.gpu, x, rect.bottom - rect.height() * .11f,
-                    rect.width() * .70f, unit * .019f, false);
-            textFitRight(canvas, data.updatedAt, rect.right - inset(rect),
-                    rect.bottom - rect.height() * .11f, rect.width() * .27f, unit * .016f);
-        } else {
-            text(canvas, "SYNC  " + data.updatedAt, x, rect.bottom - rect.height() * .11f,
-                    unit * .018f, INK, false, Paint.Align.LEFT);
-        }
+    private void drawSystem(Canvas canvas) {
+        outlinedRect(canvas, 34, 734, 690, 270, 2);
+        text(canvas, "SYSTEM", 64, 786, 24, INK, true, Paint.Align.LEFT);
+        filledRect(canvas, 64, 803, 630, 2, INK);
+        textFit(canvas, data.systemLabel, 64, 864, 430, 20, false);
+        textFit(canvas, "CPU " + data.cpu, 474, 865, 180, 18, true);
+        textFit(canvas, "RAM " + data.ram, 474, 922, 230, 18, true);
+        textFit(canvas, data.gpu, 79, 928, 330, 18, false);
+        textFitRight(canvas, data.updatedAt, 694, 979, 210, 15);
     }
 
-    private void card(Canvas canvas, RectF rect, String title, String state, float unit) {
+    private int valueOrZero(Integer value) { return value == null ? 0 : value; }
+
+    private boolean hasValue(String value) {
+        return value != null && !value.isEmpty() && !"--".equals(value)
+                && !"null".equalsIgnoreCase(value);
+    }
+
+    private void quotaBar(Canvas canvas, float left, float top, float width, int percent) {
+        outlinedRect(canvas, left, top, width, 12, 2);
+        filledRect(canvas, left + 2, top + 2, (width - 4) * Math.max(0, Math.min(100, percent)) / 100f, 8, INK);
+    }
+
+    private void outlinedRect(Canvas canvas, float x, float y, float width, float height, float stroke) {
         paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(Math.max(1.5f, unit * .0022f));
+        paint.setStrokeWidth(stroke);
         paint.setColor(INK);
+        rect.set(x, y, x + width, y + height);
         canvas.drawRect(rect, paint);
-        float inset = inset(rect);
-        float baseline = rect.top + rect.height() * .19f;
-        text(canvas, title, rect.left + inset, baseline, unit * .021f, INK, true, Paint.Align.LEFT);
-        textFitRight(canvas, state, rect.right - inset, baseline,
-                rect.width() * .42f, unit * .017f);
-        line(canvas, rect.left + inset, rect.top + rect.height() * .26f,
-                rect.right - inset, rect.top + rect.height() * .26f, unit * .0016f);
     }
 
-    private void quotaColumn(Canvas canvas, String label, int percent, String reset,
-                             float left, float right, RectF rect, float unit) {
-        text(canvas, label, left, rect.top + rect.height() * .42f,
-                unit * .019f, INK, true, Paint.Align.LEFT);
-        text(canvas, percent + "%", right, rect.top + rect.height() * .43f,
-                unit * .037f, INK, true, Paint.Align.RIGHT);
-        quotaBar(canvas, left, right, rect.top + rect.height() * .51f, percent, unit);
-        textFit(canvas, "重置 " + reset, left, rect.top + rect.height() * .68f,
-                right - left, unit * .015f, false);
-    }
-
-    private void quotaBar(Canvas canvas, float left, float right, float top,
-                          int percent, float unit) {
-        float bottom = top + Math.max(8, unit * .012f);
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(Math.max(1.5f, unit * .002f));
-        paint.setColor(INK);
-        canvas.drawRect(left, top, right, bottom, paint);
+    private void filledRect(Canvas canvas, float x, float y, float width, float height, int color) {
         paint.setStyle(Paint.Style.FILL);
-        canvas.drawRect(left, top,
-                left + (right - left) * Math.max(0, Math.min(100, percent)) / 100f,
-                bottom, paint);
-    }
-
-    private float inset(RectF rect) {
-        return Math.max(12, rect.width() * .045f);
-    }
-
-    private void line(Canvas canvas, float x1, float y1, float x2, float y2, float width) {
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(Math.max(1, width));
-        paint.setColor(INK);
-        canvas.drawLine(x1, y1, x2, y2, paint);
+        paint.setColor(color);
+        canvas.drawRect(x, y, x + width, y + height, paint);
     }
 
     private void text(Canvas canvas, String value, float x, float y, float size, int color,
@@ -287,30 +177,26 @@ final class DashboardView extends View {
         paint.setTextAlign(align);
         paint.setTypeface(bold ? BOLD : REGULAR);
         paint.setFakeBoldText(false);
-        canvas.drawText(value == null ? "--" : value, x, y, paint);
+        canvas.drawText(value == null || value.isEmpty() ? "--" : value, x, y, paint);
     }
 
     private float measure(String value, float size, boolean bold) {
         paint.setTextSize(size);
         paint.setTypeface(bold ? BOLD : REGULAR);
-        paint.setFakeBoldText(false);
-        return paint.measureText(value == null ? "--" : value);
+        return paint.measureText(value == null || value.isEmpty() ? "--" : value);
     }
 
     private float fittedSize(String value, float maxWidth, float size, boolean bold) {
-        while (size > 12 && measure(value, size, bold) > maxWidth) size *= .9f;
+        while (size > 10 && measure(value, size, bold) > maxWidth) size *= .9f;
         return size;
     }
 
-    private void textFit(Canvas canvas, String value, float x, float y,
-                         float maxWidth, float size, boolean bold) {
-        text(canvas, value, x, y, fittedSize(value, maxWidth, size, bold),
-                INK, bold, Paint.Align.LEFT);
+    private void textFit(Canvas canvas, String value, float x, float y, float maxWidth,
+                         float size, boolean bold) {
+        text(canvas, value, x, y, fittedSize(value, maxWidth, size, bold), INK, bold, Paint.Align.LEFT);
     }
 
-    private void textFitRight(Canvas canvas, String value, float x, float y,
-                              float maxWidth, float size) {
-        while (size > 10 && measure(value, size, true) > maxWidth) size *= .9f;
-        text(canvas, value, x, y, size, INK, true, Paint.Align.RIGHT);
+    private void textFitRight(Canvas canvas, String value, float x, float y, float maxWidth, float size) {
+        text(canvas, value, x, y, fittedSize(value, maxWidth, size, true), INK, true, Paint.Align.RIGHT);
     }
 }

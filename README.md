@@ -19,6 +19,7 @@ bash macos/start-dashboard.sh              # 前台启动
 bash macos/install-autostart.sh            # 安装自动启动与监控
 bash macos/uninstall-autostart.sh          # 移除自动启动
 bash macos/set-deepseek-key.sh             # 更新 DeepSeek 密钥
+SERVER_ROOT=/path/to/dashboard bash macos/build-menubar-app.sh  # 构建轻量菜单栏 App
 ```
 
 安全更新会先跑测试并完整备份，同时保留当前额度历史和缓存：
@@ -29,6 +30,12 @@ bash macos/rollback-from-backup.sh /path/to/backup
 ```
 
 日志位于 `~/Library/Logs/AI-EInk-Dashboard/`，每天自动限制体积。
+
+轻量菜单栏 App 会生成在 `dist/mac/AI E-Ink Dashboard.app`。`SERVER_ROOT` 不填时
+默认管理当前项目目录，填入生产目录时可让安装版 App 直接管理日常运行的服务。
+它只负责状态显示、
+启动/停止/重启服务、打开设置页、打开日志和配置开机自启；额度采集仍由现有
+Python 服务完成，菜单栏健康检查只访问 `/api/health`，不会额外触发额度刷新。
 
 ## 数据采集与内存策略
 
