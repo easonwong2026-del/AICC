@@ -1,13 +1,17 @@
 package com.aieink.pokedashboard;
 
 import android.app.Activity;
-import android.app.AlertDialog;
+import android.app.Dialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.res.Configuration;
+import android.content.res.ColorStateList;
+import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.GradientDrawable;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -15,14 +19,16 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
 import android.view.View;
+import android.view.Gravity;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
-import android.widget.CheckBox;
+import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.io.BufferedReader;
@@ -237,64 +243,89 @@ public final class MainActivity extends Activity {
     }
 
     private void showSettings() {
-        int padding = Math.round(20 * getResources().getDisplayMetrics().density);
+        final int padding = dp(18);
+        final int ink = Color.rgb(17, 17, 17);
+        final int muted = Color.rgb(85, 85, 85);
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
+        dialog.setCanceledOnTouchOutside(true);
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(padding, dp(14), padding, 0);
+        panel.setBackground(outline(Color.WHITE, ink, dp(2), dp(14)));
+
+        TextView title = settingText("AI E-Ink 设置", 24, ink, true);
+        title.setGravity(Gravity.CENTER);
+        panel.addView(title, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(48)));
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(padding, padding / 2, padding, 0);
+        content.setPadding(dp(4), 0, dp(4), 0);
 
-        TextView hint = new TextView(this);
-        hint.setText("电脑地址（支持自动发现）");
+        TextView hint = settingText("电脑地址（支持自动发现）", 16, muted, false);
         EditText url = new EditText(this);
+        styleInput(url, 17, ink);
         url.setSingleLine(true);
         url.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         url.setText(preferences.getString(KEY_URL, DEFAULT_URL));
 
-        TextView intervalHint = new TextView(this);
-        intervalHint.setText("刷新间隔（分钟）");
+        TextView intervalHint = settingText("刷新间隔（分钟）", 16, muted, false);
         EditText interval = new EditText(this);
+        styleInput(interval, 17, ink);
         interval.setSingleLine(true);
         interval.setInputType(InputType.TYPE_CLASS_NUMBER);
         interval.setText(String.valueOf(refreshMinutes()));
 
-        TextView modeHint = new TextView(this);
-        modeHint.setText("显示模式（省电模式需在 BOOX 中启用透明屏保）");
+        TextView modeHint = settingText("显示模式（省电模式需在 BOOX 中启用透明屏保）", 14, muted, false);
         RadioGroup displayMode = new RadioGroup(this);
         displayMode.setOrientation(RadioGroup.VERTICAL);
         RadioButton screenSaverMode = new RadioButton(this);
-        screenSaverMode.setText("省电屏保：允许休眠，唤醒后立即更新（推荐）");
+        styleChoice(screenSaverMode, "省电屏保：允许休眠，唤醒后立即更新\n（推荐）", 17, true);
         RadioButton alwaysOnMode = new RadioButton(this);
-        alwaysOnMode.setText("桌面常亮：保持屏幕点亮并定时更新");
+        styleChoice(alwaysOnMode, "桌面常亮：保持屏幕点亮并定时更新", 17, false);
         displayMode.addView(screenSaverMode);
         displayMode.addView(alwaysOnMode);
         boolean keepAwake = preferences.getBoolean(KEY_KEEP_AWAKE, false);
         screenSaverMode.setChecked(!keepAwake);
         alwaysOnMode.setChecked(keepAwake);
 
-        CheckBox showBattery = new CheckBox(this);
-        showBattery.setText("在面板右上角显示 Poke4S 电量");
+        android.widget.CheckBox showBattery = new android.widget.CheckBox(this);
+        styleChoice(showBattery, "在面板右上角显示 Poke4S 电量", 17, false);
         showBattery.setChecked(preferences.getBoolean(KEY_SHOW_BATTERY, true));
-        CheckBox autoStart = new CheckBox(this);
-        autoStart.setText("开机后尝试自动启动");
+        android.widget.CheckBox autoStart = new android.widget.CheckBox(this);
+        styleChoice(autoStart, "开机后尝试自动启动", 17, false);
         autoStart.setChecked(preferences.getBoolean("auto_start", true));
 
         content.addView(hint);
-        content.addView(url);
+        content.addView(url, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(42)));
+        content.addView(settingDivider());
         content.addView(intervalHint);
-        content.addView(interval);
+        content.addView(interval, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(42)));
+        content.addView(settingDivider());
         content.addView(modeHint);
         content.addView(displayMode);
         content.addView(showBattery);
         content.addView(autoStart);
 
-        new AlertDialog.Builder(this)
-                .setTitle("AI E-Ink 设置")
-                .setView(content)
-                .setNegativeButton("取消", null)
-                .setNeutralButton("自动发现", (dialog, which) -> {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.addView(content);
+        panel.addView(scroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        panel.addView(settingDivider());
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        Button cancel = settingButton("取消");
+        cancel.setOnClickListener(view -> dialog.dismiss());
+        Button discover = settingButton("自动发现");
+        discover.setOnClickListener(view -> {
                     preferences.edit().remove(KEY_URL).apply();
                     fetchStatus();
-                })
-                .setPositiveButton("保存", (dialog, which) -> {
+        });
+        Button save = settingButton("保存");
+        save.setOnClickListener(view -> {
                     int minutes = 5;
                     try { minutes = Integer.parseInt(interval.getText().toString()); }
                     catch (NumberFormatException ignored) { }
@@ -311,7 +342,95 @@ public final class MainActivity extends Activity {
                             new IntentFilter(Intent.ACTION_BATTERY_CHANGED)));
                     handler.removeCallbacks(refreshLoop);
                     handler.post(refreshLoop);
-                }).show();
+                    dialog.dismiss();
+        });
+        actions.addView(cancel, actionParams());
+        actions.addView(actionDivider());
+        actions.addView(discover, actionParams());
+        actions.addView(actionDivider());
+        actions.addView(save, actionParams());
+        panel.addView(actions, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(58)));
+        dialog.setContentView(panel);
+        dialog.show();
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            dialog.getWindow().setLayout((int) (getResources().getDisplayMetrics().widthPixels * .94f),
+                    (int) (getResources().getDisplayMetrics().heightPixels * .78f));
+        }
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private GradientDrawable outline(int fill, int stroke, int strokeWidth, int radius) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(fill);
+        drawable.setStroke(strokeWidth, stroke);
+        drawable.setCornerRadius(radius);
+        return drawable;
+    }
+
+    private TextView settingText(String value, int size, int color, boolean bold) {
+        TextView view = new TextView(this);
+        view.setText(value);
+        view.setTextSize(size);
+        view.setTextColor(color);
+        view.setGravity(Gravity.CENTER_VERTICAL);
+        view.setTypeface(bold ? android.graphics.Typeface.DEFAULT_BOLD : android.graphics.Typeface.DEFAULT);
+        return view;
+    }
+
+    private void styleInput(EditText input, int size, int color) {
+        input.setTextSize(size);
+        input.setTextColor(color);
+        input.setSingleLine(true);
+        input.setPadding(0, 0, 0, 0);
+        input.setBackgroundColor(Color.TRANSPARENT);
+    }
+
+    private void styleChoice(TextView view, String label, int size, boolean bold) {
+        view.setText(label);
+        view.setTextSize(size);
+        view.setTextColor(Color.rgb(17, 17, 17));
+        view.setTypeface(bold ? android.graphics.Typeface.DEFAULT_BOLD : android.graphics.Typeface.DEFAULT);
+        view.setMinHeight(dp(38));
+        view.setGravity(Gravity.CENTER_VERTICAL);
+        if (view instanceof android.widget.CompoundButton) {
+            ((android.widget.CompoundButton) view).setButtonTintList(ColorStateList.valueOf(Color.rgb(17, 17, 17)));
+        }
+    }
+
+    private View settingDivider() {
+        View divider = new View(this);
+        divider.setBackgroundColor(Color.rgb(150, 150, 150));
+        divider.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, Math.max(1, dp(1))));
+        return divider;
+    }
+
+    private Button settingButton(String label) {
+        Button button = new Button(this);
+        button.setText(label);
+        button.setTextSize(17);
+        button.setTextColor(Color.rgb(17, 17, 17));
+        button.setAllCaps(false);
+        button.setBackgroundColor(Color.TRANSPARENT);
+        button.setPadding(0, 0, 0, 0);
+        return button;
+    }
+
+    private LinearLayout.LayoutParams actionParams() {
+        return new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
+    }
+
+    private View actionDivider() {
+        View divider = new View(this);
+        divider.setBackgroundColor(Color.rgb(17, 17, 17));
+        divider.setLayoutParams(new LinearLayout.LayoutParams(Math.max(1, dp(1)),
+                LinearLayout.LayoutParams.MATCH_PARENT));
+        return divider;
     }
 
     private int refreshMinutes() {
