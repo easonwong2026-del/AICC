@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dependency-free local server for the Poke4S AI e-ink display."""
+"""Dependency-free local server for AICC — AI Status Center."""
 
 from __future__ import annotations
 
@@ -104,7 +104,7 @@ def version() -> str:
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
-    server_version = "AI-EInk/2.2.2"
+    server_version = "AICC/2.3.1"
     sys_version = ""
 
     def __init__(self, *args, **kwargs):
@@ -212,7 +212,7 @@ def start_discovery(http_port: int) -> None:
                     request, address = channel.recvfrom(512)
                     if request.strip() != DISCOVERY_MAGIC:
                         continue
-                    payload = json.dumps({"name": "AI E-Ink Dashboard", "port": http_port}).encode("utf-8")
+                    payload = json.dumps({"name": "AICC Dashboard", "port": http_port}).encode("utf-8")
                     channel.sendto(payload, address)
         except OSError as error:
             print(f"Discovery disabled: {error}")
@@ -239,7 +239,7 @@ def main() -> None:
     start_discovery(port)
     collector_manager().snapshot(force=True, wait_seconds=0)
     threading.Thread(target=_periodic_save, daemon=True).start()
-    print(f"AI E-Ink Dashboard: http://localhost:{port}")
+    print(f"AICC Dashboard: http://localhost:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

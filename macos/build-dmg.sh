@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP_NAME="AI E-Ink Dashboard"
+APP_NAME="AICC"
 VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 DMG_NAME="AI-EInk-Dashboard-$VERSION.dmg"
 APP_DIR="$ROOT/dist/mac/$APP_NAME.app"
