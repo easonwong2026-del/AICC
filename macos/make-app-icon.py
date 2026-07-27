@@ -25,7 +25,7 @@ def rgba_png_bytes(size: int) -> bytes:
             return True
         if left <= x <= right and top + radius <= y <= bottom - radius:
             return True
-        for cx, cy in ((left + radius, top + radius), (right - radius, top + radius), (left + radius, bottom - radius), (right - radius, bottom - radius)):
+        for cx, cy in ((left + radius, top + radius), (right - radius, top + radius), (left + radius, bottom - radius), (right - radius, bottom - radius)):  # noqa: E501
             if (x - cx) ** 2 + (y - cy) ** 2 <= radius ** 2:
                 return True
         return False

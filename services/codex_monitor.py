@@ -84,7 +84,7 @@ class CodexMonitor:
         process = self._process
         threading.Thread(target=self._read_stdout, args=(process,), name="codex-rate-limits", daemon=True).start()
         threading.Thread(target=self._refresh_loop, args=(process,), name="codex-rate-limits-refresh", daemon=True).start()
-        self._initialize_request_id = self._send("initialize", {"clientInfo": {"name": "ai-eink-dashboard", "version": "2.1"}, "capabilities": {}})
+        self._initialize_request_id = self._send("initialize", {"clientInfo": {"name": "ai-eink-dashboard", "version": "2.1"}, "capabilities": {}})  # noqa: E501
 
     @classmethod
     def _resolve_cli(cls) -> tuple[str | None, str]:
@@ -288,7 +288,7 @@ class CodexMonitor:
                         self._status.get("five_hour") or self._status.get("weekly")
                         or self._status.get("limit_buckets")
                     )
-                    self._status.update(state=str(detail), available=has_cache, stale=True, detail="Open ChatGPT and sign in; the dashboard will reconnect automatically.")
+                    self._status.update(state=str(detail), available=has_cache, stale=True, detail="Open ChatGPT and sign in; the dashboard will reconnect automatically.")  # noqa: E501
                 self._fresh_event.set()
                 continue
             if message.get("method") == "account/rateLimits/updated":

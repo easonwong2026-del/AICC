@@ -87,9 +87,9 @@ def collect(history_path: Path | None = None) -> dict:
         with urlopen(request, timeout=8) as response:
             payload = json.loads(response.read().decode("utf-8"))
         balances = payload.get("balance_infos", []) if isinstance(payload, dict) else []
-        safe_balances = [{"currency": item.get("currency", ""), "total_balance": item.get("total_balance", ""), "granted_balance": item.get("granted_balance", ""), "topped_up_balance": item.get("topped_up_balance", "")} for item in balances if isinstance(item, dict)]
+        safe_balances = [{"currency": item.get("currency", ""), "total_balance": item.get("total_balance", ""), "granted_balance": item.get("granted_balance", ""), "topped_up_balance": item.get("topped_up_balance", "")} for item in balances if isinstance(item, dict)]  # noqa: E501
         usage = update_usage(history_path, safe_balances) if history_path else []
-        return {"status": "Online" if payload.get("is_available") else "No balance", "balances": safe_balances, "usage": usage, "source": "Observed balance"}
+        return {"status": "Online" if payload.get("is_available") else "No balance", "balances": safe_balances, "usage": usage, "source": "Observed balance"}  # noqa: E501
     except HTTPError as error:
         return {"status": f"API error {error.code}", "balances": [], "source": "DeepSeek API"}
     except (URLError, TimeoutError, ValueError):
