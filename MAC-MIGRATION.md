@@ -17,7 +17,7 @@ downloads.
 2. Verify that `codex --version` works in Terminal. If the command is installed
    somewhere unusual, set `CODEX_CLI_PATH` to its full path before starting.
 3. Unzip the package into a stable location such as
-   `~/AI-EInk/ai-eink-dashboard`. Avoid moving it after installing auto-start.
+   `~/AICC`. Avoid moving it after installing auto-start.
 4. In Terminal, enter that directory and prepare the scripts:
 
 ```bash
@@ -53,7 +53,7 @@ bash macos/install-autostart.sh
 
 The LaunchAgents start the dashboard and WorkBuddy's localhost-only monitoring
 bridge at sign-in. The dashboard restarts after a crash.
-Logs are stored in `~/Library/Logs/AI-EInk-Dashboard/`.
+Logs are stored in `~/Library/Logs/AICC-Dashboard/`.
 
 To remove it:
 

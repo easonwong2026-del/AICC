@@ -89,5 +89,5 @@ jobs:
       - name: Upload macOS app
         uses: actions/upload-artifact@v4
         with:
-          name: macos-app
-          path: dist/mac/AI\ E-Ink\ Dashboard.app
+          name: aicc-macos-app
+          path: dist/mac/AICC.app
