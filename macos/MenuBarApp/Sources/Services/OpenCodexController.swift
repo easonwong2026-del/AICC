@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import OSLog
 
 @MainActor
 class OpenCodexController: ObservableObject {
@@ -8,6 +9,7 @@ class OpenCodexController: ObservableObject {
     @Published var status: OCXStatus = .unknown
     @Published var detectedPath: String?
     @Published var isHealthChecking = false
+    private let logger = Logger(subsystem: "com.aieink.dashboard.menubar", category: "OpenCodex")
 
     private let healthURL = "http://127.0.0.1:10100/healthz"
     private let candidates = [
@@ -172,17 +174,24 @@ class OpenCodexController: ObservableObject {
     // MARK: - Private
 
     private func runOCX(command: String, path: String) async {
+        logger.log("Running ocx \(command) via login shell")
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             let process = Process()
-            process.launchPath = path
-            process.arguments = [command]
+            // Use login shell so PATH, Homebrew, npm-global,
+            // CODEX_CLI_PATH and user .zprofile/.zshrc are sourced.
+            process.launchPath = "/bin/zsh"
+            process.arguments = ["-lc", "\(path) \(command)"]
             process.standardOutput = Pipe()
             process.standardError = Pipe()
 
+            let home = NSHomeDirectory()
             var env = ProcessInfo.processInfo.environment
             var procPath = env["PATH"] ?? ""
             procPath = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:\(procPath)"
             env["PATH"] = procPath
+            env["HOME"] = home
+            env["SHELL"] = "/bin/zsh"
+            env["TERM"] = "xterm-256color"
             process.environment = env
 
             process.terminationHandler = { _ in
@@ -192,6 +201,7 @@ class OpenCodexController: ObservableObject {
             do {
                 try process.run()
             } catch {
+                logger.error("Failed to start ocx process: \(error.localizedDescription)")
                 continuation.resume()
             }
         }
