@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SERVER_ROOT="${SERVER_ROOT:-$ROOT}"
 BUNDLE_SERVER="${BUNDLE_SERVER:-0}"
-APP_NAME="AI E-Ink Dashboard"
+APP_NAME="AICC"
 APP_DIR="$ROOT/dist/mac/$APP_NAME.app"
 CONTENTS="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS/MacOS"

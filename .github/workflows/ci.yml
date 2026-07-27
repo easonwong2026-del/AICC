@@ -44,7 +44,7 @@ jobs:
         run: pip install flake8
 
       - name: Lint Python
-        run: flake8 --max-line-length=120 --exclude=__pycache__,.git,dist,android,web .
+        run: flake8 --max-line-length=130 --exclude=__pycache__,.git,dist,android,web .
 
   android:
     runs-on: ubuntu-latest

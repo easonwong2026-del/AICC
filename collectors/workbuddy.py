@@ -1,6 +1,8 @@
 """Automatically collect WorkBuddy balance and local usage without reading tokens."""
 
 from __future__ import annotations
+from typing import Any
+
 
 import json
 import os
