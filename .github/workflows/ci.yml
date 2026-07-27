@@ -84,7 +84,7 @@ jobs:
 
       - name: Build macOS app
         run: |
-          BUNDLE_SERVER=1 bash macos/build-menubar-app.sh
+          BUNDLE_SERVER=1 bash macos/build-aicc-swiftui.sh
 
       - name: Upload macOS app
         uses: actions/upload-artifact@v4
