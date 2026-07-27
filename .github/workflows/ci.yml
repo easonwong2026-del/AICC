@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check Python syntax
+        run: |
+          python -m py_compile server.py
+          python -m py_compile services/codex_monitor.py
+          python -m py_compile services/collector_manager.py
+          python -m py_compile services/cdp.py
+          python -m py_compile collectors/deepseek.py
+          python -m py_compile collectors/workbuddy.py
+          python -m py_compile collectors/system.py
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install linter
+        run: pip install flake8
+
+      - name: Lint Python
+        run: flake8 --max-line-length=120 --exclude=__pycache__,.git,dist,android,web .
+
+  android:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android/poke-dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build APK
+        run: ./gradlew assembleRelease
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: poke4s-dashboard-apk
+          path: android/poke-dashboard/app/build/outputs/apk/release/*.apk
+
+  macos-build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build macOS app
+        run: |
+          BUNDLE_SERVER=1 bash macos/build-menubar-app.sh
+
+      - name: Upload macOS app
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-app
+          path: dist/mac/AI\ E-Ink\ Dashboard.app

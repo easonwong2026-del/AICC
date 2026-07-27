@@ -58,7 +58,7 @@ def allow_request(address: str, category: str, limit: int) -> bool:
 
 
 def persisted_status() -> dict:
-    DATA_PATH.parent.mkdir(exist_ok=True)
+    DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
     if not DATA_PATH.exists():
         save_status(DEFAULT_STATUS)
     try:
@@ -90,7 +90,7 @@ def load_status(force: bool = False) -> dict:
 
 
 def save_status(data: dict) -> None:
-    DATA_PATH.parent.mkdir(exist_ok=True)
+    DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
     temporary = DATA_PATH.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, DATA_PATH)
@@ -220,11 +220,24 @@ def start_discovery(http_port: int) -> None:
     threading.Thread(target=serve, name="eink-discovery", daemon=True).start()
 
 
+def _periodic_save(interval: int = 30) -> None:
+    """定时将收集器数据写入 status.json，供菜单栏等文件读取方使用。"""
+    while True:
+        time.sleep(interval)
+        try:
+            values, _ = collector_manager().snapshot(force=False, wait_seconds=0)
+            data = persisted_status()
+            data.update(values)
+            save_status(data)
+        except Exception:
+            pass
+
 def main() -> None:
     port = int(os.environ.get("EINK_PORT", "8765"))
     server = DashboardServer((os.environ.get("EINK_HOST", "0.0.0.0"), port), DashboardHandler)
     start_discovery(port)
     collector_manager().snapshot(force=True, wait_seconds=0)
+    threading.Thread(target=_periodic_save, daemon=True).start()
     print(f"AI E-Ink Dashboard: http://localhost:{port}")
     try:
         server.serve_forever()

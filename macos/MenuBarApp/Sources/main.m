@@ -87,7 +87,8 @@
 
 - (BOOL)start:(NSError **)error {
     if ([self isHealthy]) { return YES; }
-    NSTask *task = [self taskWithLaunchPath:@"/bin/bash" arguments:@[[self.rootURL.path stringByAppendingPathComponent:@"macos/start-dashboard.sh"]] logName:@"menubar-dashboard"];
+    NSString *serverScript = [self.rootURL.path stringByAppendingPathComponent:@"server.py"];
+    NSTask *task = [self taskWithLaunchPath:@"/usr/bin/python3" arguments:@[@"-B", serverScript] logName:@"menubar-dashboard"];
     __block BOOL ok = YES;
     __block NSError *localError = nil;
     dispatch_sync(_queue, ^{
@@ -235,6 +236,7 @@
     env[@"PATH"] = [@[path, @"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"] componentsJoinedByString:@":"];
     env[@"PYTHONDONTWRITEBYTECODE"] = @"1";
     if (self.isBundledServer) {
+        env[@"CODEX_CLI_PATH"] = @"/Applications/ChatGPT.app/Contents/Resources/codex";
         env[@"EINK_DATA_DIR"] = self.dataDirectoryURL.path;
     }
     return env;
