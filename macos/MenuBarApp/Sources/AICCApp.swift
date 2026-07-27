@@ -89,6 +89,7 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NotificationCenter.default.addObserver(forName: .showAICCSettings, object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.showSettingsWindow() } }
         NSApp.setActivationPolicy(.accessory)
 
         // Start the Python server
@@ -163,8 +164,9 @@ struct AICCApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        Settings {
-            EmptyView()
-        }
     }
+}
+
+extension Notification.Name {
+    static let showAICCSettings = Notification.Name("showAICCSettings")
 }

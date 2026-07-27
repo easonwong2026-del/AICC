@@ -17,12 +17,14 @@ struct CodexData: Codable {
     let source: String?
     let state: String?
     let stale: Bool?
+    let available: Bool?
 }
 
 struct RateWindow: Codable {
     let remaining: Double?
     let reset: String?
     let label: String?
+    let duration_minutes: Int?
 }
 
 // MARK: - WorkBuddy
@@ -34,6 +36,7 @@ struct WorkBuddyData: Codable {
     let balance_state: String?
     let auto_used_credits: Double?
     let usage_records: Int?
+    let usage_source: String?
 }
 
 // MARK: - DeepSeek
@@ -67,11 +70,19 @@ struct SystemData: Codable {
 }
 
 // MARK: - Collection Metadata
+struct CollectorStatus: Codable {
+    let state: String?
+    let last_success: String?
+    let age_seconds: Int?
+    let error: String?
+    let refresh_seconds: Int?
+}
+
 struct CollectionMeta: Codable {
-    let codex: String?
-    let workbuddy: String?
-    let deepseek: String?
-    let system: String?
+    let codex: CollectorStatus?
+    let workbuddy: CollectorStatus?
+    let deepseek: CollectorStatus?
+    let system: CollectorStatus?
 }
 
 // MARK: - OpenCodex Status

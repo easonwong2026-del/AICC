@@ -196,6 +196,7 @@ struct DashboardView: View {
 
     private func openSettings() {
         // Will be connected via App
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        NotificationCenter.default.post(name: .showAICCSettings, object: nil)
     }
 }
+

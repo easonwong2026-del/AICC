@@ -42,20 +42,27 @@ class APIService: ObservableObject {
                 state = .error("Server error")
                 return
             }
-            let decoded = try JSONDecoder().decode(StatusResponse.self, from: data)
+            let decoder = JSONDecoder()
+            let decoded = try decoder.decode(StatusResponse.self, from: data)
             status = decoded
             lastRefresh = Date()
             state = .ready
             errorMessage = nil
-        } catch {
-            if (error as NSError).code == NSURLErrorCannotConnectToHost ||
-               (error as NSError).code == NSURLErrorTimedOut {
+        } catch let decodingError as DecodingError {
+            let detail = decodingError.failureReason ?? decodingError.localizedDescription
+            state = .error(detail)
+            errorMessage = detail
+        } catch let urlError as URLError {
+            if urlError.code == .cannotConnectToHost || urlError.code == .timedOut {
                 state = .unavailable
                 errorMessage = "Cannot connect to AICC server"
             } else {
-                state = .error(error.localizedDescription)
-                errorMessage = error.localizedDescription
+                state = .error(urlError.localizedDescription)
+                errorMessage = urlError.localizedDescription
             }
+        } catch {
+            state = .error(error.localizedDescription)
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -79,7 +86,9 @@ class APIService: ObservableObject {
         guard let s = status else { return false }
         let codexOk = s.codex?.five_hour?.remaining != nil || s.codex?.weekly?.remaining != nil
         let wbOk = s.workbuddy?.points != nil
-        let dsOk = s.deepseek?.status == "Online"
+        // DeepSeek might not be configured — treat missing as ok
+        let dsStatus = s.deepseek?.status
+        let dsOk = dsStatus == nil || dsStatus == "Online"
         return codexOk && wbOk && dsOk
     }
 }
