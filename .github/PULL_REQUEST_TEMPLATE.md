@@ -15,7 +15,7 @@
 - [ ] Python 测试通过
 - [ ] macOS app 构建成功
 - [ ] Android APK 构建成功
-- [ ] 已在 Poke4S 上验证显示正常
+- [ ] 已在 AICC 看板上验证显示正常
 
 ## 相关 Issue
 
