@@ -1,4 +1,3 @@
-#!/bin/bash
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -47,16 +46,14 @@ for f in "${SWIFT_FILES[@]}"; do echo "  $f"; done
 
 # Choose compatible SDK (prefer 15.4 which works with current CLT)
 SDK_PATH=""
-for candidate in \
-  /Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk \
-  /Library/Developer/CommandLineTools/SDKs/MacOSX15.sdk \
-  /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk; do
+# Pick the newest available SDK (prefer 26.5 for Swift 6.3, fall back to 15.4 for older CLT)
+for candidate in /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk /Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk /Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk /Library/Developer/CommandLineTools/SDKs/MacOSX15.sdk /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk; do
   if [ -d "$candidate" ]; then
     SDK_PATH="$candidate"
     break
   fi
 done
-
+  if [ -d "$candidate" ]; then
 if [ -z "$SDK_PATH" ]; then
   SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
 fi
