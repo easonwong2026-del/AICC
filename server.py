@@ -184,7 +184,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'")
+        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'")  # noqa: E501
         super().end_headers()
 
     def is_local_request(self) -> bool:
@@ -231,6 +231,7 @@ def _periodic_save(interval: int = 30) -> None:
             save_status(data)
         except Exception:
             pass
+
 
 def main() -> None:
     port = int(os.environ.get("EINK_PORT", "8765"))
