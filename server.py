@@ -220,7 +220,6 @@ def start_discovery(http_port: int) -> None:
     threading.Thread(target=serve, name="eink-discovery", daemon=True).start()
 
 
-
 def _periodic_save(interval: int = 30) -> None:
     """定时将收集器数据写入 status.json，供菜单栏等文件读取方使用。"""
     while True:
