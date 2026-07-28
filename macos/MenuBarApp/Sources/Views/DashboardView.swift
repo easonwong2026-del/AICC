@@ -47,7 +47,7 @@ struct DashboardView: View {
                 .buttonStyle(.plain)
                 .help("Refresh")
 
-                Button(action: { openSettings() }) {
+                SettingsLink {
                     Image(systemName: "gearshape")
                         .font(.system(size: 13, weight: .medium))
                 }
@@ -205,9 +205,5 @@ struct DashboardView: View {
         alert.informativeText = "AI Status Center\nVersion 2.3.1\n\nCompact AI monitoring for macOS"
         alert.alertStyle = .informational
         alert.runModal()
-    }
-
-    private func openSettings() {
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
     }
 }
