@@ -57,6 +57,7 @@ final class ServerManager: ObservableObject {
         path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:\(path)"
         env["PATH"] = path
         env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["EINK_ACCESS_LOG"] = AppSettings.shared.debugMode ? "1" : "0"
         if root.path.contains(".app/Contents/Resources/Server") {
             let dataDirectory = URL(fileURLWithPath: NSHomeDirectory())
                 .appendingPathComponent("Library/Application Support/AICC-Dashboard/data", isDirectory: true)
@@ -66,20 +67,19 @@ final class ServerManager: ObservableObject {
         process.environment = env
 
         // Set up log files
-        let logsDir = NSHomeDirectory() + "/Library/Logs/AICC-Dashboard"
-        try? FileManager.default.createDirectory(atPath: logsDir,
-                                                  withIntermediateDirectories: true)
+        let logsDir = AICCPaths.logsDirectory
+        try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
 
-        let outLog = logsDir + "/aicc-server.log"
-        FileManager.default.createFile(atPath: outLog, contents: nil)
-        if let handle = FileHandle(forWritingAtPath: outLog) {
+        let outLog = logsDir.appendingPathComponent("aicc-server.log")
+        FileManager.default.createFile(atPath: outLog.path, contents: nil)
+        if let handle = FileHandle(forWritingAtPath: outLog.path) {
             handle.seekToEndOfFile()
             process.standardOutput = handle
         }
 
-        let errLog = logsDir + "/aicc-server-error.log"
-        FileManager.default.createFile(atPath: errLog, contents: nil)
-        if let handle = FileHandle(forWritingAtPath: errLog) {
+        let errLog = logsDir.appendingPathComponent("aicc-server-error.log")
+        FileManager.default.createFile(atPath: errLog.path, contents: nil)
+        if let handle = FileHandle(forWritingAtPath: errLog.path) {
             handle.seekToEndOfFile()
             process.standardError = handle
         }
@@ -93,6 +93,23 @@ final class ServerManager: ObservableObject {
             print("Failed to start server: \(error)")
             return false
         }
+    }
+
+    var dataDirectoryURL: URL? {
+        guard let root = resolveServerRoot() else { return nil }
+        if root.path.contains(".app/Contents/Resources/Server") {
+            return URL(fileURLWithPath: NSHomeDirectory())
+                .appendingPathComponent("Library/Application Support/AICC-Dashboard/data", isDirectory: true)
+        }
+        return root.appendingPathComponent("data", isDirectory: true)
+    }
+
+    func restartServer() async -> Bool {
+        if serverProcess != nil {
+            stopServer()
+            try? await Task.sleep(nanoseconds: 400_000_000)
+        }
+        return await startServer()
     }
 
     private func resolvePython() -> String? {
@@ -133,11 +150,9 @@ final class ServerManager: ObservableObject {
 
 @MainActor
 class AICCAppDelegate: NSObject, NSApplicationDelegate {
-    private var settingsWindow: NSWindow?
     private let serverManager = ServerManager.shared
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NotificationCenter.default.addObserver(forName: .showAICCSettings, object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.showSettingsWindow() } }
         NSApp.setActivationPolicy(.accessory)
 
         // Start the Python server
@@ -163,34 +178,6 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
         CodexLaunchMonitor.shared.stopMonitoring()
         serverManager.stopServer()
     }
-
-    @MainActor @objc func showSettingsWindow() {
-        if let existing = settingsWindow, existing.isVisible {
-            existing.makeKeyAndOrderFront(nil)
-            return
-        }
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 420),
-            styleMask: [.titled, .closable, .miniaturizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "AICC Settings"
-        window.titlebarAppearsTransparent = false
-        window.center()
-        window.isReleasedWhenClosed = false
-
-        let settingsView = SettingsView()
-            .environmentObject(AppSettings.shared)
-            .environmentObject(OpenCodexController.shared)
-            .environmentObject(APIService.shared)
-
-        let hostingView = NSHostingView(rootView: settingsView)
-        window.contentView = hostingView
-        settingsWindow = window
-        window.makeKeyAndOrderFront(nil)
-    }
 }
 
 // MARK: - App
@@ -203,6 +190,7 @@ struct AICCApp: App {
     @StateObject private var settings = AppSettings.shared
     @StateObject private var monitor = CodexLaunchMonitor.shared
     @StateObject private var server = ServerManager.shared
+    @StateObject private var loginAtLaunch = LaunchAtLoginService.shared
 
     var body: some Scene {
         MenuBarExtra {
@@ -211,14 +199,26 @@ struct AICCApp: App {
                 .environmentObject(ocx)
                 .environmentObject(settings)
                 .environmentObject(monitor)
+                .preferredColorScheme(settings.preferredColorScheme)
         } label: {
-            MenuBarStatusLabel(status: api.status)
+            MenuBarStatusLabel(
+                status: api.status,
+                showCodexStatus: settings.menuBarShowCodexStatus,
+                showBalance: settings.menuBarShowCodexBalance
+            )
         }
         .menuBarExtraStyle(.window)
 
-    }
-}
+        Settings {
+            SettingsView()
+                .environmentObject(api)
+                .environmentObject(ocx)
+                .environmentObject(settings)
+                .environmentObject(monitor)
+                .environmentObject(server)
+                .environmentObject(loginAtLaunch)
+                .preferredColorScheme(settings.preferredColorScheme)
+        }
 
-extension Notification.Name {
-    static let showAICCSettings = Notification.Name("showAICCSettings")
+    }
 }

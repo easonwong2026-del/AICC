@@ -9,12 +9,18 @@ struct DashboardView: View {
     var body: some View {
         VStack(spacing: 0) {
             headerSection
-            Divider().padding(.horizontal, 14)
-            codexSection
-            Divider().padding(.horizontal, 14)
-            miniCardsSection
-            Divider().padding(.horizontal, 14)
-            servicesSection
+            if settings.menuBarShowCodexStatus {
+                Divider().padding(.horizontal, 14)
+                codexSection
+            }
+            if settings.menuBarShowWorkBuddy || settings.menuBarShowDeepSeek {
+                Divider().padding(.horizontal, 14)
+                miniCardsSection
+            }
+            if settings.menuBarShowOpenCodex || settings.menuBarShowSystemHealth {
+                Divider().padding(.horizontal, 14)
+                servicesSection
+            }
             Divider().padding(.horizontal, 14)
             footerSection
         }
@@ -83,15 +89,19 @@ struct DashboardView: View {
 
     private var miniCardsSection: some View {
         HStack(spacing: 10) {
-            if let wb = api.status?.workbuddy {
-                WorkBuddyCard(data: wb)
-            } else {
-                placeholderCard(title: "WorkBuddy", icon: "wand.and.stars")
+            if settings.menuBarShowWorkBuddy {
+                if let wb = api.status?.workbuddy {
+                    WorkBuddyCard(data: wb)
+                } else {
+                    placeholderCard(title: "WorkBuddy", icon: "wand.and.stars")
+                }
             }
-            if let ds = api.status?.deepseek {
-                DeepSeekCard(data: ds)
-            } else {
-                placeholderCard(title: "DeepSeek", icon: "brain.head.profile")
+            if settings.menuBarShowDeepSeek {
+                if let ds = api.status?.deepseek {
+                    DeepSeekCard(data: ds)
+                } else {
+                    placeholderCard(title: "DeepSeek", icon: "brain.head.profile")
+                }
             }
         }
         .padding(.horizontal, 14)
@@ -102,28 +112,32 @@ struct DashboardView: View {
 
     private var servicesSection: some View {
         VStack(spacing: 8) {
-            ServiceRow(
-                label: "OpenCodex",
-                statusText: ocx.status.label,
-                isOnline: ocx.status.isRunning,
-                toggleOn: ocx.status.isRunning || (ocx.status == .starting),
-                onToggle: { newValue in
-                    Task {
-                        if newValue { await ocx.ensure() }
-                        else { await ocx.stop() }
-                    }
-                },
-                actionLabel: "Open Codex",
-                action: { monitor.openCodex() }
-            )
-            ServiceRow(
-                label: "System Health",
-                statusText: systemHealthText,
-                isOnline: systemIsHealthy,
-                showToggle: false,
-                actionLabel: nil,
-                action: nil
-            )
+            if settings.menuBarShowOpenCodex {
+                ServiceRow(
+                    label: "OpenCodex",
+                    statusText: ocx.status.label,
+                    isOnline: ocx.status.isRunning,
+                    toggleOn: ocx.status.isRunning || (ocx.status == .starting),
+                    onToggle: { newValue in
+                        Task {
+                            if newValue { await ocx.ensure() }
+                            else { await ocx.stop() }
+                        }
+                    },
+                    actionLabel: "Open Codex",
+                    action: { monitor.openCodex() }
+                )
+            }
+            if settings.menuBarShowSystemHealth {
+                ServiceRow(
+                    label: "System Health",
+                    statusText: systemHealthText,
+                    isOnline: systemIsHealthy,
+                    showToggle: false,
+                    actionLabel: nil,
+                    action: nil
+                )
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -194,7 +208,6 @@ struct DashboardView: View {
     }
 
     private func openSettings() {
-        // Will be connected via App
-        NotificationCenter.default.post(name: .showAICCSettings, object: nil)
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
     }
 }

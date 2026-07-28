@@ -2,6 +2,8 @@ import SwiftUI
 
 struct MenuBarStatusLabel: View {
     let status: StatusResponse?
+    let showCodexStatus: Bool
+    let showBalance: Bool
 
     private var remaining: Double? {
         status?.codex?.weekly?.remaining ?? status?.codex?.five_hour?.remaining
@@ -20,14 +22,21 @@ struct MenuBarStatusLabel: View {
     }
 
     var body: some View {
-        HStack(spacing: 4) {
-            Circle()
-                .fill(color)
-                .frame(width: 7, height: 7)
-            Text("AI \(quotaText)")
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-                .monospacedDigit()
+        Group {
+            if showCodexStatus {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(color)
+                        .frame(width: 7, height: 7)
+                    Text(showBalance ? "AI \(quotaText)" : "AI")
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .monospacedDigit()
+                }
+            } else {
+                Image(systemName: "chart.bar.fill")
+                    .font(.system(size: 12, weight: .medium))
+            }
         }
-        .help("Codex \(quotaText)")
+        .help(showCodexStatus ? "Codex \(quotaText)" : "AICC")
     }
 }
