@@ -85,6 +85,13 @@ final class ServerManager: ObservableObject {
         }
 
         do {
+            process.terminationHandler = { [weak self] _ in
+                Task { @MainActor [weak self, process] in
+                    guard let self, self.serverProcess === process else { return }
+                    self.serverProcess = nil
+                    self.isServerRunning = false
+                }
+            }
             try process.run()
             serverProcess = process
             isServerRunning = true

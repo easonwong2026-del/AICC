@@ -2,7 +2,7 @@ import SwiftUI
 
 enum CardState { case online, stale, unavailable }
 
-struct compactCard: View {
+struct CompactCard: View {
     let title: String
     let icon: String
     let value: String

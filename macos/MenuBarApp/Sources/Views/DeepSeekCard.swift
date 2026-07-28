@@ -4,7 +4,7 @@ struct DeepSeekCard: View {
     let data: DeepSeekData
 
     var body: some View {
-        compactCard(
+        CompactCard(
             title: "DeepSeek",
             icon: "brain.head.profile",
             value: formattedBalance,

@@ -3,7 +3,6 @@ import SwiftUI
 
 class AppSettings: ObservableObject {
     @AppStorage("launchAtLogin") var launchAtLogin = false
-    @AppStorage("menuBarShowIcon") var menuBarShowIcon = true
     @AppStorage("autoRefreshInterval") var autoRefreshInterval = 10.0
     @AppStorage("themeMode") var themeMode = "system"
 
@@ -20,7 +19,6 @@ class AppSettings: ObservableObject {
     @AppStorage("ocxCustomPath") var ocxCustomPath = ""
     @AppStorage("ocxServiceAddress") var ocxServiceAddress = "http://127.0.0.1:10100"
 
-    @AppStorage("einkSyncInterval") var einkSyncInterval = 30.0
     @AppStorage("debugMode") var debugMode = false
 
     var preferredColorScheme: ColorScheme? {
