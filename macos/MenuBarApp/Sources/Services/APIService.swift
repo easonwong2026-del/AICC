@@ -11,6 +11,7 @@ class APIService: ObservableObject {
 
     private let baseURL: String
     private var refreshTask: Task<Void, Never>?
+    private var fetchInFlight = false
     private let session: URLSession
 
     init() {
@@ -23,6 +24,10 @@ class APIService: ObservableObject {
     }
 
     func fetchStatus(force: Bool = false) async {
+        guard !fetchInFlight else { return }
+        fetchInFlight = true
+        defer { fetchInFlight = false }
+
         let path = force ? "/api/refresh" : "/api/status"
         let method = force ? "POST" : "GET"
 

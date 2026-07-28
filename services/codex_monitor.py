@@ -20,6 +20,7 @@ DATA_ROOT = Path(os.environ.get("EINK_DATA_DIR", Path(__file__).resolve().parent
 class CodexMonitor:
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._io_lock = threading.Lock()
         self._process: subprocess.Popen[str] | None = None
         self._started = False
         self._restarting = False
@@ -223,12 +224,20 @@ class CodexMonitor:
     @staticmethod
     def _stop_process(process: subprocess.Popen[str]) -> None:
         try:
+            if process.stdin:
+                process.stdin.close()
             process.terminate()
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
             process.kill()
         except OSError:
             pass
+        for stream in (process.stdout, process.stderr):
+            try:
+                if stream:
+                    stream.close()
+            except OSError:
+                pass
 
     def _schedule_restart(self) -> None:
         if self._restarting:
@@ -255,23 +264,29 @@ class CodexMonitor:
             self._rate_limit_request_id = request_id
 
     def _send(self, method: str, params: Any = None, notification: bool = False) -> int | None:
-        process = self._process
-        if not process or not process.stdin:
-            return None
-        try:
-            payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
-            if not notification or params is not None:
-                payload["params"] = params
-            if not notification:
-                self._request_id += 1
-                payload["id"] = self._request_id
-            process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            process.stdin.flush()
-            return payload.get("id")
-        except OSError:
+        failed = False
+        request_id = None
+        with self._io_lock:
+            process = self._process
+            if not process or not process.stdin:
+                return None
+            try:
+                payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+                if not notification or params is not None:
+                    payload["params"] = params
+                if not notification:
+                    self._request_id += 1
+                    payload["id"] = self._request_id
+                process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                process.stdin.flush()
+                request_id = payload.get("id")
+            except OSError:
+                failed = True
+        if failed:
             with self._lock:
                 self._status.update(state="Codex app-server connection lost")
             return None
+        return request_id
 
     def _read_stdout(self, process: subprocess.Popen[str]) -> None:
         assert process.stdout

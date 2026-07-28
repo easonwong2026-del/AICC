@@ -35,6 +35,7 @@ DISCOVERY_MAGIC = b"AI_EINK_DISCOVER"
 _collector_manager: CollectorManager | None = None
 _provider_registry: ProviderRegistry | None = None
 _rate_lock = threading.Lock()
+_status_write_lock = threading.Lock()
 _rate_windows: dict[tuple[str, str], deque[float]] = {}
 
 
@@ -88,11 +89,19 @@ def load_status(force: bool = False) -> dict:
     return data
 
 
-def save_status(data: dict) -> None:
+def save_status(data: dict) -> bool:
     DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temporary = DATA_PATH.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary, DATA_PATH)
+    with _status_write_lock:
+        try:
+            existing = json.loads(DATA_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = None
+        if existing == data:
+            return False
+        temporary = DATA_PATH.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(temporary, DATA_PATH)
+        return True
 
 
 def version() -> str:
@@ -229,8 +238,9 @@ def _periodic_save(interval: int = 30) -> None:
             data = persisted_status()
             data.update(values)
             save_status(data)
-        except Exception:
-            pass
+        except Exception as error:
+            if os.environ.get("EINK_ACCESS_LOG") == "1":
+                print(f"Periodic status save failed: {type(error).__name__}: {error}")
 
 
 def main() -> None:

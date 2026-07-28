@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from collectors import deepseek, workbuddy
+import server
 from services.codex_monitor import CodexMonitor
 
 
@@ -39,6 +40,20 @@ class DiskWriteTests(unittest.TestCase):
                 monitor._save_cache({"weekly": {"remaining": 90}, "updated_epoch": 120})
             saved = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(saved["updated_epoch"], 100)
+
+    def test_status_unchanged_cache_is_not_rewritten(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "status.json"
+            original = server.DATA_PATH
+            server.DATA_PATH = path
+            try:
+                value = {"system": {"status": "Online"}}
+                self.assertTrue(server.save_status(value))
+                with patch.object(server.os, "replace", wraps=server.os.replace) as replace:
+                    self.assertFalse(server.save_status(value))
+                replace.assert_not_called()
+            finally:
+                server.DATA_PATH = original
 
 
 if __name__ == "__main__":
