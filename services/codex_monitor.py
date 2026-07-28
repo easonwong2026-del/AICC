@@ -14,6 +14,8 @@ import threading
 import time
 from datetime import datetime
 
+DATA_ROOT = Path(os.environ.get("EINK_DATA_DIR", Path(__file__).resolve().parents[1] / "data")).expanduser()
+
 
 class CodexMonitor:
     def __init__(self) -> None:
@@ -32,7 +34,7 @@ class CodexMonitor:
         self._idle_seconds = max(30, min(600, int(os.environ.get("CODEX_IDLE_SECONDS", "30"))))
         self._fresh_event = threading.Event()
         self._status: dict[str, Any] = {"available": False, "state": "Not started", "source": "Codex app-server"}
-        self._cache_path = Path(__file__).resolve().parents[1] / "data" / "codex_last_success.json"
+        self._cache_path = DATA_ROOT / "codex_last_success.json"
         self._load_cache()
 
     def status(self) -> dict[str, Any]:

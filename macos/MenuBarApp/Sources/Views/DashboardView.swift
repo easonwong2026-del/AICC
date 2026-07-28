@@ -31,7 +31,6 @@ struct DashboardView: View {
                     .font(.system(size: 18, weight: .bold))
                 statusSummaryText
                     .font(.system(size: 10))
-                    .foregroundColor(.secondary)
             }
             Spacer()
             HStack(spacing: 12) {
@@ -118,9 +117,9 @@ struct DashboardView: View {
                 action: { monitor.openCodex() }
             )
             ServiceRow(
-                label: "E-ink Sync",
-                statusText: einkStatusText,
-                isOnline: einkIsOnline,
+                label: "System Health",
+                statusText: systemHealthText,
+                isOnline: systemIsHealthy,
                 showToggle: false,
                 actionLabel: nil,
                 action: nil
@@ -130,12 +129,12 @@ struct DashboardView: View {
         .padding(.vertical, 10)
     }
 
-    private var einkStatusText: String {
+    private var systemHealthText: String {
         guard let system = api.status?.system else { return "Unknown" }
-        return system.status == "Online" ? "Synced" : "Offline"
+        return system.status == "Online" ? "Healthy" : system.status ?? "Unavailable"
     }
 
-    private var einkIsOnline: Bool {
+    private var systemIsHealthy: Bool {
         api.status?.system?.status == "Online"
     }
 
@@ -199,4 +198,3 @@ struct DashboardView: View {
         NotificationCenter.default.post(name: .showAICCSettings, object: nil)
     }
 }
-

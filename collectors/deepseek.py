@@ -71,7 +71,7 @@ def update_usage(history_path: Path, balances: list[dict]) -> list[dict]:
             snapshots.append({"at": now.isoformat(timespec="minutes"), "date": today, "currency": currency, "total": current})
             changed = True
     if changed or not history_path.exists():
-        history_path.parent.mkdir(exist_ok=True)
+        history_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = history_path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps({"snapshots": snapshots[-720:]}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         os.replace(temporary, history_path)

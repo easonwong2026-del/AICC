@@ -11,7 +11,7 @@ RELEASE_DIR="${RELEASE_DIR:-$ROOT/dist}"
 DMG_PATH="$RELEASE_DIR/$DMG_NAME"
 TEMP_DMG="$ROOT/dist/$DMG_NAME.tmp.dmg"
 
-BUNDLE_SERVER=1 "$ROOT/macos/build-menubar-app.sh" >/dev/null
+BUNDLE_SERVER=1 "$ROOT/macos/build-aicc-swiftui.sh" >/dev/null
 
 rm -rf "$STAGING_DIR" "$TEMP_DMG" "$DMG_PATH"
 mkdir -p "$STAGING_DIR" "$RELEASE_DIR"
