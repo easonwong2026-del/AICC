@@ -5,17 +5,21 @@ from __future__ import annotations
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
+
+from providers.base import CacheStore, CallableProvider, Provider
 
 
 class CollectorSlot:
     """Small mutable record without the import cost of dataclasses."""
 
-    __slots__ = ("collect", "interval", "value", "running", "last_attempt", "last_success", "error")
+    __slots__ = ("provider", "collect", "interval", "value", "running", "last_attempt", "last_success", "error")
 
-    def __init__(self, collect, interval: float, value: dict) -> None:
-        self.collect = collect
-        self.interval = interval
-        self.value = value
+    def __init__(self, provider: Provider) -> None:
+        self.provider = provider
+        self.collect = provider.refresh
+        self.interval = max(5, provider.interval)
+        self.value = provider.status()
         self.running = False
         self.last_attempt = 0.0
         self.last_success = 0.0
@@ -23,12 +27,18 @@ class CollectorSlot:
 
 
 class CollectorManager:
-    def __init__(self, definitions: dict[str, tuple]) -> None:
+    def __init__(self, definitions: dict[str, Provider | tuple]) -> None:
         self._condition = threading.Condition()
-        self._slots = {
-            name: CollectorSlot(collect=collect, interval=max(5, interval), value=initial.copy())
-            for name, (collect, interval, initial) in definitions.items()
-        }
+        self._slots = {}
+        for name, definition in definitions.items():
+            provider = definition if hasattr(definition, "refresh") else self._legacy_provider(name, definition)
+            self._slots[name] = CollectorSlot(provider)
+            self._slots[name].value = provider.status()
+
+    @staticmethod
+    def _legacy_provider(name: str, definition: tuple) -> Provider:
+        collect, interval, initial = definition
+        return CallableProvider(name, collect, interval, initial, CacheStore(Path(".")))
 
     def snapshot(self, *, force: bool = False, wait_seconds: float = 0.0) -> tuple[dict, dict]:
         started: set[str] = set()
