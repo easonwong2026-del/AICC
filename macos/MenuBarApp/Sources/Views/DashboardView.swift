@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct DashboardView: View {
+    @Environment(\.openSettings) private var openSettings
     @EnvironmentObject var api: APIService
     @EnvironmentObject var ocx: OpenCodexController
     @EnvironmentObject var settings: AppSettings
@@ -47,7 +48,7 @@ struct DashboardView: View {
                 .buttonStyle(.plain)
                 .help("Refresh")
 
-                SettingsLink {
+                Button(action: presentSettings) {
                     Image(systemName: "gearshape")
                         .font(.system(size: 13, weight: .medium))
                 }
@@ -115,7 +116,7 @@ struct DashboardView: View {
             if settings.menuBarShowOpenCodex {
                 ServiceRow(
                     label: "OpenCodex",
-                    statusText: ocx.status.label,
+                    statusText: settings.localized(ocx.status.label),
                     isOnline: ocx.status.isRunning,
                     toggleOn: ocx.status.isRunning || (ocx.status == .starting),
                     onToggle: { newValue in
@@ -144,8 +145,8 @@ struct DashboardView: View {
     }
 
     private var systemHealthText: String {
-        guard let system = api.status?.system else { return "Unknown" }
-        return system.status == "Online" ? "Healthy" : system.status ?? "Unavailable"
+        guard let system = api.status?.system else { return settings.localized("Unknown") }
+        return settings.localized(system.status == "Online" ? "Healthy" : system.status ?? "Unavailable")
     }
 
     private var systemIsHealthy: Bool {
@@ -186,7 +187,7 @@ struct DashboardView: View {
             Image(systemName: icon)
                 .font(.system(size: 16))
                 .foregroundColor(.secondary)
-            Text("\(title)\nNo data")
+            Text(settings.localized(title) + "\n" + settings.localized("No data"))
                 .font(.system(size: 10))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -202,8 +203,16 @@ struct DashboardView: View {
     private func showAbout() {
         let alert = NSAlert()
         alert.messageText = "AICC"
-        alert.informativeText = "AI Status Center\nVersion 2.3.1\n\nCompact AI monitoring for macOS"
+        alert.informativeText = settings.localized("About Description")
         alert.alertStyle = .informational
         alert.runModal()
+    }
+
+    private func presentSettings() {
+        NSApp.activate(ignoringOtherApps: true)
+        openSettings()
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 }

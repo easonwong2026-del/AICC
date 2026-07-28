@@ -66,6 +66,11 @@ private struct GeneralSettingsView: View {
             }
 
             Section("Appearance") {
+                Picker("Language", selection: $settings.languageCode) {
+                    ForEach(AppLanguage.allCases) { language in
+                        Text(language.displayName).tag(language.rawValue)
+                    }
+                }
                 Picker("Theme", selection: $settings.themeMode) {
                     Text("System").tag("system")
                     Text("Light").tag("light")
@@ -83,6 +88,7 @@ private struct GeneralSettingsView: View {
 // MARK: - AI Providers
 
 private struct AIProvidersSettingsView: View {
+    @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var api: APIService
 
     var body: some View {
@@ -124,30 +130,32 @@ private struct AIProvidersSettingsView: View {
     }
 
     private var openAIStatus: String {
-        api.status?.codex?.available == true ? "Connected" : "Unavailable"
+        settings.localized(api.status?.codex?.available == true ? "Connected" : "Unavailable")
     }
 
     private var codexStatus: String {
-        guard let codex = api.status?.codex else { return "Unavailable" }
-        if codex.stale == true { return "Cached" }
-        if codex.available == true { return "Connected" }
-        return codex.state ?? "Unavailable"
+        guard let codex = api.status?.codex else { return settings.localized("Unavailable") }
+        if codex.stale == true { return settings.localized("Cached") }
+        if codex.available == true { return settings.localized("Connected") }
+        return settings.localized(codex.state ?? "Unavailable")
     }
 
     private var workBuddyStatus: String {
-        guard let workbuddy = api.status?.workbuddy else { return "Unavailable" }
-        if workbuddy.balance_state == "Cached" { return "Cached" }
-        return workbuddy.points == nil ? "Unavailable" : "Connected"
+        guard let workbuddy = api.status?.workbuddy else { return settings.localized("Unavailable") }
+        if workbuddy.balance_state == "Cached" { return settings.localized("Cached") }
+        return settings.localized(workbuddy.points == nil ? "Unavailable" : "Connected")
     }
 
     private var deepSeekStatus: String {
-        api.status?.deepseek?.status ?? "Unavailable"
+        settings.localized(api.status?.deepseek?.status ?? "Unavailable")
     }
 
     private func updateText(_ item: CollectorStatus?) -> String {
-        guard let item else { return "No successful read" }
-        if let age = item.age_seconds { return "Updated " + String(age) + "s ago" }
-        return item.last_success ?? "Waiting for first read"
+        guard let item else { return settings.localized("No successful read") }
+        if let age = item.age_seconds {
+            return String(format: settings.localized("Updated %ds ago"), age)
+        }
+        return item.last_success ?? settings.localized("Waiting for first read")
     }
 
     private func refresh() {
@@ -194,6 +202,7 @@ private struct DataSourceRow: View {
 // MARK: - Devices
 
 private struct DevicesSettingsView: View {
+    @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var api: APIService
 
     var body: some View {
@@ -228,11 +237,11 @@ private struct DevicesSettingsView: View {
 
     private var serverStatus: String {
         switch api.state {
-        case .ready: return "Available"
-        case .loading: return "Checking"
-        case .unavailable: return "Offline"
-        case .stale: return "Cached"
-        case .error: return "Error"
+        case .ready: return settings.localized("Available")
+        case .loading: return settings.localized("Checking")
+        case .unavailable: return settings.localized("Offline")
+        case .stale: return settings.localized("Cached")
+        case .error: return settings.localized("Error")
         }
     }
 }
@@ -308,7 +317,7 @@ private struct AdvancedSettingsView: View {
                 HStack {
                     Text("Executable")
                     Spacer()
-                    Text(ocx.detectedPath ?? "Not detected")
+                    Text(ocx.detectedPath ?? settings.localized("Not detected"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -349,7 +358,9 @@ private struct AdvancedSettingsView: View {
                 Button("Restart Data Service") {
                     Task {
                         let success = await server.restartServer()
-                        notice = success ? "Data service restarted." : "Unable to restart data service."
+                        notice = settings.localized(
+                            success ? "Data service restarted." : "Unable to restart data service."
+                        )
                         if success { await api.fetchStatus() }
                     }
                 }
@@ -383,15 +394,17 @@ private struct AdvancedSettingsView: View {
 
     private func clearCache() {
         guard let directory = server.dataDirectoryURL else {
-            notice = "Data directory is unavailable."
+            notice = settings.localized("Data directory is unavailable.")
             return
         }
         do {
             let count = try CacheManager.clear(in: directory)
-            notice = count == 0 ? "No cached files found." : "Cleared " + String(count) + " cached file(s)."
+            notice = count == 0
+                ? settings.localized("No cached files found.")
+                : String(format: settings.localized("Cleared %d cached file(s)."), count)
             Task { await api.fetchStatus(force: true) }
         } catch {
-            notice = "Cache cleanup failed: \(error.localizedDescription)"
+            notice = settings.localized("Cache cleanup failed:") + " \(error.localizedDescription)"
         }
     }
 
@@ -409,9 +422,9 @@ private struct AdvancedSettingsView: View {
         do {
             let data = try JSONEncoder().encode(payload)
             try data.write(to: url, options: .atomic)
-            notice = "Diagnostic info exported."
+            notice = settings.localized("Diagnostic info exported.")
         } catch {
-            notice = "Export failed: \(error.localizedDescription)"
+            notice = settings.localized("Export failed:") + " \(error.localizedDescription)"
         }
     }
 }

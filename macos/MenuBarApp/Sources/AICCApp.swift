@@ -206,6 +206,7 @@ struct AICCApp: App {
                 .environmentObject(ocx)
                 .environmentObject(settings)
                 .environmentObject(monitor)
+                .environment(\.locale, settings.locale)
                 .preferredColorScheme(settings.preferredColorScheme)
         } label: {
             MenuBarStatusLabel(
@@ -224,6 +225,7 @@ struct AICCApp: App {
                 .environmentObject(monitor)
                 .environmentObject(server)
                 .environmentObject(loginAtLaunch)
+                .environment(\.locale, settings.locale)
                 .preferredColorScheme(settings.preferredColorScheme)
         }
 

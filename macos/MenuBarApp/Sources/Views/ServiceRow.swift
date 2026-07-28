@@ -15,7 +15,7 @@ struct CompactCard: View {
                 Image(systemName: icon)
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
-                Text(title)
+                Text(LocalizedStringKey(title))
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(.secondary)
                 Spacer()
@@ -63,7 +63,7 @@ struct ServiceRow: View {
                 .fill(isOnline ? Color.green : Color.secondary)
                 .frame(width: 6, height: 6)
 
-            Text(label)
+            Text(LocalizedStringKey(label))
                 .font(.system(size: 12, weight: .medium))
 
             Text(statusText)
@@ -83,7 +83,7 @@ struct ServiceRow: View {
             }
 
             if let actionLabel = actionLabel, let action = action {
-                Button(actionLabel, action: action)
+                Button(LocalizedStringKey(actionLabel), action: action)
                     .buttonStyle(.plain)
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(.accentColor)
