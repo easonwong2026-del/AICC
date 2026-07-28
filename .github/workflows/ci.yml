@@ -92,8 +92,21 @@ jobs:
         run: |
           BUNDLE_SERVER=1 bash macos/build-aicc-swiftui.sh
 
+      - name: Validate macOS scripts
+        run: |
+          for file in macos/*.sh; do bash -n "$file"; done
+
+      - name: Build macOS DMG
+        run: bash macos/build-dmg.sh
+
       - name: Upload macOS app
         uses: actions/upload-artifact@v4
         with:
           name: aicc-macos-app
           path: dist/mac/AICC.app
+
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: aicc-macos-dmg
+          path: dist/*.dmg
