@@ -22,6 +22,11 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 # Copy Info.plist
 cp "$ROOT/macos/MenuBarApp/Info.plist" "$CONTENTS/Info.plist"
 
+# Copy localized resources
+if [ -d "$ROOT/macos/MenuBarApp/Resources" ]; then
+  cp -R "$ROOT/macos/MenuBarApp/Resources/." "$RESOURCES_DIR/"
+fi
+
 # Bundle server if requested
 if [[ "$BUNDLE_SERVER" == "1" ]]; then
   BUNDLED_SERVER_DIR="$RESOURCES_DIR/Server"

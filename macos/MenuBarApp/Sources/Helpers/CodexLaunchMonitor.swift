@@ -4,20 +4,13 @@ import AppKit
 class CodexLaunchMonitor: ObservableObject {
     static let shared = CodexLaunchMonitor()
 
-    @Published var isCodexRunning = false
-
-    private var runningAppsObserver: NSKeyValueObservation?
+    private var launchObserver: NSObjectProtocol?
 
     func startMonitoring() {
-        // Monitor Codex Desktop app launch/terminate
-        runningAppsObserver = NSWorkspace.shared.observe(\.runningApplications, options: [.initial, .new]) { [weak self] _, _ in
-            Task { @MainActor in
-                self?.checkCodexRunning()
-            }
-        }
+        stopMonitoring()
 
         // Also listen for app launch notifications
-        NSWorkspace.shared.notificationCenter.addObserver(
+        launchObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didLaunchApplicationNotification,
             object: nil,
             queue: .main
@@ -33,15 +26,18 @@ class CodexLaunchMonitor: ObservableObject {
     }
 
     func stopMonitoring() {
-        runningAppsObserver?.invalidate()
-        runningAppsObserver = nil
-        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        if let launchObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(launchObserver)
+            self.launchObserver = nil
+        }
     }
 
     func openCodex() {
         Task {
             let settings = AppSettings.shared
+            var proxyReady = true
             if settings.ocxAutoStart {
+                proxyReady = false
                 let ocx = OpenCodexController.shared
                 if !ocx.status.isRunning {
                     await ocx.ensure()
@@ -52,7 +48,9 @@ class CodexLaunchMonitor: ObservableObject {
                         await ocx.refreshStatus()
                     }
                 }
+                proxyReady = ocx.status.isRunning
             }
+            guard proxyReady else { return }
             // Launch Codex Desktop
             if let codexURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.codex") ??
                                NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.chatgpt") {
@@ -62,15 +60,7 @@ class CodexLaunchMonitor: ObservableObject {
         }
     }
 
-    private func checkCodexRunning() {
-        let apps = NSWorkspace.shared.runningApplications
-        isCodexRunning = apps.contains { app in
-            app.bundleIdentifier == "com.openai.codex" || app.bundleIdentifier == "com.openai.chatgpt"
-        }
-    }
-
     private func handleCodexLaunched() {
-        isCodexRunning = true
         guard AppSettings.shared.ocxAutoStart else { return }
 
         Task {

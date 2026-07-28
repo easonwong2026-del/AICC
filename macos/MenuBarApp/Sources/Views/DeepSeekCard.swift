@@ -1,10 +1,11 @@
 import SwiftUI
 
 struct DeepSeekCard: View {
+    @EnvironmentObject private var settings: AppSettings
     let data: DeepSeekData
 
     var body: some View {
-        compactCard(
+        CompactCard(
             title: "DeepSeek",
             icon: "brain.head.profile",
             value: formattedBalance,
@@ -22,13 +23,15 @@ struct DeepSeekCard: View {
 
     private var consumptionText: String {
         guard let usage = data.usage, !usage.isEmpty else {
-            return data.status == "Online" ? "Online" : (data.status ?? "--")
+            return data.status == "Online"
+                ? settings.localized("Online")
+                : settings.localized(data.status ?? "--")
         }
         let cnyUsed = usage.first(where: { $0.currency == "CNY" })?.used_today
         if let used = cnyUsed, let value = Double(used), value > 0 {
-            return "Today ¥\(String(format: "%.2f", value))"
+            return String(format: settings.localized("Today %@"), "¥\(String(format: "%.2f", value))")
         }
-        return "Online"
+        return settings.localized("Online")
     }
 
     private var state: CardState {

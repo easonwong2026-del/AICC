@@ -4,8 +4,6 @@ set -euo pipefail
 APP="${WORKBUDDY_APP:-/Applications/WorkBuddy.app}"
 DEBUG_PORT="${WORKBUDDY_DEBUG_PORT:-9223}"
 ENSURE_MODE="${1:-}"
-STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ai-eink-dashboard"
-WARNING_MARKER="$STATE_DIR/workbuddy-monitor-warning"
 
 if [[ ! -d "$APP" ]]; then
   echo "WorkBuddy.app was not found. Set WORKBUDDY_APP to its full path." >&2
@@ -22,7 +20,6 @@ app_running() {
 }
 
 if port_ready; then
-  rm -f "$WARNING_MARKER"
   [[ "$ENSURE_MODE" == "--ensure" ]] && echo "WorkBuddy monitoring bridge is already available on 127.0.0.1:$DEBUG_PORT."
   exit 0
 fi
@@ -50,7 +47,6 @@ open -na "$APP" --args --remote-debugging-address=127.0.0.1 --remote-debugging-p
 for _ in {1..20}; do
   if port_ready; then
     echo "WorkBuddy started with the localhost monitoring bridge."
-    rm -f "$WARNING_MARKER"
     exit 0
   fi
   sleep 1

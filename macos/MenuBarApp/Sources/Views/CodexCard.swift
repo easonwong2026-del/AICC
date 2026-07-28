@@ -33,13 +33,7 @@ struct CodexCard: View {
                 }
                 .frame(height: 4)
 
-                // Reset info
                 HStack {
-                    if let reset = weekly.reset {
-                        Text("Resets \(reset)")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                    }
                     Spacer()
                     if let fiveHour = codex.five_hour, let fiveRem = fiveHour.remaining {
                         Text("5h: \(String(format: "%.0f", fiveRem))%")
@@ -73,11 +67,6 @@ struct CodexCard: View {
                 }
                 .frame(height: 4)
 
-                if let reset = fiveHour.reset {
-                    Text("Resets \(reset)")
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                }
             } else {
                 placeholderContent
             }
@@ -96,8 +85,8 @@ struct CodexCard: View {
     }
 
     private func progressColor(_ value: Double) -> Color {
-        if value > 50 { return .green }
-        if value > 20 { return .orange }
+        if value > 70 { return .green }
+        if value >= 30 { return .yellow }
         return .red
     }
 }

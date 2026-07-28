@@ -1,9 +1,6 @@
 """Automatically collect WorkBuddy balance and local usage without reading tokens."""
 
 from __future__ import annotations
-from typing import Any
-
-
 import json
 import os
 import sqlite3
@@ -11,11 +8,13 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from services.cdp import CdpError, evaluate_localhost, target_identity_localhost
 
 DEFAULT_DB_PATH = Path.home() / ".workbuddy" / "workbuddy.db"
-ACCOUNT_CACHE_PATH = Path(__file__).resolve().parents[1] / "data" / "workbuddy_last_success.json"
+DATA_ROOT = Path(os.environ.get("EINK_DATA_DIR", Path(__file__).resolve().parents[1] / "data")).expanduser()
+ACCOUNT_CACHE_PATH = DATA_ROOT / "workbuddy_last_success.json"
 DEBUG_PORT = int(os.environ.get("WORKBUDDY_DEBUG_PORT", "9223"))
 ACCOUNT_REFRESH_SECONDS = max(30, min(300, int(os.environ.get("WORKBUDDY_REFRESH_SECONDS", "60"))))
 _lock = threading.Lock()

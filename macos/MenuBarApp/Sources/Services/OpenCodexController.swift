@@ -11,13 +11,11 @@ class OpenCodexController: ObservableObject {
     @Published var isHealthChecking = false
     private let logger = Logger(subsystem: "com.aieink.dashboard.menubar", category: "OpenCodex")
 
-    private let healthURL = "http://127.0.0.1:10100/healthz"
     private let candidates = [
         "/opt/homebrew/bin/ocx",
         "/usr/local/bin/ocx",
         "\(NSHomeDirectory())/.npm-global/bin/ocx"
     ]
-    private var healthCheckTask: Task<Void, Never>?
     private let session: URLSession
 
     init() {
@@ -99,7 +97,7 @@ class OpenCodexController: ObservableObject {
         isHealthChecking = true
         defer { isHealthChecking = false }
 
-        guard let url = URL(string: healthURL) else {
+        guard let url = healthURL else {
             status = .error("Invalid health URL")
             return
         }
@@ -180,7 +178,7 @@ class OpenCodexController: ObservableObject {
             // Use login shell so PATH, Homebrew, npm-global,
             // CODEX_CLI_PATH and user .zprofile/.zshrc are sourced.
             process.launchPath = "/bin/zsh"
-            process.arguments = ["-lc", "\(path) \(command)"]
+            process.arguments = ["-lc", "\(shellQuote(path)) \(command)"]
             process.standardOutput = Pipe()
             process.standardError = Pipe()
 
@@ -205,5 +203,14 @@ class OpenCodexController: ObservableObject {
                 continuation.resume()
             }
         }
+    }
+
+    private var healthURL: URL? {
+        guard let base = URL(string: AppSettings.shared.ocxServiceAddress) else { return nil }
+        return base.appendingPathComponent("healthz")
+    }
+
+    private func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }

@@ -19,7 +19,7 @@ bash macos/start-dashboard.sh              # 前台启动
 bash macos/install-autostart.sh            # 安装自动启动与监控
 bash macos/uninstall-autostart.sh          # 移除自动启动
 bash macos/set-deepseek-key.sh             # 更新 DeepSeek 密钥
-SERVER_ROOT=/path/to/dashboard bash macos/build-menubar-app.sh  # 构建轻量菜单栏 App
+SERVER_ROOT=/path/to/dashboard bash macos/build-aicc-swiftui.sh  # 构建 SwiftUI 菜单栏 App
 RELEASE_DIR=/Users/easonwong/AICC/releases/mac bash macos/build-dmg.sh  # 构建自包含 DMG 安装包
 ```
 
@@ -32,13 +32,13 @@ bash macos/rollback-from-backup.sh /path/to/backup
 
 日志位于 `~/Library/Logs/AICC-Dashboard/`，每天自动限制体积。
 
-轻量菜单栏 App（AICC）会生成在 `dist/mac/AICC.app`。`SERVER_ROOT` 不填时
+SwiftUI 菜单栏 App（AICC）会生成在 `dist/mac/AICC.app`。`SERVER_ROOT` 不填时
 默认管理当前项目目录，填入生产目录时可让安装版 App 直接管理日常运行的服务。
-`build-dmg.sh` 会生成自包含安装包，默认输出到 `dist/`；传入 `RELEASE_DIR` 后可输出到
+`build-dmg.sh` 会打包同一套 SwiftUI App，并生成自包含安装包，默认输出到 `dist/`；传入 `RELEASE_DIR` 后可输出到
 `/Users/easonwong/AICC/releases/mac/` 这类成品目录。DMG 里的 App 自带服务器代码，
 可拖入 `/Applications`。自包含 App 的运行数据写入
 `~/Library/Application Support/AICC-Dashboard/data/`，不会写进 App 包本身。
-菜单栏 App 只负责状态显示、启动/停止/重启服务、打开设置页、打开日志和配置
+菜单栏 App 只负责状态显示、启动/停止/重启服务、打开原生设置窗口、打开日志和配置
 开机自启；额度采集仍由现有 Python 服务完成，菜单栏健康检查只访问 `/api/health`，
 不会额外触发额度刷新。
 

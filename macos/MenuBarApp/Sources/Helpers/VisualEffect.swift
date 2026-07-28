@@ -31,19 +31,3 @@ struct VisualEffect: NSViewRepresentable {
         VisualEffect(material: .menu, blendingMode: .behindWindow)
     }
 }
-
-struct GlassBackground: ViewModifier {
-    func body(content: Content) -> some View {
-        content
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(.ultraThinMaterial)
-            )
-    }
-}
-
-extension View {
-    func glassBackground() -> some View {
-        modifier(GlassBackground())
-    }
-}

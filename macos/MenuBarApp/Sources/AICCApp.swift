@@ -4,7 +4,9 @@ import AppKit
 // MARK: - Server Manager
 
 @MainActor
-class ServerManager: ObservableObject {
+final class ServerManager: ObservableObject {
+    static let shared = ServerManager()
+
     @Published var isServerRunning = false
     private var serverProcess: Process?
 
@@ -28,14 +30,25 @@ class ServerManager: ObservableObject {
             .deletingLastPathComponent()
     }
 
-    func startServer() -> Bool {
+    func startServer() async -> Bool {
+        if isServerRunning {
+            return true
+        }
+
         guard let root = resolveServerRoot() else { return false }
         let serverScript = root.appendingPathComponent("server.py").path
 
         guard FileManager.default.fileExists(atPath: serverScript) else { return false }
 
+        if await serverIsHealthy() {
+            isServerRunning = true
+            return true
+        }
+
+        guard let python = resolvePython() else { return false }
+
         let process = Process()
-        process.launchPath = "/usr/bin/python3"
+        process.launchPath = python
         process.arguments = ["-B", serverScript]
         process.currentDirectoryPath = root.path
 
@@ -44,34 +57,91 @@ class ServerManager: ObservableObject {
         path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:\(path)"
         env["PATH"] = path
         env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["EINK_ACCESS_LOG"] = AppSettings.shared.debugMode ? "1" : "0"
+        if root.path.contains(".app/Contents/Resources/Server") {
+            let dataDirectory = URL(fileURLWithPath: NSHomeDirectory())
+                .appendingPathComponent("Library/Application Support/AICC-Dashboard/data", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+            env["EINK_DATA_DIR"] = dataDirectory.path
+        }
         process.environment = env
 
         // Set up log files
-        let logsDir = NSHomeDirectory() + "/Library/Logs/AICC-Dashboard"
-        try? FileManager.default.createDirectory(atPath: logsDir,
-                                                  withIntermediateDirectories: true)
+        let logsDir = AICCPaths.logsDirectory
+        try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
 
-        let outLog = logsDir + "/aicc-server.log"
-        FileManager.default.createFile(atPath: outLog, contents: nil)
-        if let handle = FileHandle(forWritingAtPath: outLog) {
+        let outLog = logsDir.appendingPathComponent("aicc-server.log")
+        FileManager.default.createFile(atPath: outLog.path, contents: nil)
+        if let handle = FileHandle(forWritingAtPath: outLog.path) {
             handle.seekToEndOfFile()
             process.standardOutput = handle
         }
 
-        let errLog = logsDir + "/aicc-server-error.log"
-        FileManager.default.createFile(atPath: errLog, contents: nil)
-        if let handle = FileHandle(forWritingAtPath: errLog) {
+        let errLog = logsDir.appendingPathComponent("aicc-server-error.log")
+        FileManager.default.createFile(atPath: errLog.path, contents: nil)
+        if let handle = FileHandle(forWritingAtPath: errLog.path) {
             handle.seekToEndOfFile()
             process.standardError = handle
         }
 
         do {
+            process.terminationHandler = { [weak self] _ in
+                Task { @MainActor [weak self, process] in
+                    guard let self, self.serverProcess === process else { return }
+                    self.serverProcess = nil
+                    self.isServerRunning = false
+                }
+            }
             try process.run()
             serverProcess = process
             isServerRunning = true
             return true
         } catch {
             print("Failed to start server: \(error)")
+            return false
+        }
+    }
+
+    var dataDirectoryURL: URL? {
+        guard let root = resolveServerRoot() else { return nil }
+        if root.path.contains(".app/Contents/Resources/Server") {
+            return URL(fileURLWithPath: NSHomeDirectory())
+                .appendingPathComponent("Library/Application Support/AICC-Dashboard/data", isDirectory: true)
+        }
+        return root.appendingPathComponent("data", isDirectory: true)
+    }
+
+    func restartServer() async -> Bool {
+        if serverProcess != nil {
+            stopServer()
+            try? await Task.sleep(nanoseconds: 400_000_000)
+        }
+        return await startServer()
+    }
+
+    private func resolvePython() -> String? {
+        let environment = ProcessInfo.processInfo.environment
+        let candidates = [
+            environment["AICC_PYTHON_PATH"],
+            "/opt/homebrew/bin/python3",
+            "/usr/local/bin/python3",
+            "/usr/bin/python3"
+        ].compactMap { $0 }
+        return candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+    }
+
+    private func serverIsHealthy() async -> Bool {
+        guard let port = ProcessInfo.processInfo.environment["EINK_PORT"] ?? Optional("8765"),
+              let url = URL(string: "http://127.0.0.1:\(port)/api/health") else {
+            return false
+        }
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 1.0
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            return (response as? HTTPURLResponse)?.statusCode == 200
+        } catch {
             return false
         }
     }
@@ -85,16 +155,16 @@ class ServerManager: ObservableObject {
 
 // MARK: - App Delegate
 
+@MainActor
 class AICCAppDelegate: NSObject, NSApplicationDelegate {
-    private var settingsWindow: NSWindow?
+    private let serverManager = ServerManager.shared
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NotificationCenter.default.addObserver(forName: .showAICCSettings, object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.showSettingsWindow() } }
         NSApp.setActivationPolicy(.accessory)
 
         // Start the Python server
         Task { @MainActor in
-            _ = ServerManager().startServer()
+            _ = await self.serverManager.startServer()
             // Give the server a moment to start, then fetch status
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             await APIService.shared.fetchStatus()
@@ -113,34 +183,7 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         APIService.shared.stopAutoRefresh()
         CodexLaunchMonitor.shared.stopMonitoring()
-    }
-
-    @MainActor @objc func showSettingsWindow() {
-        if let existing = settingsWindow, existing.isVisible {
-            existing.makeKeyAndOrderFront(nil)
-            return
-        }
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 420),
-            styleMask: [.titled, .closable, .miniaturizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "AICC Settings"
-        window.titlebarAppearsTransparent = false
-        window.center()
-        window.isReleasedWhenClosed = false
-
-        let settingsView = SettingsView()
-            .environmentObject(AppSettings.shared)
-            .environmentObject(OpenCodexController.shared)
-            .environmentObject(APIService.shared)
-
-        let hostingView = NSHostingView(rootView: settingsView)
-        window.contentView = hostingView
-        settingsWindow = window
-        window.makeKeyAndOrderFront(nil)
+        serverManager.stopServer()
     }
 }
 
@@ -153,20 +196,38 @@ struct AICCApp: App {
     @StateObject private var ocx = OpenCodexController.shared
     @StateObject private var settings = AppSettings.shared
     @StateObject private var monitor = CodexLaunchMonitor.shared
+    @StateObject private var server = ServerManager.shared
+    @StateObject private var loginAtLaunch = LaunchAtLoginService.shared
 
     var body: some Scene {
-        MenuBarExtra("AICC", systemImage: "chart.bar.fill") {
+        MenuBarExtra {
             DashboardView()
                 .environmentObject(api)
                 .environmentObject(ocx)
                 .environmentObject(settings)
                 .environmentObject(monitor)
+                .environment(\.locale, settings.locale)
+                .preferredColorScheme(settings.preferredColorScheme)
+        } label: {
+            MenuBarStatusLabel(
+                status: api.status,
+                showCodexStatus: settings.menuBarShowCodexStatus,
+                showBalance: settings.menuBarShowCodexBalance
+            )
         }
         .menuBarExtraStyle(.window)
 
-    }
-}
+        Settings {
+            SettingsView()
+                .environmentObject(api)
+                .environmentObject(ocx)
+                .environmentObject(settings)
+                .environmentObject(monitor)
+                .environmentObject(server)
+                .environmentObject(loginAtLaunch)
+                .environment(\.locale, settings.locale)
+                .preferredColorScheme(settings.preferredColorScheme)
+        }
 
-extension Notification.Name {
-    static let showAICCSettings = Notification.Name("showAICCSettings")
+    }
 }

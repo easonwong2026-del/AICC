@@ -11,6 +11,7 @@ class APIService: ObservableObject {
 
     private let baseURL: String
     private var refreshTask: Task<Void, Never>?
+    private var fetchInFlight = false
     private let session: URLSession
 
     init() {
@@ -20,10 +21,13 @@ class APIService: ObservableObject {
         config.timeoutIntervalForRequest = 5
         config.timeoutIntervalForResource = 10
         session = URLSession(configuration: config)
-        Task { await fetchStatus() }
     }
 
     func fetchStatus(force: Bool = false) async {
+        guard !fetchInFlight else { return }
+        fetchInFlight = true
+        defer { fetchInFlight = false }
+
         let path = force ? "/api/refresh" : "/api/status"
         let method = force ? "POST" : "GET"
 
@@ -68,6 +72,7 @@ class APIService: ObservableObject {
 
     func startAutoRefresh(interval: TimeInterval) {
         refreshTask?.cancel()
+        let interval = max(5, min(300, interval))
         refreshTask = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
@@ -86,9 +91,10 @@ class APIService: ObservableObject {
         guard let s = status else { return false }
         let codexOk = s.codex?.five_hour?.remaining != nil || s.codex?.weekly?.remaining != nil
         let wbOk = s.workbuddy?.points != nil
-        // DeepSeek might not be configured — treat missing as ok
+        let systemOk = s.system?.status == "Online"
+        // DeepSeek might not be configured — treat that as a healthy optional source.
         let dsStatus = s.deepseek?.status
-        let dsOk = dsStatus == nil || dsStatus == "Online"
-        return codexOk && wbOk && dsOk
+        let dsOk = dsStatus == nil || dsStatus == "Online" || dsStatus == "Not configured"
+        return codexOk && wbOk && dsOk && systemOk
     }
 }

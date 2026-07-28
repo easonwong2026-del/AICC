@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct DashboardView: View {
+    @Environment(\.openSettings) private var openSettings
     @EnvironmentObject var api: APIService
     @EnvironmentObject var ocx: OpenCodexController
     @EnvironmentObject var settings: AppSettings
@@ -9,12 +10,18 @@ struct DashboardView: View {
     var body: some View {
         VStack(spacing: 0) {
             headerSection
-            Divider().padding(.horizontal, 14)
-            codexSection
-            Divider().padding(.horizontal, 14)
-            miniCardsSection
-            Divider().padding(.horizontal, 14)
-            servicesSection
+            if settings.menuBarShowCodexStatus {
+                Divider().padding(.horizontal, 14)
+                codexSection
+            }
+            if settings.menuBarShowWorkBuddy || settings.menuBarShowDeepSeek {
+                Divider().padding(.horizontal, 14)
+                miniCardsSection
+            }
+            if settings.menuBarShowOpenCodex || settings.menuBarShowSystemHealth {
+                Divider().padding(.horizontal, 14)
+                servicesSection
+            }
             Divider().padding(.horizontal, 14)
             footerSection
         }
@@ -31,7 +38,6 @@ struct DashboardView: View {
                     .font(.system(size: 18, weight: .bold))
                 statusSummaryText
                     .font(.system(size: 10))
-                    .foregroundColor(.secondary)
             }
             Spacer()
             HStack(spacing: 12) {
@@ -42,7 +48,7 @@ struct DashboardView: View {
                 .buttonStyle(.plain)
                 .help("Refresh")
 
-                Button(action: { openSettings() }) {
+                Button(action: presentSettings) {
                     Image(systemName: "gearshape")
                         .font(.system(size: 13, weight: .medium))
                 }
@@ -84,15 +90,19 @@ struct DashboardView: View {
 
     private var miniCardsSection: some View {
         HStack(spacing: 10) {
-            if let wb = api.status?.workbuddy {
-                WorkBuddyCard(data: wb)
-            } else {
-                placeholderCard(title: "WorkBuddy", icon: "wand.and.stars")
+            if settings.menuBarShowWorkBuddy {
+                if let wb = api.status?.workbuddy {
+                    WorkBuddyCard(data: wb)
+                } else {
+                    placeholderCard(title: "WorkBuddy", icon: "wand.and.stars")
+                }
             }
-            if let ds = api.status?.deepseek {
-                DeepSeekCard(data: ds)
-            } else {
-                placeholderCard(title: "DeepSeek", icon: "brain.head.profile")
+            if settings.menuBarShowDeepSeek {
+                if let ds = api.status?.deepseek {
+                    DeepSeekCard(data: ds)
+                } else {
+                    placeholderCard(title: "DeepSeek", icon: "brain.head.profile")
+                }
             }
         }
         .padding(.horizontal, 14)
@@ -103,39 +113,43 @@ struct DashboardView: View {
 
     private var servicesSection: some View {
         VStack(spacing: 8) {
-            ServiceRow(
-                label: "OpenCodex",
-                statusText: ocx.status.label,
-                isOnline: ocx.status.isRunning,
-                toggleOn: ocx.status.isRunning || (ocx.status == .starting),
-                onToggle: { newValue in
-                    Task {
-                        if newValue { await ocx.ensure() }
-                        else { await ocx.stop() }
-                    }
-                },
-                actionLabel: "Open Codex",
-                action: { monitor.openCodex() }
-            )
-            ServiceRow(
-                label: "E-ink Sync",
-                statusText: einkStatusText,
-                isOnline: einkIsOnline,
-                showToggle: false,
-                actionLabel: nil,
-                action: nil
-            )
+            if settings.menuBarShowOpenCodex {
+                ServiceRow(
+                    label: "OpenCodex",
+                    statusText: settings.localized(ocx.status.label),
+                    isOnline: ocx.status.isRunning,
+                    toggleOn: ocx.status.isRunning || (ocx.status == .starting),
+                    onToggle: { newValue in
+                        Task {
+                            if newValue { await ocx.ensure() }
+                            else { await ocx.stop() }
+                        }
+                    },
+                    actionLabel: "Open Codex",
+                    action: { monitor.openCodex() }
+                )
+            }
+            if settings.menuBarShowSystemHealth {
+                ServiceRow(
+                    label: "System Health",
+                    statusText: systemHealthText,
+                    isOnline: systemIsHealthy,
+                    showToggle: false,
+                    actionLabel: nil,
+                    action: nil
+                )
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
     }
 
-    private var einkStatusText: String {
-        guard let system = api.status?.system else { return "Unknown" }
-        return system.status == "Online" ? "Synced" : "Offline"
+    private var systemHealthText: String {
+        guard let system = api.status?.system else { return settings.localized("Unknown") }
+        return settings.localized(system.status == "Online" ? "Healthy" : system.status ?? "Unavailable")
     }
 
-    private var einkIsOnline: Bool {
+    private var systemIsHealthy: Bool {
         api.status?.system?.status == "Online"
     }
 
@@ -173,7 +187,7 @@ struct DashboardView: View {
             Image(systemName: icon)
                 .font(.system(size: 16))
                 .foregroundColor(.secondary)
-            Text("\(title)\nNo data")
+            Text(settings.localized(title) + "\n" + settings.localized("No data"))
                 .font(.system(size: 10))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -189,14 +203,16 @@ struct DashboardView: View {
     private func showAbout() {
         let alert = NSAlert()
         alert.messageText = "AICC"
-        alert.informativeText = "AI Status Center\nVersion 2.3.1\n\nCompact AI monitoring for macOS"
+        alert.informativeText = settings.localized("About Description")
         alert.alertStyle = .informational
         alert.runModal()
     }
 
-    private func openSettings() {
-        // Will be connected via App
-        NotificationCenter.default.post(name: .showAICCSettings, object: nil)
+    private func presentSettings() {
+        NSApp.activate(ignoringOtherApps: true)
+        openSettings()
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 }
-

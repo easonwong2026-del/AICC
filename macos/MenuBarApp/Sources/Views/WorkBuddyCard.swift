@@ -4,7 +4,7 @@ struct WorkBuddyCard: View {
     let data: WorkBuddyData
 
     var body: some View {
-        compactCard(
+        CompactCard(
             title: "WorkBuddy",
             icon: "wand.and.stars",
             value: formattedPoints,

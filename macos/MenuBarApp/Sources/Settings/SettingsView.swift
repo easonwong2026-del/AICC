@@ -1,239 +1,295 @@
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
-    @EnvironmentObject var settings: AppSettings
-    @EnvironmentObject var ocx: OpenCodexController
-    @EnvironmentObject var api: APIService
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var ocx: OpenCodexController
+    @EnvironmentObject private var api: APIService
+    @EnvironmentObject private var server: ServerManager
+    @EnvironmentObject private var loginAtLaunch: LaunchAtLoginService
 
     var body: some View {
         TabView {
             GeneralSettingsView()
-                .tabItem { Label("General", systemImage: "switch.2") }
-            DataSourcesSettingsView()
-                .tabItem { Label("Data Sources", systemImage: "antenna.radiowaves.left.and.right") }
-            OpenCodexSettingsView()
-                .tabItem { Label("OpenCodex", systemImage: "server.rack") }
-            EInkSettingsView()
-                .tabItem { Label("E-ink", systemImage: "display") }
+                .tabItem { Label("General", systemImage: "gearshape") }
+            AIProvidersSettingsView()
+                .tabItem { Label("AI Providers", systemImage: "cpu") }
+            DevicesSettingsView()
+                .tabItem { Label("Devices", systemImage: "display.2") }
+            MenuBarSettingsView()
+                .tabItem { Label("Menu Bar", systemImage: "menubar.rectangle") }
             AdvancedSettingsView()
                 .tabItem { Label("Advanced", systemImage: "wrench.and.screwdriver") }
         }
-        .frame(width: 500, height: 400)
+        .frame(width: 640, height: 480)
+        .onAppear {
+            loginAtLaunch.refresh()
+            settings.launchAtLogin = loginAtLaunch.isEnabled
+        }
     }
 }
 
 // MARK: - General
 
-struct GeneralSettingsView: View {
-    @EnvironmentObject var settings: AppSettings
+private struct GeneralSettingsView: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var api: APIService
+    @EnvironmentObject private var loginAtLaunch: LaunchAtLoginService
 
     var body: some View {
         Form {
-            Section {
-                Toggle("Launch AICC at login", isOn: $settings.launchAtLogin)
-                Toggle("Show icon in menu bar", isOn: $settings.menuBarShowIcon)
-            } header: {
-                Text("Startup")
+            Section("Startup") {
+                Toggle("Launch AICC at login", isOn: Binding(
+                    get: { loginAtLaunch.isEnabled },
+                    set: { enabled in
+                        settings.launchAtLogin = enabled
+                        loginAtLaunch.setEnabled(enabled)
+                    }
+                ))
+                if let error = loginAtLaunch.errorMessage {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
             }
 
-            Section {
-                Picker("Auto-refresh interval", selection: $settings.autoRefreshInterval) {
-                    Text("5 seconds").tag(5.0)
+            Section("Refresh") {
+                Picker("Automatic refresh", selection: $settings.autoRefreshInterval) {
                     Text("10 seconds").tag(10.0)
                     Text("30 seconds").tag(30.0)
                     Text("60 seconds").tag(60.0)
                 }
-                Toggle("Enable notifications", isOn: $settings.enableNotifications)
-            } header: {
-                Text("Refresh & Notifications")
+                Text("Menu bar updates use the same cached status and do not trigger an additional provider request.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
-            Section {
+            Section("Appearance") {
+                Picker("Language", selection: $settings.languageCode) {
+                    ForEach(AppLanguage.allCases) { language in
+                        Text(language.displayName).tag(language.rawValue)
+                    }
+                }
                 Picker("Theme", selection: $settings.themeMode) {
                     Text("System").tag("system")
                     Text("Light").tag("light")
                     Text("Dark").tag("dark")
                 }
-            } header: {
-                Text("Appearance")
             }
         }
         .formStyle(.grouped)
+        .onChange(of: settings.autoRefreshInterval) { _, interval in
+            api.startAutoRefresh(interval: interval)
+        }
     }
 }
 
-// MARK: - Data Sources
+// MARK: - AI Providers
 
-struct DataSourcesSettingsView: View {
-    @EnvironmentObject var api: APIService
+private struct AIProvidersSettingsView: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var api: APIService
 
     var body: some View {
         Form {
+            Section("Providers") {
+                DataSourceRow(
+                    name: "OpenAI",
+                    status: openAIStatus,
+                    lastUpdate: "Account used by Codex",
+                    action: refresh
+                )
+                DataSourceRow(
+                    name: "Codex",
+                    status: codexStatus,
+                    lastUpdate: updateText(api.status?.collection?.codex),
+                    action: refresh
+                )
+                DataSourceRow(
+                    name: "WorkBuddy",
+                    status: workBuddyStatus,
+                    lastUpdate: updateText(api.status?.collection?.workbuddy),
+                    action: refresh
+                )
+                DataSourceRow(
+                    name: "DeepSeek",
+                    status: deepSeekStatus,
+                    lastUpdate: updateText(api.status?.collection?.deepseek),
+                    action: refresh
+                )
+            }
+
             Section {
-                DataSourceRow(name: "Codex", status: codexStatus, lastUpdate: "Auto via ChatGPT", action: {})
-                DataSourceRow(name: "WorkBuddy", status: wbStatus, lastUpdate: "Auto via CDP", action: {})
-                DataSourceRow(name: "DeepSeek", status: dsStatus, lastUpdate: "API balance check", action: {})
-            } header: {
-                Text("Connected Services")
+                Text("Credentials are read from the existing local application, environment, or Keychain integrations. AICC does not display or store tokens here.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
     }
 
+    private var openAIStatus: String {
+        settings.localized(api.status?.codex?.available == true ? "Connected" : "Unavailable")
+    }
+
     private var codexStatus: String {
-        api.status?.codex?.five_hour?.remaining != nil ? "Connected" : "Unavailable"
+        guard let codex = api.status?.codex else { return settings.localized("Unavailable") }
+        if codex.stale == true { return settings.localized("Cached") }
+        if codex.available == true { return settings.localized("Connected") }
+        return settings.localized(codex.state ?? "Unavailable")
     }
 
-    private var wbStatus: String {
-        api.status?.workbuddy?.points != nil ? "Connected" : "Unavailable"
+    private var workBuddyStatus: String {
+        guard let workbuddy = api.status?.workbuddy else { return settings.localized("Unavailable") }
+        if workbuddy.balance_state == "Cached" { return settings.localized("Cached") }
+        return settings.localized(workbuddy.points == nil ? "Unavailable" : "Connected")
     }
 
-    private var dsStatus: String {
-        api.status?.deepseek?.status ?? "Unknown"
+    private var deepSeekStatus: String {
+        settings.localized(api.status?.deepseek?.status ?? "Unavailable")
+    }
+
+    private func updateText(_ item: CollectorStatus?) -> String {
+        guard let item else { return settings.localized("No successful read") }
+        if let age = item.age_seconds {
+            return String(format: settings.localized("Updated %ds ago"), age)
+        }
+        return item.last_success ?? settings.localized("Waiting for first read")
+    }
+
+    private func refresh() {
+        Task { await api.fetchStatus(force: true) }
     }
 }
 
-struct DataSourceRow: View {
+private struct DataSourceRow: View {
     let name: String
     let status: String
     let lastUpdate: String
     let action: () -> Void
 
     var body: some View {
-        HStack {
+        HStack(spacing: 12) {
+            Circle()
+                .fill(statusColor)
+                .frame(width: 7, height: 7)
             VStack(alignment: .leading, spacing: 2) {
-                Text(name).font(.system(size: 13, weight: .medium))
-                Text(lastUpdate).font(.system(size: 10)).foregroundColor(.secondary)
+                Text(name)
+                    .font(.system(size: 13, weight: .medium))
+                Text(lastUpdate)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Spacer()
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 6, height: 6)
-                Text(status)
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                Button("Refresh") { action() }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 10))
-                    .foregroundColor(.accentColor)
-            }
+            Text(status)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button("Refresh", action: action)
+                .buttonStyle(.borderless)
         }
     }
 
     private var statusColor: Color {
-        status == "Connected" || status == "Online" ? .green : .secondary
+        switch status.lowercased() {
+        case "connected", "online", "healthy": return .green
+        case "cached": return .orange
+        default: return .secondary
+        }
     }
 }
 
-// MARK: - OpenCodex
+// MARK: - Devices
 
-struct OpenCodexSettingsView: View {
-    @EnvironmentObject var settings: AppSettings
-    @EnvironmentObject var ocx: OpenCodexController
+private struct DevicesSettingsView: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var api: APIService
 
     var body: some View {
         Form {
-            Section {
-                Toggle("Start OpenCodex with Codex Desktop", isOn: $settings.ocxAutoStart)
-                Toggle("Stop OpenCodex when Codex quits", isOn: $settings.ocxStopOnCodexExit)
-                Toggle("Wait for proxy before starting Codex", isOn: $settings.ocxWaitProxy)
-            } header: {
-                Text("Auto-launch")
+            Section("Poke4S") {
+                DeviceStatusRow(
+                    name: "Poke4S",
+                    detail: "UDP discovery 8766 · HTTP dashboard 8765",
+                    status: serverStatus
+                )
             }
 
-            Section {
-                HStack {
-                    Text("OCX Path")
-                    Spacer()
-                    Text(ocx.detectedPath ?? "Not detected")
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Button("Redetect") {
-                        Task { await ocx.detectExecutable() }
-                    }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 10))
-                    .foregroundColor(.accentColor)
-                }
-                TextField("Service address", text: $settings.ocxServiceAddress)
-                    .font(.system(size: 12))
-            } header: {
-                Text("Path & Connection")
+            Section("Android Dashboard") {
+                DeviceStatusRow(
+                    name: "Android Dashboard",
+                    detail: "Uses the same cached /api/status contract",
+                    status: serverStatus
+                )
             }
 
-            Section {
-                HStack(spacing: 12) {
-                    Button("Open Dashboard") { ocx.openDashboard() }
-                        .buttonStyle(.bordered)
-                    Button("Restart OpenCodex") {
-                        Task { await ocx.restart() }
-                    }
-                    .buttonStyle(.bordered)
-                    Button("Run Diagnostics") { runDiagnostics() }
-                        .buttonStyle(.bordered)
+            Section("Sync") {
+                Button("Sync Now") {
+                    Task { await api.fetchStatus(force: true) }
                 }
-            } header: {
-                Text("Actions")
+                if let updated = api.lastRefresh {
+                    LabeledContent("Last sync", value: updated.formatted(date: .abbreviated, time: .standard))
+                }
             }
         }
         .formStyle(.grouped)
     }
 
-    private func runDiagnostics() {}
+    private var serverStatus: String {
+        switch api.state {
+        case .ready: return settings.localized("Available")
+        case .loading: return settings.localized("Checking")
+        case .unavailable: return settings.localized("Offline")
+        case .stale: return settings.localized("Cached")
+        case .error: return settings.localized("Error")
+        }
+    }
 }
 
-// MARK: - E-ink
+private struct DeviceStatusRow: View {
+    let name: String
+    let detail: String
+    let status: String
 
-struct EInkSettingsView: View {
-    @EnvironmentObject var settings: AppSettings
-    @EnvironmentObject var api: APIService
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text("Server: \(status)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+// MARK: - Menu Bar
+
+private struct MenuBarSettingsView: View {
+    @EnvironmentObject private var settings: AppSettings
 
     var body: some View {
         Form {
-            Section {
-                HStack {
-                    Text("Sync Status")
-                    Spacer()
-                    Text(api.status?.system?.status ?? "Unknown")
-                        .foregroundColor(.secondary)
-                }
-                HStack {
-                    Text("Sync Interval")
-                    Spacer()
-                    Picker("", selection: $settings.einkSyncInterval) {
-                        Text("15s").tag(15.0)
-                        Text("30s").tag(30.0)
-                        Text("60s").tag(60.0)
-                    }
-                    .labelsHidden()
-                }
-                if let updated = api.lastRefresh {
-                    HStack {
-                        Text("Last Sync")
-                        Spacer()
-                        Text(updated, style: .time)
-                            .foregroundColor(.secondary)
-                    }
-                }
-            } header: {
-                Text("Synchronization")
+            Section("Menu bar status") {
+                Toggle("Show Codex status", isOn: $settings.menuBarShowCodexStatus)
+                Toggle("Show Codex balance", isOn: $settings.menuBarShowCodexBalance)
+            }
+
+            Section("Menu bar items") {
+                Toggle("WorkBuddy", isOn: $settings.menuBarShowWorkBuddy)
+                Toggle("DeepSeek", isOn: $settings.menuBarShowDeepSeek)
+                Toggle("OpenCodex", isOn: $settings.menuBarShowOpenCodex)
+                Toggle("System Health", isOn: $settings.menuBarShowSystemHealth)
             }
 
             Section {
-                Button("Sync Now") { Task { await api.fetchStatus(force: true) } }
-                HStack {
-                    Text("Display Template")
-                    Text("Default").foregroundColor(.secondary)
-                }
-                HStack {
-                    Text("Device Config")
-                    Text("Auto-detected").foregroundColor(.secondary)
-                }
-            } header: {
-                Text("Configuration")
+                Text("The menu bar label only shows Codex. The selected items appear after clicking it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -242,39 +298,139 @@ struct EInkSettingsView: View {
 
 // MARK: - Advanced
 
-struct AdvancedSettingsView: View {
-    @EnvironmentObject var settings: AppSettings
+private struct AdvancedSettingsView: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var ocx: OpenCodexController
+    @EnvironmentObject private var api: APIService
+    @EnvironmentObject private var server: ServerManager
+
+    @State private var notice = ""
+    @State private var showingClearCacheConfirmation = false
 
     var body: some View {
         Form {
-            Section {
-                Button("View Logs") {
-                    let logsURL = NSHomeDirectory() + "/Library/Logs/AICC-Dashboard"
-                    NSWorkspace.shared.open(URL(fileURLWithPath: logsURL))
+            Section("OpenCodex") {
+                Toggle("Start OpenCodex with Codex Desktop", isOn: $settings.ocxAutoStart)
+                Toggle("Stop OpenCodex when Codex quits", isOn: $settings.ocxStopOnCodexExit)
+                Toggle("Wait for proxy before starting Codex", isOn: $settings.ocxWaitProxy)
+
+                HStack {
+                    Text("Executable")
+                    Spacer()
+                    Text(ocx.detectedPath ?? settings.localized("Not detected"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Button("Redetect") {
+                        Task { await ocx.detectExecutable() }
+                    }
+                    .buttonStyle(.borderless)
                 }
+
+                TextField("Dashboard address", text: $settings.ocxServiceAddress)
+                HStack {
+                    Button("Open Dashboard") { ocx.openDashboard() }
+                    Button("Restart OpenCodex") {
+                        Task { await ocx.restart() }
+                    }
+                    Button("Check Health") {
+                        Task { await ocx.refreshStatus() }
+                    }
+                }
+            }
+
+            Section("Diagnostics") {
+                Toggle("Debug mode", isOn: $settings.debugMode)
+                Text("Debug logging applies after the internal data service is restarted.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("View Logs") { openDirectory(AICCPaths.logsDirectory) }
                 Button("Show Data Directory") {
-                    let dataURL = NSHomeDirectory() + "/Library/Application Support/AICC-Dashboard/data"
-                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: dataURL)])
+                    if let directory = server.dataDirectoryURL {
+                        openDirectory(directory)
+                    }
                 }
-            } header: {
-                Text("Diagnostics")
+                Button("Export Diagnostic Info") { exportDiagnostics() }
             }
 
-            Section {
+            Section("Service") {
                 Button("Restart Data Service") {
-                    // Send restart command to server
+                    Task {
+                        let success = await server.restartServer()
+                        notice = settings.localized(
+                            success ? "Data service restarted." : "Unable to restart data service."
+                        )
+                        if success { await api.fetchStatus() }
+                    }
                 }
-                Button("Export Diagnostic Info") {}
-            } header: {
-                Text("Service")
-            }
-
-            Section {
-                Button("Clear Cache") {}
-            } header: {
-                Text("Maintenance")
+                Button("Clear Cache", role: .destructive) {
+                    showingClearCacheConfirmation = true
+                }
+                if !notice.isEmpty {
+                    Text(notice)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .formStyle(.grouped)
+        .confirmationDialog(
+            "Clear AICC cached data?",
+            isPresented: $showingClearCacheConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Clear Cache", role: .destructive) { clearCache() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Provider credentials are not stored in this cache.")
+        }
     }
+
+    private func openDirectory(_ directory: URL) {
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(directory)
+    }
+
+    private func clearCache() {
+        guard let directory = server.dataDirectoryURL else {
+            notice = settings.localized("Data directory is unavailable.")
+            return
+        }
+        do {
+            let count = try CacheManager.clear(in: directory)
+            notice = count == 0
+                ? settings.localized("No cached files found.")
+                : String(format: settings.localized("Cleared %d cached file(s)."), count)
+            Task { await api.fetchStatus(force: true) }
+        } catch {
+            notice = settings.localized("Cache cleanup failed:") + " \(error.localizedDescription)"
+        }
+    }
+
+    private func exportDiagnostics() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "AICC-Diagnostics.json"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let payload = DiagnosticsPayload(
+            version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev",
+            generatedAt: ISO8601DateFormatter().string(from: Date()),
+            status: api.status
+        )
+        do {
+            let data = try JSONEncoder().encode(payload)
+            try data.write(to: url, options: .atomic)
+            notice = settings.localized("Diagnostic info exported.")
+        } catch {
+            notice = settings.localized("Export failed:") + " \(error.localizedDescription)"
+        }
+    }
+}
+
+private struct DiagnosticsPayload: Codable {
+    let version: String
+    let generatedAt: String
+    let status: StatusResponse?
 }

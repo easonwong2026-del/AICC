@@ -17,16 +17,12 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from collectors.deepseek import collect as collect_deepseek
-from collectors.system import collect as collect_system
-from collectors.workbuddy import collect as collect_workbuddy
-from services.codex_monitor import monitor as codex_monitor
+from providers.registry import ProviderRegistry, build_provider_registry
 from services.collector_manager import CollectorManager
 
 ROOT = Path(__file__).resolve().parent
 DATA_ROOT = Path(os.environ.get("EINK_DATA_DIR", ROOT / "data")).expanduser()
 DATA_PATH = DATA_ROOT / "status.json"
-DEEPSEEK_HISTORY_PATH = DATA_ROOT / "deepseek_history.json"
 WEB_ROOT = Path(os.environ.get("EINK_WEB_ROOT", ROOT / "web")).expanduser()
 COLLECTOR_WAIT_SECONDS = max(0, min(5, float(os.environ.get("COLLECTOR_WAIT_SECONDS", "3.2"))))
 MAX_POST_BYTES = 16 * 1024
@@ -37,7 +33,9 @@ DEFAULT_STATUS = {
 }
 DISCOVERY_MAGIC = b"AI_EINK_DISCOVER"
 _collector_manager: CollectorManager | None = None
+_provider_registry: ProviderRegistry | None = None
 _rate_lock = threading.Lock()
+_status_write_lock = threading.Lock()
 _rate_windows: dict[tuple[str, str], deque[float]] = {}
 
 
@@ -67,16 +65,18 @@ def persisted_status() -> dict:
         return DEFAULT_STATUS.copy()
 
 
+def provider_registry() -> ProviderRegistry:
+    global _provider_registry
+    if _provider_registry is None:
+        fallback = persisted_status()
+        _provider_registry = build_provider_registry(DATA_ROOT, fallback, persisted_status)
+    return _provider_registry
+
+
 def collector_manager() -> CollectorManager:
     global _collector_manager
     if _collector_manager is None:
-        fallback = persisted_status()
-        _collector_manager = CollectorManager({
-            "codex": (codex_monitor.status, 60, fallback.get("codex", {})),
-            "deepseek": (lambda: collect_deepseek(DEEPSEEK_HISTORY_PATH), 300, {"status": "Loading", "balances": []}),
-            "workbuddy": (lambda: collect_workbuddy(persisted_status().get("workbuddy", {})), 60, fallback.get("workbuddy", {})),
-            "system": (collect_system, 60, {"status": "Loading"}),
-        })
+        _collector_manager = CollectorManager(provider_registry().as_dict())
     return _collector_manager
 
 
@@ -89,11 +89,19 @@ def load_status(force: bool = False) -> dict:
     return data
 
 
-def save_status(data: dict) -> None:
+def save_status(data: dict) -> bool:
     DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temporary = DATA_PATH.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary, DATA_PATH)
+    with _status_write_lock:
+        try:
+            existing = json.loads(DATA_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = None
+        if existing == data:
+            return False
+        temporary = DATA_PATH.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(temporary, DATA_PATH)
+        return True
 
 
 def version() -> str:
@@ -118,7 +126,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if path == "/api/status":
             return self.send_json(load_status())
         if path == "/api/codex/status":
-            return self.send_json(codex_monitor.status())
+            values, _ = collector_manager().snapshot(wait_seconds=COLLECTOR_WAIT_SECONDS)
+            return self.send_json(values.get("codex", {}))
         if path == "/api/health":
             return self.send_json({"ok": True, "version": version()})
         self.path = "/settings.html" if path == "/settings" else "/index.html" if path == "/" else self.path
@@ -229,8 +238,9 @@ def _periodic_save(interval: int = 30) -> None:
             data = persisted_status()
             data.update(values)
             save_status(data)
-        except Exception:
-            pass
+        except Exception as error:
+            if os.environ.get("EINK_ACCESS_LOG") == "1":
+                print(f"Periodic status save failed: {type(error).__name__}: {error}")
 
 
 def main() -> None:
