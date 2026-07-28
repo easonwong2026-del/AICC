@@ -56,9 +56,9 @@ private struct GeneralSettingsView: View {
 
             Section("Refresh") {
                 Picker("Automatic refresh", selection: $settings.autoRefreshInterval) {
-                    Text("10 seconds").tag(10.0)
-                    Text("30 seconds").tag(30.0)
                     Text("60 seconds").tag(60.0)
+                    Text("120 seconds").tag(120.0)
+                    Text("300 seconds").tag(300.0)
                 }
                 Text("Menu bar updates use the same cached status and do not trigger an additional provider request.")
                     .font(.caption)

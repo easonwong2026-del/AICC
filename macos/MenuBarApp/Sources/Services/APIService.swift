@@ -5,13 +5,16 @@ class APIService: ObservableObject {
     static let shared = APIService()
 
     @Published var status: StatusResponse?
+    @Published var health: HealthResponse?
     @Published var state: DataSourceState = .loading
     @Published var lastRefresh: Date?
     @Published var errorMessage: String?
 
     private let baseURL: String
     private var refreshTask: Task<Void, Never>?
+    private var healthTask: Task<Void, Never>?
     private var fetchInFlight = false
+    private var healthInFlight = false
     private let session: URLSession
 
     init() {
@@ -70,9 +73,30 @@ class APIService: ObservableObject {
         }
     }
 
+    func fetchHealth() async {
+        guard !healthInFlight else { return }
+        healthInFlight = true
+        defer { healthInFlight = false }
+
+        guard let url = URL(string: "\(baseURL)/api/health") else { return }
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 5
+
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  (200..<500).contains(http.statusCode) else { return }
+            health = try JSONDecoder().decode(HealthResponse.self, from: data)
+        } catch {
+            // Health is diagnostic state. Do not overwrite a usable cached status
+            // just because this low-frequency probe was unavailable.
+        }
+    }
+
     func startAutoRefresh(interval: TimeInterval) {
         refreshTask?.cancel()
-        let interval = max(5, min(300, interval))
+        let interval = max(60, min(600, interval))
         refreshTask = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
@@ -85,6 +109,20 @@ class APIService: ObservableObject {
     func stopAutoRefresh() {
         refreshTask?.cancel()
         refreshTask = nil
+        healthTask?.cancel()
+        healthTask = nil
+    }
+
+    func startHealthRefresh(interval: TimeInterval = 60) {
+        healthTask?.cancel()
+        let interval = max(60, min(300, interval))
+        healthTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                if Task.isCancelled { break }
+                await fetchHealth()
+            }
+        }
     }
 
     var allServicesOk: Bool {

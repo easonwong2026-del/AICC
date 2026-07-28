@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.4.0 - 2026-07-28
+
+- SwiftUI 进程级单实例保护，防止重复菜单栏入口
+- 新增 PythonServiceSupervisor：自动恢复、指数退避、5 次失败熔断
+- Provider 统一超时（默认 8 秒）与失败隔离
+- 新增 `/api/health/live`、`/api/health/ready` 分层健康状态
+- 刷新周期默认 120 秒；菜单栏沿用只读缓存
+- 升级脚本增加版本 manifest 校验和健康检查后自动回滚
+- 统一 DMG 命名为 `AICC-2.4.0.dmg`
+- Developer ID 签名与 Apple Notarization 支持
+
 ## 2.3.1 - 2026-07-27
 
 - 修复：`CODEX_CLI_PATH` 环境变量未传递导致 codex_monitor 无法连接 Codex CLI，使用旧 Manual 兜底数据

@@ -5,12 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 from collectors.system import collect
-from providers.base import CacheStore
+from providers.base import DEFAULT_PROVIDER_INTERVAL, DEFAULT_PROVIDER_TIMEOUT, CacheStore
 
 
 class SystemProvider:
     name = "system"
-    interval = 60.0
+    interval = DEFAULT_PROVIDER_INTERVAL
+    timeout = DEFAULT_PROVIDER_TIMEOUT
 
     def __init__(self, cache: CacheStore) -> None:
         self._cache = cache

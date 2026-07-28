@@ -5,12 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 from collectors.deepseek import collect
-from providers.base import CacheStore
+from providers.base import CacheStore, DEFAULT_PROVIDER_TIMEOUT
 
 
 class DeepSeekProvider:
     name = "deepseek"
     interval = 300.0
+    timeout = DEFAULT_PROVIDER_TIMEOUT
 
     def __init__(self, cache: CacheStore) -> None:
         self._cache = cache
