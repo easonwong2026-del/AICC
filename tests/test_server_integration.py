@@ -60,6 +60,17 @@ class ServerIntegrationTests(unittest.TestCase):
             self.assertEqual(payload["workbuddy"]["points"], 12)
             self.assertIn("collection", payload)
 
+    def test_health_layers_are_non_refreshing_and_versioned(self):
+        with urlopen(self.base + "/api/health/live", timeout=2) as response:
+            live = json.load(response)
+        self.assertEqual(live["status"], "live")
+        self.assertEqual(live["version"], server.version())
+
+        with urlopen(self.base + "/api/health/ready", timeout=2) as response:
+            ready = json.load(response)
+        self.assertIn(ready["status"], {"healthy", "degraded"})
+        self.assertEqual(server._collector_manager.invalidated, [])
+
     def test_local_post_is_validated_and_saved(self):
         body = json.dumps({"workbuddy": {"points": 45, "used_points": 3, "reset_text": "ok"}}).encode()
         request = Request(self.base + "/api/status", data=body, headers={"Content-Type": "application/json"}, method="POST")

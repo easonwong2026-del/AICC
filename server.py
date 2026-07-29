@@ -150,6 +150,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return
         if path == "/api/workbuddy/reconnect":
             script = ROOT / "macos" / "start-workbuddy-monitored.sh"
+            if not script.is_file():
+                self.send_json(
+                    {"error": "WorkBuddy reconnect is unavailable in the bundled runtime"},
+                    HTTPStatus.NOT_IMPLEMENTED,
+                )
+                return
             subprocess.Popen(
                 ["/bin/bash", str(script), "--ensure"],
                 stdin=subprocess.DEVNULL,

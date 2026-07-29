@@ -48,6 +48,6 @@ final class SingleInstanceService {
         let currentPID = ProcessInfo.processInfo.processIdentifier
         let existing = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
             .first { $0.processIdentifier != currentPID }
-        existing?.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        existing?.activate(options: [.activateAllWindows])
     }
 }
