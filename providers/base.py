@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 
+DEFAULT_PROVIDER_INTERVAL = 120.0
+DEFAULT_PROVIDER_TIMEOUT = 8.0
+
+
 class CacheStore:
     """Namespaced view over the single AICC runtime data directory."""
 
@@ -23,6 +27,7 @@ class CacheStore:
 class Provider(Protocol):
     name: str
     interval: float
+    timeout: float
 
     def status(self) -> dict[str, Any]:
         """Return the most recent in-memory or cached value without refreshing."""
@@ -47,9 +52,11 @@ class CallableProvider:
         interval: float,
         initial: dict[str, Any],
         cache: CacheStore,
+        timeout: float = DEFAULT_PROVIDER_TIMEOUT,
     ) -> None:
         self.name = name
         self.interval = interval
+        self.timeout = max(1.0, float(timeout))
         self._collect = collect
         self._status = initial.copy()
         self._cache = cache

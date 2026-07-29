@@ -5,7 +5,7 @@
 ## 使用地址
 
 - Mac：`http://localhost:8765`
-- 设置：`http://localhost:8765/settings`
+- 设置：SwiftUI 原生设置窗口（菜单栏 → Settings）
 - Poke4S：`http://<Mac 当前 Wi-Fi 地址>:8765/?kiosk=1`
 
 Mac 与 Poke4S 需要连接同一 Wi-Fi。原生 Android 客户端也可以通过 UDP 自动发现 Mac。
@@ -19,8 +19,8 @@ bash macos/start-dashboard.sh              # 前台启动
 bash macos/install-autostart.sh            # 安装自动启动与监控
 bash macos/uninstall-autostart.sh          # 移除自动启动
 bash macos/set-deepseek-key.sh             # 更新 DeepSeek 密钥
-SERVER_ROOT=/path/to/dashboard bash macos/build-aicc-swiftui.sh  # 构建 SwiftUI 菜单栏 App
-RELEASE_DIR=/Users/easonwong/AICC/releases/mac bash macos/build-dmg.sh  # 构建自包含 DMG 安装包
+BUNDLE_SERVER=1 bash macos/build-aicc-swiftui.sh  # 构建自包含 SwiftUI 菜单栏 App（含 Python 服务）
+bash macos/build-dmg.sh  # 构建自包含 AICC DMG 安装包
 ```
 
 安全更新会先跑测试并完整备份，同时保留当前额度历史和缓存：
@@ -38,6 +38,8 @@ SwiftUI 菜单栏 App（AICC）会生成在 `dist/mac/AICC.app`。`SERVER_ROOT` 
 `/Users/easonwong/AICC/releases/mac/` 这类成品目录。DMG 里的 App 自带服务器代码，
 可拖入 `/Applications`。自包含 App 的运行数据写入
 `~/Library/Application Support/AICC-Dashboard/data/`，不会写进 App 包本身。
+App 运行需要 macOS 14 或更高版本、Apple Silicon，以及可执行的 Python 3（建议 Python 3.10+）；DMG 不包含 Python 解释器。
+没有 Developer ID 时生成的是 ad-hoc 测试包，首次在其他 Mac 安装需要右键选择“打开”。
 菜单栏 App 只负责状态显示、启动/停止/重启服务、打开原生设置窗口、打开日志和配置
 开机自启；额度采集仍由现有 Python 服务完成，菜单栏健康检查只访问 `/api/health`，
 不会额外触发额度刷新。

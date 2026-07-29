@@ -3,12 +3,41 @@ import AppKit
 
 // MARK: - Server Manager
 
+enum ServerHealthState: String {
+    case stopped
+    case starting
+    case healthy
+    case degraded
+    case recovering
+    case failed
+}
+
+enum ServerOwnership {
+    case none
+    case managed
+    case external
+}
+
+enum ServerStopReason {
+    case none
+    case recovery
+    case user
+    case appExit
+}
+
 @MainActor
 final class ServerManager: ObservableObject {
     static let shared = ServerManager()
 
     @Published var isServerRunning = false
+    @Published var healthState: ServerHealthState = .stopped
     private var serverProcess: Process?
+    private var ownership: ServerOwnership = .none
+    private var supervisorTask: Task<Void, Never>?
+    private var stopReason: ServerStopReason = .none
+    private var restartFailures = 0
+    private var failureWindowStarted = Date.distantPast
+    private var nextRetryDelay: UInt64 = 1_000_000_000
 
     func resolveServerRoot() -> URL? {
         if let marker = Bundle.main.url(forResource: "ServerRoot", withExtension: "txt") {
@@ -31,21 +60,34 @@ final class ServerManager: ObservableObject {
     }
 
     func startServer() async -> Bool {
-        if isServerRunning {
-            return true
+        if serverProcess?.isRunning == true {
+            return await serverIsAlive()
         }
 
-        guard let root = resolveServerRoot() else { return false }
+        stopReason = .none
+        healthState = .starting
+        guard let root = resolveServerRoot() else {
+            healthState = .degraded
+            return false
+        }
         let serverScript = root.appendingPathComponent("server.py").path
 
-        guard FileManager.default.fileExists(atPath: serverScript) else { return false }
+        guard FileManager.default.fileExists(atPath: serverScript) else {
+            healthState = .degraded
+            return false
+        }
 
-        if await serverIsHealthy() {
+        if await serverIsAlive() {
             isServerRunning = true
+            ownership = .external
+            healthState = .healthy
             return true
         }
 
-        guard let python = resolvePython() else { return false }
+        guard let python = resolvePython() else {
+            healthState = .degraded
+            return false
+        }
 
         let process = Process()
         process.launchPath = python
@@ -85,20 +127,42 @@ final class ServerManager: ObservableObject {
         }
 
         do {
+            stopReason = .none
             process.terminationHandler = { [weak self] _ in
-                Task { @MainActor [weak self, process] in
-                    guard let self, self.serverProcess === process else { return }
-                    self.serverProcess = nil
-                    self.isServerRunning = false
+                Task { @MainActor [weak self] in
+                    self?.handleProcessTermination()
                 }
             }
             try process.run()
             serverProcess = process
-            isServerRunning = true
-            return true
+            ownership = .managed
+            isServerRunning = false
+            let ready = await waitForServerAlive()
+            if ready {
+                isServerRunning = true
+                healthState = .healthy
+                return true
+            }
+            stopOwnedServer(reason: .recovery)
+            healthState = .degraded
+            return false
         } catch {
             print("Failed to start server: \(error)")
+            healthState = .degraded
             return false
+        }
+    }
+
+    func startMonitoring() {
+        guard supervisorTask == nil else { return }
+        supervisorTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            _ = await self.startServer()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
+                if Task.isCancelled { break }
+                await self.superviseOnce()
+            }
         }
     }
 
@@ -112,11 +176,18 @@ final class ServerManager: ObservableObject {
     }
 
     func restartServer() async -> Bool {
-        if serverProcess != nil {
-            stopServer()
+        if ownership == .managed {
+            stopOwnedServer(reason: .recovery)
             try? await Task.sleep(nanoseconds: 400_000_000)
         }
+        restartFailures = 0
+        nextRetryDelay = 1_000_000_000
         return await startServer()
+    }
+
+    func stopMonitoring() {
+        supervisorTask?.cancel()
+        supervisorTask = nil
     }
 
     private func resolvePython() -> String? {
@@ -130,9 +201,9 @@ final class ServerManager: ObservableObject {
         return candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
     }
 
-    private func serverIsHealthy() async -> Bool {
+    private func serverIsAlive() async -> Bool {
         guard let port = ProcessInfo.processInfo.environment["EINK_PORT"] ?? Optional("8765"),
-              let url = URL(string: "http://127.0.0.1:\(port)/api/health") else {
+              let url = URL(string: "http://127.0.0.1:\(port)/api/health/live") else {
             return false
         }
         var request = URLRequest(url: url)
@@ -146,10 +217,75 @@ final class ServerManager: ObservableObject {
         }
     }
 
-    func stopServer() {
-        serverProcess?.terminate()
+    private func waitForServerAlive() async -> Bool {
+        for _ in 0..<10 {
+            if await serverIsAlive() { return true }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        return false
+    }
+
+    private func superviseOnce() async {
+        guard stopReason == .none || stopReason == .recovery else { return }
+        if await serverIsAlive() {
+            isServerRunning = true
+            healthState = .healthy
+            restartFailures = 0
+            nextRetryDelay = 1_000_000_000
+            return
+        }
+
+        isServerRunning = false
+        healthState = .recovering
+        if ownership == .managed {
+            stopOwnedServer(reason: .recovery)
+            try? await Task.sleep(nanoseconds: 400_000_000)
+        }
+
+        let now = Date()
+        if now.timeIntervalSince(failureWindowStarted) > 300 {
+            failureWindowStarted = now
+            restartFailures = 0
+            nextRetryDelay = 1_000_000_000
+        }
+        guard restartFailures < 5 else {
+            healthState = .failed
+            return
+        }
+
+        try? await Task.sleep(nanoseconds: nextRetryDelay)
+        if await startServer() {
+            restartFailures = 0
+            nextRetryDelay = 1_000_000_000
+        } else {
+            restartFailures += 1
+            nextRetryDelay = min(nextRetryDelay * 2, 30_000_000_000)
+        }
+    }
+
+    private func handleProcessTermination() {
         serverProcess = nil
         isServerRunning = false
+        ownership = .none
+        healthState = stopReason == .appExit || stopReason == .user ? .stopped : .degraded
+    }
+
+    private func stopOwnedServer(reason: ServerStopReason) {
+        guard ownership == .managed else { return }
+        stopReason = reason
+        serverProcess?.terminate()
+        serverProcess = nil
+        ownership = .none
+        isServerRunning = false
+        healthState = reason == .recovery ? .recovering : .stopped
+    }
+
+    func stopServer(reason: ServerStopReason = .user) {
+        stopReason = reason
+        stopOwnedServer(reason: reason)
+        if ownership == .none {
+            healthState = .stopped
+        }
     }
 }
 
@@ -157,18 +293,27 @@ final class ServerManager: ObservableObject {
 
 @MainActor
 class AICCAppDelegate: NSObject, NSApplicationDelegate {
+    private let singleInstance = SingleInstanceService.shared
     private let serverManager = ServerManager.shared
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        guard singleInstance.acquire() else {
+            NSApp.terminate(nil)
+            return
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
-        // Start the Python server
+        // Start and supervise the Python server.
+        serverManager.startMonitoring()
         Task { @MainActor in
-            _ = await self.serverManager.startServer()
-            // Give the server a moment to start, then fetch status
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             await APIService.shared.fetchStatus()
+            await APIService.shared.fetchHealth()
             APIService.shared.startAutoRefresh(interval: AppSettings.shared.autoRefreshInterval)
+            APIService.shared.startHealthRefresh()
         }
 
         // Start Codex monitoring
@@ -183,7 +328,8 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         APIService.shared.stopAutoRefresh()
         CodexLaunchMonitor.shared.stopMonitoring()
-        serverManager.stopServer()
+        serverManager.stopMonitoring()
+        serverManager.stopServer(reason: .appExit)
     }
 }
 

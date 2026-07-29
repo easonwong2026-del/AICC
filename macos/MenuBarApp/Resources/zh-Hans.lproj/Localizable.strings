@@ -11,6 +11,8 @@
 "10 seconds" = "10 秒";
 "30 seconds" = "30 秒";
 "60 seconds" = "60 秒";
+"120 seconds" = "120 秒";
+"300 seconds" = "300 秒";
 "Menu bar updates use the same cached status and do not trigger an additional provider request." = "菜单栏使用同一份缓存状态，不会额外请求 AI 服务。";
 "Appearance" = "外观";
 "Language" = "语言";
@@ -102,6 +104,9 @@
 "Stopping..." = "正在停止…";
 "Unknown" = "未知";
 "Healthy" = "健康";
+"healthy" = "健康";
+"degraded" = "降级";
+"unhealthy" = "异常";
 "Online" = "在线";
 "Open Codex" = "打开 Codex";
 "Updated %@ ago" = "%@前更新";

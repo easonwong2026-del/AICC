@@ -26,6 +26,7 @@ DATA_PATH = DATA_ROOT / "status.json"
 WEB_ROOT = Path(os.environ.get("EINK_WEB_ROOT", ROOT / "web")).expanduser()
 COLLECTOR_WAIT_SECONDS = max(0, min(5, float(os.environ.get("COLLECTOR_WAIT_SECONDS", "3.2"))))
 MAX_POST_BYTES = 16 * 1024
+SERVER_STARTED_AT = time.time()
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 DEFAULT_STATUS = {
     "codex": {"five_hour": {"remaining": 83, "reset": "14:27"}, "weekly": {"remaining": 97, "reset": "7月17日"}, "source": "Manual"},
@@ -112,7 +113,7 @@ def version() -> str:
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
-    server_version = "AICC/2.3.1"
+    server_version = f"AICC/{version()}"
     sys_version = ""
 
     def __init__(self, *args, **kwargs):
@@ -123,13 +124,19 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": "Too many requests"}, HTTPStatus.TOO_MANY_REQUESTS)
             return
         path = urlparse(self.path).path
+        if path == "/api/health/live":
+            return self.send_json({"ok": True, "status": "live", "version": version()})
+        if path == "/api/health/ready":
+            payload = health_payload()
+            status = HTTPStatus.OK if payload["status"] != "unhealthy" else HTTPStatus.SERVICE_UNAVAILABLE
+            return self.send_json(payload, status)
         if path == "/api/status":
             return self.send_json(load_status())
         if path == "/api/codex/status":
             values, _ = collector_manager().snapshot(wait_seconds=COLLECTOR_WAIT_SECONDS)
             return self.send_json(values.get("codex", {}))
         if path == "/api/health":
-            return self.send_json({"ok": True, "version": version()})
+            return self.send_json(health_payload())
         self.path = "/settings.html" if path == "/settings" else "/index.html" if path == "/" else self.path
         return super().do_GET()
 
@@ -143,6 +150,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return
         if path == "/api/workbuddy/reconnect":
             script = ROOT / "macos" / "start-workbuddy-monitored.sh"
+            if not script.is_file():
+                self.send_json(
+                    {"error": "WorkBuddy reconnect is unavailable in the bundled runtime"},
+                    HTTPStatus.NOT_IMPLEMENTED,
+                )
+                return
             subprocess.Popen(
                 ["/bin/bash", str(script), "--ensure"],
                 stdin=subprocess.DEVNULL,
@@ -229,7 +242,7 @@ def start_discovery(http_port: int) -> None:
     threading.Thread(target=serve, name="eink-discovery", daemon=True).start()
 
 
-def _periodic_save(interval: int = 30) -> None:
+def _periodic_save(interval: int = 120) -> None:
     """定时将收集器数据写入 status.json，供菜单栏等文件读取方使用。"""
     while True:
         time.sleep(interval)
@@ -243,12 +256,74 @@ def _periodic_save(interval: int = 30) -> None:
                 print(f"Periodic status save failed: {type(error).__name__}: {error}")
 
 
+def _cache_health() -> dict:
+    try:
+        location = DATA_PATH if DATA_PATH.exists() else DATA_ROOT
+        parent = location if location.is_dir() else location.parent
+        writable = parent.exists() and os.access(parent, os.W_OK)
+        modified = DATA_PATH.stat().st_mtime if DATA_PATH.exists() else None
+        return {
+            "writable": writable,
+            "exists": DATA_PATH.exists(),
+            "age_seconds": max(0, round(time.time() - modified)) if modified else None,
+        }
+    except OSError as error:
+        return {"writable": False, "exists": False, "error": str(error)[:160]}
+
+
+def health_payload() -> dict:
+    cache = _cache_health()
+    try:
+        manager = collector_manager()
+        health_method = getattr(manager, "health", None)
+        if callable(health_method):
+            provider_items = health_method()
+        else:
+            _, metadata = manager.snapshot(wait_seconds=0)
+            provider_items = {
+                name: {**item, "provider": name, "ok": item.get("state") == "ready"}
+                for name, item in metadata.items()
+            }
+    except Exception as error:  # health must explain a broken scheduler without raising
+        return {
+            "ok": False,
+            "status": "unhealthy",
+            "version": version(),
+            "uptime_seconds": round(max(0, time.time() - SERVER_STARTED_AT)),
+            "cache": cache,
+            "providers": {},
+            "error": f"{type(error).__name__}: {error}"[:160],
+        }
+
+    required = {"codex", "workbuddy", "system"}
+    required_failed = any(
+        not provider_items.get(name, {}).get("ok", False)
+        for name in required
+    )
+    any_failed = any(not item.get("ok", False) for item in provider_items.values())
+    if not cache.get("writable", False):
+        state = "unhealthy"
+    elif required_failed or any_failed:
+        state = "degraded"
+    else:
+        state = "healthy"
+
+    return {
+        "ok": state == "healthy",
+        "status": state,
+        "version": version(),
+        "uptime_seconds": round(max(0, time.time() - SERVER_STARTED_AT)),
+        "cache": cache,
+        "providers": provider_items,
+    }
+
+
 def main() -> None:
     port = int(os.environ.get("EINK_PORT", "8765"))
     server = DashboardServer((os.environ.get("EINK_HOST", "0.0.0.0"), port), DashboardHandler)
     start_discovery(port)
     collector_manager().snapshot(force=True, wait_seconds=0)
-    threading.Thread(target=_periodic_save, daemon=True).start()
+    threading.Thread(target=_periodic_save, args=(120,), daemon=True).start()
     print(f"AICC Dashboard: http://localhost:{port}")
     try:
         server.serve_forever()

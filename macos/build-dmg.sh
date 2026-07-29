@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="AICC"
 VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
-DMG_NAME="AI-EInk-Dashboard-$VERSION.dmg"
+DMG_NAME="$APP_NAME-$VERSION.dmg"
 APP_DIR="$ROOT/dist/mac/$APP_NAME.app"
 STAGING_DIR="$ROOT/dist/dmg"
 RELEASE_DIR="${RELEASE_DIR:-$ROOT/dist}"

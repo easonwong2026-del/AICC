@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SERVER_ROOT="${SERVER_ROOT:-$ROOT}"
 BUNDLE_SERVER="${BUNDLE_SERVER:-0}"
+SIGNING_IDENTITY="${AICC_SIGNING_IDENTITY:--}"
+
+# Required server directories for BUNDLE_SERVER=1
+REQUIRED_SERVER_DIRS=("collectors" "services" "providers" "web")
 
 APP_NAME="AICC"
 APP_DIR="$ROOT/dist/mac/$APP_NAME.app"
@@ -30,9 +34,17 @@ fi
 # Bundle server if requested
 if [[ "$BUNDLE_SERVER" == "1" ]]; then
   BUNDLED_SERVER_DIR="$RESOURCES_DIR/Server"
+  # Validate required server directories exist
+  for dir in "${REQUIRED_SERVER_DIRS[@]}"; do
+    if [ ! -d "$ROOT/$dir" ]; then
+      echo "ERROR: Required server directory not found: $ROOT/$dir" >&2
+      exit 1
+    fi
+  done
+
   mkdir -p "$BUNDLED_SERVER_DIR"
   cp "$ROOT/server.py" "$ROOT/VERSION" "$ROOT/PACKAGE.json" "$BUNDLED_SERVER_DIR/"
-  cp -R "$ROOT/collectors" "$ROOT/services" "$ROOT/web" "$BUNDLED_SERVER_DIR/"
+  cp -R "$ROOT/collectors" "$ROOT/services" "$ROOT/providers" "$ROOT/web" "$BUNDLED_SERVER_DIR/"
   printf '%s\n' "@resources/Server" > "$RESOURCES_DIR/ServerRoot.txt"
 else
   printf '%s\n' "$SERVER_ROOT" > "$RESOURCES_DIR/ServerRoot.txt"
@@ -85,7 +97,14 @@ xcrun swiftc \
   -o "$MACOS_DIR/$APP_NAME"
 
 echo "=== Signing ==="
-codesign --force --deep --sign - "$APP_DIR" 2>/dev/null || true
+if [[ "$SIGNING_IDENTITY" == "-" ]]; then
+  codesign --force --deep --sign - "$APP_DIR"
+else
+  codesign --force --deep --options runtime --timestamp \
+    --entitlements "$ROOT/macos/entitlements.plist" \
+    --sign "$SIGNING_IDENTITY" "$APP_DIR"
+fi
+codesign --verify --deep --strict "$APP_DIR"
 
 echo "=== Done ==="
 echo "$APP_DIR"

@@ -123,3 +123,29 @@ enum DataSourceState {
     case unavailable
     case error(String)
 }
+
+struct HealthCache: Codable {
+    let writable: Bool
+    let exists: Bool?
+    let age_seconds: Int?
+}
+
+struct ProviderHealth: Codable {
+    let provider: String?
+    let ok: Bool
+    let state: String
+    let age_seconds: Int?
+    let duration_ms: Int?
+    let consecutive_failures: Int?
+    let error: String?
+}
+
+struct HealthResponse: Codable {
+    let ok: Bool
+    let status: String
+    let version: String
+    let uptime_seconds: Int?
+    let cache: HealthCache?
+    let providers: [String: ProviderHealth]
+    let error: String?
+}

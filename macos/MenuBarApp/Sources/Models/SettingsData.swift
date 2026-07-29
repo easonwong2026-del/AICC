@@ -27,7 +27,7 @@ enum AppLanguage: String, CaseIterable, Identifiable {
 
 class AppSettings: ObservableObject {
     @AppStorage("launchAtLogin") var launchAtLogin = false
-    @AppStorage("autoRefreshInterval") var autoRefreshInterval = 10.0
+    @AppStorage("autoRefreshInterval") var autoRefreshInterval = 120.0
     @AppStorage("themeMode") var themeMode = "system"
     @Published var languageCode: String {
         didSet {
@@ -89,6 +89,10 @@ class AppSettings: ObservableObject {
     private init() {
         languageCode = UserDefaults.standard.string(forKey: "languageCode")
             ?? AppLanguage.system.rawValue
+        let storedInterval = UserDefaults.standard.double(forKey: "autoRefreshInterval")
+        if storedInterval < 60 {
+            UserDefaults.standard.set(120.0, forKey: "autoRefreshInterval")
+        }
     }
 
     static let shared = AppSettings()

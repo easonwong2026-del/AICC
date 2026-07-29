@@ -5,12 +5,13 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from collectors.workbuddy import collect
-from providers.base import CacheStore
+from providers.base import DEFAULT_PROVIDER_INTERVAL, DEFAULT_PROVIDER_TIMEOUT, CacheStore
 
 
 class WorkBuddyProvider:
     name = "workbuddy"
-    interval = 60.0
+    interval = DEFAULT_PROVIDER_INTERVAL
+    timeout = DEFAULT_PROVIDER_TIMEOUT
 
     def __init__(
         self,

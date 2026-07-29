@@ -145,12 +145,18 @@ struct DashboardView: View {
     }
 
     private var systemHealthText: String {
+        if let health = api.health {
+            return settings.localized(health.status)
+        }
         guard let system = api.status?.system else { return settings.localized("Unknown") }
         return settings.localized(system.status == "Online" ? "Healthy" : system.status ?? "Unavailable")
     }
 
     private var systemIsHealthy: Bool {
-        api.status?.system?.status == "Online"
+        if let health = api.health {
+            return health.status == "healthy"
+        }
+        return api.status?.system?.status == "Online"
     }
 
     // MARK: - Footer
