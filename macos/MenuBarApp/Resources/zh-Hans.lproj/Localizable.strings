@@ -56,19 +56,12 @@
 "Show Codex balance" = "显示 Codex 余额";
 "Menu bar items" = "菜单栏项目";
 "OpenCodex" = "OpenCodex";
-"System Health" = "系统健康";
 "The menu bar label only shows Codex. The selected items appear after clicking it." = "菜单栏标题仅显示 Codex；点击后会展示所选项目。";
 
-"Start OpenCodex with Codex Desktop" = "随 Codex Desktop 启动 OpenCodex";
-"Stop OpenCodex when Codex quits" = "Codex 退出时停止 OpenCodex";
-"Wait for proxy before starting Codex" = "启动 Codex 前等待代理就绪";
 "Executable" = "可执行文件";
 "Not detected" = "未检测到";
 "Redetect" = "重新检测";
-"Dashboard address" = "仪表盘地址";
 "Open Dashboard" = "打开仪表盘";
-"Restart OpenCodex" = "重启 OpenCodex";
-"Check Health" = "检查健康状态";
 "Diagnostics" = "诊断";
 "Debug mode" = "调试模式";
 "Debug logging applies after the internal data service is restarted." = "重启内部数据服务后，调试日志设置才会生效。";
@@ -90,6 +83,10 @@
 "Diagnostic info exported." = "诊断信息已导出。";
 "Export failed:" = "导出失败：";
 
+"OpenCodex Dashboard" = "OpenCodex 仪表盘";
+"Version" = "版本";
+"Port" = "端口";
+
 "Settings" = "设置";
 "All services online" = "所有服务在线";
 "Some services unavailable" = "部分服务不可用";
@@ -108,12 +105,11 @@
 "degraded" = "降级";
 "unhealthy" = "异常";
 "Online" = "在线";
-"Open Codex" = "打开 Codex";
 "Updated %@ ago" = "%@前更新";
 "About AICC" = "关于 AICC";
 "Quit AICC" = "退出 AICC";
 "No data" = "暂无数据";
-"About Description" = "AI 状态中心\n版本 2.3.1\n\n轻量的 macOS AI 监控中心";
+"About Description" = "AI 状态中心\n\n轻量的 macOS AI 监控中心";
 
 "Codex Weekly" = "Codex 每周额度";
 "Codex 5h" = "Codex 5 小时额度";

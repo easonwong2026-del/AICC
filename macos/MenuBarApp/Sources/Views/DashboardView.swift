@@ -5,7 +5,6 @@ struct DashboardView: View {
     @EnvironmentObject var api: APIService
     @EnvironmentObject var ocx: OpenCodexController
     @EnvironmentObject var settings: AppSettings
-    @EnvironmentObject var monitor: CodexLaunchMonitor
 
     var body: some View {
         VStack(spacing: 0) {
@@ -18,7 +17,7 @@ struct DashboardView: View {
                 Divider().padding(.horizontal, 14)
                 miniCardsSection
             }
-            if settings.menuBarShowOpenCodex || settings.menuBarShowSystemHealth {
+            if settings.menuBarShowOpenCodex {
                 Divider().padding(.horizontal, 14)
                 servicesSection
             }
@@ -27,6 +26,8 @@ struct DashboardView: View {
         }
         .frame(width: 350)
         .background(VisualEffect.material)
+        .onAppear { ocx.panelDidAppear() }
+        .onDisappear { ocx.panelDidDisappear() }
     }
 
     // MARK: - Header
@@ -118,25 +119,23 @@ struct DashboardView: View {
                     label: "OpenCodex",
                     statusText: settings.localized(ocx.status.label),
                     isOnline: ocx.status.isRunning,
-                    toggleOn: ocx.status.isRunning || (ocx.status == .starting),
+                    toggleOn: ocx.status.isToggleOn,
+                    isBusy: ocx.status.isBusy,
+                    statusColor: ocxStatusColor,
                     onToggle: { newValue in
                         Task {
                             if newValue { await ocx.ensure() }
                             else { await ocx.stop() }
                         }
                     },
-                    actionLabel: "Open Codex",
-                    action: { monitor.openCodex() }
-                )
-            }
-            if settings.menuBarShowSystemHealth {
-                ServiceRow(
-                    label: "System Health",
-                    statusText: systemHealthText,
-                    isOnline: systemIsHealthy,
-                    showToggle: false,
                     actionLabel: nil,
                     action: nil
+                )
+                DashboardActionRow(
+                    label: "OpenCodex Dashboard",
+                    actionLabel: "Open Dashboard",
+                    isEnabled: ocx.dashboardURL != nil,
+                    action: { _ = ocx.openDashboard() }
                 )
             }
         }
@@ -144,19 +143,17 @@ struct DashboardView: View {
         .padding(.vertical, 10)
     }
 
-    private var systemHealthText: String {
-        if let health = api.health {
-            return settings.localized(health.status)
+    private var ocxStatusColor: Color {
+        switch ocx.status {
+        case .running:
+            return .green
+        case .unhealthy:
+            return .red
+        case .checking, .starting, .stopping:
+            return .yellow
+        case .unknown, .notInstalled, .stopped:
+            return .secondary
         }
-        guard let system = api.status?.system else { return settings.localized("Unknown") }
-        return settings.localized(system.status == "Online" ? "Healthy" : system.status ?? "Unavailable")
-    }
-
-    private var systemIsHealthy: Bool {
-        if let health = api.health {
-            return health.status == "healthy"
-        }
-        return api.status?.system?.status == "Online"
     }
 
     // MARK: - Footer
@@ -209,7 +206,11 @@ struct DashboardView: View {
     private func showAbout() {
         let alert = NSAlert()
         alert.messageText = "AICC"
-        alert.informativeText = settings.localized("About Description")
+        let shortVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+        let buildVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
+        let description = settings.localized("About Description")
+        let versionLabel = settings.localized("Version")
+        alert.informativeText = "\(description)\n\n\(versionLabel) \(shortVersion) (\(buildVersion))"
         alert.alertStyle = .informational
         alert.runModal()
     }

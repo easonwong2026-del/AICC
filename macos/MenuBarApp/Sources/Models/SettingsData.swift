@@ -40,13 +40,8 @@ class AppSettings: ObservableObject {
     @AppStorage("menuBarShowWorkBuddy") var menuBarShowWorkBuddy = true
     @AppStorage("menuBarShowDeepSeek") var menuBarShowDeepSeek = true
     @AppStorage("menuBarShowOpenCodex") var menuBarShowOpenCodex = true
-    @AppStorage("menuBarShowSystemHealth") var menuBarShowSystemHealth = true
 
-    @AppStorage("ocxAutoStart") var ocxAutoStart = false
-    @AppStorage("ocxStopOnCodexExit") var ocxStopOnCodexExit = false
-    @AppStorage("ocxWaitProxy") var ocxWaitProxy = false
     @AppStorage("ocxCustomPath") var ocxCustomPath = ""
-    @AppStorage("ocxServiceAddress") var ocxServiceAddress = "http://127.0.0.1:10100"
 
     @AppStorage("debugMode") var debugMode = false
 

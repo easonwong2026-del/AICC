@@ -283,7 +283,6 @@ private struct MenuBarSettingsView: View {
                 Toggle("WorkBuddy", isOn: $settings.menuBarShowWorkBuddy)
                 Toggle("DeepSeek", isOn: $settings.menuBarShowDeepSeek)
                 Toggle("OpenCodex", isOn: $settings.menuBarShowOpenCodex)
-                Toggle("System Health", isOn: $settings.menuBarShowSystemHealth)
             }
 
             Section {
@@ -310,10 +309,6 @@ private struct AdvancedSettingsView: View {
     var body: some View {
         Form {
             Section("OpenCodex") {
-                Toggle("Start OpenCodex with Codex Desktop", isOn: $settings.ocxAutoStart)
-                Toggle("Stop OpenCodex when Codex quits", isOn: $settings.ocxStopOnCodexExit)
-                Toggle("Wait for proxy before starting Codex", isOn: $settings.ocxWaitProxy)
-
                 HStack {
                     Text("Executable")
                     Spacer()
@@ -328,15 +323,11 @@ private struct AdvancedSettingsView: View {
                     .buttonStyle(.borderless)
                 }
 
-                TextField("Dashboard address", text: $settings.ocxServiceAddress)
-                HStack {
-                    Button("Open Dashboard") { ocx.openDashboard() }
-                    Button("Restart OpenCodex") {
-                        Task { await ocx.restart() }
-                    }
-                    Button("Check Health") {
-                        Task { await ocx.refreshStatus() }
-                    }
+                if let version = ocx.ocxVersion {
+                    LabeledContent("Version", value: version)
+                }
+                if let port = ocx.knownPort {
+                    LabeledContent("Port", value: String(port))
                 }
             }
 
