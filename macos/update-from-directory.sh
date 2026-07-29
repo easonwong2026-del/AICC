@@ -11,12 +11,15 @@ SOURCE="$(cd "$1" && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || true)}"
 BACKUP_ROOT="${AI_EINK_BACKUP_DIR:-$(dirname "$ROOT")/backups}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-BACKUP="$BACKUP_ROOT/ai-eink-dashboard-before-update-$STAMP"
-MANIFEST_VERSION="$(cat "$ROOT/macos/MANIFEST_VERSION" 2>/dev/null || echo 0)"
-UPGRADE_MANIFEST_VERSION="$(cat "$SOURCE/macos/MANIFEST_VERSION" 2>/dev/null || echo 0)"
+BACKUP="$BACKUP_ROOT/aicc-before-update-$STAMP"
+BACKUP_CODE="$BACKUP/code"
+MANIFEST_VERSION="$(tr -d '[:space:]' < "$ROOT/macos/MANIFEST_VERSION" 2>/dev/null || echo 0)"
+UPGRADE_MANIFEST_VERSION="$(tr -d '[:space:]' < "$SOURCE/macos/MANIFEST_VERSION" 2>/dev/null || echo 0)"
+DATA_SCHEMA_VERSION="$(tr -d '[:space:]' < "$ROOT/macos/DATA_SCHEMA_VERSION" 2>/dev/null || echo 0)"
+UPGRADE_DATA_SCHEMA_VERSION="$(tr -d '[:space:]' < "$SOURCE/macos/DATA_SCHEMA_VERSION" 2>/dev/null || echo 0)"
 
 [[ "$SOURCE" != "$ROOT" ]] || { echo "Source and destination must differ." >&2; exit 1; }
-for required in VERSION server.py macos/install-autostart.sh macos/MANIFEST_VERSION; do
+for required in VERSION server.py macos/install-autostart.sh macos/MANIFEST_VERSION macos/DATA_SCHEMA_VERSION; do
   [[ -f "$SOURCE/$required" ]] || { echo "Invalid update source: missing $required" >&2; exit 1; }
 done
 [[ -n "$PYTHON_BIN" ]] || { echo "Python 3 is required." >&2; exit 1; }
@@ -25,6 +28,10 @@ SOURCE_VERSION="$(tr -d '[:space:]' < "$SOURCE/VERSION")"
 if [[ "$UPGRADE_MANIFEST_VERSION" -lt "$MANIFEST_VERSION" ]]; then
   echo "ERROR: Upgrade source has older manifest ($UPGRADE_MANIFEST_VERSION vs $MANIFEST_VERSION)." >&2
   echo "Reinstall from DMG instead." >&2
+  exit 1
+fi
+if [[ "$UPGRADE_DATA_SCHEMA_VERSION" -lt "$DATA_SCHEMA_VERSION" ]]; then
+  echo "ERROR: update data schema $UPGRADE_DATA_SCHEMA_VERSION is older than current $DATA_SCHEMA_VERSION." >&2
   exit 1
 fi
 
@@ -38,18 +45,44 @@ fi
 echo "Running pre-upgrade tests..."
 (cd "$SOURCE" && PYTHONDONTWRITEBYTECODE=1 "$PYTHON_BIN" -m unittest discover -s tests -q)
 
-mkdir -p "$BACKUP_ROOT" "$BACKUP"
-cp "$ROOT/VERSION" "$ROOT/macos/MANIFEST_VERSION" "$BACKUP/"
-rsync -a --exclude data "$ROOT/providers" "$ROOT/collectors" "$ROOT/services" "$ROOT/macos" "$ROOT/web" "$ROOT/server.py" "$BACKUP/"
-echo "$MANIFEST_VERSION" > "$BACKUP/data/.schema_version"
+mkdir -p "$BACKUP_CODE"
+rsync -a --delete \
+  --exclude .git \
+  --exclude dist \
+  --exclude data \
+  --exclude backups \
+  --exclude __pycache__ \
+  --exclude '*.pyc' \
+  --exclude 'android/poke-dashboard/app/build' \
+  "$ROOT/" "$BACKUP_CODE/"
+{
+  echo "version=$(tr -d '[:space:]' < "$ROOT/VERSION")"
+  echo "manifest_version=$MANIFEST_VERSION"
+  echo "data_schema_version=$DATA_SCHEMA_VERSION"
+  echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$BACKUP/manifest"
 
 echo "Installing..."
-rsync -a --delete --exclude data --exclude __pycache__ --exclude '*.pyc' \
+rsync -a --delete \
+  --exclude .git --exclude dist --exclude data --exclude backups \
+  --exclude __pycache__ --exclude '*.pyc' \
   --exclude .gradle --exclude 'android/poke-dashboard/app/build' \
   "$SOURCE/" "$ROOT/"
-echo "$UPGRADE_MANIFEST_VERSION" > "$ROOT/data/.schema_version" 2>/dev/null || true
 
-PYTHON_BIN="$PYTHON_BIN" bash "$ROOT/macos/install-autostart.sh"
+rollback_code() {
+  rsync -a --delete \
+    --exclude .git --exclude dist --exclude data --exclude backups \
+    --exclude __pycache__ --exclude '*.pyc' \
+    --exclude .gradle --exclude 'android/poke-dashboard/app/build' \
+    "$BACKUP_CODE/" "$ROOT/"
+  PYTHON_BIN="$PYTHON_BIN" bash "$ROOT/macos/install-autostart.sh"
+}
+
+if ! PYTHON_BIN="$PYTHON_BIN" bash "$ROOT/macos/install-autostart.sh"; then
+  echo "ERROR: service registration failed; restoring previous code." >&2
+  rollback_code
+  exit 1
+fi
 
 echo "Performing health check..."
 HEALTH_OK=false
@@ -71,9 +104,7 @@ done
 
 if [[ "$HEALTH_OK" != "true" ]]; then
   echo "ERROR: Health check failed. Rolling back..." >&2
-  rsync -a --delete --exclude data --exclude __pycache__ --exclude '*.pyc' \
-    "$BACKUP/" "$ROOT/"
-  PYTHON_BIN="$PYTHON_BIN" bash "$ROOT/macos/install-autostart.sh"
+  rollback_code
   echo "Rolled back to previous version. Data preserved in $BACKUP"
   exit 1
 fi
