@@ -40,6 +40,7 @@ let package = Package(
             exclude: ["CoreSmokeMain.swift", "Fixtures"],
             sources: [
                 "OCXStatusTests.swift",
+                "OCXCommandBuilderTests.swift",
                 "OCXOperationPolicyTests.swift",
                 "ProcessRunnerTests.swift",
             ]
