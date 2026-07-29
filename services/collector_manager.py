@@ -158,8 +158,17 @@ class CollectorManager:
         result = {}
         for name, slot in self._slots.items():
             result[name] = {
-                "state": "refreshing" if slot.running else "timeout" if slot.timed_out else "error" if slot.error else "ready" if slot.last_success else "pending",
-                "last_success": datetime.fromtimestamp(slot.last_success).astimezone().strftime("%Y-%m-%d %H:%M:%S") if slot.last_success else None,  # noqa: E501
+                "state": (
+                    "refreshing" if slot.running
+                    else "timeout" if slot.timed_out
+                    else "error" if slot.error
+                    else "ready" if slot.last_success
+                    else "pending"
+                ),
+                "last_success": (
+                    datetime.fromtimestamp(slot.last_success).astimezone()
+                    .strftime("%Y-%m-%d %H:%M:%S") if slot.last_success else None
+                ),
                 "age_seconds": max(0, round(now - slot.last_success)) if slot.last_success else None,
                 "error": slot.error,
                 "refresh_seconds": round(slot.interval),

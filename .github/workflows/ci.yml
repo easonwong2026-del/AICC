@@ -95,9 +95,19 @@ jobs:
       - name: Validate macOS scripts
         run: |
           for file in macos/*.sh; do bash -n "$file"; done
+          for file in scripts/*.sh; do bash -n "$file"; done
+
+      - name: Smoke test bundled server
+        run: |
+          bash scripts/smoke-test-bundled-server.sh "dist/mac/AICC.app/Contents/Resources/Server"
 
       - name: Build macOS DMG
         run: bash macos/build-dmg.sh
+
+      - name: Validate DMG artifact exists
+        run: |
+          bash scripts/validate-version.sh --dmg
+          hdiutil verify "dist/AICC-$(cat VERSION).dmg"
 
       - name: Upload macOS app
         uses: actions/upload-artifact@v4
