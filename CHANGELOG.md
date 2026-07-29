@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.4.2 - 2026-07-29
+
+- **修复 OpenCodex 登录 Shell 环境**：`ocx ensure` 和 `ocx stop` 现在通过 `/bin/zsh -lc` 执行，确保用户的 `.zprofile`、Homebrew、npm-global 路径和 `CODEX_CLI_PATH` 可用
+- **安全的命令注入保护**：检测到的 `ocx` 二进制路径通过专用的 `AICC_OCX_PATH` 环境变量传递，不直接拼接到 Shell 命令字符串中，避免空格、引号等特殊字符导致的注入风险
+- **仅影响生命周期命令**：`ocx status --json` 和 `ocx --version` 继续直接执行，无需加载 Login Shell；操作后的状态确认逻辑不变
+- **命令构造测试覆盖**：新增 `OCXCommandBuilder` 单元测试，覆盖 `/bin/zsh -lc` 参数、特殊字符路径和受限制的命令集
+- **版本统一 2.4.2**：VERSION、PACKAGE.json、Info.plist（CFBundleShortVersionString、CFBundleVersion）同步更新
+
 ## 2.4.1 - 2026-07-29
 
 - **OpenCodex 控制简化**：删除 Codex Desktop / ChatGPT 客户端启动和联动功能；AICC 不再启动或监听 codex/chatgpt 应用
@@ -44,10 +52,3 @@
 - Document that the menu bar app is built into `dist/mac/AICC.app` first, with `/Applications` installation kept as an explicit user action.
 
 ## 2.2.2 - 2026-07-18
-## 2.4.2 - 2026-07-29
-
-- **修复 OpenCodex 登录 Shell 环境**：`ocx ensure` 和 `ocx stop` 现在通过 `/bin/zsh -lc` 执行，确保用户的 `.zprofile`、Homebrew、npm-global 路径和 `CODEX_CLI_PATH` 可用
-- **安全的命令注入保护**：检测到的 `ocx` 二进制路径通过专用的 `AICC_OCX_PATH` 环境变量传递，不直接拼接到 Shell 命令字符串中，避免空格、引号等特殊字符导致的注入风险
-- **仅影响生命周期命令**：`ocx status --json` 和 `ocx --version` 继续直接执行，无需加载 Login Shell；操作后的状态确认逻辑不变
-- **命令构造测试覆盖**：新增 `OCXCommandBuilder` 单元测试，覆盖 `/bin/zsh -lc` 参数、特殊字符路径和受限制的命令集
-- **版本统一 2.4.2**：VERSION、PACKAGE.json、Info.plist（CFBundleShortVersionString、CFBundleVersion）同步更新
