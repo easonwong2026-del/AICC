@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "proxy": {
+    "running": true,
+    "pid": 4321,
+    "health": {
+      "ok": true,
+      "url": "http://127.0.0.1:12001/healthz",
+      "message": "ok"
+    }
+  },
+  "dashboard": {
+    "url": "http://localhost:12001/"
+  },
+  "listen": {
+    "port": 12001,
+    "hostname": "127.0.0.1"
+  },
+  "codexRuntime": {
+    "version": "0.146.0"
+  }
+}

@@ -53,6 +53,8 @@ struct ServiceRow: View {
     let isOnline: Bool
     var toggleOn: Bool?
     var showToggle: Bool = true
+    var isBusy: Bool = false
+    var statusColor: Color?
     var onToggle: ((Bool) -> Void)?
     var actionLabel: String?
     var action: (() -> Void)?
@@ -60,7 +62,7 @@ struct ServiceRow: View {
     var body: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(isOnline ? Color.green : Color.secondary)
+                .fill(statusColor ?? (isOnline ? Color.green : Color.secondary))
                 .frame(width: 6, height: 6)
 
             Text(LocalizedStringKey(label))
@@ -80,6 +82,7 @@ struct ServiceRow: View {
                 .toggleStyle(.switch)
                 .scaleEffect(0.7)
                 .frame(width: 32)
+                .disabled(isBusy)
             }
 
             if let actionLabel = actionLabel, let action = action {
@@ -87,7 +90,35 @@ struct ServiceRow: View {
                     .buttonStyle(.plain)
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(.accentColor)
+                    .disabled(isBusy)
             }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+struct DashboardActionRow: View {
+    let label: String
+    let actionLabel: String
+    let isEnabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(isEnabled ? Color.green : Color.secondary)
+                .frame(width: 6, height: 6)
+
+            Text(LocalizedStringKey(label))
+                .font(.system(size: 12, weight: .medium))
+
+            Spacer()
+
+            Button(LocalizedStringKey(actionLabel), action: action)
+                .buttonStyle(.plain)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(isEnabled ? .accentColor : .secondary)
+                .disabled(!isEnabled)
         }
         .padding(.vertical, 2)
     }

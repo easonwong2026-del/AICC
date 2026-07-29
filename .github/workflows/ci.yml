@@ -78,6 +78,17 @@ jobs:
           name: poke4s-dashboard-apk
           path: android/poke-dashboard/app/build/outputs/apk/release/*.apk
 
+  swift-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Swift core smoke tests
+        run: bash scripts/smoke-test-swift-core.sh
+
+      - name: Run Swift core library tests
+        run: swift test --package-path macos/MenuBarApp
+
   macos-build:
     runs-on: macos-15
     steps:
@@ -87,6 +98,38 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Static reference check
+        run: |
+          # Verify that removed symbols do not remain anywhere in the repository.
+          # rg exits 1 when a match is found — invert so the step fails only
+          # when a deleted symbol is unexpectedly still referenced.
+          cd "$GITHUB_WORKSPACE"
+          patterns=(
+            "Codex""LaunchMonitor"
+            "open""Codex\("
+            "ocx""AutoStart"
+            "ocx""StopOnCodexExit"
+            "ocx""WaitProxy"
+            "ocx""ServiceAddress"
+            "menuBarShow""SystemHealth"
+            "System"" Health"
+            "Open"" Codex"
+            "com\.openai\.""codex"
+            "com\.openai\.""chatgpt"
+          )
+          failed=0
+          for p in "${patterns[@]}"; do
+            # --quiet: exit 0 when no match, exit 1 when match found.
+            if rg --quiet --glob '!dist/**' "$p" .; then
+              echo "FAIL: Pattern '$p' still found." >&2
+              rg --glob '!dist/**' "$p" .
+              failed=1
+            else
+              echo "OK: '$p' not found."
+            fi
+          done
+          exit "$failed"
 
       - name: Build macOS app
         run: |

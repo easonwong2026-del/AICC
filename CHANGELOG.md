@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.4.1 - 2026-07-29
+
+- **OpenCodex 控制简化**：删除 Codex Desktop / ChatGPT 客户端启动和联动功能；AICC 不再启动或监听 codex/chatgpt 应用
+- **OpenCodex 真实状态**：状态检测基于 CLI 运行时发现，支持动态端口和仪表盘 URL；面板可见时 8-10 秒轻量检查，面板关闭后停止轮询
+- **OpenCodex 控制**：菜单栏显示真实状态（未安装/检查中/已停止/启动中/运行中/停止中），开关反映真实运行状态；新增独立"打开 OpenCodex 仪表盘"操作行
+- **移除系统健康面板项**：菜单栏面板和设置中删除重复的系统健康行；Python 后台 `/api/health/*` 接口完整保留用于服务监督
+- **移除 Codex 客户端联动设置**：删除三项桌面客户端联动偏好及相关实现
+- **移除 Swift 端重复健康轮询**：删除 APIService.startHealthRefresh 和独立 health Task；ServerManager 的 60 秒监督保持不变
+- **版本统一 2.4.1**：VERSION、PACKAGE.json、Info.plist 同步更新；About 页面动态读取 CFBundleShortVersionString
+- **SwiftPM 核心包**：新增 `macos/MenuBarApp/Package.swift`，支持编译状态模型和 ProcessRunner 并运行单元测试
+- **CI 增强**：新增 Swift 核心测试步骤；新增静态引用检查确保已删除符号无残留
+- **资源测量脚本**：新增 `scripts/measure-resources.sh`，支持可重复的内存/RSS/CPU/FD 基线测量
+- **清理死文件**：删除 main.m.bak、main.m.bak2、build-menubar-app.sh
+
 ## 2.4.0 - 2026-07-28
 
 - SwiftUI 进程级单实例保护，防止重复菜单栏入口
@@ -24,7 +38,7 @@
 
 - Add a native 128 KB macOS menu bar app for starting, stopping, restarting, and monitoring the local dashboard service.
 - Show cached Codex quota directly in the menu bar without triggering a quota refresh or collector run.
-- Add a generated monochrome macOS app icon and a reproducible `macos/build-menubar-app.sh` build path.
+- Add a generated monochrome macOS app icon and a reproducible build path (historically `macos/build-menubar-app.sh`, superseded by `build-aicc-swiftui.sh`).
 - Add `macos/build-dmg.sh` for a self-contained drag-to-Applications DMG whose bundled server stores runtime data in Application Support and can publish into a separate releases directory.
 - Ship Android 1.2.5 Pencil Home UI with the final Poke4S home layout, larger quota typography, corrected reset-credit expiry fallback, and fixed charging status text.
 - Document that the menu bar app is built into `dist/mac/AICC.app` first, with `/Applications` installation kept as an explicit user action.

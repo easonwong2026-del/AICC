@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "proxy": {
+    "running": true,
+    "pid": 4444,
+    "health": {
+      "ok": true,
+      "url": "ftp://127.0.0.1:19993/healthz"
+    }
+  },
+  "dashboard": {
+    "url": "file:///tmp/opencodex"
+  },
+  "listen": {
+    "port": 19993
+  }
+}

@@ -1,216 +1,417 @@
 import AppKit
+import Combine
 import Foundation
 import OSLog
 
 @MainActor
-class OpenCodexController: ObservableObject {
+final class OpenCodexController: ObservableObject {
     static let shared = OpenCodexController()
 
-    @Published var status: OCXStatus = .unknown
-    @Published var detectedPath: String?
-    @Published var isHealthChecking = false
+    @Published private(set) var status: OCXStatus = .unknown
+    @Published private(set) var detectedPath: String?
+    @Published private(set) var snapshot: OCXSnapshot?
+    @Published private(set) var ocxVersion: String?
+
     private let logger = Logger(subsystem: "com.aieink.dashboard.menubar", category: "OpenCodex")
+    private let processRunner: ProcessRunning
+    private let candidates: [String]
+    private let versionRefreshInterval: TimeInterval = 15 * 60
 
-    private let candidates = [
-        "/opt/homebrew/bin/ocx",
-        "/usr/local/bin/ocx",
-        "\(NSHomeDirectory())/.npm-global/bin/ocx"
-    ]
-    private let session: URLSession
+    private var panelMonitorTask: Task<Void, Never>?
+    private var statusTask: Task<Void, Never>?
+    private var operationTask: Task<Void, Never>?
+    private var operationGeneration = 0
+    private var statusGeneration = 0
+    private var isPanelVisible = false
+    private var isDetecting = false
+    private var lastVersionCheck: Date?
 
-    init() {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 3
-        config.timeoutIntervalForResource = 5
-        session = URLSession(configuration: config)
+    init(processRunner: ProcessRunning = ProcessRunner()) {
+        self.processRunner = processRunner
+        candidates = [
+            "/opt/homebrew/bin/ocx",
+            "/usr/local/bin/ocx",
+            "\(NSHomeDirectory())/.npm-global/bin/ocx",
+            "\(NSHomeDirectory())/.local/bin/ocx"
+        ]
+
         let saved = AppSettings.shared.ocxCustomPath
-        if !saved.isEmpty && FileManager.default.isExecutableFile(atPath: saved) {
+        if Self.isExecutable(saved) {
             detectedPath = saved
         }
     }
 
-    // MARK: - Path Detection
+    // MARK: - Panel lifecycle
 
-    func detectExecutable() async {
-        status = .detecting
+    func panelDidAppear() {
+        guard !isPanelVisible else { return }
+        isPanelVisible = true
+        panelMonitorTask?.cancel()
+        panelMonitorTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.checkOnce()
 
-        // 1. Try saved custom path
-        let custom = AppSettings.shared.ocxCustomPath
-        if !custom.isEmpty && FileManager.default.isExecutableFile(atPath: custom) {
-            detectedPath = custom
-            await refreshStatus()
-            return
-        }
-
-        // 2. Try shell command detection (mirrors terminal PATH)
-        if let path = await detectViaShell() {
-            detectedPath = path
-            AppSettings.shared.ocxCustomPath = path
-            await refreshStatus()
-            return
-        }
-
-        // 3. Try known paths
-        for candidate in candidates {
-            if FileManager.default.isExecutableFile(atPath: candidate) {
-                detectedPath = candidate
-                AppSettings.shared.ocxCustomPath = candidate
-                await refreshStatus()
-                return
-            }
-        }
-
-        detectedPath = nil
-        status = .notFound
-    }
-
-    private func detectViaShell() async -> String? {
-        await withCheckedContinuation { continuation in
-            let process = Process()
-            process.launchPath = "/bin/zsh"
-            process.arguments = ["-lc", "command -v ocx"]
-            process.standardOutput = Pipe()
-            process.standardError = Pipe()
-
-            process.terminationHandler = { proc in
-                guard proc.terminationStatus == 0,
-                      let data = try? (proc.standardOutput as? Pipe)?.fileHandleForReading.readToEnd(),
-                      let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      !path.isEmpty else {
-                    continuation.resume(returning: nil)
+            while !Task.isCancelled && self.isPanelVisible {
+                do {
+                    try await Task.sleep(nanoseconds: OCXOperationPolicy.panelPollIntervalNanoseconds)
+                } catch {
                     return
                 }
-                continuation.resume(returning: path)
-            }
-
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(returning: nil)
+                guard OCXOperationPolicy.shouldContinuePanel(
+                    isVisible: self.isPanelVisible,
+                    taskIsCancelled: Task.isCancelled
+                ) else { return }
+                await self.checkOnce()
             }
         }
     }
 
-    // MARK: - Status
+    func panelDidDisappear() {
+        isPanelVisible = false
+        panelMonitorTask?.cancel()
+        panelMonitorTask = nil
+        statusTask?.cancel()
+        statusTask = nil
+    }
 
-    func refreshStatus() async {
-        isHealthChecking = true
-        defer { isHealthChecking = false }
+    // MARK: - Detection and status
 
-        guard let url = healthURL else {
-            status = .error("Invalid health URL")
+    /// Performs one executable resolution and one `ocx status --json` check.
+    /// There is no permanent OpenCodex polling task outside the visible panel.
+    func checkOnce() async {
+        guard operationTask == nil, !isDetecting else { return }
+
+        if let currentTask = statusTask {
+            await currentTask.value
             return
         }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.cachePolicy = .reloadIgnoringLocalCacheData
+        statusGeneration += 1
+        let requestGeneration = statusGeneration
+        status = .checking
+
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performStatusCheck(generation: requestGeneration)
+        }
+        statusTask = task
+        await task.value
+
+        if requestGeneration == statusGeneration {
+            statusTask = nil
+        }
+    }
+
+    func detectExecutable() async {
+        guard operationTask == nil, !isDetecting else { return }
+        isDetecting = true
+        defer { isDetecting = false }
+        invalidateStatusTask()
+        status = .checking
+
+        guard let path = await resolveExecutable() else {
+            detectedPath = nil
+            snapshot = nil
+            status = .notInstalled
+            return
+        }
+
+        setDetectedPath(path)
+        await refreshVersionIfNeeded(force: true)
+        await checkStatus(path: path, generation: statusGeneration)
+    }
+
+    private func performStatusCheck(generation: Int) async {
+        guard generation == statusGeneration, !Task.isCancelled else { return }
+
+        guard let path = await resolveExecutable() else {
+            guard generation == statusGeneration, !Task.isCancelled else { return }
+            detectedPath = nil
+            snapshot = nil
+            status = .notInstalled
+            return
+        }
+
+        guard generation == statusGeneration, !Task.isCancelled else { return }
+        setDetectedPath(path)
+        await refreshVersionIfNeeded()
+        await checkStatus(path: path, generation: generation)
+    }
+
+    private func checkStatus(path: String, generation: Int) async {
+        do {
+            let result = try await processRunner.run(
+                executable: path,
+                arguments: ["status", "--json"],
+                environment: processEnvironment,
+                timeout: OCXOperationPolicy.statusTimeout
+            )
+            let nextSnapshot = try OCXSnapshot(jsonData: result.stdoutData)
+            guard OCXOperationPolicy.shouldApplyStatus(
+                requestGeneration: generation,
+                currentGeneration: statusGeneration,
+                operationActive: operationTask != nil
+            ), !Task.isCancelled else { return }
+            apply(nextSnapshot)
+        } catch is CancellationError {
+            return
+        } catch let error as ProcessRunnerError {
+            guard OCXOperationPolicy.shouldApplyStatus(
+                requestGeneration: generation,
+                currentGeneration: statusGeneration,
+                operationActive: operationTask != nil
+            ), !Task.isCancelled else { return }
+            if case .launchFailed = error, !Self.isExecutable(path) {
+                detectedPath = nil
+                snapshot = nil
+                status = .notInstalled
+            } else {
+                snapshot = nil
+                status = .unhealthy
+            }
+            logger.error("OpenCodex status check failed: \(String(describing: error))")
+        } catch {
+            guard OCXOperationPolicy.shouldApplyStatus(
+                requestGeneration: generation,
+                currentGeneration: statusGeneration,
+                operationActive: operationTask != nil
+            ), !Task.isCancelled else { return }
+            snapshot = nil
+            status = .unhealthy
+            logger.error("OpenCodex status JSON failed: \(String(describing: error))")
+        }
+    }
+
+    private func resolveExecutable() async -> String? {
+        if let detectedPath, Self.isExecutable(detectedPath) {
+            return detectedPath
+        }
+
+        let saved = AppSettings.shared.ocxCustomPath
+        if Self.isExecutable(saved) {
+            return saved
+        }
+
+        for candidate in candidates where Self.isExecutable(candidate) {
+            return candidate
+        }
 
         do {
-            let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse else {
-                status = .stopped
-                return
-            }
-            if http.statusCode == 200 {
-                _ = String(data: data, encoding: .utf8) ?? ""
-                status = .running
-            } else {
-                status = .error("Health returned \(http.statusCode)")
+            let result = try await processRunner.run(
+                executable: "/bin/zsh",
+                arguments: ["-lc", "command -v ocx"],
+                environment: processEnvironment,
+                timeout: 5
+            )
+            let path = OCXVersionParser.parse(result.stdout)
+            if let path, Self.isExecutable(path) {
+                return path
             }
         } catch {
-            let code = (error as NSError).code
-            if code == NSURLErrorCannotConnectToHost || code == NSURLErrorTimedOut {
-                status = .stopped
-            } else {
-                status = .error(error.localizedDescription)
-            }
+            logger.debug("Unable to resolve ocx from login shell: \(String(describing: error))")
         }
+
+        return nil
     }
 
-    // MARK: - Lifecycle
-
-    func ensure() async {
-        if detectedPath == nil {
-            await detectExecutable()
-        }
-        guard let path = detectedPath else {
-            status = .notFound
+    private func refreshVersionIfNeeded(force: Bool = false) async {
+        guard let path = detectedPath else { return }
+        let now = Date()
+        if !force,
+           let lastVersionCheck,
+           now.timeIntervalSince(lastVersionCheck) < versionRefreshInterval {
             return
         }
 
-        // Already running?
-        await refreshStatus()
-        if case .running = status { return }
+        lastVersionCheck = now
+        do {
+            let result = try await processRunner.run(
+                executable: path,
+                arguments: ["--version"],
+                environment: processEnvironment,
+                timeout: 5
+            )
+            if let version = OCXVersionParser.parse(result.stdout) {
+                ocxVersion = version
+            }
+        } catch {
+            logger.debug("Unable to read ocx version: \(String(describing: error))")
+        }
+    }
 
-        status = .starting
-        await runOCX(command: "ensure", path: path)
-        // Wait briefly then check
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
-        await refreshStatus()
+    // MARK: - Manual lifecycle
+
+    func ensure() async {
+        await runOperation(.ensure)
     }
 
     func stop() async {
-        guard let path = detectedPath else { return }
-        status = .stopping
-        await runOCX(command: "stop", path: path)
-        try? await Task.sleep(nanoseconds: 500_000_000)
-        await refreshStatus()
+        await runOperation(.stop)
     }
 
-    func restart() async {
-        await stop()
-        try? await Task.sleep(nanoseconds: 500_000_000)
-        await ensure()
+    @discardableResult
+    func openDashboard() -> Bool {
+        guard status == .running, let url = snapshot?.dashboardURL else { return false }
+        return NSWorkspace.shared.open(url)
     }
 
-    func openDashboard() {
-        guard let url = URL(string: AppSettings.shared.ocxServiceAddress) else { return }
-        NSWorkspace.shared.open(url)
+    var dashboardURL: URL? {
+        guard status == .running else { return nil }
+        return snapshot?.dashboardURL
     }
 
-    // MARK: - Private
+    var knownPort: Int? {
+        snapshot?.port
+    }
 
-    private func runOCX(command: String, path: String) async {
-        logger.log("Running ocx \(command) via login shell")
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let process = Process()
-            // Use login shell so PATH, Homebrew, npm-global,
-            // CODEX_CLI_PATH and user .zprofile/.zshrc are sourced.
-            process.launchPath = "/bin/zsh"
-            process.arguments = ["-lc", "\(shellQuote(path)) \(command)"]
-            process.standardOutput = Pipe()
-            process.standardError = Pipe()
+    private enum Operation {
+        case ensure
+        case stop
 
-            let home = NSHomeDirectory()
-            var env = ProcessInfo.processInfo.environment
-            var procPath = env["PATH"] ?? ""
-            procPath = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:\(procPath)"
-            env["PATH"] = procPath
-            env["HOME"] = home
-            env["SHELL"] = "/bin/zsh"
-            env["TERM"] = "xterm-256color"
-            process.environment = env
-
-            process.terminationHandler = { _ in
-                continuation.resume()
+        var command: String {
+            switch self {
+            case .ensure: return "ensure"
+            case .stop: return "stop"
             }
+        }
 
-            do {
-                try process.run()
-            } catch {
-                logger.error("Failed to start ocx process: \(error.localizedDescription)")
-                continuation.resume()
+        var expectedStatus: OCXStatus {
+            switch self {
+            case .ensure: return .running
+            case .stop: return .stopped
+            }
+        }
+
+        var transientStatus: OCXStatus {
+            switch self {
+            case .ensure: return .starting
+            case .stop: return .stopping
             }
         }
     }
 
-    private var healthURL: URL? {
-        guard let base = URL(string: AppSettings.shared.ocxServiceAddress) else { return nil }
-        return base.appendingPathComponent("healthz")
+    private func runOperation(_ operation: Operation) async {
+        guard !isDetecting else { return }
+        if let existingTask = operationTask {
+            existingTask.cancel()
+            await existingTask.value
+        }
+
+        operationGeneration += 1
+        let generation = operationGeneration
+        invalidateStatusTask()
+        status = operation.transientStatus
+
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performOperation(operation, generation: generation)
+        }
+        operationTask = task
+        await task.value
+
+        if operationGeneration == generation {
+            operationTask = nil
+        }
     }
 
-    private func shellQuote(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    private func performOperation(_ operation: Operation, generation: Int) async {
+        guard let path = await resolveExecutable() else {
+            guard generation == operationGeneration else { return }
+            detectedPath = nil
+            snapshot = nil
+            status = .notInstalled
+            return
+        }
+
+        guard generation == operationGeneration, !Task.isCancelled else { return }
+        setDetectedPath(path)
+
+        do {
+            _ = try await processRunner.run(
+                executable: path,
+                arguments: [operation.command],
+                environment: processEnvironment,
+                timeout: OCXOperationPolicy.operationTimeout
+            )
+        } catch is CancellationError {
+            return
+        } catch {
+            logger.error("OpenCodex \(operation.command) failed: \(String(describing: error))")
+        }
+
+        var lastSnapshot: OCXSnapshot?
+        for delay in OCXOperationPolicy.confirmationDelays {
+            do {
+                try await Task.sleep(nanoseconds: delay)
+            } catch {
+                return
+            }
+
+            guard generation == operationGeneration, !Task.isCancelled else { return }
+
+            do {
+                let result = try await processRunner.run(
+                    executable: path,
+                    arguments: ["status", "--json"],
+                    environment: processEnvironment,
+                    timeout: OCXOperationPolicy.statusTimeout
+                )
+                let nextSnapshot = try OCXSnapshot(jsonData: result.stdoutData)
+                lastSnapshot = nextSnapshot
+
+                if OCXOperationPolicy.reachedTarget(
+                    nextSnapshot.resolvedStatus,
+                    target: operation.expectedStatus
+                ) {
+                    apply(nextSnapshot)
+                    return
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                // Keep the transient state while confirmation is still in
+                // progress. A later probe can still observe the target state.
+            }
+        }
+
+        guard generation == operationGeneration, !Task.isCancelled else { return }
+        if let lastSnapshot {
+            apply(lastSnapshot)
+        } else {
+            snapshot = nil
+            status = .unhealthy
+        }
+    }
+
+    private func apply(_ nextSnapshot: OCXSnapshot) {
+        snapshot = nextSnapshot
+        status = nextSnapshot.resolvedStatus
+    }
+
+    private func setDetectedPath(_ path: String) {
+        detectedPath = path
+        if AppSettings.shared.ocxCustomPath != path {
+            AppSettings.shared.ocxCustomPath = path
+        }
+    }
+
+    private func invalidateStatusTask() {
+        statusGeneration += 1
+        statusTask?.cancel()
+        statusTask = nil
+    }
+
+    private var processEnvironment: [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        var path = environment["PATH"] ?? ""
+        path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:\(path)"
+        environment["PATH"] = path
+        environment["HOME"] = NSHomeDirectory()
+        environment["SHELL"] = "/bin/zsh"
+        return environment
+    }
+
+    private static func isExecutable(_ path: String) -> Bool {
+        !path.isEmpty && FileManager.default.isExecutableFile(atPath: path)
     }
 }

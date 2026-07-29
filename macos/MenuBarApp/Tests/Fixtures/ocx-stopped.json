@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "proxy": {
+    "running": false,
+    "pid": null,
+    "health": {
+      "ok": false,
+      "url": "http://127.0.0.1:13077/healthz",
+      "message": "unreachable"
+    }
+  },
+  "dashboard": {
+    "url": "http://localhost:13077/"
+  },
+  "listen": {
+    "port": 13077
+  }
+}

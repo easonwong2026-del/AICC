@@ -88,30 +88,272 @@ struct CollectionMeta: Codable {
 // MARK: - OpenCodex Status
 enum OCXStatus: Equatable {
     case unknown
-    case detecting
-    case notFound
+    case checking
+    case notInstalled
     case stopped
     case starting
     case running
     case stopping
-    case error(String)
+    case unhealthy
 
     var label: String {
         switch self {
-        case .unknown: return "Checking..."
-        case .detecting: return "Detecting..."
-        case .notFound: return "Not Found"
+        case .unknown: return "Unknown"
+        case .checking: return "Checking..."
+        case .notInstalled: return "Not Found"
         case .stopped: return "Stopped"
         case .starting: return "Starting..."
         case .running: return "Running"
         case .stopping: return "Stopping..."
-        case .error(let msg): return msg
+        case .unhealthy: return "unhealthy"
         }
     }
 
     var isRunning: Bool {
-        if case .running = self { return true }
-        return false
+        self == .running
+    }
+
+    /// The switch remains on for an unhealthy but active service so the user
+    /// can turn it off and issue a manual stop command.
+    var isToggleOn: Bool {
+        switch self {
+        case .running, .starting, .unhealthy:
+            return true
+        case .unknown, .checking, .notInstalled, .stopped, .stopping:
+            return false
+        }
+    }
+
+    var isBusy: Bool {
+        switch self {
+        case .checking, .starting, .stopping:
+            return true
+        case .unknown, .notInstalled, .stopped, .running, .unhealthy:
+            return false
+        }
+    }
+}
+
+enum OCXOperationPolicy {
+    static let panelPollIntervalNanoseconds: UInt64 = 9_000_000_000
+    static let statusTimeout: TimeInterval = 4.5
+    static let operationTimeout: TimeInterval = 12
+    static let confirmationDelays: [UInt64] = [
+        300_000_000,
+        700_000_000,
+        1_500_000_000,
+        3_000_000_000
+    ]
+
+    static func shouldApplyStatus(
+        requestGeneration: Int,
+        currentGeneration: Int,
+        operationActive: Bool
+    ) -> Bool {
+        requestGeneration == currentGeneration && !operationActive
+    }
+
+    static func shouldContinuePanel(isVisible: Bool, taskIsCancelled: Bool) -> Bool {
+        isVisible && !taskIsCancelled
+    }
+
+    static func reachedTarget(_ observed: OCXStatus, target: OCXStatus) -> Bool {
+        observed == target
+    }
+}
+
+enum OCXVersionParser {
+    static func parse(_ output: String) -> String? {
+        guard let firstLine = output.split(whereSeparator: { $0 == "\n" || $0 == "\r" }).first else {
+            return nil
+        }
+        let value = String(firstLine).trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+}
+
+enum OCXSnapshotError: Error, Equatable {
+    case invalidJSON
+    case missingRequiredField(String)
+}
+
+/// The stable, provider-facing result of `ocx status --json`.
+///
+/// The decoder intentionally accepts optional fields and ignores additions to
+/// the CLI schema. `proxy.running` is the only required field; a running proxy
+/// without a boolean health result is treated as unhealthy by `resolvedStatus`.
+struct OCXSnapshot: Equatable {
+    let running: Bool
+    let pid: Int?
+    let port: Int?
+    let healthOK: Bool?
+    let healthURL: URL?
+    let healthMessage: String?
+    let dashboardURL: URL?
+    let version: String?
+
+    var resolvedStatus: OCXStatus {
+        guard running else { return .stopped }
+        return healthOK == true ? .running : .unhealthy
+    }
+
+    var hasValidDashboardURL: Bool {
+        dashboardURL != nil
+    }
+
+    init(jsonData: Data) throws {
+        let document: OCXDocument
+        do {
+            document = try JSONDecoder().decode(OCXDocument.self, from: jsonData)
+        } catch {
+            throw OCXSnapshotError.invalidJSON
+        }
+
+        guard let proxy = document.proxy else {
+            throw OCXSnapshotError.missingRequiredField("proxy")
+        }
+        guard let running = proxy.running else {
+            throw OCXSnapshotError.missingRequiredField("proxy.running")
+        }
+
+        self.running = running
+        self.pid = proxy.pid
+        self.port = document.listen?.port
+        self.healthOK = proxy.health?.ok
+        self.healthURL = Self.validHTTPURL(proxy.health?.url)
+        self.healthMessage = proxy.health?.message
+        self.dashboardURL = Self.validHTTPURL(document.dashboard?.url)
+        self.version = document.codexRuntime?.version
+    }
+
+    static func validHTTPURL(_ value: String?) -> URL? {
+        guard
+            let value,
+            let url = URL(string: value),
+            let scheme = url.scheme?.lowercased(),
+            (scheme == "http" || scheme == "https"),
+            let host = url.host,
+            !host.isEmpty
+        else {
+            return nil
+        }
+        return url
+    }
+}
+
+private struct OCXDocument: Decodable {
+    let proxy: OCXProxyDocument?
+    let dashboard: OCXDashboardDocument?
+    let listen: OCXListenDocument?
+    let codexRuntime: OCXRuntimeDocument?
+
+    private enum CodingKeys: String, CodingKey {
+        case proxy
+        case dashboard
+        case listen
+        case codexRuntime
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        proxy = try? container.decodeIfPresent(OCXProxyDocument.self, forKey: .proxy)
+        dashboard = try? container.decodeIfPresent(OCXDashboardDocument.self, forKey: .dashboard)
+        listen = try? container.decodeIfPresent(OCXListenDocument.self, forKey: .listen)
+        codexRuntime = try? container.decodeIfPresent(OCXRuntimeDocument.self, forKey: .codexRuntime)
+    }
+}
+
+private struct OCXProxyDocument: Decodable {
+    let running: Bool?
+    let pid: Int?
+    let health: OCXHealthDocument?
+
+    private enum CodingKeys: String, CodingKey {
+        case running
+        case pid
+        case health
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        running = try? container.decodeIfPresent(Bool.self, forKey: .running)
+        pid = try? container.decodeIfPresent(LossyInt.self, forKey: .pid)?.value
+        health = try? container.decodeIfPresent(OCXHealthDocument.self, forKey: .health)
+    }
+}
+
+private struct OCXHealthDocument: Decodable {
+    let ok: Bool?
+    let url: String?
+    let message: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case ok
+        case url
+        case message
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        ok = try? container.decodeIfPresent(Bool.self, forKey: .ok)
+        url = try? container.decodeIfPresent(String.self, forKey: .url)
+        message = try? container.decodeIfPresent(String.self, forKey: .message)
+    }
+}
+
+private struct OCXDashboardDocument: Decodable {
+    let url: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case url
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        url = try? container.decodeIfPresent(String.self, forKey: .url)
+    }
+}
+
+private struct OCXListenDocument: Decodable {
+    let port: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case port
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        port = try? container.decodeIfPresent(LossyInt.self, forKey: .port)?.value
+    }
+}
+
+private struct OCXRuntimeDocument: Decodable {
+    let version: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try? container.decodeIfPresent(String.self, forKey: .version)
+    }
+}
+
+private struct LossyInt: Decodable {
+    let value: Int?
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            value = nil
+        } else if let number = try? container.decode(Int.self) {
+            value = number
+        } else if let string = try? container.decode(String.self) {
+            value = Int(string.trimmingCharacters(in: .whitespacesAndNewlines))
+        } else {
+            value = nil
+        }
     }
 }
 
@@ -122,30 +364,4 @@ enum DataSourceState {
     case stale
     case unavailable
     case error(String)
-}
-
-struct HealthCache: Codable {
-    let writable: Bool
-    let exists: Bool?
-    let age_seconds: Int?
-}
-
-struct ProviderHealth: Codable {
-    let provider: String?
-    let ok: Bool
-    let state: String
-    let age_seconds: Int?
-    let duration_ms: Int?
-    let consecutive_failures: Int?
-    let error: String?
-}
-
-struct HealthResponse: Codable {
-    let ok: Bool
-    let status: String
-    let version: String
-    let uptime_seconds: Int?
-    let cache: HealthCache?
-    let providers: [String: ProviderHealth]
-    let error: String?
 }

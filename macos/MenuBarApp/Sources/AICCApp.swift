@@ -311,23 +311,20 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             await APIService.shared.fetchStatus()
-            await APIService.shared.fetchHealth()
             APIService.shared.startAutoRefresh(interval: AppSettings.shared.autoRefreshInterval)
-            APIService.shared.startHealthRefresh()
         }
 
-        // Start Codex monitoring
-        CodexLaunchMonitor.shared.startMonitoring()
-
-        // Detect OpenCodex
-        Task {
-            await OpenCodexController.shared.detectExecutable()
+        // One low-frequency OpenCodex check at app launch. The controller
+        // owns the visible-panel refresh loop and does not poll in the
+        // background while the menu is closed.
+        Task { @MainActor in
+            await OpenCodexController.shared.checkOnce()
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         APIService.shared.stopAutoRefresh()
-        CodexLaunchMonitor.shared.stopMonitoring()
+        OpenCodexController.shared.panelDidDisappear()
         serverManager.stopMonitoring()
         serverManager.stopServer(reason: .appExit)
     }
@@ -341,7 +338,6 @@ struct AICCApp: App {
     @StateObject private var api = APIService.shared
     @StateObject private var ocx = OpenCodexController.shared
     @StateObject private var settings = AppSettings.shared
-    @StateObject private var monitor = CodexLaunchMonitor.shared
     @StateObject private var server = ServerManager.shared
     @StateObject private var loginAtLaunch = LaunchAtLoginService.shared
 
@@ -351,7 +347,6 @@ struct AICCApp: App {
                 .environmentObject(api)
                 .environmentObject(ocx)
                 .environmentObject(settings)
-                .environmentObject(monitor)
                 .environment(\.locale, settings.locale)
                 .preferredColorScheme(settings.preferredColorScheme)
         } label: {
@@ -368,7 +363,6 @@ struct AICCApp: App {
                 .environmentObject(api)
                 .environmentObject(ocx)
                 .environmentObject(settings)
-                .environmentObject(monitor)
                 .environmentObject(server)
                 .environmentObject(loginAtLaunch)
                 .environment(\.locale, settings.locale)

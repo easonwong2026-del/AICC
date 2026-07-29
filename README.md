@@ -39,10 +39,18 @@ SwiftUI 菜单栏 App（AICC）会生成在 `dist/mac/AICC.app`。`SERVER_ROOT` 
 可拖入 `/Applications`。自包含 App 的运行数据写入
 `~/Library/Application Support/AICC-Dashboard/data/`，不会写进 App 包本身。
 App 运行需要 macOS 14 或更高版本、Apple Silicon，以及可执行的 Python 3（建议 Python 3.10+）；DMG 不包含 Python 解释器。
-没有 Developer ID 时生成的是 ad-hoc 测试包，首次在其他 Mac 安装需要右键选择“打开”。
-菜单栏 App 只负责状态显示、启动/停止/重启服务、打开原生设置窗口、打开日志和配置
-开机自启；额度采集仍由现有 Python 服务完成，菜单栏健康检查只访问 `/api/health`，
-不会额外触发额度刷新。
+没有 Developer ID 时生成的是 ad-hoc 测试包，首次在其他 Mac 安装需要右键选择"打开"。
+菜单栏 App 只负责状态显示、启动/停止内部数据服务、手动控制 OpenCodex、打开原生设置窗口、
+打开日志和配置开机自启；额度采集仍由现有 Python 服务完成。内部数据服务监督只访问
+`/api/health/live`，状态面板读取 `/api/status` 缓存，不会额外触发 Provider 刷新。
+
+### 2.4.1 OpenCodex 控制变更
+
+- AICC **不负责打开 Codex Desktop 或 ChatGPT Desktop**。
+- AICC 只负责查看 OpenCodex 状态、启动/停止 OpenCodex、打开 OpenCodex 仪表盘。
+- OpenCodex 开关反映真实运行时状态（通过 `ocx status --json` CLI 发现），支持动态端口。
+- OpenCodex 状态轮询仅在菜单栏面板打开时进行（约 9 秒间隔），面板关闭后停止。
+- 不再保留"随 Codex Desktop 启动 OpenCodex"等联动设置。
 
 ## 数据采集与内存策略
 
@@ -57,7 +65,7 @@ App 运行需要 macOS 14 或更高版本、Apple Silicon，以及可执行的 P
 
 ## Poke4S
 
-网页模式打开 kiosk 地址后，点一次“进入墨水屏模式”。页面每 5 分钟取数，并保留最近成功数据。
+网页模式打开 kiosk 地址后，点一次"进入墨水屏模式"。页面每 5 分钟取数，并保留最近成功数据。
 
 原生客户端 V1.2.2 Optimized C 安装包位于 `dist/Poke4S-AI-Dashboard-v1.2.2-optimized.apk`。它保留 V1.2 的 AI COMMAND 风格和长按设置弹窗，将 Codex 额度重置时间、重置机会次数和机会到期时间分组对应，并把 WorkBuddy 与 DeepSeek 调整为双栏。所有现有服务器字段均保留；DeepSeek 当日使用量会去掉无意义的尾随零。数据层继续兼容最新服务器字段，并保留单实例、缓存减写、回调保护、自动发现、R8 和低内存 Canvas 渲染等优化。
 
@@ -66,7 +74,29 @@ App 运行需要 macOS 14 或更高版本、Apple Silicon，以及可执行的 P
 ## 验证
 
 ```bash
+# Python 单元测试
 python3 -B -m unittest discover -s tests -v
+
+# SwiftPM 核心包测试
+swift test --package-path macos/MenuBarApp
+
+# 无 XCTest 环境也可运行的核心 smoke test
+bash scripts/smoke-test-swift-core.sh
+
+# 完整构建
+BUNDLE_SERVER=1 bash macos/build-aicc-swiftui.sh
+
+# Shell 语法检查
+for f in macos/*.sh scripts/*.sh; do [ -f "$f" ] && bash -n "$f"; done
+
+# Bundled Server Smoke Test
+bash scripts/smoke-test-bundled-server.sh
+
+# DMG 构建
+bash macos/build-dmg.sh
+
+# 版本一致性
+bash scripts/validate-version.sh
 ```
 
 健康检查：`http://localhost:8765/api/health`。完整状态：`http://localhost:8765/api/status`。

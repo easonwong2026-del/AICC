@@ -96,7 +96,7 @@ refreshStatus()
 ensure()
 stop()
 restart()
-openCodex()
+旧版的 Codex 桌面端打开动作
 ```
 
 ### 路径检测
