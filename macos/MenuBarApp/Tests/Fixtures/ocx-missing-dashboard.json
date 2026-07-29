@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "proxy": {
+    "running": true,
+    "pid": 1111,
+    "health": {
+      "ok": true,
+      "url": "http://127.0.0.1:15555/healthz"
+    }
+  },
+  "listen": {
+    "port": 15555
+  }
+}

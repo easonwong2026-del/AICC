@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "proxy": {
+    "running": true,
+    "pid": "24680",
+    "health": {
+      "ok": true,
+      "url": "https://127.0.0.1:18888/healthz"
+    }
+  },
+  "dashboard": {
+    "url": "https://dashboard.example.test:18888/"
+  },
+  "listen": {
+    "port": "18888"
+  }
+}

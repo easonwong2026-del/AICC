@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "proxy": {
+    "running": true,
+    "pid": 3333
+  },
+  "dashboard": {
+    "url": "http://localhost:19991/"
+  },
+  "listen": {
+    "port": 19991
+  }
+}

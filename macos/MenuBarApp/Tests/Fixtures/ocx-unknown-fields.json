@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 99,
+  "futureField": {
+    "ignored": true
+  },
+  "proxy": {
+    "running": false,
+    "pid": null,
+    "health": {
+      "ok": false,
+      "futureHealthField": "ignored"
+    },
+    "futureProxyField": "ignored"
+  },
+  "dashboard": {
+    "url": "http://localhost:16666/",
+    "futureDashboardField": 1
+  },
+  "listen": {
+    "port": 16666,
+    "futureListenField": true
+  }
+}

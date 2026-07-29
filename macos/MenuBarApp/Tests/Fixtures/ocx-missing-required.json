@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "proxy": {
+    "pid": 2222,
+    "health": {
+      "ok": true
+    }
+  },
+  "dashboard": {
+    "url": "http://localhost:17777/"
+  },
+  "listen": {
+    "port": 17777
+  }
+}
