@@ -326,11 +326,17 @@ final class OpenCodexController: ObservableObject {
         guard generation == operationGeneration, !Task.isCancelled else { return }
         setDetectedPath(path)
 
+        let invocation = OCXCommandBuilder.lifecycle(command: operation.command, ocxPath: path)
+        var environment = processEnvironment
+        for (key, value) in invocation.environmentOverrides {
+            environment[key] = value
+        }
+
         do {
             _ = try await processRunner.run(
-                executable: path,
-                arguments: [operation.command],
-                environment: processEnvironment,
+                executable: invocation.executable,
+                arguments: invocation.arguments,
+                environment: environment,
                 timeout: OCXOperationPolicy.operationTimeout
             )
         } catch is CancellationError {

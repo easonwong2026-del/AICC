@@ -365,3 +365,45 @@ enum DataSourceState {
     case unavailable
     case error(String)
 }
+// MARK: - OpenCodex Command Builder
+
+/// A safe, inspectable invocation for OpenCodex lifecycle commands that must
+/// execute through a login shell so the user's .zprofile, Homebrew, npm-global
+/// paths, and CODEX_CLI_PATH are available.
+///
+/// The detected `ocx` binary path is passed via environment variable
+/// `AICC_OCX_PATH`, and the shell command references only that variable.
+/// No path string is concatenated into the shell argument, so spaces,
+/// single quotes, and other special characters in the path are safe.
+///
+/// Only lifecycle commands (`ensure`, `stop`) use this path. Read-only
+/// operations (`status --json`, `--version`) continue to execute the
+/// binary directly.
+struct OCXCommandInvocation: Equatable {
+    let executable: String
+    let arguments: [String]
+    let environmentOverrides: [String: String]
+}
+
+enum OCXCommandBuilder {
+    private static let envKey = "AICC_OCX_PATH"
+    private static let allowedCommands: Set<String> = ["ensure", "stop"]
+
+    /// Build a login-shell invocation for a lifecycle command.
+    ///
+    /// - Parameters:
+    ///   - command: `"ensure"` or `"stop"`.
+    ///   - ocxPath: The filesystem path to the discovered `ocx` binary.
+    /// - Returns: An `OCXCommandInvocation` ready to pass to `ProcessRunner`.
+    /// - Precondition: `command` must be one of the allowed lifecycle commands.
+    ///   A runtime assertion guards against accidental misuse.
+    static func lifecycle(command: String, ocxPath: String) -> OCXCommandInvocation {
+        assert(allowedCommands.contains(command),
+               "OCXCommandBuilder only accepts lifecycle commands: \(allowedCommands)")
+        return OCXCommandInvocation(
+            executable: "/bin/zsh",
+            arguments: ["-lc", "exec \"$\(envKey)\" \(command)"],
+            environmentOverrides: [envKey: ocxPath]
+        )
+    }
+}
