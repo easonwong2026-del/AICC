@@ -25,6 +25,17 @@ struct WorkBuddyCard: View {
 
     private var statusSubtitle: String {
         let status = data.balance_state ?? (data.points == nil ? "Unavailable" : "Connected")
+        if data.points == nil {
+            if data.balance_error_code == "bridge_unavailable" {
+                return "未连接 · 设置 → 重连 WorkBuddy"
+            }
+            if let error = data.balance_error {
+                return "\(status) · \(error)"
+            }
+            if let code = data.balance_error_code {
+                return "\(status) · \(code)"
+            }
+        }
         if let age = data.balance_age_seconds {
             return "\(status) · \(ageText(age))"
         }

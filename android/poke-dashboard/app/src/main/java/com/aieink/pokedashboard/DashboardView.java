@@ -121,6 +121,9 @@ final class DashboardView extends View {
 
     private String workBuddyStatus() {
         String state = data.workBuddyStale ? "CACHED" : data.workBuddyState;
+        if ("UNAVAILABLE".equals(state) && !data.workBuddyErrorCode.isEmpty()) {
+            return state + " " + data.workBuddyErrorCode;
+        }
         if (!data.workBuddyStale || data.workBuddyAgeSeconds == null) return state;
         return state + " " + compactAge(data.workBuddyAgeSeconds);
     }

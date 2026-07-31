@@ -55,7 +55,7 @@ App 运行需要 macOS 14 或更高版本、Apple Silicon，以及可执行的 P
 ## 数据采集与内存策略
 
 - Codex：按需启动 `codex app-server`，读取账户额度；面板停止访问 30 秒后结束子进程并使用最后成功缓存。
-- WorkBuddy：只连接 `127.0.0.1:9223` 的本机调试桥。应用关闭时绝不主动启动；你手动打开后，默认每 120 秒读取一次余额，同一页面 target 也会按时间重新读取，手动刷新会强制重新读取。本机数据库中的当日用量仍可被动更新，不保存或传输令牌、Cookie 等认证信息。
+- WorkBuddy：优先通过 `127.0.0.1:9223` 的本机调试桥读取账户余额；当前 WorkBuddy/CodeBuddy CLI 只提供编码代理能力，不作为账户积分接口。应用关闭时绝不主动启动；发现 WorkBuddy 已运行但未开放本地桥时，AICC 会在后台自动重启它一次以启用读取通道（恢复 2.3.x 的监控行为，每个 WorkBuddy 进程只重启一次，会话自动恢复），也可在设置中手动「重连 WorkBuddy」。启用后默认每 120 秒读取一次余额，同一页面 target 也会按时间重新读取，手动刷新会强制重新读取。本机数据库中的当日用量仍可被动更新，不保存或传输令牌、Cookie 等认证信息。
 - DeepSeek：密钥只从环境变量或 macOS 钥匙串读取，不写入项目目录。
 - 系统：使用 macOS 自带命令读取内存；没有第三方运行依赖。
 
@@ -103,7 +103,7 @@ bash scripts/validate-version.sh
 
 ## 本地数据
 
-- `data/status.json`：WorkBuddy 手工兜底值
+- `data/status.json`：WorkBuddy 最近状态（旧版本的手工字段仅作兼容，不会在自动采集失败时冒充真实余额）
 - `data/codex_last_success.json`：Codex 最近成功额度
 - `data/workbuddy_last_success.json`：WorkBuddy 最近成功余额
 - `data/deepseek_history.json`：用于计算当日消耗的余额快照

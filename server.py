@@ -30,7 +30,12 @@ SERVER_STARTED_AT = time.time()
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 DEFAULT_STATUS = {
     "codex": {"five_hour": {"remaining": 83, "reset": "14:27"}, "weekly": {"remaining": 97, "reset": "7月17日"}, "source": "Manual"},
-    "workbuddy": {"points": 8520, "used_points": 1480, "reset_text": "Update from WorkBuddy"},
+    "workbuddy": {
+        "points": None,
+        "balance_state": "Unavailable",
+        "balance_stale": True,
+        "usage_source": "WorkBuddy unavailable",
+    },
 }
 DISCOVERY_MAGIC = b"AI_EINK_DISCOVER"
 _collector_manager: CollectorManager | None = None
@@ -156,15 +161,35 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     HTTPStatus.NOT_IMPLEMENTED,
                 )
                 return
-            subprocess.Popen(
-                ["/bin/bash", str(script), "--ensure"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            try:
+                completed = subprocess.run(
+                    ["/bin/bash", str(script), "--ensure"],
+                    capture_output=True,
+                    text=True,
+                    timeout=50,
+                )
+            except subprocess.TimeoutExpired:
+                collector_manager().invalidate("workbuddy")
+                self.send_json(
+                    {"ok": False, "state": "failed", "error_code": "timeout", "error": "WorkBuddy reconnect timed out"},
+                    HTTPStatus.BAD_GATEWAY,
+                )
+                return
             collector_manager().invalidate("workbuddy")
-            self.send_json({"ok": True, "state": "reconnecting"}, HTTPStatus.ACCEPTED)
+            if completed.returncode == 0:
+                self.send_json({"ok": True, "state": "bridge_ready"})
+                return
+            error_code = "unknown"
+            for line in reversed((completed.stderr or "").splitlines()):
+                if line.startswith("AICC_WORKBUDDY_FAIL:"):
+                    error_code = line.split(":", 1)[1].strip()
+                    break
+            detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+            message = detail[-1] if detail else "WorkBuddy reconnect failed"
+            self.send_json(
+                {"ok": False, "state": "failed", "error_code": error_code, "error": message},
+                HTTPStatus.BAD_GATEWAY,
+            )
             return
         if path == "/api/refresh":
             self.send_json(load_status(force=True))
@@ -256,6 +281,43 @@ def _periodic_save(interval: int = 120) -> None:
                 print(f"Periodic status save failed: {type(error).__name__}: {error}")
 
 
+def _workbuddy_monitor_loop(interval: int = 60) -> None:
+    """Auto-heal the WorkBuddy debugging bridge once per WorkBuddy process.
+
+    This restores the 2.3.x monitor behavior (previously a LaunchAgent) without
+    needing a LaunchAgent or Automation permission: when WorkBuddy is running
+    without the localhost bridge, the monitor restarts it once with the
+    debugging flag. WorkBuddy is never launched when it is not running.
+    """
+    while True:
+        time.sleep(interval)
+        if os.environ.get("WORKBUDDY_AUTO_HEAL", "1") != "1":
+            continue
+        _run_workbuddy_monitor_once()
+
+
+def _run_workbuddy_monitor_once() -> bool:
+    script = ROOT / "macos" / "start-workbuddy-monitored.sh"
+    if not script.is_file():
+        return False
+    try:
+        completed = subprocess.run(
+            ["/bin/bash", str(script), "--monitor"],
+            capture_output=True,
+            text=True,
+            timeout=55,
+        )
+        if completed.returncode == 0 and "auto-healed" in completed.stdout:
+            collector_manager().invalidate("workbuddy")
+            collector_manager().snapshot(force=True, wait_seconds=0)
+            print("WorkBuddy bridge auto-healed; collector refreshed.")
+            return True
+    except Exception as error:
+        if os.environ.get("EINK_ACCESS_LOG") == "1":
+            print(f"WorkBuddy monitor failed: {type(error).__name__}: {error}")
+    return False
+
+
 def _cache_health() -> dict:
     try:
         location = DATA_PATH if DATA_PATH.exists() else DATA_ROOT
@@ -324,6 +386,7 @@ def main() -> None:
     start_discovery(port)
     collector_manager().snapshot(force=True, wait_seconds=0)
     threading.Thread(target=_periodic_save, args=(120,), daemon=True).start()
+    threading.Thread(target=_workbuddy_monitor_loop, args=(60,), daemon=True).start()
     print(f"AICC Dashboard: http://localhost:{port}")
     try:
         server.serve_forever()

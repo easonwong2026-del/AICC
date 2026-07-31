@@ -8,6 +8,7 @@ SIGNING_IDENTITY="${AICC_SIGNING_IDENTITY:--}"
 
 # Required server directories for BUNDLE_SERVER=1
 REQUIRED_SERVER_DIRS=("collectors" "services" "providers" "web")
+REQUIRED_SERVER_FILES=("macos/start-workbuddy-monitored.sh")
 
 APP_NAME="AICC"
 APP_DIR="$ROOT/dist/mac/$APP_NAME.app"
@@ -41,10 +42,23 @@ if [[ "$BUNDLE_SERVER" == "1" ]]; then
       exit 1
     fi
   done
+  for file in "${REQUIRED_SERVER_FILES[@]}"; do
+    if [ ! -f "$ROOT/$file" ]; then
+      echo "ERROR: Required bundled server file not found: $ROOT/$file" >&2
+      exit 1
+    fi
+  done
 
   mkdir -p "$BUNDLED_SERVER_DIR"
   cp "$ROOT/server.py" "$ROOT/VERSION" "$ROOT/PACKAGE.json" "$BUNDLED_SERVER_DIR/"
   cp -R "$ROOT/collectors" "$ROOT/services" "$ROOT/providers" "$ROOT/web" "$BUNDLED_SERVER_DIR/"
+  mkdir -p "$BUNDLED_SERVER_DIR/macos"
+  cp "$ROOT/macos/start-workbuddy-monitored.sh" "$BUNDLED_SERVER_DIR/macos/"
+  chmod 755 "$BUNDLED_SERVER_DIR/macos/start-workbuddy-monitored.sh"
+  if [ ! -x "$BUNDLED_SERVER_DIR/macos/start-workbuddy-monitored.sh" ]; then
+    echo "ERROR: Bundled WorkBuddy reconnect script is not executable" >&2
+    exit 1
+  fi
   printf '%s\n' "@resources/Server" > "$RESOURCES_DIR/ServerRoot.txt"
 else
   printf '%s\n' "$SERVER_ROOT" > "$RESOURCES_DIR/ServerRoot.txt"

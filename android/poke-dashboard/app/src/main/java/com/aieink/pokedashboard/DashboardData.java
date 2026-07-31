@@ -24,6 +24,7 @@ final class DashboardData {
     String workBuddyUpdatedAt = "--";
     Double workBuddyUpdatedEpoch;
     Long workBuddyAgeSeconds;
+    String workBuddyErrorCode = "";
     String deepSeekBalance = "--";
     String deepSeekUsage = "--";
     String deepSeekCurrency = "";
@@ -84,6 +85,7 @@ final class DashboardData {
             if (!workBuddy.isNull("balance_age_seconds")) {
                 data.workBuddyAgeSeconds = workBuddy.optLong("balance_age_seconds");
             }
+            data.workBuddyErrorCode = workBuddy.optString("balance_error_code", "");
         }
 
         JSONObject deepSeek = root.optJSONObject("deepseek");
