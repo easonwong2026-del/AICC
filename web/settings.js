@@ -35,8 +35,15 @@ document.getElementById("refresh").addEventListener("click", async () => {
 });
 
 document.getElementById("reconnect-workbuddy").addEventListener("click", async () => {
+  if (!confirm("将重启 WorkBuddy 一次以启用本地读取通道，已打开的会话会自动恢复。继续？")) return;
   actionNotice.textContent = "正在重连 WorkBuddy…";
   const result = await fetch("/api/workbuddy/reconnect", { method: "POST" });
-  actionNotice.textContent = result.ok ? "已开始重连，请数秒后查看状态。" : "重连失败。";
-  if (result.ok) setTimeout(load, 5000);
+  let payload = {};
+  try { payload = await result.json(); } catch { /* keep empty */ }
+  if (result.ok) {
+    actionNotice.textContent = "已启用本地读取通道。";
+    setTimeout(load, 3000);
+  } else {
+    actionNotice.textContent = `重连失败：${payload.error || payload.error_code || "未知错误"}`;
+  }
 });
