@@ -109,29 +109,15 @@ class AppSettings: ObservableObject {
         if storedInterval < 60 {
             UserDefaults.standard.set(120.0, forKey: "autoRefreshInterval")
         }
-        let defaults = UserDefaults.standard
-        if ProviderPreferences.needsLegacyVisibilityMigration(defaults: defaults) {
-            // First run of the dynamic collection: migrate the legacy
-            // per-provider visibility toggles without losing user choices.
-            providerOrder = ProviderPreferences.defaultOrder
-            hiddenProviders = ProviderPreferences.hiddenAfterMigration(
-                showCodexStatus: ProviderPreferences.storedBool(
-                    "menuBarShowCodexStatus", defaults: defaults, default: true
-                ),
-                showWorkBuddy: ProviderPreferences.storedBool(
-                    "menuBarShowWorkBuddy", defaults: defaults, default: true
-                ),
-                showDeepSeek: ProviderPreferences.storedBool(
-                    "menuBarShowDeepSeek", defaults: defaults, default: true
-                )
-            )
-        } else {
-            providerOrder = ProviderPreferences.decodeProviderList(defaults.data(forKey: "providerOrderData"))
-                ?? ProviderPreferences.defaultOrder
-            hiddenProviders = Set(
-                ProviderPreferences.decodeProviderList(defaults.data(forKey: "hiddenProvidersData")) ?? []
-            )
-        }
+        // Load or perform the one-time legacy migration. The migration result
+        // is persisted inside loadOrMigrate, so initialization never depends
+        // on property observers firing during init. didSet below still handles
+        // every later user change.
+        let providerPreferences = ProviderPreferences.loadOrMigrate(
+            defaults: UserDefaults.standard
+        )
+        providerOrder = providerPreferences.order
+        hiddenProviders = providerPreferences.hidden
     }
 
     static let shared = AppSettings()

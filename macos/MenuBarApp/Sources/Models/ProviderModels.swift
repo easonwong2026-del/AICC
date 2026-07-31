@@ -398,6 +398,14 @@ enum DashboardTypography {
 
 // MARK: - Provider preferences (pure logic, testable without AppKit)
 
+/// The loaded provider preferences for one runtime. Used by
+/// `ProviderPreferences.loadOrMigrate` so AppSettings never has to re-implement
+/// migration or persistence decisions.
+struct ProviderPreferenceSnapshot: Equatable {
+    let order: [String]
+    let hidden: Set<String>
+}
+
 enum ProviderPreferences {
     static let defaultOrder = ["codex", "workbuddy", "deepseek", "system"]
 
@@ -419,6 +427,44 @@ enum ProviderPreferences {
     /// yet and the legacy per-provider toggles still need one migration.
     static func needsLegacyVisibilityMigration(defaults: UserDefaults) -> Bool {
         defaults.object(forKey: "providerOrderData") == nil
+    }
+
+    /// Load the dynamic provider settings, running the one-time legacy
+    /// migration when needed.
+    ///
+    /// The migration result is written to `providerOrderData` and
+    /// `hiddenProvidersData` immediately — AppSettings initialization must
+    /// not rely on property observers to persist a first-run migration.
+    static func loadOrMigrate(defaults: UserDefaults) -> ProviderPreferenceSnapshot {
+        if !needsLegacyVisibilityMigration(defaults: defaults) {
+            let order = decodeProviderList(defaults.data(forKey: "providerOrderData"))
+                ?? defaultOrder
+            let hidden = Set(
+                decodeProviderList(defaults.data(forKey: "hiddenProvidersData")) ?? []
+            )
+            return ProviderPreferenceSnapshot(order: order, hidden: hidden)
+        }
+
+        let order = defaultOrder
+        let hidden = hiddenAfterMigration(
+            showCodexStatus: storedBool(
+                "menuBarShowCodexStatus", defaults: defaults, default: true
+            ),
+            showWorkBuddy: storedBool(
+                "menuBarShowWorkBuddy", defaults: defaults, default: true
+            ),
+            showDeepSeek: storedBool(
+                "menuBarShowDeepSeek", defaults: defaults, default: true
+            )
+        )
+
+        defaults.set(encodeProviderList(order), forKey: "providerOrderData")
+        defaults.set(
+            encodeProviderList(Array(hidden).sorted()),
+            forKey: "hiddenProvidersData"
+        )
+
+        return ProviderPreferenceSnapshot(order: order, hidden: hidden)
     }
 
     /// Serialize the provider list for `UserDefaults`.

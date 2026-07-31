@@ -288,25 +288,104 @@ final class ProviderModelsTests: XCTestCase {
         XCTAssertFalse(ProviderPreferences.needsLegacyVisibilityMigration(defaults: defaults))
     }
 
-    func testMigrationResultSurvivesRestart() throws {
+    func testFreshInstallMigrationPersistsDynamicSettings() throws {
         let defaults = try makeDefaults()
-        // Simulate the AppSettings first-run migration path.
-        defaults.set(false, forKey: "menuBarShowWorkBuddy")
-        let hidden = ProviderPreferences.hiddenAfterMigration(
-            showCodexStatus: ProviderPreferences.storedBool("menuBarShowCodexStatus", defaults: defaults, default: true),
-            showWorkBuddy: ProviderPreferences.storedBool("menuBarShowWorkBuddy", defaults: defaults, default: true),
-            showDeepSeek: ProviderPreferences.storedBool("menuBarShowDeepSeek", defaults: defaults, default: true)
-        )
-        defaults.set(ProviderPreferences.encodeProviderList(["codex", "workbuddy", "deepseek", "system"]), forKey: "providerOrderData")
-        defaults.set(ProviderPreferences.encodeProviderList(Array(hidden).sorted()), forKey: "hiddenProvidersData")
+        XCTAssertNil(defaults.object(forKey: "providerOrderData"))
+        XCTAssertNil(defaults.object(forKey: "hiddenProvidersData"))
 
-        // Restart: the migration gate is closed and the stored hidden set is
+        let snapshot = ProviderPreferences.loadOrMigrate(defaults: defaults)
+
+        XCTAssertEqual(snapshot.order, ["codex", "workbuddy", "deepseek", "system"])
+        XCTAssertTrue(snapshot.hidden.isEmpty)
+        // The real migration entry point must write both dynamic keys
+        // immediately; AppSettings init cannot rely on property observers.
+        XCTAssertEqual(
+            ProviderPreferences.decodeProviderList(defaults.data(forKey: "providerOrderData")),
+            ["codex", "workbuddy", "deepseek", "system"]
+        )
+        XCTAssertEqual(
+            Set(ProviderPreferences.decodeProviderList(defaults.data(forKey: "hiddenProvidersData")) ?? []),
+            []
+        )
+    }
+
+    func testLegacyExplicitFalseIsMigratedAndPersisted() throws {
+        let defaults = try makeDefaults()
+        defaults.set(false, forKey: "menuBarShowWorkBuddy")
+
+        let snapshot = ProviderPreferences.loadOrMigrate(defaults: defaults)
+
+        XCTAssertEqual(snapshot.hidden, ["workbuddy"])
+        XCTAssertEqual(
+            Set(ProviderPreferences.decodeProviderList(defaults.data(forKey: "hiddenProvidersData")) ?? []),
+            ["workbuddy"]
+        )
+        // Codex and DeepSeek were never explicitly hidden.
+        XCTAssertFalse(snapshot.hidden.contains("codex"))
+        XCTAssertFalse(snapshot.hidden.contains("deepseek"))
+    }
+
+    func testExistingDynamicSettingsAreNotOverwrittenByLegacySettings() throws {
+        let defaults = try makeDefaults()
+        defaults.set(false, forKey: "menuBarShowWorkBuddy")
+        let firstRun = ProviderPreferences.loadOrMigrate(defaults: defaults)
+        XCTAssertEqual(firstRun.hidden, ["workbuddy"])
+
+        // Legacy toggles change after the first run; they must never override
+        // the dynamic settings that already exist.
+        defaults.set(true, forKey: "menuBarShowWorkBuddy")
+        defaults.set(false, forKey: "menuBarShowDeepSeek")
+        let secondRun = ProviderPreferences.loadOrMigrate(defaults: defaults)
+
+        XCTAssertEqual(secondRun.order, ["codex", "workbuddy", "deepseek", "system"])
+        XCTAssertEqual(secondRun.hidden, ["workbuddy"])
+        XCTAssertEqual(
+            Set(ProviderPreferences.decodeProviderList(defaults.data(forKey: "hiddenProvidersData")) ?? []),
+            ["workbuddy"]
+        )
+    }
+
+    func testMigratedSettingsSurviveRestart() throws {
+        let defaults = try makeDefaults()
+        _ = ProviderPreferences.loadOrMigrate(defaults: defaults)
+
+        // Simulate the user hiding DeepSeek in the settings page; the didSet
+        // path writes the same encoded representation.
+        let userHidden = ["deepseek"]
+        defaults.set(
+            ProviderPreferences.encodeProviderList(userHidden),
+            forKey: "hiddenProvidersData"
+        )
+
+        // Restart: the migration gate is closed and the user's state is
         // decoded back unchanged.
+        let restarted = ProviderPreferences.loadOrMigrate(defaults: defaults)
+        XCTAssertEqual(restarted.hidden, ["deepseek"])
+        XCTAssertEqual(restarted.order, ["codex", "workbuddy", "deepseek", "system"])
         XCTAssertFalse(ProviderPreferences.needsLegacyVisibilityMigration(defaults: defaults))
-        let decodedHidden = Set(ProviderPreferences.decodeProviderList(defaults.data(forKey: "hiddenProvidersData")) ?? [])
-        XCTAssertEqual(decodedHidden, ["workbuddy"])
-        let decodedOrder = ProviderPreferences.decodeProviderList(defaults.data(forKey: "providerOrderData"))
-        XCTAssertEqual(decodedOrder, ["codex", "workbuddy", "deepseek", "system"])
+    }
+
+    func testCorruptedDynamicSettingsFallBackSafely() throws {
+        let defaults = try makeDefaults()
+        // Corrupt both dynamic keys with undecodable data.
+        defaults.set(Data("not-json".utf8), forKey: "providerOrderData")
+        defaults.set(Data("also-not-json".utf8), forKey: "hiddenProvidersData")
+
+        let snapshot = ProviderPreferences.loadOrMigrate(defaults: defaults)
+
+        XCTAssertEqual(snapshot.order, ["codex", "workbuddy", "deepseek", "system"])
+        XCTAssertTrue(snapshot.hidden.isEmpty)
+
+        // Corrupted order alone falls back while a valid hidden set still
+        // loads independently.
+        defaults.set(Data("not-json".utf8), forKey: "providerOrderData")
+        defaults.set(
+            ProviderPreferences.encodeProviderList(["workbuddy"]),
+            forKey: "hiddenProvidersData"
+        )
+        let partial = ProviderPreferences.loadOrMigrate(defaults: defaults)
+        XCTAssertEqual(partial.order, ["codex", "workbuddy", "deepseek", "system"])
+        XCTAssertEqual(partial.hidden, ["workbuddy"])
     }
 
     // MARK: - Action routing (0.2)
