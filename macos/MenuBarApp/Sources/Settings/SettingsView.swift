@@ -109,7 +109,7 @@ private struct AIProvidersSettingsView: View {
                 DataSourceRow(
                     name: "WorkBuddy",
                     status: workBuddyStatus,
-                    lastUpdate: updateText(api.status?.collection?.workbuddy),
+                    lastUpdate: workBuddyLastUpdate,
                     action: refresh
                 )
                 DataSourceRow(
@@ -146,6 +146,13 @@ private struct AIProvidersSettingsView: View {
             return settings.localized("Cached")
         }
         return settings.localized(workbuddy.points == nil ? "Unavailable" : "Connected")
+    }
+
+    private var workBuddyLastUpdate: String {
+        if let error = api.status?.workbuddy?.balance_error {
+            return "\(settings.localized("Error")): \(error)"
+        }
+        return updateText(api.status?.collection?.workbuddy)
     }
 
     private var deepSeekStatus: String {
