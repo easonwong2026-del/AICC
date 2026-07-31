@@ -151,9 +151,15 @@ class WorkBuddyPassiveTests(unittest.TestCase):
             "    const payload = event.data;"
             "    if (!payload || payload.kind !== 'message' || !payload.json) return;"
             "    const frame = payload.json;"
+            "    if (frame.channel !== 'auth:getAccountUsage') {"
+            "      port.postMessage({kind: 'message', json: {"
+            "        id: frame.id, type: 'error', error: {message: 'no handler for ' + frame.channel}"
+            "      }});"
+            "      return;"
+            "    }"
             "    port.postMessage({kind: 'message', json: {"
             "      id: frame.id, type: 'response',"
-            "      result: {data: {usageLeft: '5,238', usageTotal: '12000', refreshAt: null}}"
+            "      result: {usageLeft: '5,238', usageTotal: '12000', usageUsed: '6762', refreshAt: null}"
             "    }});"
             "  };"
             "  port.start();"
@@ -163,6 +169,7 @@ class WorkBuddyPassiveTests(unittest.TestCase):
         result = self._run_expression(api_function=None, api_invoke=None, button_text="", api_daemon=daemon)
         self.assertEqual(result["usageLeft"], "5238")
         self.assertEqual(result["usageTotal"], "12000")
+        self.assertEqual(result["usageUsed"], "6762")
         self.assertEqual(result["source"], "account-api")
 
     def test_failure_includes_api_probe_diagnostics(self):
