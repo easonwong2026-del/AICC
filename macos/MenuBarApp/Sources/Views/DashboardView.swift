@@ -9,14 +9,16 @@ struct DashboardView: View {
     var body: some View {
         VStack(spacing: 0) {
             headerSection
-            if settings.menuBarShowCodexStatus {
+            if settings.menuBarShowCodexStatus && !settings.isProviderHidden("codex") {
                 Divider().padding(.horizontal, 14)
                 codexSection
             }
-            if settings.menuBarShowWorkBuddy || settings.menuBarShowDeepSeek {
+            if (settings.menuBarShowWorkBuddy && !settings.isProviderHidden("workbuddy"))
+                || (settings.menuBarShowDeepSeek && !settings.isProviderHidden("deepseek")) {
                 Divider().padding(.horizontal, 14)
                 miniCardsSection
             }
+            dynamicProviderSection
             if settings.menuBarShowOpenCodex {
                 Divider().padding(.horizontal, 14)
                 servicesSection
@@ -91,14 +93,14 @@ struct DashboardView: View {
 
     private var miniCardsSection: some View {
         HStack(spacing: 10) {
-            if settings.menuBarShowWorkBuddy {
+            if settings.menuBarShowWorkBuddy && !settings.isProviderHidden("workbuddy") {
                 if let wb = api.status?.workbuddy {
                     WorkBuddyCard(data: wb)
                 } else {
                     placeholderCard(title: "WorkBuddy", icon: "wand.and.stars")
                 }
             }
-            if settings.menuBarShowDeepSeek {
+            if settings.menuBarShowDeepSeek && !settings.isProviderHidden("deepseek") {
                 if let ds = api.status?.deepseek {
                     DeepSeekCard(data: ds)
                 } else {
@@ -108,6 +110,34 @@ struct DashboardView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+
+    // MARK: - Dynamic Providers
+
+    /// Manifest-driven cards. Legacy cards (codex, workbuddy, deepseek) keep
+    /// rendering through their existing components during the migration
+    /// period; every other provider — including future built-ins and the dev
+    /// example provider — renders here without any dedicated SwiftUI card.
+    @ViewBuilder
+    private var dynamicProviderSection: some View {
+        let legacy = Set(["codex", "workbuddy", "deepseek"])
+        let providers = api.providers?.providers ?? []
+        let visible = ProviderPreferences.ordered(
+            providers.filter { !legacy.contains($0.id) && !settings.isProviderHidden($0.id) },
+            order: settings.providerOrder,
+            id: { $0.id },
+            manifestSortOrder: { $0.sortOrder }
+        )
+        if !visible.isEmpty {
+            Divider().padding(.horizontal, 14)
+            VStack(spacing: 8) {
+                ForEach(visible) { provider in
+                    ProviderCard(provider: provider)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+        }
     }
 
     // MARK: - Services

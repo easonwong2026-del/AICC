@@ -116,3 +116,14 @@
 "left" = "剩余";
 "Codex: No data" = "Codex：暂无数据";
 "Today %@" = "今日 %@";
+
+"Updated" = "更新于";
+"Temporarily unavailable" = "暂不可用";
+"Pending" = "等待中";
+"Disabled" = "已停用";
+"Close" = "关闭";
+"Show" = "显示";
+"Hide" = "隐藏";
+"Reset default order" = "恢复默认排序";
+"Loading providers…" = "正在加载服务…";
+"Providers are listed dynamically from the local manifest. Use the arrows to reorder, the switch to show or hide a provider, and the info button for diagnostics. Credentials are read from the existing local application, environment, or Keychain integrations; AICC never displays tokens." = "服务列表由本地 Manifest 动态生成。使用箭头调整顺序，用开关显示或隐藏服务，点击信息按钮查看诊断。凭据来自现有本地应用、环境变量或钥匙串集成；AICC 不显示任何令牌。";

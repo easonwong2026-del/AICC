@@ -30,6 +30,7 @@ let package = Package(
             ],
             sources: [
                 "Models/StatusData.swift",
+                "Models/ProviderModels.swift",
                 "Services/ProcessRunner.swift",
             ]
         ),
@@ -43,6 +44,7 @@ let package = Package(
                 "OCXCommandBuilderTests.swift",
                 "OCXOperationPolicyTests.swift",
                 "ProcessRunnerTests.swift",
+                "ProviderModelsTests.swift",
             ]
         ),
     ]

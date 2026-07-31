@@ -8,6 +8,9 @@ struct CompactCard: View {
     let value: String
     let subtitle: String
     let state: CardState
+    var unit: String? = nil
+    var valueFontSize: CGFloat? = nil
+    var valueWeight: Font.Weight = .bold
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -23,12 +26,24 @@ struct CompactCard: View {
                     .fill(statusColor)
                     .frame(width: 5, height: 5)
             }
-            Text(value)
-                .font(.system(size: 20, weight: .semibold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.55)
+            HStack(alignment: .lastTextBaseline, spacing: 3) {
+                Text(value)
+                    .font(.system(
+                        size: valueFontSize ?? DashboardTypography.primaryFontSize(number: value, compact: true),
+                        weight: valueWeight
+                    ))
+                    .foregroundColor(valueColor)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .allowsTightening(true)
+                if let unit, !unit.isEmpty {
+                    Text(unit)
+                        .font(.system(size: DashboardTypography.unit, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+            }
             Text(subtitle)
-                .font(.system(size: 9))
+                .font(.system(size: DashboardTypography.status))
                 .foregroundColor(.secondary)
                 .lineLimit(1)
         }
@@ -44,6 +59,14 @@ struct CompactCard: View {
         switch state {
         case .online: return .green
         case .stale: return .orange
+        case .unavailable: return .secondary
+        }
+    }
+
+    private var valueColor: Color {
+        switch state {
+        case .online: return .primary
+        case .stale: return .primary
         case .unavailable: return .secondary
         }
     }

@@ -53,6 +53,49 @@ struct CoreSmokeMain {
             guard case .timedOut = error else { throw error }
         }
 
+        // Provider manifest models: unknown fields must not break decoding and
+        // long numbers must stay readable without scientific notation.
+        let manifestJSON = """
+        {
+          "schema_version": 1,
+          "unknown_root": {"x": 1},
+          "providers": [{
+            "id": "workbuddy",
+            "display_name": "WorkBuddy",
+            "category": "credits",
+            "state": "connected",
+            "available": true,
+            "stale": false,
+            "sort_order": 20,
+            "capabilities": ["refresh", "reconnect"],
+            "unknown_provider_field": "ignored",
+            "metrics": [
+              {"key": "points", "label": "剩余积分", "value": 5343.37, "value_type": "number", "format": "decimal", "unit": "积分", "primary": true, "unknown_metric_field": true},
+              {"key": "used_today", "label": "今日使用", "value": "126", "value_type": "number", "format": "decimal", "unit": "积分", "primary": false},
+              {"key": "flag", "label": "Flag", "value": true, "value_type": "status", "format": "plain", "primary": false},
+              {"key": "missing", "label": "Missing", "value": null, "value_type": "number", "format": "decimal", "primary": false}
+            ],
+            "actions": [{"id": "reconnect", "label": "重连", "kind": "reconnect", "local_only": true}]
+          }]
+        }
+        """
+        let decoded = try JSONDecoder().decode(ProvidersResponse.self, from: Data(manifestJSON.utf8))
+        try require(decoded.providers.count == 1, "manifest provider count")
+        let provider = decoded.providers[0]
+        try require(provider.primaryMetrics.count == 1, "primary metric")
+        try require(provider.metrics[0].value == .number(5343.37), "numeric metric value")
+        let display = MetricFormatter.format(
+            value: provider.metrics[0].value,
+            valueType: provider.metrics[0].safeValueType,
+            format: provider.metrics[0].safeFormat,
+            unit: provider.metrics[0].unit
+        )
+        try require(display.number == "5,343.37", "long number formatting")
+        try require(display.unit == "积分", "metric unit")
+        let long = MetricFormatter.format(value: .number(999_999.99), valueType: "number", format: "decimal", unit: nil)
+        try require(long.number == "999,999.99", "max-length number formatting")
+        try require(MetricFormatter.format(value: .null, valueType: "number", format: "decimal", unit: nil).placeholder, "null placeholder")
+
         print("AICC Swift core smoke tests passed.")
     }
 }

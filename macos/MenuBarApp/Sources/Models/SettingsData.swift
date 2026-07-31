@@ -45,6 +45,21 @@ class AppSettings: ObservableObject {
 
     @AppStorage("debugMode") var debugMode = false
 
+    // Dynamic provider collection (schema v1). Legacy per-provider toggles
+    // are migrated once into these collections; no new per-provider switches
+    // are added.
+    @Published var providerOrder: [String] {
+        didSet {
+            UserDefaults.standard.set(encodeProviderList(providerOrder), forKey: "providerOrderData")
+        }
+    }
+
+    @Published var hiddenProviders: Set<String> {
+        didSet {
+            UserDefaults.standard.set(encodeProviderList(Array(hiddenProviders).sorted()), forKey: "hiddenProvidersData")
+        }
+    }
+
     var preferredColorScheme: ColorScheme? {
         switch themeMode {
         case "light": return .light
@@ -88,7 +103,71 @@ class AppSettings: ObservableObject {
         if storedInterval < 60 {
             UserDefaults.standard.set(120.0, forKey: "autoRefreshInterval")
         }
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: "providerOrderData") == nil {
+            // First run of the dynamic collection: migrate the legacy
+            // per-provider visibility toggles without losing user choices.
+            providerOrder = ProviderPreferences.defaultOrder
+            hiddenProviders = ProviderPreferences.hiddenAfterMigration(
+                showCodexStatus: defaults.bool(forKey: "menuBarShowCodexStatus"),
+                showWorkBuddy: defaults.bool(forKey: "menuBarShowWorkBuddy"),
+                showDeepSeek: defaults.bool(forKey: "menuBarShowDeepSeek")
+            )
+        } else {
+            providerOrder = Self.decodeProviderList(defaults.data(forKey: "providerOrderData"))
+                ?? ProviderPreferences.defaultOrder
+            hiddenProviders = Set(
+                Self.decodeProviderList(defaults.data(forKey: "hiddenProvidersData")) ?? []
+            )
+        }
     }
 
     static let shared = AppSettings()
+
+    // MARK: - Dynamic provider settings
+
+    func isProviderHidden(_ providerID: String) -> Bool {
+        hiddenProviders.contains(providerID)
+    }
+
+    func setProviderHidden(_ providerID: String, hidden: Bool) {
+        if hidden {
+            hiddenProviders.insert(providerID)
+        } else {
+            hiddenProviders.remove(providerID)
+        }
+    }
+
+    func moveProvider(_ providerID: String, direction: Int) {
+        guard let index = providerOrder.firstIndex(of: providerID) else {
+            // Unknown providers are appended; make the move relative to the
+            // known prefix when possible.
+            providerOrder.append(providerID)
+            return
+        }
+        let target = index + direction
+        guard target >= 0 && target < providerOrder.count else { return }
+        providerOrder.swapAt(index, target)
+    }
+
+    func resetProviderOrder() {
+        providerOrder = ProviderPreferences.defaultOrder
+    }
+
+    func appendUnknownProvider(_ providerID: String) {
+        if !providerOrder.contains(providerID) {
+            providerOrder.append(providerID)
+        }
+    }
+
+    private func encodeProviderList(_ items: [String]) -> Data {
+        (try? JSONEncoder().encode(items)) ?? Data()
+    }
+
+    private static func decodeProviderList(_ data: Data?) -> [String]? {
+        guard let data, let items = try? JSONDecoder().decode([String].self, from: data) else {
+            return nil
+        }
+        return items.isEmpty ? nil : items
+    }
 }

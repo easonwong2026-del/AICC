@@ -10,15 +10,24 @@ struct DeepSeekCard: View {
             icon: "brain.head.profile",
             value: formattedBalance,
             subtitle: consumptionText,
-            state: state
+            state: state,
+            unit: balanceUnit,
+            valueFontSize: DashboardTypography.primaryFontSize(number: formattedBalance, compact: true)
         )
     }
 
     private var formattedBalance: String {
-        guard let balances = data.balances, !balances.isEmpty else { return "--" }
+        guard let balances = data.balances, !balances.isEmpty else {
+            return settings.localized("Temporarily unavailable")
+        }
         let cny = balances.first(where: { $0.currency == "CNY" }) ?? balances[0]
         guard let total = Double(cny.total_balance ?? "") else { return "--" }
-        return String(format: "¥%.2f", total)
+        return String(format: "%.2f", total)
+    }
+
+    private var balanceUnit: String? {
+        guard let balances = data.balances, !balances.isEmpty else { return nil }
+        return (balances.first(where: { $0.currency == "CNY" }) ?? balances[0]).currency
     }
 
     private var consumptionText: String {

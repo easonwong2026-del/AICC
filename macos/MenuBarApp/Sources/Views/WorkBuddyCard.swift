@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct WorkBuddyCard: View {
+    @EnvironmentObject private var settings: AppSettings
     let data: WorkBuddyData
 
     var body: some View {
@@ -9,12 +10,16 @@ struct WorkBuddyCard: View {
             icon: "wand.and.stars",
             value: formattedPoints,
             subtitle: statusSubtitle,
-            state: state
+            state: state,
+            unit: data.points == nil ? nil : "积分",
+            valueFontSize: DashboardTypography.primaryFontSize(number: formattedPoints, compact: true)
         )
     }
 
     private var formattedPoints: String {
-        guard let points = data.points else { return "--" }
+        guard let points = data.points else {
+            return settings.localized("Temporarily unavailable")
+        }
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
         formatter.usesGroupingSeparator = true

@@ -5,6 +5,7 @@ class APIService: ObservableObject {
     static let shared = APIService()
 
     @Published var status: StatusResponse?
+    @Published var providers: ProvidersResponse?
     @Published var state: DataSourceState = .loading
     @Published var lastRefresh: Date?
     @Published var errorMessage: String?
@@ -52,6 +53,7 @@ class APIService: ObservableObject {
             lastRefresh = Date()
             state = .ready
             errorMessage = nil
+            await fetchProviders()
         } catch let decodingError as DecodingError {
             let detail = decodingError.failureReason ?? decodingError.localizedDescription
             state = .error(detail)
@@ -67,6 +69,63 @@ class APIService: ObservableObject {
         } catch {
             state = .error(error.localizedDescription)
             errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Fetch the dynamic provider manifests. Failure keeps the last known
+    /// list and never flips the overall connection state.
+    func fetchProviders() async {
+        guard let url = URL(string: "\(baseURL)/api/providers") else { return }
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return }
+            providers = try? JSONDecoder().decode(ProvidersResponse.self, from: data)
+        } catch {
+            providers = nil
+        }
+    }
+
+    /// Force-refresh one provider and then reload the whole snapshot.
+    func refreshProvider(id: String) async {
+        guard let url = URL(string: "\(baseURL)/api/providers/\(id)/refresh") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        do {
+            _ = try await session.data(for: request)
+        } catch {
+            return
+        }
+        await fetchStatus()
+    }
+
+    /// Execute a whitelisted provider action. Returns the response body for
+    /// display-only actions (diagnostics), otherwise nil after a reload.
+    func performProviderAction(providerId: String, actionId: String) async -> String? {
+        guard let url = URL(string: "\(baseURL)/api/providers/\(providerId)/actions/\(actionId)") else {
+            return nil
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return nil }
+            let body = String(data: data, encoding: .utf8)
+            guard http.statusCode == 200 else { return body }
+            if actionId == "diagnostics" {
+                if let payload = try? JSONSerialization.jsonObject(with: data),
+                   let pretty = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) {
+                    return String(data: pretty, encoding: .utf8)
+                }
+                return body
+            }
+            await fetchStatus()
+            return body
+        } catch {
+            return nil
         }
     }
 

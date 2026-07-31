@@ -94,39 +94,67 @@ private struct AIProvidersSettingsView: View {
     var body: some View {
         Form {
             Section("Providers") {
-                DataSourceRow(
-                    name: "OpenAI",
-                    status: openAIStatus,
-                    lastUpdate: "Account used by Codex",
-                    action: refresh
-                )
-                DataSourceRow(
-                    name: "Codex",
-                    status: codexStatus,
-                    lastUpdate: updateText(api.status?.collection?.codex),
-                    action: refresh
-                )
-                DataSourceRow(
-                    name: "WorkBuddy",
-                    status: workBuddyStatus,
-                    lastUpdate: workBuddyLastUpdate,
-                    action: refresh
-                )
-                DataSourceRow(
-                    name: "DeepSeek",
-                    status: deepSeekStatus,
-                    lastUpdate: updateText(api.status?.collection?.deepseek),
-                    action: refresh
-                )
+                if let providers = api.providers?.providers, !providers.isEmpty {
+                    ForEach(sortedProviders) { provider in
+                        DynamicProviderRow(provider: provider)
+                    }
+                    Button("Reset default order") {
+                        settings.resetProviderOrder()
+                    }
+                } else if case .ready = api.state {
+                    // Older server without /api/providers: keep the legacy rows.
+                    DataSourceRow(
+                        name: "OpenAI",
+                        status: openAIStatus,
+                        lastUpdate: "Account used by Codex",
+                        action: refresh
+                    )
+                    DataSourceRow(
+                        name: "Codex",
+                        status: codexStatus,
+                        lastUpdate: updateText(api.status?.collection?.codex),
+                        action: refresh
+                    )
+                    DataSourceRow(
+                        name: "WorkBuddy",
+                        status: workBuddyStatus,
+                        lastUpdate: workBuddyLastUpdate,
+                        action: refresh
+                    )
+                    DataSourceRow(
+                        name: "DeepSeek",
+                        status: deepSeekStatus,
+                        lastUpdate: updateText(api.status?.collection?.deepseek),
+                        action: refresh
+                    )
+                } else {
+                    Text("Loading providers…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section {
-                Text("Credentials are read from the existing local application, environment, or Keychain integrations. AICC does not display or store tokens here.")
+                Text("Providers are listed dynamically from the local manifest. Use the arrows to reorder, the switch to show or hide a provider, and the info button for diagnostics. Credentials are read from the existing local application, environment, or Keychain integrations; AICC never displays tokens.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
+        .onAppear {
+            if api.providers == nil {
+                Task { await api.fetchProviders() }
+            }
+        }
+    }
+
+    private var sortedProviders: [ProviderSummary] {
+        ProviderPreferences.ordered(
+            api.providers?.providers ?? [],
+            order: settings.providerOrder,
+            id: { $0.id },
+            manifestSortOrder: { $0.sortOrder }
+        )
     }
 
     private var openAIStatus: String {
@@ -169,6 +197,156 @@ private struct AIProvidersSettingsView: View {
 
     private func refresh() {
         Task { await api.fetchStatus(force: true) }
+    }
+}
+
+// MARK: - Dynamic provider row
+
+private struct DynamicProviderRow: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var api: APIService
+
+    let provider: ProviderSummary
+
+    @State private var diagnosticsText: String?
+    @State private var showingDiagnostics = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(spacing: 2) {
+                Button {
+                    settings.moveProvider(provider.id, direction: -1)
+                } label: {
+                    Image(systemName: "chevron.up")
+                        .font(.system(size: 9, weight: .semibold))
+                }
+                .buttonStyle(.borderless)
+                .disabled(isFirst)
+                Button {
+                    settings.moveProvider(provider.id, direction: 1)
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                }
+                .buttonStyle(.borderless)
+                .disabled(isLast)
+            }
+            .frame(width: 16)
+
+            Circle()
+                .fill(statusColor)
+                .frame(width: 7, height: 7)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(provider.displayName)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+                Text(statusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            Toggle("", isOn: visibilityBinding)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .scaleEffect(0.8)
+                .help(settings.isProviderHidden(provider.id)
+                      ? settings.localized("Show")
+                      : settings.localized("Hide"))
+
+            Button {
+                Task { await api.refreshProvider(id: provider.id) }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.borderless)
+            .help(settings.localized("Refresh"))
+            .disabled(!provider.capabilities.contains("refresh"))
+
+            Menu {
+                Button(settings.localized("Diagnostics")) {
+                    Task {
+                        let result = await api.performProviderAction(
+                            providerId: provider.id,
+                            actionId: "diagnostics"
+                        )
+                        diagnosticsText = result
+                        showingDiagnostics = result != nil
+                    }
+                }
+            } label: {
+                Image(systemName: "info.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 22, height: 22)
+            .help(settings.localized("Diagnostics"))
+            .disabled(!provider.capabilities.contains("diagnostics"))
+        }
+        .sheet(isPresented: $showingDiagnostics) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("\(provider.displayName) — Diagnostics")
+                        .font(.headline)
+                    Spacer()
+                    Button(settings.localized("Close")) { showingDiagnostics = false }
+                        .buttonStyle(.borderless)
+                }
+                ScrollView {
+                    Text(diagnosticsText ?? settings.localized("No data"))
+                        .font(.system(size: 11, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding(16)
+            .frame(width: 460, height: 340)
+        }
+    }
+
+    private var isFirst: Bool {
+        settings.providerOrder.first == provider.id
+    }
+
+    private var isLast: Bool {
+        settings.providerOrder.last == provider.id
+    }
+
+    private var visibilityBinding: Binding<Bool> {
+        Binding(
+            get: { !settings.isProviderHidden(provider.id) },
+            set: { visible in settings.setProviderHidden(provider.id, hidden: !visible) }
+        )
+    }
+
+    private var statusText: String {
+        let stateLabel: String
+        switch provider.state {
+        case "connected": stateLabel = settings.localized("Connected")
+        case "cached": stateLabel = settings.localized("Cached")
+        case "unavailable": stateLabel = settings.localized("Unavailable")
+        case "error": stateLabel = settings.localized("Error")
+        case "pending": stateLabel = settings.localized("Pending")
+        case "disabled": stateLabel = settings.localized("Disabled")
+        default: stateLabel = provider.state
+        }
+        if let updated = provider.updatedAt {
+            return "\(stateLabel) · \(updated)"
+        }
+        return stateLabel
+    }
+
+    private var statusColor: Color {
+        switch provider.state {
+        case "connected": return .green
+        case "cached": return .orange
+        case "error": return .red
+        case "pending": return .yellow
+        default: return .secondary
+        }
     }
 }
 
