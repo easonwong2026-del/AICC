@@ -78,7 +78,10 @@ ACCOUNT_EXPRESSION = r"""
   // WorkBuddy 5.3.x reads account usage through the in-process daemon RPC:
   // the renderer opens a MessageChannel, the preload forwards it to the main
   // process, and the daemon replies with {kind:'open', sessionId}. Requests
-  // are {id, type:'request', channel:'__backend__', args:[backendMessage]}.
+  // are {id, type:'request', channel:'auth:getAccountUsage', args:[]} — the
+  // in-process daemon registers auth handlers under their RPC channel names
+  // (registry.handle('auth:getAccountUsage')). The IDE-only "__backend__"
+  // channel is not registered in the desktop daemon.
   // Reusing that channel keeps the request inside WorkBuddy's own session and
   // never exposes authentication material to AICC.
   const readUsageViaDaemon = () => new Promise((resolve) => {
@@ -113,14 +116,9 @@ ACCOUNT_EXPRESSION = r"""
         if (payload.kind === 'open') {
           sessionId = payload.sessionId;
           const requestId = 'aicc-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
-          const backendMessage = {
-            type: 'backend',
-            requestId,
-            params: { type: 'backend:get-account-usage', params: undefined }
-          };
           port.postMessage({
             kind: 'message',
-            json: { id: requestId, type: 'request', channel: '__backend__', args: [backendMessage] }
+            json: { id: requestId, type: 'request', channel: 'auth:getAccountUsage', args: [] }
           });
           return;
         }
