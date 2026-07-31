@@ -20,7 +20,6 @@ let package = Package(
                 "AICCApp.swift",
                 "Helpers",
                 "Models/SettingsData.swift",
-                "Services/APIService.swift",
                 "Services/CacheManager.swift",
                 "Services/LaunchAtLoginService.swift",
                 "Services/OpenCodexController.swift",
@@ -30,6 +29,8 @@ let package = Package(
             ],
             sources: [
                 "Models/StatusData.swift",
+                "Models/ProviderModels.swift",
+                "Services/APIService.swift",
                 "Services/ProcessRunner.swift",
             ]
         ),
@@ -43,6 +44,8 @@ let package = Package(
                 "OCXCommandBuilderTests.swift",
                 "OCXOperationPolicyTests.swift",
                 "ProcessRunnerTests.swift",
+                "ProviderModelsTests.swift",
+                "APIServiceTests.swift",
             ]
         ),
     ]

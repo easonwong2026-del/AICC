@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Callable
 
 from providers.base import CacheStore, Provider
 from providers.codex import CodexProvider
 from providers.deepseek import DeepSeekProvider
+from providers.example import ExampleProvider
 from providers.system import SystemProvider
 from providers.workbuddy import WorkBuddyProvider
 
@@ -35,7 +37,7 @@ def build_provider_registry(
     fallback_loader: Callable[[], dict[str, Any]],
 ) -> ProviderRegistry:
     cache = CacheStore(data_root)
-    return ProviderRegistry({
+    providers: dict[str, Provider] = {
         "codex": CodexProvider(cache, fallback.get("codex", {})),
         "deepseek": DeepSeekProvider(cache),
         "workbuddy": WorkBuddyProvider(
@@ -44,4 +46,7 @@ def build_provider_registry(
             fallback.get("workbuddy", {}),
         ),
         "system": SystemProvider(cache),
-    })
+    }
+    if os.environ.get("AICC_DEV_PROVIDERS") == "1":
+        providers["example"] = ExampleProvider(cache)
+    return ProviderRegistry(providers)

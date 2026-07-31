@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.5.0 - 2026-07-31
+
+- **动态 Provider 架构（P1）**：新增 Provider Manifest v1 规范化层，所有采集器只负责原始数据，展示层只消费 Manifest；`GET /api/providers`、`GET /api/providers/<id>`、`POST /api/providers/<id>/refresh`、`POST /api/providers/<id>/actions/<kind>` 四个新端点；Action 由后端白名单映射（refresh / reconnect / diagnostics），Manifest 永远不能下发 endpoint、shell 命令、脚本路径或远程 URL
+- **安全边界**：Provider ID 严格校验 `[a-z0-9][a-z0-9_-]{0,63}`；Manifest 剥离 Token、Cookie、API Key、WorkBuddy 原始账户对象和 `balance_diagnostic` 内部对象；错误信息截断脱敏；写操作仅限 localhost
+- **WorkBuddy 2.4.4 链路冻结**：`127.0.0.1:9223` bridge、主 renderer 选择、DevTools/tdoc/MCP 排除、MessageChannel daemon transport、`auth:getAccountUsage`、`usageLeft/usageTotal/usageUsed/refreshAt`、120 秒自动更新、`force=true`、自动恢复、失败缓存全部保持不变；仅在原始结果外层增加 Manifest Adapter，并新增通道回归测试
+- **额度字体与信息层级修复**：Codex Weekly 主数字放大至 30–38pt（进度条加粗、5 Hour 降为次级）；WorkBuddy 积分与 DeepSeek 余额主数字放大至 28–36pt 并与单位分层；新增统一 `DashboardTypography` 设计 Token，主数字按长度自适应且不会退化到小号正文
+- **macOS 动态卡片**：新增通用 `ProviderCard`/`ProviderMetricView`/`ProviderStateBadge`/`ProviderActionMenu`，由 Manifest 数组驱动；新增内置 Provider 不再需要专属 Swift 模型、卡片或设置开关
+- **设置迁移**：旧 `menuBarShowWorkBuddy`/`menuBarShowDeepSeek` 等开关自动迁移为 `provider_order` + `hidden_providers` 动态集合；设置页支持动态排序、显示/隐藏、单独刷新、诊断与恢复默认顺序
+- **示例 Provider**：开发模式（`AICC_DEV_PROVIDERS=1`）内置示例额度 Provider，通过插件式 `manifest()` 接口自动出现在 API、设置页和动态卡片，默认不污染正式界面
+- **Android/Poke4S 兼容**：`/api/status` 原字段完全保留，现有 APK 继续正常工作；动态化方案见 `docs/provider-architecture.md`
+- **版本统一 2.5.0**：VERSION、PACKAGE.json、Info.plist（CFBundleShortVersionString、CFBundleVersion）同步更新
+
 ## 2.4.4 - 2026-07-31
 
 - **真实环境根因确认**：WorkBuddy 5.3.5 的账户菜单实际显示 `5,343.37`，但安装版 2.4.3 的 9223 CDP bridge 未监听，AICC 因而落回旧 `Manual balance`；本机 CodeBuddy CLI 是编码代理 CLI，不提供账户积分读取接口
