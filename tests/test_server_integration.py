@@ -79,6 +79,31 @@ class ServerIntegrationTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
         self.assertTrue(server._collector_manager.snapshots[-1]["force"])
 
+    def test_workbuddy_reconnect_uses_bundled_script(self):
+        request = Request(self.base + "/api/workbuddy/reconnect", method="POST")
+        with patch("server.subprocess.Popen") as popen:
+            with urlopen(request, timeout=2) as response:
+                self.assertEqual(response.status, 202)
+                self.assertEqual(json.load(response)["state"], "reconnecting")
+        self.assertIn("--ensure", popen.call_args.args[0])
+        self.assertIn("start-workbuddy-monitored.sh", popen.call_args.args[0][1])
+        self.assertIn("workbuddy", server._collector_manager.invalidated)
+
+    def test_unavailable_workbuddy_snapshot_clears_old_manual_points(self):
+        server.save_status({"workbuddy": {"points": 8520, "used_points": 1480}})
+        server._collector_manager = type(
+            "UnavailableManager",
+            (),
+            {
+                "snapshot": lambda _self, **_kwargs: (
+                    {"workbuddy": {"points": None, "balance_state": "Unavailable"}},
+                    {},
+                )
+            },
+        )()
+        result = server.load_status(force=True)
+        self.assertIsNone(result["workbuddy"]["points"])
+
     def test_local_post_is_validated_and_saved(self):
         body = json.dumps({"workbuddy": {"points": 45, "used_points": 3, "reset_text": "ok"}}).encode()
         request = Request(self.base + "/api/status", data=body, headers={"Content-Type": "application/json"}, method="POST")
