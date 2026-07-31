@@ -281,6 +281,43 @@ def _periodic_save(interval: int = 120) -> None:
                 print(f"Periodic status save failed: {type(error).__name__}: {error}")
 
 
+def _workbuddy_monitor_loop(interval: int = 60) -> None:
+    """Auto-heal the WorkBuddy debugging bridge once per WorkBuddy process.
+
+    This restores the 2.3.x monitor behavior (previously a LaunchAgent) without
+    needing a LaunchAgent or Automation permission: when WorkBuddy is running
+    without the localhost bridge, the monitor restarts it once with the
+    debugging flag. WorkBuddy is never launched when it is not running.
+    """
+    while True:
+        time.sleep(interval)
+        if os.environ.get("WORKBUDDY_AUTO_HEAL", "1") != "1":
+            continue
+        _run_workbuddy_monitor_once()
+
+
+def _run_workbuddy_monitor_once() -> bool:
+    script = ROOT / "macos" / "start-workbuddy-monitored.sh"
+    if not script.is_file():
+        return False
+    try:
+        completed = subprocess.run(
+            ["/bin/bash", str(script), "--monitor"],
+            capture_output=True,
+            text=True,
+            timeout=55,
+        )
+        if completed.returncode == 0 and "auto-healed" in completed.stdout:
+            collector_manager().invalidate("workbuddy")
+            collector_manager().snapshot(force=True, wait_seconds=0)
+            print("WorkBuddy bridge auto-healed; collector refreshed.")
+            return True
+    except Exception as error:
+        if os.environ.get("EINK_ACCESS_LOG") == "1":
+            print(f"WorkBuddy monitor failed: {type(error).__name__}: {error}")
+    return False
+
+
 def _cache_health() -> dict:
     try:
         location = DATA_PATH if DATA_PATH.exists() else DATA_ROOT
@@ -349,6 +386,7 @@ def main() -> None:
     start_discovery(port)
     collector_manager().snapshot(force=True, wait_seconds=0)
     threading.Thread(target=_periodic_save, args=(120,), daemon=True).start()
+    threading.Thread(target=_workbuddy_monitor_loop, args=(60,), daemon=True).start()
     print(f"AICC Dashboard: http://localhost:{port}")
     try:
         server.serve_forever()
