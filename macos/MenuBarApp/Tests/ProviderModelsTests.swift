@@ -242,6 +242,102 @@ final class ProviderModelsTests: XCTestCase {
         XCTAssertEqual(hidden, ["workbuddy"])
     }
 
+    // MARK: - Legacy visibility migration (0.1)
+
+    private func makeDefaults() throws -> UserDefaults {
+        let name = "AICCMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defaults.removePersistentDomain(forName: name)
+        addTeardownBlock { [weak defaults] in
+            defaults?.removePersistentDomain(forName: name)
+        }
+        return defaults
+    }
+
+    func testMissingLegacyKeysNeverHideProvidersOnFreshInstall() throws {
+        let defaults = try makeDefaults()
+        XCTAssertTrue(ProviderPreferences.needsLegacyVisibilityMigration(defaults: defaults))
+        let hidden = ProviderPreferences.hiddenAfterMigration(
+            showCodexStatus: nil,
+            showWorkBuddy: nil,
+            showDeepSeek: nil
+        )
+        XCTAssertTrue(hidden.isEmpty)
+        // The safe reader treats a missing key as the legacy default (true),
+        // so a fresh install keeps every provider visible.
+        XCTAssertTrue(ProviderPreferences.storedBool("menuBarShowCodexStatus", defaults: defaults, default: true))
+        XCTAssertTrue(ProviderPreferences.storedBool("menuBarShowWorkBuddy", defaults: defaults, default: true))
+        XCTAssertTrue(ProviderPreferences.storedBool("menuBarShowDeepSeek", defaults: defaults, default: true))
+    }
+
+    func testExplicitFalseHidesOnlyThatProvider() throws {
+        let defaults = try makeDefaults()
+        defaults.set(false, forKey: "menuBarShowWorkBuddy")
+        let hidden = ProviderPreferences.hiddenAfterMigration(
+            showCodexStatus: ProviderPreferences.storedBool("menuBarShowCodexStatus", defaults: defaults, default: true),
+            showWorkBuddy: ProviderPreferences.storedBool("menuBarShowWorkBuddy", defaults: defaults, default: true),
+            showDeepSeek: ProviderPreferences.storedBool("menuBarShowDeepSeek", defaults: defaults, default: true)
+        )
+        XCTAssertEqual(hidden, ["workbuddy"])
+    }
+
+    func testDynamicSettingsExistingSkipsMigration() throws {
+        let defaults = try makeDefaults()
+        XCTAssertTrue(ProviderPreferences.needsLegacyVisibilityMigration(defaults: defaults))
+        defaults.set(ProviderPreferences.encodeProviderList(["codex"]), forKey: "providerOrderData")
+        XCTAssertFalse(ProviderPreferences.needsLegacyVisibilityMigration(defaults: defaults))
+    }
+
+    func testMigrationResultSurvivesRestart() throws {
+        let defaults = try makeDefaults()
+        // Simulate the AppSettings first-run migration path.
+        defaults.set(false, forKey: "menuBarShowWorkBuddy")
+        let hidden = ProviderPreferences.hiddenAfterMigration(
+            showCodexStatus: ProviderPreferences.storedBool("menuBarShowCodexStatus", defaults: defaults, default: true),
+            showWorkBuddy: ProviderPreferences.storedBool("menuBarShowWorkBuddy", defaults: defaults, default: true),
+            showDeepSeek: ProviderPreferences.storedBool("menuBarShowDeepSeek", defaults: defaults, default: true)
+        )
+        defaults.set(ProviderPreferences.encodeProviderList(["codex", "workbuddy", "deepseek", "system"]), forKey: "providerOrderData")
+        defaults.set(ProviderPreferences.encodeProviderList(Array(hidden).sorted()), forKey: "hiddenProvidersData")
+
+        // Restart: the migration gate is closed and the stored hidden set is
+        // decoded back unchanged.
+        XCTAssertFalse(ProviderPreferences.needsLegacyVisibilityMigration(defaults: defaults))
+        let decodedHidden = Set(ProviderPreferences.decodeProviderList(defaults.data(forKey: "hiddenProvidersData")) ?? [])
+        XCTAssertEqual(decodedHidden, ["workbuddy"])
+        let decodedOrder = ProviderPreferences.decodeProviderList(defaults.data(forKey: "providerOrderData"))
+        XCTAssertEqual(decodedOrder, ["codex", "workbuddy", "deepseek", "system"])
+    }
+
+    // MARK: - Action routing (0.2)
+
+    func testActionRouteUsesKindNeverDisplayID() throws {
+        let response = try decode("""
+        {
+          "schema_version": 1,
+          "providers": [{
+            "id": "workbuddy",
+            "display_name": "WorkBuddy",
+            "state": "connected",
+            "available": true,
+            "metrics": [],
+            "actions": [
+              {"id": "reconnect_workbuddy", "label": "Reconnect", "kind": "reconnect", "local_only": true}
+            ]
+          }]
+        }
+        """)
+        let action = try XCTUnwrap(response.providers.first?.actions.first)
+        XCTAssertEqual(action.actionID, "reconnect_workbuddy")
+        XCTAssertEqual(action.kind, "reconnect")
+        let route = ProviderAPI.actionPath(providerID: "workbuddy", kind: action.kind)
+        XCTAssertEqual(route, "/api/providers/workbuddy/actions/reconnect")
+        XCTAssertNotEqual(route, "/api/providers/workbuddy/actions/reconnect_workbuddy")
+        XCTAssertEqual(ProviderAPI.refreshPath(providerID: "workbuddy"), "/api/providers/workbuddy/refresh")
+        XCTAssertNil(ProviderAPI.actionPath(providerID: "workbuddy", kind: ""))
+        XCTAssertNil(ProviderAPI.actionPath(providerID: "", kind: "reconnect"))
+    }
+
     func testProviderOrderingPutsUnknownProvidersLast() {
         struct Stub { let id: String; let sort: Int }
         let providers = [

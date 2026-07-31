@@ -50,13 +50,19 @@ class AppSettings: ObservableObject {
     // are added.
     @Published var providerOrder: [String] {
         didSet {
-            UserDefaults.standard.set(encodeProviderList(providerOrder), forKey: "providerOrderData")
+            UserDefaults.standard.set(
+                ProviderPreferences.encodeProviderList(providerOrder),
+                forKey: "providerOrderData"
+            )
         }
     }
 
     @Published var hiddenProviders: Set<String> {
         didSet {
-            UserDefaults.standard.set(encodeProviderList(Array(hiddenProviders).sorted()), forKey: "hiddenProvidersData")
+            UserDefaults.standard.set(
+                ProviderPreferences.encodeProviderList(Array(hiddenProviders).sorted()),
+                forKey: "hiddenProvidersData"
+            )
         }
     }
 
@@ -104,20 +110,26 @@ class AppSettings: ObservableObject {
             UserDefaults.standard.set(120.0, forKey: "autoRefreshInterval")
         }
         let defaults = UserDefaults.standard
-        if defaults.object(forKey: "providerOrderData") == nil {
+        if ProviderPreferences.needsLegacyVisibilityMigration(defaults: defaults) {
             // First run of the dynamic collection: migrate the legacy
             // per-provider visibility toggles without losing user choices.
             providerOrder = ProviderPreferences.defaultOrder
             hiddenProviders = ProviderPreferences.hiddenAfterMigration(
-                showCodexStatus: defaults.bool(forKey: "menuBarShowCodexStatus"),
-                showWorkBuddy: defaults.bool(forKey: "menuBarShowWorkBuddy"),
-                showDeepSeek: defaults.bool(forKey: "menuBarShowDeepSeek")
+                showCodexStatus: ProviderPreferences.storedBool(
+                    "menuBarShowCodexStatus", defaults: defaults, default: true
+                ),
+                showWorkBuddy: ProviderPreferences.storedBool(
+                    "menuBarShowWorkBuddy", defaults: defaults, default: true
+                ),
+                showDeepSeek: ProviderPreferences.storedBool(
+                    "menuBarShowDeepSeek", defaults: defaults, default: true
+                )
             )
         } else {
-            providerOrder = Self.decodeProviderList(defaults.data(forKey: "providerOrderData"))
+            providerOrder = ProviderPreferences.decodeProviderList(defaults.data(forKey: "providerOrderData"))
                 ?? ProviderPreferences.defaultOrder
             hiddenProviders = Set(
-                Self.decodeProviderList(defaults.data(forKey: "hiddenProvidersData")) ?? []
+                ProviderPreferences.decodeProviderList(defaults.data(forKey: "hiddenProvidersData")) ?? []
             )
         }
     }
@@ -158,16 +170,5 @@ class AppSettings: ObservableObject {
         if !providerOrder.contains(providerID) {
             providerOrder.append(providerID)
         }
-    }
-
-    private func encodeProviderList(_ items: [String]) -> Data {
-        (try? JSONEncoder().encode(items)) ?? Data()
-    }
-
-    private static func decodeProviderList(_ data: Data?) -> [String]? {
-        guard let data, let items = try? JSONDecoder().decode([String].self, from: data) else {
-            return nil
-        }
-        return items.isEmpty ? nil : items
     }
 }

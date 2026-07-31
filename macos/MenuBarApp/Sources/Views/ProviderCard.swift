@@ -115,14 +115,14 @@ struct ProviderCard: View {
                         if action.kind == "diagnostics" {
                             let result = await api.performProviderAction(
                                 providerId: provider.id,
-                                actionId: action.actionID
+                                kind: action.kind
                             )
                             diagnosticsText = result
                             showingDiagnostics = result != nil
                         } else {
                             _ = await api.performProviderAction(
                                 providerId: provider.id,
-                                actionId: action.actionID
+                                kind: action.kind
                             )
                         }
                     }

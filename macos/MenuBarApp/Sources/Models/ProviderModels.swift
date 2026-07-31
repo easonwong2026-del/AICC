@@ -187,6 +187,8 @@ struct ProviderAction: Decodable, Identifiable, Equatable {
     let kind: String
     let localOnly: Bool
 
+    /// `id` is only a client-side list identity. Server routing uses `kind`
+    /// exclusively: `POST /api/providers/<id>/actions/<kind>`.
     var id: String { actionID }
 
     init(from decoder: Decoder) throws {
@@ -202,6 +204,22 @@ struct ProviderAction: Decodable, Identifiable, Equatable {
         case label
         case kind
         case localOnly = "local_only"
+    }
+}
+
+// MARK: - Provider API routing
+
+/// Pure route builders shared by APIService and tests. The server routes
+/// actions by their whitelisted `kind`, never by the display `id`.
+enum ProviderAPI {
+    static func refreshPath(providerID: String) -> String? {
+        guard !providerID.isEmpty else { return nil }
+        return "/api/providers/\(providerID)/refresh"
+    }
+
+    static func actionPath(providerID: String, kind: String) -> String? {
+        guard !providerID.isEmpty, !kind.isEmpty else { return nil }
+        return "/api/providers/\(providerID)/actions/\(kind)"
     }
 }
 
@@ -383,17 +401,54 @@ enum DashboardTypography {
 enum ProviderPreferences {
     static let defaultOrder = ["codex", "workbuddy", "deepseek", "system"]
 
+    /// Read a legacy boolean preference while distinguishing "key missing"
+    /// from "key explicitly false". Missing keys fall back to `defaultValue`
+    /// so fresh installs never hide providers they never opted out of.
+    static func storedBool(
+        _ key: String,
+        defaults: UserDefaults,
+        default defaultValue: Bool
+    ) -> Bool {
+        guard defaults.object(forKey: key) != nil else {
+            return defaultValue
+        }
+        return defaults.bool(forKey: key)
+    }
+
+    /// True when the dynamic provider collection has not been initialized
+    /// yet and the legacy per-provider toggles still need one migration.
+    static func needsLegacyVisibilityMigration(defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: "providerOrderData") == nil
+    }
+
+    /// Serialize the provider list for `UserDefaults`.
+    static func encodeProviderList(_ items: [String]) -> Data {
+        (try? JSONEncoder().encode(items)) ?? Data()
+    }
+
+    /// Deserialize a provider list stored by `encodeProviderList`.
+    static func decodeProviderList(_ data: Data?) -> [String]? {
+        guard let data, let items = try? JSONDecoder().decode([String].self, from: data) else {
+            return nil
+        }
+        return items.isEmpty ? nil : items
+    }
+
     /// Migrate the legacy per-provider visibility toggles into the dynamic
     /// hidden-provider collection exactly once.
+    ///
+    /// A `nil` value means the legacy key does not exist at all — the
+    /// provider was never explicitly hidden, so it stays visible. Only an
+    /// explicit `false` hides a provider.
     static func hiddenAfterMigration(
-        showCodexStatus: Bool,
-        showWorkBuddy: Bool,
-        showDeepSeek: Bool
+        showCodexStatus: Bool?,
+        showWorkBuddy: Bool?,
+        showDeepSeek: Bool?
     ) -> Set<String> {
         var hidden = Set<String>()
-        if !showCodexStatus { hidden.insert("codex") }
-        if !showWorkBuddy { hidden.insert("workbuddy") }
-        if !showDeepSeek { hidden.insert("deepseek") }
+        if showCodexStatus == false { hidden.insert("codex") }
+        if showWorkBuddy == false { hidden.insert("workbuddy") }
+        if showDeepSeek == false { hidden.insert("deepseek") }
         return hidden
     }
 

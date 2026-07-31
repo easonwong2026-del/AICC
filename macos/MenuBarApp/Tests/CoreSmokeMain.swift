@@ -84,6 +84,15 @@ struct CoreSmokeMain {
         let provider = decoded.providers[0]
         try require(provider.primaryMetrics.count == 1, "primary metric")
         try require(provider.metrics[0].value == .number(5343.37), "numeric metric value")
+        try require(
+            ProviderAPI.actionPath(providerID: "workbuddy", kind: "reconnect")
+                == "/api/providers/workbuddy/actions/reconnect",
+            "action routes use kind"
+        )
+        try require(
+            ProviderAPI.refreshPath(providerID: "codex") == "/api/providers/codex/refresh",
+            "provider refresh route"
+        )
         let display = MetricFormatter.format(
             value: provider.metrics[0].value,
             valueType: provider.metrics[0].safeValueType,

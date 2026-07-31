@@ -271,7 +271,7 @@ private struct DynamicProviderRow: View {
                     Task {
                         let result = await api.performProviderAction(
                             providerId: provider.id,
-                            actionId: "diagnostics"
+                            kind: "diagnostics"
                         )
                         diagnosticsText = result
                         showingDiagnostics = result != nil
