@@ -30,7 +30,12 @@ SERVER_STARTED_AT = time.time()
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 DEFAULT_STATUS = {
     "codex": {"five_hour": {"remaining": 83, "reset": "14:27"}, "weekly": {"remaining": 97, "reset": "7月17日"}, "source": "Manual"},
-    "workbuddy": {"points": 8520, "used_points": 1480, "reset_text": "Update from WorkBuddy"},
+    "workbuddy": {
+        "points": None,
+        "balance_state": "Unavailable",
+        "balance_stale": True,
+        "usage_source": "WorkBuddy unavailable",
+    },
 }
 DISCOVERY_MAGIC = b"AI_EINK_DISCOVER"
 _collector_manager: CollectorManager | None = None
