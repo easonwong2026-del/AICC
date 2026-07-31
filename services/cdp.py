@@ -64,13 +64,55 @@ def _target_localhost(port: int, timeout: float) -> dict:
     except (OSError, ValueError) as error:
         raise CdpError("WorkBuddy monitoring bridge is not running") from error
 
-    pages = [target for target in targets if target.get("type") == "page" and target.get("webSocketDebuggerUrl")]
+    pages = [
+        target for target in targets
+        if target.get("type") == "page" and target.get("webSocketDebuggerUrl")
+    ]
     if not pages:
         raise CdpError("WorkBuddy page is not available")
-    return next(
-        (page for page in pages if "workbuddy" in (page.get("title", "") + page.get("url", "")).lower()),
-        pages[0],
-    )
+    selected = _rank_targets(pages)
+    if selected is None:
+        raise CdpError("WorkBuddy renderer page was not found")
+    return selected
+
+
+def _rank_targets(pages: list[dict]) -> dict | None:
+    """Choose the WorkBuddy main renderer instead of an embedded webview.
+
+    Electron exposes every WebContents (docs webviews, MCP apps, devtools) on
+    the debugging bridge.  The balance API lives in the main renderer whose
+    preload exposes ``globalThis.workbuddyDesktop``, so we must not attach to
+    the first arbitrary page target.
+    """
+
+    def excluded(page: dict) -> bool:
+        value = (page.get("url", "") + " " + page.get("title", "")).lower()
+        return any(
+            token in value
+            for token in (
+                "devtools://",
+                "chrome-extension://",
+                "about:blank",
+                "tdoc-import",
+                "tdoc-preview",
+                "mcp-app",
+                "webview",
+            )
+        )
+
+    candidates = [page for page in pages if not excluded(page)]
+    if not candidates:
+        candidates = pages
+
+    def score(page: dict) -> int:
+        value = (page.get("url", "") + " " + page.get("title", "")).lower()
+        if "renderer/index.html" in value or value.endswith("/index.html"):
+            return 3
+        if "workbuddy" in value or "codebuddy" in value:
+            return 2
+        return 1
+
+    return max(candidates, key=score) if candidates else None
 
 
 class _WebSocket:
