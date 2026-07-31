@@ -161,15 +161,35 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     HTTPStatus.NOT_IMPLEMENTED,
                 )
                 return
-            subprocess.Popen(
-                ["/bin/bash", str(script), "--ensure"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            try:
+                completed = subprocess.run(
+                    ["/bin/bash", str(script), "--ensure"],
+                    capture_output=True,
+                    text=True,
+                    timeout=50,
+                )
+            except subprocess.TimeoutExpired:
+                collector_manager().invalidate("workbuddy")
+                self.send_json(
+                    {"ok": False, "state": "failed", "error_code": "timeout", "error": "WorkBuddy reconnect timed out"},
+                    HTTPStatus.BAD_GATEWAY,
+                )
+                return
             collector_manager().invalidate("workbuddy")
-            self.send_json({"ok": True, "state": "reconnecting"}, HTTPStatus.ACCEPTED)
+            if completed.returncode == 0:
+                self.send_json({"ok": True, "state": "bridge_ready"})
+                return
+            error_code = "unknown"
+            for line in reversed((completed.stderr or "").splitlines()):
+                if line.startswith("AICC_WORKBUDDY_FAIL:"):
+                    error_code = line.split(":", 1)[1].strip()
+                    break
+            detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+            message = detail[-1] if detail else "WorkBuddy reconnect failed"
+            self.send_json(
+                {"ok": False, "state": "failed", "error_code": error_code, "error": message},
+                HTTPStatus.BAD_GATEWAY,
+            )
             return
         if path == "/api/refresh":
             self.send_json(load_status(force=True))
