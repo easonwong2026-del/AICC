@@ -4,6 +4,7 @@ set -euo pipefail
 APP="${WORKBUDDY_APP:-/Applications/WorkBuddy.app}"
 DEBUG_PORT="${WORKBUDDY_DEBUG_PORT:-9223}"
 ENSURE_MODE="${1:-}"
+STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ai-eink-dashboard"
 
 if [[ ! -d "$APP" ]]; then
   echo "WorkBuddy.app was not found. Set WORKBUDDY_APP to its full path." >&2
@@ -68,6 +69,7 @@ launch_with_bridge() {
 }
 
 if port_ready; then
+  rm -f "$STATE_DIR"/workbuddy-bridge-* 2>/dev/null || true
   [[ "$ENSURE_MODE" == "--ensure" ]] && echo "WorkBuddy monitoring bridge is already available on 127.0.0.1:$DEBUG_PORT."
   exit 0
 fi
@@ -85,8 +87,36 @@ if [[ "$ENSURE_MODE" != "--ensure" && "$ENSURE_MODE" != "--monitor" ]] && app_ru
 fi
 
 if [[ "$ENSURE_MODE" == "--monitor" ]]; then
-  # WorkBuddy is running but the bridge is not available. Never restart the
-  # app from the passive monitor; only the explicit user action may do that.
+  # WorkBuddy is running but the bridge is not available. Heal it once per
+  # WorkBuddy process (matching the original 2.3.x monitor behavior): restart
+  # with the debugging flag so AICC can read the balance again. The marker is
+  # keyed by PID, so a WorkBuddy started later without the flag is healed once
+  # again instead of being restarted in a loop.
+  pid="$(pgrep -f "^$EXECUTABLE" | head -1 || true)"
+  if [[ -z "$pid" ]]; then
+    exit 0
+  fi
+  mkdir -p "$STATE_DIR"
+  marker="$STATE_DIR/workbuddy-bridge-$pid"
+  if [[ -f "$marker" ]]; then
+    exit 0
+  fi
+  if app_running; then
+    stop_app || { touch "$marker"; exit 1; }
+  fi
+  launch_with_bridge || { touch "$marker"; exit 1; }
+  for _ in {1..30}; do
+    if port_ready; then
+      if renderer_ready; then
+        touch "$marker"
+        echo "WorkBuddy bridge auto-healed."
+        exit 0
+      fi
+    fi
+    sleep 1
+  done
+  touch "$marker"
+  echo "AICC_WORKBUDDY_FAIL:monitor" >&2
   exit 0
 fi
 
