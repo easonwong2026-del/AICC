@@ -28,7 +28,7 @@ class CodexProvider:
             "state": value.get("state", "pending"),
         }
 
-    def refresh(self) -> dict[str, Any]:
+    def refresh(self, force: bool = False) -> dict[str, Any]:
         value = monitor.status()
         self._status = value.copy()
         return value

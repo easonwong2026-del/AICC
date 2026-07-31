@@ -28,7 +28,7 @@ class SystemProvider:
             "state": value.get("status", "pending"),
         }
 
-    def refresh(self) -> dict[str, Any]:
+    def refresh(self, force: bool = False) -> dict[str, Any]:
         value = collect()
         self._status = value.copy()
         return value

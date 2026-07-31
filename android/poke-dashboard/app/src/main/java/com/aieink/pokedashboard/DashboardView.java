@@ -112,11 +112,24 @@ final class DashboardView extends View {
     private void drawWorkBuddy(Canvas canvas) {
         outlinedRect(canvas, 34, 429, 326, 286, 2);
         text(canvas, "WORKBUDDY", 49, 480, 26, INK, true, Paint.Align.LEFT);
-        textFitRight(canvas, data.workBuddyStale ? "CACHED" : data.workBuddyState, 343, 480, 142, 13);
+        textFitRight(canvas, workBuddyStatus(), 343, 480, 142, 13);
         filledRect(canvas, 49, 503, 295, 2, INK);
         textFit(canvas, data.workBuddyPoints, 85, 599, 236, 46, true);
         text(canvas, "PTS", 321, 675, 18, INK, true, Paint.Align.RIGHT);
         textFit(canvas, "今日使用  " + data.workBuddyUsed, 81, 675, 183, 20, false);
+    }
+
+    private String workBuddyStatus() {
+        String state = data.workBuddyStale ? "CACHED" : data.workBuddyState;
+        if (!data.workBuddyStale || data.workBuddyAgeSeconds == null) return state;
+        return state + " " + compactAge(data.workBuddyAgeSeconds);
+    }
+
+    private String compactAge(long seconds) {
+        if (seconds < 60) return seconds + "s";
+        if (seconds < 3600) return (seconds / 60) + "m";
+        if (seconds < 86400) return (seconds / 3600) + "h";
+        return (seconds / 86400) + "d";
     }
 
     private void drawDeepSeek(Canvas canvas) {

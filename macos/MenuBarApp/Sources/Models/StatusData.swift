@@ -34,6 +34,10 @@ struct WorkBuddyData: Codable {
     let total_points: Double?
     let reset_text: String?
     let balance_state: String?
+    let balance_stale: Bool?
+    let balance_updated_at: String?
+    let balance_updated_epoch: Double?
+    let balance_age_seconds: Int?
     let auto_used_credits: Double?
     let usage_records: Int?
     let usage_source: String?

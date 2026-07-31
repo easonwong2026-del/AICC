@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 from datetime import datetime
@@ -10,18 +11,31 @@ from pathlib import Path
 from providers.base import CacheStore, CallableProvider, Provider, DEFAULT_PROVIDER_TIMEOUT
 
 
+def _accepts_force(collector) -> bool:
+    """Keep older third-party providers working while forwarding force when supported."""
+    try:
+        parameters = inspect.signature(collector).parameters.values()
+    except (TypeError, ValueError):
+        return True
+    return any(
+        parameter.name == "force" or parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
 class CollectorSlot:
     """Small mutable record without the import cost of dataclasses."""
 
     __slots__ = (
         "provider", "collect", "interval", "timeout", "value", "running", "worker_alive",
         "started_monotonic", "generation", "last_attempt", "last_success", "error",
-        "timed_out", "duration_ms", "consecutive_failures",
+        "timed_out", "duration_ms", "consecutive_failures", "accepts_force",
     )
 
     def __init__(self, provider: Provider) -> None:
         self.provider = provider
         self.collect = provider.refresh
+        self.accepts_force = _accepts_force(self.collect)
         self.interval = max(30, provider.interval)
         self.timeout = max(1.0, float(getattr(provider, "timeout", DEFAULT_PROVIDER_TIMEOUT)))
         self.value = provider.status()
@@ -77,7 +91,7 @@ class CollectorManager:
                     started.add(name)
                     threading.Thread(
                         target=self._run,
-                        args=(name, slot, generation),
+                        args=(name, slot, generation, force),
                         name=f"collect-{name}",
                         daemon=True,
                     ).start()
@@ -97,10 +111,10 @@ class CollectorManager:
                 if name in self._slots:
                     self._slots[name].last_attempt = 0.0
 
-    def _run(self, name: str, slot: CollectorSlot, generation: int) -> None:
+    def _run(self, name: str, slot: CollectorSlot, generation: int, force: bool) -> None:
         started = time.monotonic()
         try:
-            value = slot.collect()
+            value = slot.collect(force=force) if slot.accepts_force else slot.collect()
             if not isinstance(value, dict):
                 raise TypeError("collector did not return an object")
         except Exception as error:  # collectors are an isolation boundary
@@ -151,7 +165,13 @@ class CollectorManager:
             slot.generation += 1
 
     def _values_locked(self) -> dict:
-        return {name: slot.value.copy() for name, slot in self._slots.items()}
+        values = {}
+        for name, slot in self._slots.items():
+            # WorkBuddy's age/stale fields are derived from wall time and need
+            # to stay current even while its next collection is still inside
+            # the interval. Other providers retain the legacy slot snapshot.
+            values[name] = slot.provider.status() if name == "workbuddy" else slot.value.copy()
+        return values
 
     def _metadata_locked(self) -> dict:
         now = time.time()

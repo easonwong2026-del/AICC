@@ -142,7 +142,9 @@ private struct AIProvidersSettingsView: View {
 
     private var workBuddyStatus: String {
         guard let workbuddy = api.status?.workbuddy else { return settings.localized("Unavailable") }
-        if workbuddy.balance_state == "Cached" { return settings.localized("Cached") }
+        if workbuddy.balance_stale == true || workbuddy.balance_state == "Cached" {
+            return settings.localized("Cached")
+        }
         return settings.localized(workbuddy.points == nil ? "Unavailable" : "Connected")
     }
 

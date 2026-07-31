@@ -13,8 +13,10 @@ import server
 class FakeManager:
     def __init__(self):
         self.invalidated = []
+        self.snapshots = []
 
-    def snapshot(self, **_):
+    def snapshot(self, **kwargs):
+        self.snapshots.append(kwargs)
         values = {
             "codex": {"state": "Connected"},
             "deepseek": {"status": "Online", "balances": []},
@@ -70,6 +72,12 @@ class ServerIntegrationTests(unittest.TestCase):
             ready = json.load(response)
         self.assertIn(ready["status"], {"healthy", "degraded"})
         self.assertEqual(server._collector_manager.invalidated, [])
+
+    def test_manual_refresh_forces_provider_refresh(self):
+        request = Request(self.base + "/api/refresh", method="POST")
+        with urlopen(request, timeout=2) as response:
+            self.assertEqual(response.status, 200)
+        self.assertTrue(server._collector_manager.snapshots[-1]["force"])
 
     def test_local_post_is_validated_and_saved(self):
         body = json.dumps({"workbuddy": {"points": 45, "used_points": 3, "reset_text": "ok"}}).encode()
