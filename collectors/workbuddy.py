@@ -33,6 +33,7 @@ _account_cache: dict[str, Any] | None = None
 _account_target: str | None = None
 _account_last_error = False
 _account_last_error_code: str | None = None
+_account_last_diag: dict[str, Any] | None = None
 
 ACCOUNT_EXPRESSION = r"""
 (async () => {
@@ -62,11 +63,133 @@ ACCOUNT_EXPRESSION = r"""
   const presentPublicFields = (object) => publicFields.filter((name) =>
     Object.prototype.hasOwnProperty.call(object || {}, name));
 
-  const api = globalThis.workbuddyDesktop;
+  const host = globalThis.workbuddyDesktop;
+  const apiProbe = {
+    page: (typeof location !== 'undefined' && location.href) || '',
+    title: (typeof document !== 'undefined' && document.title) || '',
+    hostKeys: host && typeof host === 'object'
+      ? Object.keys(host).filter((key) =>
+          /^(platform|appVersion|configDir|machineId|app|invoke|events|window|clipboard|shell|network|log|storage|product|ui|menu|fs|dialog|power|updater|oauth|protocol)/i.test(key)
+        ).slice(0, 40)
+      : []
+  };
   let apiErrorCode = null;
-  if (api && typeof api.authGetAccountUsage === 'function') {
+  let apiError = null;
+  // WorkBuddy 5.3.x reads account usage through the in-process daemon RPC:
+  // the renderer opens a MessageChannel, the preload forwards it to the main
+  // process, and the daemon replies with {kind:'open', sessionId}. Requests
+  // are {id, type:'request', channel:'__backend__', args:[backendMessage]}.
+  // Reusing that channel keeps the request inside WorkBuddy's own session and
+  // never exposes authentication material to AICC.
+  const readUsageViaDaemon = () => new Promise((resolve) => {
+    if (typeof window === 'undefined' || typeof MessageChannel === 'undefined'
+        || typeof window.postMessage !== 'function') {
+      apiError = 'daemon transport is unavailable in this context';
+      resolve(null);
+      return;
+    }
     try {
-      const usage = await api.authGetAccountUsage();
+      const channel = new MessageChannel();
+      const port = channel.port1;
+      let sessionId = null;
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { port.close(); } catch (_) {}
+        apiError = 'daemon rpc timed out';
+        resolve(null);
+      }, 3500);
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { port.close(); } catch (_) {}
+        resolve(value);
+      };
+      port.onmessage = (event) => {
+        const payload = event.data;
+        if (!payload || typeof payload !== 'object' || settled) return;
+        if (payload.kind === 'open') {
+          sessionId = payload.sessionId;
+          const requestId = 'aicc-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+          const backendMessage = {
+            type: 'backend',
+            requestId,
+            params: { type: 'backend:get-account-usage', params: undefined }
+          };
+          port.postMessage({
+            kind: 'message',
+            json: { id: requestId, type: 'request', channel: '__backend__', args: [backendMessage] }
+          });
+          return;
+        }
+        if (payload.kind === 'message' && payload.json && payload.json.id
+            && String(payload.json.id).startsWith('aicc-')) {
+          if (payload.json.type === 'error' || payload.json.error) {
+            apiError = String((payload.json.error && payload.json.error.message) || payload.json.error || 'daemon rpc error');
+            finish(null);
+            return;
+          }
+          finish(payload.json.result);
+          return;
+        }
+        if (payload.kind === 'error') {
+          apiError = String(payload.error || 'daemon transport error');
+          finish(null);
+          return;
+        }
+        if (payload.kind === 'close') {
+          apiError = 'daemon transport closed';
+          finish(null);
+        }
+      };
+      port.onmessageerror = () => {
+        apiError = 'daemon transport port error';
+        finish(null);
+      };
+      port.start();
+      window.postMessage(
+        { type: 'workbuddy:open-local-daemon-transport-port', target: { transportType: 'local' } },
+        '*',
+        [channel.port2]
+      );
+    } catch (error) {
+      apiError = String((error && error.message) || error);
+      resolve(null);
+    }
+  });
+  const readUsageViaHost = async () => {
+    if (host && typeof host.invoke === 'function') {
+      try {
+        const value = await host.invoke({type: 'invoke', channel: 'auth:getAccountUsage'});
+        if (value !== undefined && value !== null) return value;
+        apiError = apiError || 'host invoke returned no value';
+      } catch (error) {
+        apiError = apiError || String((error && error.message) || error);
+      }
+    }
+    if (host && typeof host.authGetAccountUsage === 'function') {
+      try {
+        const value = await host.authGetAccountUsage();
+        if (value !== undefined && value !== null) return value;
+        apiError = apiError || 'legacy api returned no value';
+      } catch (error) {
+        apiError = apiError || String((error && error.message) || error);
+      }
+    }
+    return null;
+  };
+  let usage = await readUsageViaDaemon();
+  if (usage && typeof usage === 'object' && usage.data !== undefined
+      && usage.data !== null && typeof usage.data === 'object') {
+    usage = usage.data;
+  }
+  if (usage === null || usage === undefined) {
+    usage = await readUsageViaHost();
+  }
+  if (usage !== null && usage !== undefined) {
+    try {
       const usageLeft = firstNumber(usage, [
         'usageLeft', 'balance', 'credit', 'credits', 'remaining', 'remainingPoints',
         'creditBalance', 'pointBalance', 'availableCredit', 'points'
@@ -203,7 +326,9 @@ ACCOUNT_EXPRESSION = r"""
   if (usageLeft !== null) return {usageLeft, refreshAt: null, source: 'account-menu'};
   return {
     __errorCode: apiErrorCode || (trigger ? 'balance_text_not_found' : 'menu_trigger_not_found'),
-    __error: 'WorkBuddy balance read failed'
+    __error: 'WorkBuddy balance read failed',
+    __apiProbe: apiProbe,
+    __apiError: apiError ? String(apiError).slice(0, 240) : null
   };
 })()
 """
@@ -248,7 +373,7 @@ def collect(fallback: dict, force: bool = False, *, database_path: Path = DEFAUL
 
 
 def _get_account_usage(force: bool = False) -> dict[str, Any] | None:
-    global _last_attempt, _account_cache, _account_target, _account_last_error, _account_last_error_code
+    global _last_attempt, _account_cache, _account_target, _account_last_error, _account_last_error_code, _account_last_diag
     now = time.monotonic()
     with _lock:
         if _account_cache is None:
@@ -267,12 +392,18 @@ def _get_account_usage(force: bool = False) -> dict[str, Any] | None:
                 _account_target = target
                 _account_last_error = False
                 _account_last_error_code = None
+                _account_last_diag = None
                 _save_account_cache(parsed)
             else:
                 _account_target = None
+                _account_last_diag = {
+                    key: value for key, value in raw.items()
+                    if key in ("__apiProbe", "__apiError")
+                } if isinstance(raw, dict) else None
                 _set_account_error(_error_code_from_raw(raw))
         except (CdpError, OSError, ValueError, TypeError) as error:
             _account_target = None
+            _account_last_diag = None
             _set_account_error(_error_code_from_exception(error))
         return _with_stale_state(_account_cache)
 
@@ -357,12 +488,15 @@ def _has_successful_balance(value: dict[str, Any]) -> bool:
     return value.get("points") is not None and value.get("balance_updated_epoch") is not None
 
 
-def _error_payload() -> dict[str, str]:
+def _error_payload() -> dict[str, Any]:
     code = _account_last_error_code or "account_api_unavailable"
-    return {
+    payload: dict[str, Any] = {
         "balance_error_code": code,
         "balance_error": BALANCE_ERROR_MESSAGES.get(code, "WorkBuddy balance read failed"),
     }
+    if _account_last_diag:
+        payload["balance_diagnostic"] = _account_last_diag
+    return payload
 
 
 def _set_account_error(code: str) -> None:
