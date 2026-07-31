@@ -43,6 +43,10 @@ for dir in providers collectors services web; do
     exit 1
   fi
 done
+if [ ! -x "$SERVER_DIR/macos/start-workbuddy-monitored.sh" ]; then
+  echo "FAIL: bundled WorkBuddy reconnect script not found or not executable" >&2
+  exit 1
+fi
 
 # ---- Start server ----
 echo "Starting server on port $PORT ..."
