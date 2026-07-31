@@ -1,3 +1,6 @@
+import json
+import shutil
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -17,6 +20,7 @@ class WorkBuddyPassiveTests(unittest.TestCase):
         workbuddy._account_cache = None
         workbuddy._account_target = None
         workbuddy._account_last_error = False
+        workbuddy._account_last_error_code = None
 
     def test_same_target_is_read_again_after_refresh_interval(self):
         raw = {"usageLeft": "6000", "refreshAt": None}
@@ -92,6 +96,78 @@ class WorkBuddyPassiveTests(unittest.TestCase):
         for raw, expected in (("5238", 5238), ("5,238", 5238), ("5，238", 5238), ("5238.5", 5238.5)):
             with self.subTest(raw=raw):
                 self.assertEqual(workbuddy._normalise_account_usage({"usageLeft": raw})["points"], expected)
+        self.assertEqual(workbuddy._normalise_account_usage({"balance": "5 238"})["points"], 5238)
+
+    def test_bridge_failure_does_not_expose_manual_fallback_points(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(workbuddy, "_load_account_cache", return_value=None), \
+             patch.object(workbuddy, "target_identity_localhost", side_effect=CdpError("WorkBuddy monitoring bridge is not running")):
+            result = workbuddy.collect(
+                {"points": 8520, "used_points": 1480, "reset_text": "Update from WorkBuddy"},
+                database_path=Path(directory) / "missing.db",
+            )
+
+        self.assertIsNone(result["points"])
+        self.assertIsNone(result["used_points"])
+        self.assertEqual(result["balance_state"], "Unavailable")
+        self.assertTrue(result["balance_stale"])
+        self.assertEqual(result["balance_error_code"], "bridge_unavailable")
+        self.assertEqual(result["usage_source"], "WorkBuddy unavailable")
+
+    def test_expression_uses_safe_api_fallback_and_never_reads_page_body(self):
+        expression = workbuddy.ACCOUNT_EXPRESSION.lower()
+        self.assertIn("account_api_invalid", expression)
+        self.assertIn("waitforbalance", expression)
+        self.assertNotIn("document.body", expression)
+        self.assertNotIn("localstorage", expression)
+        self.assertNotIn("sessionstorage", expression)
+        self.assertNotIn("cookie", expression)
+        self.assertNotIn("authorization", expression)
+
+    def test_api_invalid_result_falls_back_to_same_line_dom_balance(self):
+        if shutil.which("node") is None:
+            self.skipTest("Node.js is not installed")
+        result = self._run_expression(
+            "async () => ({points: 'not-a-balance'})",
+            "积分余额 刷新 5,238",
+        )
+        self.assertEqual(result["usageLeft"], "5238")
+        self.assertEqual(result["source"], "account-menu")
+
+    def test_api_exception_falls_back_to_adjacent_dom_nodes(self):
+        if shutil.which("node") is None:
+            self.skipTest("Node.js is not installed")
+        result = self._run_expression(
+            "async () => { throw new Error('account API unavailable'); }",
+            "积分余额",
+            parent_text="积分余额",
+            sibling_text="5，238",
+        )
+        self.assertEqual(result["usageLeft"], "5238")
+        self.assertEqual(result["source"], "account-menu")
+
+    def _run_expression(self, api_function, button_text, parent_text="", sibling_text=""):
+        expression = json.dumps(workbuddy.ACCOUNT_EXPRESSION)
+        button_text = json.dumps(button_text)
+        parent_text = json.dumps(parent_text)
+        sibling_text = json.dumps(sibling_text)
+        script = f"""
+globalThis.workbuddyDesktop = {{ authGetAccountUsage: {api_function} }};
+const sibling = {{ tagName: 'SPAN', innerText: {sibling_text}, textContent: {sibling_text},
+  parentElement: null, nextElementSibling: null,
+  getAttribute: () => null, getBoundingClientRect: () => ({{width: 10, height: 10}}) }};
+const parent = {{ tagName: 'DIV', innerText: {parent_text}, textContent: {parent_text},
+  parentElement: null, nextElementSibling: sibling,
+  getAttribute: () => null, getBoundingClientRect: () => ({{width: 10, height: 10}}) }};
+const button = {{ tagName: 'BUTTON', innerText: {button_text}, textContent: {button_text},
+  parentElement: parent, nextElementSibling: sibling,
+  getAttribute: () => null, getBoundingClientRect: () => ({{width: 10, height: 10}}), click: () => {{}} }};
+globalThis.getComputedStyle = () => ({{display: 'block', visibility: 'visible'}});
+globalThis.document = {{ querySelectorAll: (selector) => selector.includes('button') ? [button] : [] }};
+Promise.resolve(eval({expression})).then((result) => process.stdout.write(JSON.stringify(result)));
+"""
+        completed = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=8, check=True)
+        return json.loads(completed.stdout)
 
     def test_workbuddy_refresh_forwards_force(self):
         provider = WorkBuddyProvider(CacheStore(Path(".")), lambda: {}, {})
@@ -111,6 +187,18 @@ class WorkBuddyPassiveTests(unittest.TestCase):
         self.assertEqual(result["balance_age_seconds"], 401)
         self.assertTrue(result["balance_stale"])
         self.assertEqual(result["balance_state"], "Cached")
+
+    def test_provider_does_not_expose_old_manual_initial_points(self):
+        provider = WorkBuddyProvider(
+            CacheStore(Path(".")),
+            lambda: {},
+            {"points": 8520, "used_points": 1480, "reset_text": "Manual"},
+        )
+        result = provider.status()
+
+        self.assertIsNone(result["points"])
+        self.assertIsNone(result["used_points"])
+        self.assertEqual(result["balance_state"], "Unavailable")
 
     def test_concurrent_workbuddy_refreshes_are_coalesced(self):
         started = threading.Event()
