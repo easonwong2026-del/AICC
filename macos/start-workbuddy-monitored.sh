@@ -11,12 +11,16 @@ if [[ ! -d "$APP" ]]; then
   exit 1
 fi
 
+EXECUTABLE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist" 2>/dev/null || true)"
+EXECUTABLE="$APP/Contents/MacOS/$EXECUTABLE_NAME"
+
 port_ready() {
   nc -z 127.0.0.1 "$DEBUG_PORT" >/dev/null 2>&1
 }
 
 app_running() {
-  pgrep -f "$APP/Contents/MacOS/Electron" >/dev/null 2>&1
+  pgrep -f "$APP/Contents/MacOS/$EXECUTABLE_NAME" >/dev/null 2>&1 \
+    || lsof -t "$EXECUTABLE" >/dev/null 2>&1
 }
 
 if port_ready; then
@@ -43,7 +47,16 @@ if app_running; then
   done
 fi
 
-open -na "$APP" --args --remote-debugging-address=127.0.0.1 --remote-debugging-port="$DEBUG_PORT"
+if ! open -na "$APP" --args --remote-debugging-address=127.0.0.1 --remote-debugging-port="$DEBUG_PORT" >/dev/null 2>&1; then
+  if [[ -z "$EXECUTABLE_NAME" || ! -x "$EXECUTABLE" ]]; then
+    echo "WorkBuddy executable was not found in $APP." >&2
+    exit 1
+  fi
+  nohup "$EXECUTABLE" \
+    --remote-debugging-address=127.0.0.1 \
+    --remote-debugging-port="$DEBUG_PORT" \
+    >/dev/null 2>&1 </dev/null &
+fi
 for _ in {1..20}; do
   if port_ready; then
     echo "WorkBuddy started with the localhost monitoring bridge."
