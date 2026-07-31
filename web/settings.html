@@ -2,7 +2,8 @@
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>AI Command 设置</title><link rel="stylesheet" href="/style.css"></head>
 <body class="settings-page"><main class="settings"><a href="/">返回仪表盘</a><h1>仪表盘设置</h1>
-  <p>Codex 自动采集；WorkBuddy 优先读取本机账户，下面的字段仅兼容旧版手工数据，不会在自动采集失败时冒充真实余额。</p>
+  <p>Codex 自动采集；WorkBuddy 优先通过本地调试桥读取账户积分（每次读取不会打开账户菜单）。</p>
+  <p>如果显示“未连接”，点击下方「重连 WorkBuddy」会重启 WorkBuddy 一次以启用本地读取通道，重启后已打开的会话会自动恢复。</p>
   <p>修改与重连操作仅允许从 <strong>localhost</strong> 打开的设置页执行。</p>
   <h2>采集状态</h2>
   <div id="source-status" class="source-status"></div>
