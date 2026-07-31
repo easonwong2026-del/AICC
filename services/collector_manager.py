@@ -111,6 +111,37 @@ class CollectorManager:
                 if name in self._slots:
                     self._slots[name].last_attempt = 0.0
 
+    def refresh_one(self, name: str, *, wait_seconds: float = 0.0) -> tuple[dict, dict]:
+        """Force one provider refresh without touching the other collectors."""
+        with self._condition:
+            slot = self._slots.get(name)
+            if slot is None:
+                raise KeyError(name)
+            if not slot.worker_alive:
+                self._expire_locked(time.monotonic())
+                now = time.monotonic()
+                slot.running = True
+                slot.worker_alive = True
+                slot.started_monotonic = now
+                slot.last_attempt = now
+                slot.generation += 1
+                generation = slot.generation
+                threading.Thread(
+                    target=self._run,
+                    args=(name, slot, generation, True),
+                    name=f"collect-{name}",
+                    daemon=True,
+                ).start()
+            deadline = time.monotonic() + max(0.0, wait_seconds)
+            while slot.running:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                timeout_remaining = max(0.01, slot.timeout - (time.monotonic() - slot.started_monotonic)) + 0.05
+                self._condition.wait(min(remaining, timeout_remaining))
+            value = slot.provider.status() if name == "workbuddy" else slot.value.copy()
+            return value, self._metadata_locked()[name]
+
     def _run(self, name: str, slot: CollectorSlot, generation: int, force: bool) -> None:
         started = time.monotonic()
         try:

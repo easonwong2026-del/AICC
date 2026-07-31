@@ -18,6 +18,12 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from providers.registry import ProviderRegistry, build_provider_registry
+from providers.manifest import (
+    PROVIDER_ID_PATTERN,
+    SCHEMA_VERSION,
+    error_manifest,
+    render_manifest,
+)
 from services.collector_manager import CollectorManager
 
 ROOT = Path(__file__).resolve().parent
@@ -95,6 +101,126 @@ def load_status(force: bool = False) -> dict:
     return data
 
 
+def providers_payload() -> dict:
+    """Build the schema-v1 provider list. A single failing provider never
+    breaks the whole response."""
+    registry = provider_registry()
+    _, metadata = collector_manager().snapshot(wait_seconds=0)
+    items = []
+    for name, provider in registry.items():
+        try:
+            items.append(render_manifest(name, provider, metadata.get(name, {})))
+        except Exception as error:  # isolation boundary for one provider
+            items.append(error_manifest(name, error))
+    items.sort(key=lambda item: (item["sort_order"], item["id"]))
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "updated_at": datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+        "providers": items,
+    }
+
+
+def provider_manifest(name: str) -> dict:
+    registry = provider_registry()
+    provider = registry.get(name)
+    _, metadata = collector_manager().snapshot(wait_seconds=0)
+    return render_manifest(name, provider, metadata.get(name, {}))
+
+
+def refresh_provider(name: str) -> dict:
+    registry = provider_registry()
+    provider = registry.get(name)
+    _, metadata = collector_manager().refresh_one(name, wait_seconds=COLLECTOR_WAIT_SECONDS)
+    return render_manifest(name, provider, metadata)
+
+
+def diagnostics_payload(name: str, provider) -> dict:
+    """Safe, truncated diagnostics: never the full raw provider response."""
+    try:
+        health = provider.health()
+    except Exception as error:  # diagnostics must never break the server
+        health = {"ok": False, "state": "error", "error": f"{type(error).__name__}: {error}"[:160]}
+    if not isinstance(health, dict):
+        health = {}
+    _, metadata = collector_manager().snapshot(wait_seconds=0)
+    meta = metadata.get(name, {}) if isinstance(metadata, dict) else {}
+    allowed_meta = {
+        key: meta[key]
+        for key in ("state", "last_success", "age_seconds", "error", "refresh_seconds",
+                    "timeout_seconds", "duration_ms", "consecutive_failures")
+        if key in meta
+    }
+    allowed_health = {
+        key: health[key]
+        for key in ("ok", "state", "error_code", "error")
+        if key in health
+    }
+    if allowed_health.get("error"):
+        allowed_health["error"] = str(allowed_health["error"])[:160]
+    return {"provider": name, "diagnostics": {"collection": allowed_meta, "health": allowed_health}}
+
+
+def _workbuddy_reconnect() -> tuple[dict, HTTPStatus]:
+    """Run the bundled WorkBuddy bridge setup script and report the result."""
+    script = ROOT / "macos" / "start-workbuddy-monitored.sh"
+    if not script.is_file():
+        return (
+            {"error": "WorkBuddy reconnect is unavailable in the bundled runtime"},
+            HTTPStatus.NOT_IMPLEMENTED,
+        )
+    try:
+        completed = subprocess.run(
+            ["/bin/bash", str(script), "--ensure"],
+            capture_output=True,
+            text=True,
+            timeout=50,
+        )
+    except subprocess.TimeoutExpired:
+        collector_manager().invalidate("workbuddy")
+        return (
+            {"ok": False, "state": "failed", "error_code": "timeout",
+             "error": "WorkBuddy reconnect timed out"},
+            HTTPStatus.BAD_GATEWAY,
+        )
+    collector_manager().invalidate("workbuddy")
+    if completed.returncode == 0:
+        return {"ok": True, "state": "bridge_ready"}, HTTPStatus.OK
+    error_code = "unknown"
+    for line in reversed((completed.stderr or "").splitlines()):
+        if line.startswith("AICC_WORKBUDDY_FAIL:"):
+            error_code = line.split(":", 1)[1].strip()
+            break
+    detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+    message = detail[-1] if detail else "WorkBuddy reconnect failed"
+    return (
+        {"ok": False, "state": "failed", "error_code": error_code, "error": message},
+        HTTPStatus.BAD_GATEWAY,
+    )
+
+
+def run_provider_action(name: str, kind: str) -> tuple[dict, HTTPStatus]:
+    """Execute a whitelisted provider action. ``kind`` is mapped server-side;
+    manifests can never supply endpoints, shell commands, or scripts."""
+    registry = provider_registry()
+    provider = registry.get(name)
+    manifest = render_manifest(name, provider, {})
+    if kind not in manifest["capabilities"]:
+        raise ValueError(f"action {kind!r} is not available for provider {name!r}")
+    if kind == "refresh":
+        return refresh_provider(name), HTTPStatus.OK
+    if kind == "reconnect":
+        if name != "workbuddy":
+            raise ValueError(f"action {kind!r} is not available for provider {name!r}")
+        payload, status = _workbuddy_reconnect()
+        if status != HTTPStatus.OK:
+            return payload, status
+        _, metadata = collector_manager().refresh_one(name, wait_seconds=COLLECTOR_WAIT_SECONDS)
+        return render_manifest(name, provider, metadata), HTTPStatus.OK
+    if kind == "diagnostics":
+        return diagnostics_payload(name, provider), HTTPStatus.OK
+    raise ValueError(f"unknown action kind: {kind!r}")
+
+
 def save_status(data: dict) -> bool:
     DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _status_write_lock:
@@ -137,6 +263,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return self.send_json(payload, status)
         if path == "/api/status":
             return self.send_json(load_status())
+        if path == "/api/providers":
+            return self.send_json(providers_payload())
+        if path.startswith("/api/providers/"):
+            provider_id = path[len("/api/providers/"):]
+            if "/" in provider_id or not PROVIDER_ID_PATTERN.fullmatch(provider_id):
+                return self.send_json({"error": "Unknown provider"}, HTTPStatus.NOT_FOUND)
+            try:
+                return self.send_json(provider_manifest(provider_id))
+            except KeyError:
+                return self.send_json({"error": "Unknown provider"}, HTTPStatus.NOT_FOUND)
         if path == "/api/codex/status":
             values, _ = collector_manager().snapshot(wait_seconds=COLLECTOR_WAIT_SECONDS)
             return self.send_json(values.get("codex", {}))
@@ -154,45 +290,35 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": "Write operations are local-only"}, HTTPStatus.FORBIDDEN)
             return
         if path == "/api/workbuddy/reconnect":
-            script = ROOT / "macos" / "start-workbuddy-monitored.sh"
-            if not script.is_file():
-                self.send_json(
-                    {"error": "WorkBuddy reconnect is unavailable in the bundled runtime"},
-                    HTTPStatus.NOT_IMPLEMENTED,
-                )
-                return
-            try:
-                completed = subprocess.run(
-                    ["/bin/bash", str(script), "--ensure"],
-                    capture_output=True,
-                    text=True,
-                    timeout=50,
-                )
-            except subprocess.TimeoutExpired:
-                collector_manager().invalidate("workbuddy")
-                self.send_json(
-                    {"ok": False, "state": "failed", "error_code": "timeout", "error": "WorkBuddy reconnect timed out"},
-                    HTTPStatus.BAD_GATEWAY,
-                )
-                return
-            collector_manager().invalidate("workbuddy")
-            if completed.returncode == 0:
-                self.send_json({"ok": True, "state": "bridge_ready"})
-                return
-            error_code = "unknown"
-            for line in reversed((completed.stderr or "").splitlines()):
-                if line.startswith("AICC_WORKBUDDY_FAIL:"):
-                    error_code = line.split(":", 1)[1].strip()
-                    break
-            detail = (completed.stderr or completed.stdout or "").strip().splitlines()
-            message = detail[-1] if detail else "WorkBuddy reconnect failed"
-            self.send_json(
-                {"ok": False, "state": "failed", "error_code": error_code, "error": message},
-                HTTPStatus.BAD_GATEWAY,
-            )
-            return
+            payload, status = _workbuddy_reconnect()
+            return self.send_json(payload, status)
         if path == "/api/refresh":
             self.send_json(load_status(force=True))
+            return
+        if path.startswith("/api/providers/"):
+            parts = path[len("/api/providers/"):].split("/")
+            provider_id = parts[0]
+            if not PROVIDER_ID_PATTERN.fullmatch(provider_id):
+                self.send_json({"error": "Unknown provider"}, HTTPStatus.NOT_FOUND)
+                return
+            if len(parts) == 2 and parts[1] == "refresh":
+                try:
+                    self.send_json(refresh_provider(provider_id))
+                except KeyError:
+                    self.send_json({"error": "Unknown provider"}, HTTPStatus.NOT_FOUND)
+                return
+            if len(parts) == 3 and parts[1] == "actions":
+                try:
+                    payload, status = run_provider_action(provider_id, parts[2])
+                except KeyError:
+                    self.send_json({"error": "Unknown provider"}, HTTPStatus.NOT_FOUND)
+                    return
+                except ValueError as error:
+                    self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+                    return
+                self.send_json(payload, status)
+                return
+            self.send_json({"error": "Unknown provider action"}, HTTPStatus.NOT_FOUND)
             return
         if path != "/api/status":
             self.send_error(HTTPStatus.NOT_FOUND)
