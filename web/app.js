@@ -51,7 +51,8 @@ function render(data) {
   const used = workbuddy.auto_used_credits ?? workbuddy.used_points ?? 0;
   const balanceAge = Number(workbuddy.balance_age_seconds);
   const balanceAgeText = Number.isFinite(balanceAge) ? ` · ${balanceAge}s 前` : "";
-  $("workbuddy-state").textContent = `${workbuddy.balance_state || "Manual"}${balanceAgeText}`;
+  const balanceError = workbuddy.balance_error_code ? ` · ${workbuddy.balance_error_code}` : "";
+  $("workbuddy-state").textContent = `${workbuddy.balance_state || "Unavailable"}${balanceAgeText}${balanceError}`;
   $("workbuddy-used").textContent = Number(used).toLocaleString();
   $("workbuddy-reset").textContent = workbuddy.reset_text || "--";
   $("workbuddy-source").textContent = workbuddy.usage_source ? `Source: ${workbuddy.usage_source}` : "";
