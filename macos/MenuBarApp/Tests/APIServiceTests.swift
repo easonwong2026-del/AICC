@@ -167,14 +167,20 @@ final class APIServiceTests: XCTestCase {
     func testActionRequestUsesKindInPath() async throws {
         let service = makeService()
         MockURLProtocol.handler = { request in
-            if request.url?.path == "/api/status" {
+            switch request.url?.path {
+            case "/api/status":
                 return try self.respond(Self.statusJSON)
+            case "/api/providers":
+                // performProviderAction reloads the snapshot afterwards via
+                // fetchStatus -> fetchProviders.
+                return try self.respond(Self.providersJSON)
+            default:
+                XCTAssertEqual(
+                    request.url?.path,
+                    "/api/providers/workbuddy/actions/reconnect"
+                )
+                return try self.respond(#"{"id":"workbuddy"}"#)
             }
-            XCTAssertEqual(
-                request.url?.path,
-                "/api/providers/workbuddy/actions/reconnect"
-            )
-            return try self.respond(#"{"id":"workbuddy"}"#)
         }
         let result = await service.performProviderAction(
             providerId: "workbuddy",
@@ -183,8 +189,10 @@ final class APIServiceTests: XCTestCase {
         XCTAssertEqual(result, #"{"id":"workbuddy"}"#)
         // `actionID` from a manifest such as "reconnect_workbuddy" must never
         // leak into the route.
-        let paths = MockURLProtocol.requests.compactMap { $0.url?.path }
-        XCTAssertEqual(paths, ["/api/providers/workbuddy/actions/reconnect"])
-        XCTAssertFalse(paths.contains("/api/providers/workbuddy/actions/reconnect_workbuddy"))
+        let actionPaths = MockURLProtocol.requests
+            .compactMap { $0.url?.path }
+            .filter { $0.contains("/actions/") }
+        XCTAssertEqual(actionPaths, ["/api/providers/workbuddy/actions/reconnect"])
+        XCTAssertFalse(actionPaths.contains("/api/providers/workbuddy/actions/reconnect_workbuddy"))
     }
 }
