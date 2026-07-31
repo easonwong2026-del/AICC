@@ -113,6 +113,30 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["error_code"], "timeout")
         self.assertFalse(payload["ok"])
 
+    def test_workbuddy_monitor_heals_bridge_and_refreshes_collector(self):
+        with patch("server.subprocess.run") as run:
+            run.return_value = type(
+                "Completed",
+                (),
+                {"returncode": 0, "stdout": "WorkBuddy bridge auto-healed.\n", "stderr": ""},
+            )()
+            healed = server._run_workbuddy_monitor_once()
+        self.assertTrue(healed)
+        self.assertIn("--monitor", run.call_args.args[0])
+        self.assertIn("workbuddy", server._collector_manager.invalidated)
+        self.assertTrue(server._collector_manager.snapshots[-1]["force"])
+
+    def test_workbuddy_monitor_does_nothing_when_bridge_is_already_up(self):
+        with patch("server.subprocess.run") as run:
+            run.return_value = type(
+                "Completed",
+                (),
+                {"returncode": 0, "stdout": "", "stderr": ""},
+            )()
+            healed = server._run_workbuddy_monitor_once()
+        self.assertFalse(healed)
+        self.assertEqual(server._collector_manager.invalidated, [])
+
     def test_unavailable_workbuddy_snapshot_clears_old_manual_points(self):
         server.save_status({"workbuddy": {"points": 8520, "used_points": 1480}})
         server._collector_manager = type(
