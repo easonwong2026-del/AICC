@@ -6,6 +6,8 @@
 - **安全余额读取增强**：账户 API 支持积分字段别名；API 字段无效或抛错时继续使用受限 DOM fallback，支持同一行、相邻节点、千位分隔和小数格式
 - **诊断可见性**：WorkBuddy 返回安全的 `balance_error_code`/`balance_error`，区分 bridge、renderer、API、菜单触发器、解析和超时错误；不读取或传输认证信息
 - **安装版重连修复**：将 `start-workbuddy-monitored.sh` 打包到 `AICC.app/Contents/Resources/Server/macos/`，并在构建与 bundled smoke test 中校验可执行性；仅用户主动重连时启动/重启 WorkBuddy
+- **重连通道可靠性**：重连脚本改用进程级退出/启动（不再依赖 Apple Events 自动化权限，避免静默失败），启动后校验 9223 桥和主渲染页面，失败时返回具体错误码；卡片在未连接时显示“设置 → 重连 WorkBuddy”操作提示
+- **CDP 目标选择**：优先连接 WorkBuddy 主渲染页面（`renderer/index.html`），避免误连文档/MCP 等内嵌 WebView 导致积分 API 不可用
 - **版本统一 2.4.4**：VERSION、PACKAGE.json、Info.plist 同步更新
 
 ## 2.4.3 - 2026-07-31
