@@ -129,7 +129,7 @@ final class ProviderModelsTests: XCTestCase {
           }]
         }
         """)
-        XCTAssertNil(response.providers[0].metrics[0].value)
+        XCTAssertEqual(response.providers[0].metrics[0].value, .null)
     }
 
     func testEmptyProviderListDecodes() throws {

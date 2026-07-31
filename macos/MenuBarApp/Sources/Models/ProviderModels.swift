@@ -96,7 +96,13 @@ struct ProviderMetric: Decodable, Identifiable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         key = (try? container.decodeIfPresent(String.self, forKey: .key)) ?? ""
         label = (try? container.decodeIfPresent(String.self, forKey: .label)) ?? key
-        value = try? container.decodeIfPresent(MetricValue.self, forKey: .value)
+        // Distinguish a missing key (nil) from an explicit JSON null
+        // (.null): decodeIfPresent would silently collapse both into nil.
+        if container.contains(.value) {
+            value = try? container.decode(MetricValue.self, forKey: .value)
+        } else {
+            value = nil
+        }
         valueType = (try? container.decodeIfPresent(String.self, forKey: .valueType)) ?? "text"
         format = (try? container.decodeIfPresent(String.self, forKey: .format)) ?? "plain"
         unit = try? container.decodeIfPresent(String.self, forKey: .unit)

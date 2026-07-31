@@ -96,6 +96,24 @@ struct CoreSmokeMain {
         try require(long.number == "999,999.99", "max-length number formatting")
         try require(MetricFormatter.format(value: .null, valueType: "number", format: "decimal", unit: nil).placeholder, "null placeholder")
 
+        // Explicit JSON null and malformed values must decode to .null, while
+        // a missing value key stays nil — both render as placeholders.
+        let nullJSON = """
+        {"schema_version":1,"providers":[{"id":"x","display_name":"X","state":"connected","available":true,"metrics":[{"key":"m","label":"M","value":null,"value_type":"number","format":"decimal","primary":true}],"actions":[]}]}
+        """
+        let nullDecoded = try JSONDecoder().decode(ProvidersResponse.self, from: Data(nullJSON.utf8))
+        try require(nullDecoded.providers[0].metrics[0].value == .null, "json null decodes to .null")
+        let malformedJSON = """
+        {"schema_version":1,"providers":[{"id":"x","display_name":"X","state":"connected","available":true,"metrics":[{"key":"m","label":"M","value":{"nested":true},"value_type":"number","format":"decimal","primary":true}],"actions":[]}]}
+        """
+        let malformedDecoded = try JSONDecoder().decode(ProvidersResponse.self, from: Data(malformedJSON.utf8))
+        try require(malformedDecoded.providers[0].metrics[0].value == .null, "malformed value degrades to .null")
+        let missingJSON = """
+        {"schema_version":1,"providers":[{"id":"x","display_name":"X","state":"connected","available":true,"metrics":[{"key":"m","label":"M","value_type":"number","format":"decimal","primary":true}],"actions":[]}]}
+        """
+        let missingDecoded = try JSONDecoder().decode(ProvidersResponse.self, from: Data(missingJSON.utf8))
+        try require(missingDecoded.providers[0].metrics[0].value == nil, "missing value key stays nil")
+
         print("AICC Swift core smoke tests passed.")
     }
 }
