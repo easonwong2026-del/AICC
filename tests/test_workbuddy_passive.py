@@ -21,6 +21,7 @@ class WorkBuddyPassiveTests(unittest.TestCase):
         workbuddy._account_target = None
         workbuddy._account_last_error = False
         workbuddy._account_last_error_code = None
+        workbuddy._account_last_diag = None
 
     def test_same_target_is_read_again_after_refresh_interval(self):
         raw = {"usageLeft": "6000", "refreshAt": None}
@@ -117,12 +118,76 @@ class WorkBuddyPassiveTests(unittest.TestCase):
     def test_expression_uses_safe_api_fallback_and_never_reads_page_body(self):
         expression = workbuddy.ACCOUNT_EXPRESSION.lower()
         self.assertIn("account_api_invalid", expression)
+        self.assertIn("auth:getaccountusage", expression)
+        self.assertIn("__apiprobe", expression)
         self.assertIn("waitforbalance", expression)
         self.assertNotIn("document.body", expression)
         self.assertNotIn("localstorage", expression)
         self.assertNotIn("sessionstorage", expression)
         self.assertNotIn("cookie", expression)
         self.assertNotIn("authorization", expression)
+
+    def test_workbuddy_5_3_invoke_channel_returns_usage(self):
+        if shutil.which("node") is None:
+            self.skipTest("Node.js is not installed")
+        result = self._run_expression(
+            api_function=None,
+            api_invoke="async (command) => {"
+            " globalThis.__cmd = command;"
+            " return {usageLeft: '5,238', usageTotal: '12000', usageUsed: '6762', refreshAt: null};"
+            " }",
+            button_text="",
+        )
+        self.assertEqual(result["usageLeft"], "5238")
+        self.assertEqual(result["usageTotal"], "12000")
+        self.assertEqual(result["source"], "account-api")
+
+    def test_workbuddy_5_3_daemon_rpc_returns_usage(self):
+        if shutil.which("node") is None:
+            self.skipTest("Node.js is not installed")
+        daemon = (
+            "(port) => {"
+            "  port.onmessage = (event) => {"
+            "    const payload = event.data;"
+            "    if (!payload || payload.kind !== 'message' || !payload.json) return;"
+            "    const frame = payload.json;"
+            "    port.postMessage({kind: 'message', json: {"
+            "      id: frame.id, type: 'response',"
+            "      result: {data: {usageLeft: '5,238', usageTotal: '12000', refreshAt: null}}"
+            "    }});"
+            "  };"
+            "  port.start();"
+            "  port.postMessage({kind: 'open', sessionId: 'test-session'});"
+            "}"
+        )
+        result = self._run_expression(api_function=None, api_invoke=None, button_text="", api_daemon=daemon)
+        self.assertEqual(result["usageLeft"], "5238")
+        self.assertEqual(result["usageTotal"], "12000")
+        self.assertEqual(result["source"], "account-api")
+
+    def test_failure_includes_api_probe_diagnostics(self):
+        if shutil.which("node") is None:
+            self.skipTest("Node.js is not installed")
+        result = self._run_expression(api_function=None, api_invoke=None, button_text="")
+        self.assertEqual(result["__errorCode"], "account_api_unavailable")
+        self.assertIn("invoke", result["__apiProbe"]["hostKeys"])
+        self.assertTrue(all("token" not in key.lower() for key in result["__apiProbe"]["hostKeys"]))
+        self.assertIn("daemon", result["__apiError"])
+
+    def test_collector_surfaces_api_diagnostics_in_error_payload(self):
+        raw = {
+            "__errorCode": "account_api_unavailable",
+            "__apiProbe": {"page": "file:///renderer/index.html", "hostKeys": ["invoke"]},
+            "__apiError": "boom",
+        }
+        with patch.object(workbuddy, "_load_account_cache", return_value=None), \
+             patch.object(workbuddy, "target_identity_localhost", return_value="session-1"), \
+             patch.object(workbuddy, "evaluate_localhost", return_value=raw), \
+             patch.object(workbuddy.time, "monotonic", return_value=100.0):
+            result = workbuddy.collect({}, database_path=Path("/tmp/missing-workbuddy.db"))
+
+        self.assertEqual(result["balance_error_code"], "account_api_unavailable")
+        self.assertEqual(result["balance_diagnostic"]["__apiProbe"]["hostKeys"], ["invoke"])
 
     def test_api_invalid_result_falls_back_to_same_line_dom_balance(self):
         if shutil.which("node") is None:
@@ -146,13 +211,23 @@ class WorkBuddyPassiveTests(unittest.TestCase):
         self.assertEqual(result["usageLeft"], "5238")
         self.assertEqual(result["source"], "account-menu")
 
-    def _run_expression(self, api_function, button_text, parent_text="", sibling_text=""):
+    def _run_expression(self, api_function, button_text, parent_text="", sibling_text="", api_invoke=None, api_daemon=None):
         expression = json.dumps(workbuddy.ACCOUNT_EXPRESSION)
         button_text = json.dumps(button_text)
         parent_text = json.dumps(parent_text)
         sibling_text = json.dumps(sibling_text)
+        legacy_api = api_function if api_function is not None else "null"
+        invoke_api = api_invoke if api_invoke is not None else "null"
+        daemon_api = api_daemon if api_daemon is not None else "null"
         script = f"""
-globalThis.workbuddyDesktop = {{ authGetAccountUsage: {api_function} }};
+globalThis.workbuddyDesktop = {{ authGetAccountUsage: {legacy_api}, invoke: {invoke_api} }};
+globalThis.window = {{
+  postMessage: (data, origin, ports) => {{
+    if (!data || data.type !== 'workbuddy:open-local-daemon-transport-port') return;
+    const daemon = {daemon_api};
+    if (typeof daemon === 'function') daemon(ports[0]);
+  }}
+}};
 const sibling = {{ tagName: 'SPAN', innerText: {sibling_text}, textContent: {sibling_text},
   parentElement: null, nextElementSibling: null,
   getAttribute: () => null, getBoundingClientRect: () => ({{width: 10, height: 10}}) }};
