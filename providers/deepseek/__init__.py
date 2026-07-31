@@ -28,7 +28,7 @@ class DeepSeekProvider:
             "state": value.get("status", "pending"),
         }
 
-    def refresh(self) -> dict[str, Any]:
+    def refresh(self, force: bool = False) -> dict[str, Any]:
         value = collect(self._cache.file("deepseek_history.json"))
         self._status = value.copy()
         return value

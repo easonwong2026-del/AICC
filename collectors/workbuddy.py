@@ -16,17 +16,28 @@ DEFAULT_DB_PATH = Path.home() / ".workbuddy" / "workbuddy.db"
 DATA_ROOT = Path(os.environ.get("EINK_DATA_DIR", Path(__file__).resolve().parents[1] / "data")).expanduser()
 ACCOUNT_CACHE_PATH = DATA_ROOT / "workbuddy_last_success.json"
 DEBUG_PORT = int(os.environ.get("WORKBUDDY_DEBUG_PORT", "9223"))
-ACCOUNT_REFRESH_SECONDS = max(30, min(300, int(os.environ.get("WORKBUDDY_REFRESH_SECONDS", "60"))))
+ACCOUNT_REFRESH_SECONDS = max(30, min(300, int(os.environ.get("WORKBUDDY_REFRESH_SECONDS", "120"))))
 _lock = threading.Lock()
 _last_attempt = 0.0
 _account_cache: dict[str, Any] | None = None
 _account_target: str | None = None
+_account_last_error = False
 
 ACCOUNT_EXPRESSION = """
 (async () => {
   const api = globalThis.workbuddyDesktop;
   if (api && typeof api.authGetAccountUsage === 'function') {
-    return await api.authGetAccountUsage();
+    const usage = await api.authGetAccountUsage();
+    if (!usage || typeof usage !== 'object') return null;
+    // Copy only the public balance fields. Authentication data never leaves
+    // the WorkBuddy renderer or crosses the CDP boundary.
+    return {
+      usageLeft: usage.usageLeft ?? null,
+      usageTotal: usage.usageTotal ?? null,
+      usageUsed: usage.usageUsed ?? null,
+      refreshAt: usage.refreshAt ?? null,
+      source: 'account-api'
+    };
   }
 
   // WorkBuddy 5.2.5 no longer exposes authGetAccountUsage in preload.
@@ -63,12 +74,18 @@ ACCOUNT_EXPRESSION = """
 """
 
 
-def collect(fallback: dict, database_path: Path = DEFAULT_DB_PATH) -> dict:
+def collect(fallback: dict, force: bool = False, *, database_path: Path = DEFAULT_DB_PATH) -> dict:
     """Read balance through WorkBuddy itself and today's usage from its local DB."""
     result = fallback.copy()
-    account = _get_account_usage()
+    account = _get_account_usage(force=force)
     if account:
         result.update(account)
+    else:
+        result.setdefault("balance_state", "Manual")
+        result.setdefault("balance_stale", True)
+        result.setdefault("balance_updated_at", None)
+        result.setdefault("balance_updated_epoch", None)
+        result.setdefault("balance_age_seconds", None)
 
     local_usage = _read_today_usage(database_path)
     if local_usage:
@@ -81,19 +98,17 @@ def collect(fallback: dict, database_path: Path = DEFAULT_DB_PATH) -> dict:
     return result
 
 
-def _get_account_usage() -> dict[str, Any] | None:
-    global _last_attempt, _account_cache, _account_target
+def _get_account_usage(force: bool = False) -> dict[str, Any] | None:
+    global _last_attempt, _account_cache, _account_target, _account_last_error
     now = time.monotonic()
     with _lock:
         if _account_cache is None:
             _account_cache = _load_account_cache()
-        if now - _last_attempt < ACCOUNT_REFRESH_SECONDS:
+        if not force and _last_attempt and now - _last_attempt < ACCOUNT_REFRESH_SECONDS:
             return _with_stale_state(_account_cache)
         _last_attempt = now
         try:
             target = target_identity_localhost(DEBUG_PORT)
-            if target == _account_target:
-                return _with_stale_state(_account_cache)
             raw = evaluate_localhost(DEBUG_PORT, ACCOUNT_EXPRESSION)
             parsed = _normalise_account_usage(raw)
             if parsed:
@@ -101,9 +116,14 @@ def _get_account_usage() -> dict[str, Any] | None:
                 parsed["balance_updated_at"] = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
                 _account_cache = parsed
                 _account_target = target
+                _account_last_error = False
                 _save_account_cache(parsed)
+            else:
+                _account_target = None
+                _account_last_error = True
         except (CdpError, OSError, ValueError, TypeError):
             _account_target = None
+            _account_last_error = True
         return _with_stale_state(_account_cache)
 
 
@@ -161,6 +181,7 @@ def _number(value: Any) -> int | float | None:
         return None
     if isinstance(value, str):
         value = value.replace(",", "").replace("，", "").strip()
+        value = "".join(value.split())
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -172,10 +193,20 @@ def _with_stale_state(value: dict[str, Any] | None) -> dict[str, Any] | None:
     if not value:
         return None
     result = value.copy()
-    updated = float(result.get("balance_updated_epoch", 0) or 0)
+    try:
+        updated = float(result.get("balance_updated_epoch", 0) or 0)
+    except (TypeError, ValueError):
+        updated = 0
     result["balance_age_seconds"] = max(0, round(time.time() - updated)) if updated else None
     result["balance_stale"] = not updated or result["balance_age_seconds"] > ACCOUNT_REFRESH_SECONDS * 3
-    result["balance_state"] = "Cached" if result["balance_stale"] else "Connected"
+    result["balance_state"] = "Cached" if result["balance_stale"] or _account_last_error else "Connected"
+    if updated:
+        result.setdefault(
+            "balance_updated_at",
+            datetime.fromtimestamp(updated).astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+    else:
+        result.setdefault("balance_updated_at", None)
     return result
 
 
@@ -197,7 +228,11 @@ def _save_account_cache(value: dict[str, Any]) -> None:
             existing = {}
         stable_keys = ("points", "total_points", "cycle_used_points", "reset_text")
         unchanged = all(existing.get(key) == value.get(key) for key in stable_keys)
-        recent = time.time() - float(existing.get("balance_updated_epoch", 0) or 0) < 900
+        try:
+            existing_epoch = float(existing.get("balance_updated_epoch", 0) or 0)
+        except (TypeError, ValueError):
+            existing_epoch = 0
+        recent = time.time() - existing_epoch < 900
         if unchanged and recent:
             return
         temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

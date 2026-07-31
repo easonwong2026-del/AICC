@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.4.3 - 2026-07-31
+
+- **修复 WorkBuddy 实时积分缓存**：同一 CDP 页面 target 在超过 120 秒后会重新读取余额，不再因为页面会话未变化而永久复用旧值
+- **贯通手动刷新**：`POST /api/refresh` 将 `force=true` 传递到 WorkBuddy 采集器，手动刷新会立即绕过采集器缓存
+- **安全的失败回退**：CDP 读取失败时保留最近成功积分，并返回连接状态、更新时间、缓存年龄和过期标记；不读取、保存或传输 Token/Cookie
+- **跨端显示修复**：macOS 使用千位分隔和小数显示真实积分，显示连接/缓存及最近更新时间；Android/Poke4S 兼容新的状态字段
+- **并发保护**：同一时间只允许一个 WorkBuddy 采集任务运行，菜单读取仍只在页面余额不可见时短暂打开并恢复用户菜单
+
 ## 2.4.2 - 2026-07-29
 
 - **修复 OpenCodex 登录 Shell 环境**：`ocx ensure` 和 `ocx stop` 现在通过 `/bin/zsh -lc` 执行，确保用户的 `.zprofile`、Homebrew、npm-global 路径和 `CODEX_CLI_PATH` 可用

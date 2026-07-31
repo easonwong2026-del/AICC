@@ -19,6 +19,7 @@ class ProviderContractTests(unittest.TestCase):
             )
             self.assertEqual(provider.status()["status"], "Pending")
             self.assertEqual(provider.refresh()["status"], "Online")
+            self.assertEqual(provider.refresh(force=True)["status"], "Online")
             self.assertEqual(provider.health()["state"], "Online")
             self.assertEqual(provider.cache().root, Path(directory))
 

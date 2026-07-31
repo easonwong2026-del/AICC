@@ -25,6 +25,8 @@ struct CompactCard: View {
             }
             Text(value)
                 .font(.system(size: 20, weight: .semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.55)
             Text(subtitle)
                 .font(.system(size: 9))
                 .foregroundColor(.secondary)

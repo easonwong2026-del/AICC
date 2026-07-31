@@ -21,6 +21,9 @@ final class DashboardData {
     String workBuddyUsed = "--";
     String workBuddyState = "--";
     boolean workBuddyStale;
+    String workBuddyUpdatedAt = "--";
+    Double workBuddyUpdatedEpoch;
+    Long workBuddyAgeSeconds;
     String deepSeekBalance = "--";
     String deepSeekUsage = "--";
     String deepSeekCurrency = "";
@@ -74,6 +77,13 @@ final class DashboardData {
                     ? number(workBuddy, "auto_used_credits") : number(workBuddy, "used_points");
             data.workBuddyState = workBuddy.optString("balance_state", "MANUAL").toUpperCase(Locale.ROOT);
             data.workBuddyStale = workBuddy.optBoolean("balance_stale", false);
+            data.workBuddyUpdatedAt = workBuddy.optString("balance_updated_at", "--");
+            if (!workBuddy.isNull("balance_updated_epoch")) {
+                data.workBuddyUpdatedEpoch = workBuddy.optDouble("balance_updated_epoch");
+            }
+            if (!workBuddy.isNull("balance_age_seconds")) {
+                data.workBuddyAgeSeconds = workBuddy.optLong("balance_age_seconds");
+            }
         }
 
         JSONObject deepSeek = root.optJSONObject("deepseek");

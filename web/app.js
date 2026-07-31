@@ -44,9 +44,14 @@ function render(data) {
   $("codex-state").textContent = codex.available
     ? `${codex.stale ? "Cached" : "Connected"}${age} · refreshes every ${codex.refresh_seconds || 60}s`
     : `Not connected · ${codex.state || "--"}`;
-  $("workbuddy-points").textContent = Number(workbuddy.points || 0).toLocaleString();
+  const workBuddyPoints = Number(workbuddy.points);
+  $("workbuddy-points").textContent = Number.isFinite(workBuddyPoints)
+    ? workBuddyPoints.toLocaleString()
+    : "--";
   const used = workbuddy.auto_used_credits ?? workbuddy.used_points ?? 0;
-  $("workbuddy-state").textContent = workbuddy.balance_state || "Manual";
+  const balanceAge = Number(workbuddy.balance_age_seconds);
+  const balanceAgeText = Number.isFinite(balanceAge) ? ` · ${balanceAge}s 前` : "";
+  $("workbuddy-state").textContent = `${workbuddy.balance_state || "Manual"}${balanceAgeText}`;
   $("workbuddy-used").textContent = Number(used).toLocaleString();
   $("workbuddy-reset").textContent = workbuddy.reset_text || "--";
   $("workbuddy-source").textContent = workbuddy.usage_source ? `Source: ${workbuddy.usage_source}` : "";

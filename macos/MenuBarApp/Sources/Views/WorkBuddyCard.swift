@@ -8,22 +8,42 @@ struct WorkBuddyCard: View {
             title: "WorkBuddy",
             icon: "wand.and.stars",
             value: formattedPoints,
-            subtitle: data.reset_text ?? "",
+            subtitle: statusSubtitle,
             state: state
         )
     }
 
     private var formattedPoints: String {
         guard let points = data.points else { return "--" }
-        if points >= 1000 {
-            return String(format: "%.1fk", points / 1000)
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.usesGroupingSeparator = true
+        formatter.maximumFractionDigits = 2
+        formatter.minimumFractionDigits = 0
+        return formatter.string(from: NSNumber(value: points)) ?? String(points)
+    }
+
+    private var statusSubtitle: String {
+        let status = data.balance_state ?? (data.points == nil ? "Unavailable" : "Connected")
+        if let age = data.balance_age_seconds {
+            return "\(status) · \(ageText(age))"
         }
-        return String(format: "%.0f", points)
+        if let updated = data.balance_updated_at, !updated.isEmpty {
+            return "\(status) · \(updated)"
+        }
+        return status
+    }
+
+    private func ageText(_ seconds: Int) -> String {
+        if seconds < 60 { return "\(seconds)s ago" }
+        if seconds < 3600 { return "\(seconds / 60)m ago" }
+        if seconds < 86400 { return "\(seconds / 3600)h ago" }
+        return "\(seconds / 86400)d ago"
     }
 
     private var state: CardState {
+        if data.balance_stale == true || data.balance_state == "Cached" { return .stale }
         if data.balance_state == "Connected" { return .online }
-        if data.balance_state == "Cached" { return .stale }
         if data.points == nil { return .unavailable }
         return .online
     }

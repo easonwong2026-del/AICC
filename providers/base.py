@@ -35,7 +35,7 @@ class Provider(Protocol):
     def health(self) -> dict[str, Any]:
         """Return a small health summary without starting a provider refresh."""
 
-    def refresh(self) -> dict[str, Any]:
+    def refresh(self, force: bool = False) -> dict[str, Any]:
         """Perform one provider refresh and return its normalized status."""
 
     def cache(self) -> CacheStore:
@@ -69,7 +69,7 @@ class CallableProvider:
         state = value.get("state", value.get("status", "unknown"))
         return {"provider": self.name, "ok": bool(value), "state": str(state)}
 
-    def refresh(self) -> dict[str, Any]:
+    def refresh(self, force: bool = False) -> dict[str, Any]:
         value = self._collect()
         if not isinstance(value, dict):
             raise TypeError("provider did not return an object")

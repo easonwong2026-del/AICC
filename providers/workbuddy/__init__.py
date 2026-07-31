@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from collectors.workbuddy import collect
+from collectors.workbuddy import _with_stale_state, collect
 from providers.base import DEFAULT_PROVIDER_INTERVAL, DEFAULT_PROVIDER_TIMEOUT, CacheStore
 
 
@@ -24,7 +24,10 @@ class WorkBuddyProvider:
         self._status = initial.copy()
 
     def status(self) -> dict[str, Any]:
-        return self._status.copy()
+        value = self._status.copy()
+        if value.get("balance_updated_epoch") is not None:
+            return _with_stale_state(value) or value
+        return value
 
     def health(self) -> dict[str, Any]:
         value = self.status()
@@ -34,8 +37,8 @@ class WorkBuddyProvider:
             "state": value.get("balance_state", "pending"),
         }
 
-    def refresh(self) -> dict[str, Any]:
-        value = collect(self._fallback())
+    def refresh(self, force: bool = False) -> dict[str, Any]:
+        value = collect(self._fallback(), force=force)
         self._status = value.copy()
         return value
 
