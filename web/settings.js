@@ -6,11 +6,15 @@ const set = (name, value) => { form.elements[name].value = value ?? ""; };
 
 async function load() {
   const data = await fetch("/api/status").then((r) => r.json());
-  set("workbuddy_points", data.workbuddy.points); set("workbuddy_used", data.workbuddy.used_points); set("workbuddy_reset", data.workbuddy.reset_text);
+  const workbuddy = data.workbuddy || {};
+  set("workbuddy_points", workbuddy.points); set("workbuddy_used", workbuddy.used_points); set("workbuddy_reset", workbuddy.reset_text);
   sourceStatus.replaceChildren(...Object.entries(data.collection || {}).map(([name, item]) => {
     const row = document.createElement("div");
     const label = document.createElement("strong"); label.textContent = name.toUpperCase();
-    const state = document.createElement("span"); state.textContent = item.error || `${item.state} · ${item.last_success || "never"}`;
+    const detail = name === "workbuddy" && workbuddy.balance_error_code
+      ? `${workbuddy.balance_error_code} · ${workbuddy.balance_error || "balance read failed"}`
+      : `${item.state} · ${item.last_success || "never"}`;
+    const state = document.createElement("span"); state.textContent = item.error || detail;
     row.append(label, state); return row;
   }));
 }
