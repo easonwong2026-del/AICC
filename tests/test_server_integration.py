@@ -81,13 +81,37 @@ class ServerIntegrationTests(unittest.TestCase):
 
     def test_workbuddy_reconnect_uses_bundled_script(self):
         request = Request(self.base + "/api/workbuddy/reconnect", method="POST")
-        with patch("server.subprocess.Popen") as popen:
+        with patch("server.subprocess.run") as run:
+            run.return_value = type(
+                "Completed",
+                (),
+                {"returncode": 0, "stdout": "AICC_WORKBUDDY_READY\n", "stderr": ""},
+            )()
             with urlopen(request, timeout=2) as response:
-                self.assertEqual(response.status, 202)
-                self.assertEqual(json.load(response)["state"], "reconnecting")
-        self.assertIn("--ensure", popen.call_args.args[0])
-        self.assertIn("start-workbuddy-monitored.sh", popen.call_args.args[0][1])
+                self.assertEqual(response.status, 200)
+                self.assertEqual(json.load(response)["state"], "bridge_ready")
+        self.assertIn("--ensure", run.call_args.args[0])
+        self.assertIn("start-workbuddy-monitored.sh", run.call_args.args[0][1])
         self.assertIn("workbuddy", server._collector_manager.invalidated)
+
+    def test_workbuddy_reconnect_reports_failure(self):
+        request = Request(self.base + "/api/workbuddy/reconnect", method="POST")
+        with patch("server.subprocess.run") as run:
+            run.return_value = type(
+                "Completed",
+                (),
+                {
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": "boom\nAICC_WORKBUDDY_FAIL:timeout\n",
+                },
+            )()
+            with self.assertRaises(HTTPError) as caught:
+                urlopen(request, timeout=2)
+            self.assertEqual(caught.exception.code, 502)
+            payload = json.loads(caught.exception.read().decode("utf-8"))
+        self.assertEqual(payload["error_code"], "timeout")
+        self.assertFalse(payload["ok"])
 
     def test_unavailable_workbuddy_snapshot_clears_old_manual_points(self):
         server.save_status({"workbuddy": {"points": 8520, "used_points": 1480}})
