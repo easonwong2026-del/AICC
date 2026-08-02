@@ -33,8 +33,10 @@ let package = Package(
                 "Models/ProviderModels.swift",
                 "Models/SettingsPresentationModel.swift",
                 "Models/StatusItemMenuModel.swift",
+                "Models/UpdateModels.swift",
                 "Services/APIService.swift",
                 "Services/ProcessRunner.swift",
+                "Services/UpdateService.swift",
             ]
         ),
         .testTarget(
@@ -50,6 +52,7 @@ let package = Package(
                 "ProviderModelsTests.swift",
                 "SettingsPresentationModelTests.swift",
                 "StatusItemMenuModelTests.swift",
+                "UpdateServiceTests.swift",
                 "APIServiceTests.swift",
             ]
         ),

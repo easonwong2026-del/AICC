@@ -24,6 +24,17 @@
 "System" = "跟随系统";
 "Light" = "浅色";
 "Dark" = "深色";
+"About & Updates" = "关于与更新";
+"Build" = "构建号";
+"Check for Updates" = "检查更新";
+"Checking for Updates…" = "正在检查更新…";
+"You're up to date" = "当前已是最新版本";
+"Update available: %@" = "发现新版本 %@";
+"Update check failed" = "检查更新失败";
+"Update source not configured" = "更新源尚未配置";
+"Open Release Page" = "打开发布页面";
+"View Update" = "查看更新";
+"Updates are checked only when you click the button." = "仅在点击按钮后检查更新。";
 
 "Providers" = "服务";
 "OpenAI" = "OpenAI";

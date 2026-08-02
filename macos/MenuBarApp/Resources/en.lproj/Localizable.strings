@@ -22,6 +22,17 @@
 "System" = "System";
 "Light" = "Light";
 "Dark" = "Dark";
+"About & Updates" = "About & Updates";
+"Build" = "Build";
+"Check for Updates" = "Check for Updates";
+"Checking for Updates…" = "Checking for Updates…";
+"You're up to date" = "You're up to date";
+"Update available: %@" = "Update available: %@";
+"Update check failed" = "Update check failed";
+"Update source not configured" = "Update source not configured";
+"Open Release Page" = "Open Release Page";
+"View Update" = "View Update";
+"Updates are checked only when you click the button." = "Updates are checked only when you click the button.";
 "Points" = "Points";
 "Providers" = "Providers";
 "OpenAI" = "OpenAI";

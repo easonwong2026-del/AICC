@@ -11,7 +11,24 @@ enum AppLanguage: String, CaseIterable, Identifiable {
         switch self {
         case .system: return "System Default"
         case .english: return "English"
-        case .simplifiedChinese: return "Simplified Chinese"
+        case .simplifiedChinese: return "简体中文"
+        }
+    }
+
+    var nativeDisplayName: String {
+        switch self {
+        case .system: return "System Default"
+        case .english: return "English"
+        case .simplifiedChinese: return "简体中文"
+        }
+    }
+
+    func pickerDisplayName(localize: (String) -> String) -> String {
+        switch self {
+        case .system:
+            return localize("System Default")
+        case .english, .simplifiedChinese:
+            return nativeDisplayName
         }
     }
 

@@ -18,6 +18,25 @@ final class SettingsPresentationModelTests: XCTestCase {
         XCTAssertEqual((AppLanguage(rawValue: "invalid") ?? .system).localizationIdentifier, AppLanguage.system.localizationIdentifier)
     }
 
+    func testLanguagePickerUsesNativeNamesAndLocalizesOnlySystemDefault() {
+        XCTAssertEqual(
+            AppLanguage.english.pickerDisplayName(localize: { _ in "系统默认" }),
+            "English"
+        )
+        XCTAssertEqual(
+            AppLanguage.simplifiedChinese.pickerDisplayName(localize: { _ in "系统默认" }),
+            "简体中文"
+        )
+        XCTAssertEqual(
+            AppLanguage.system.pickerDisplayName(localize: { _ in "跟随系统" }),
+            "跟随系统"
+        )
+        XCTAssertEqual(
+            AppLanguage.system.pickerDisplayName(localize: { _ in "System Default" }),
+            "System Default"
+        )
+    }
+
     func testThemeSelectionHasThreeSupportedModes() {
         XCTAssertEqual(AppThemeMode.allCases, [.system, .light, .dark])
         XCTAssertNil(AppThemeMode(rawValue: "invalid"))

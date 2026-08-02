@@ -42,6 +42,16 @@ struct CoreSmokeMain {
         )
         try require(AppLanguage.english.localizationIdentifier == "en", "english locale")
         try require(AppLanguage.simplifiedChinese.localizationIdentifier == "zh-Hans", "Chinese locale")
+        try require(
+            AppLanguage.english.pickerDisplayName(localize: { _ in "跟随系统" }) == "English",
+            "English native language name"
+        )
+        try require(
+            AppLanguage.simplifiedChinese.pickerDisplayName(localize: { _ in "System Default" }) == "简体中文",
+            "Chinese native language name"
+        )
+        try require(SemanticVersion("2.5.9")! < SemanticVersion("2.5.10")!, "semantic version ordering")
+        try require(SemanticVersion("2.5.1-beta")! < SemanticVersion("2.5.1")!, "prerelease ordering")
         try require(AppThemeMode.allCases.count == 3, "theme modes")
         var settingsLifecycle = SettingsWindowLifecycle()
         try require(settingsLifecycle.beginPresentation(), "settings lifecycle begin")
