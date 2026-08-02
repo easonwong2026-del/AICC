@@ -53,7 +53,7 @@ struct DashboardView: View {
                 .buttonStyle(.plain)
                 .help("Refresh")
 
-                Button(action: presentSettings) {
+                Button(action: openSettings) {
                     Image(systemName: "gearshape")
                         .font(.system(size: 13, weight: .medium))
                 }

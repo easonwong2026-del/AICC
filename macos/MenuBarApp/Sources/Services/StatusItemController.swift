@@ -2,6 +2,12 @@ import AppKit
 import Combine
 import SwiftUI
 
+private final class StatusItemHostingView: NSHostingView<AnyView> {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+}
+
 @MainActor
 final class StatusItemController: NSObject, NSPopoverDelegate {
     private let api: APIService
@@ -10,14 +16,16 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private let openSettings: () -> Void
 
     private var statusItem: NSStatusItem?
-    private var statusLabelView: NSHostingView<AnyView>?
+    private var statusLabelView: StatusItemHostingView?
     private var popover: NSPopover?
     private var hostingController: NSHostingController<AnyView>?
     private var secondaryClickRecognizer: NSClickGestureRecognizer?
     private var cancellables = Set<AnyCancellable>()
     private var isTearingDown = false
 
-    private lazy var contextMenu: NSMenu = {
+    private var contextMenu: NSMenu?
+
+    private func makeContextMenu() -> NSMenu {
         let menu = NSMenu(title: "AICC")
         menu.addItem(menuItem("Open AICC Dashboard", action: #selector(openDashboardFromMenu)))
         menu.addItem(menuItem("Refresh All Now", action: #selector(refreshAllFromMenu)))
@@ -25,7 +33,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         menu.addItem(menuItem("Settings…", action: #selector(openSettingsFromMenu)))
         menu.addItem(menuItem("Quit AICC", action: #selector(quitFromMenu)))
         return menu
-    }()
+    }
 
     init(
         api: APIService,
@@ -60,7 +68,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         button.addGestureRecognizer(recognizer)
         secondaryClickRecognizer = recognizer
 
-        let label = NSHostingView(rootView: statusLabel())
+        let label = StatusItemHostingView(rootView: statusLabel())
         label.translatesAutoresizingMaskIntoConstraints = false
         button.addSubview(label)
         NSLayoutConstraint.activate([
@@ -107,7 +115,24 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private func updateStatusLabel() {
         guard !isTearingDown else { return }
         statusLabelView?.rootView = statusLabel()
+        updateContextMenuTitles()
         updateStatusItemLength()
+    }
+
+    private func updateContextMenuTitles() {
+        guard let contextMenu else { return }
+        let keys = [
+            "Open AICC Dashboard",
+            "Refresh All Now",
+            "Settings…",
+            "Quit AICC"
+        ]
+        var keyIndex = 0
+        for item in contextMenu.items where !item.isSeparatorItem {
+            guard keyIndex < keys.count else { break }
+            item.title = settings.localized(keys[keyIndex])
+            keyIndex += 1
+        }
     }
 
     private func updateStatusItemLength() {
@@ -149,7 +174,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     @objc private func showContextMenu(_ sender: NSClickGestureRecognizer) {
         guard sender.state == .ended, !isTearingDown, let button = statusItem?.button else { return }
         popover?.performClose(nil)
-        contextMenu.popUp(positioning: nil, at: NSPoint(x: button.bounds.midX, y: button.bounds.minY), in: button)
+        if contextMenu == nil {
+            contextMenu = makeContextMenu()
+        }
+        updateContextMenuTitles()
+        contextMenu?.popUp(positioning: nil, at: NSPoint(x: button.bounds.midX, y: button.bounds.minY), in: button)
     }
 
     @objc private func openDashboardFromMenu() {
@@ -215,6 +244,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             NSStatusBar.system.removeStatusItem(statusItem)
         }
         self.statusItem = nil
-        contextMenu.items.forEach { $0.target = nil }
+        contextMenu?.items.forEach { $0.target = nil }
+        contextMenu = nil
     }
 }

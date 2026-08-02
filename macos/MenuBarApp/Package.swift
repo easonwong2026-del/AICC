@@ -23,6 +23,7 @@ let package = Package(
                 "Services/CacheManager.swift",
                 "Services/LaunchAtLoginService.swift",
                 "Services/OpenCodexController.swift",
+                "Services/StatusItemController.swift",
                 "Services/SingleInstanceService.swift",
                 "Settings",
                 "Views",
