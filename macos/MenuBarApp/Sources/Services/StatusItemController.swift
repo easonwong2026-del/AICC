@@ -82,6 +82,14 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.updateStatusLabel() }
             .store(in: &cancellables)
+        // AppStorage updates UserDefaults but does not reliably forward an
+        // ObservableObject change from AppSettings. Observe the defaults
+        // notification so menu-bar visibility, theme, and locale snapshots
+        // are refreshed immediately as well.
+        NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updateStatusLabel() }
+            .store(in: &cancellables)
     }
 
     private func statusLabel() -> AnyView {
