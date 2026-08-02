@@ -2,9 +2,36 @@ import AppKit
 import Combine
 import SwiftUI
 
-private final class StatusItemHostingView: NSHostingView<AnyView> {
+private struct StatusItemLabelRootView: View {
+    let displayState: StatusItemDisplayState
+    let locale: Locale
+    let colorScheme: ColorScheme?
+    let tooltip: String
+
+    var body: some View {
+        MenuBarStatusLabel(
+            remaining: displayState.remaining,
+            showCodexStatus: displayState.showStatus,
+            showBalance: displayState.showBalance,
+            tooltip: tooltip
+        )
+        .environment(\.locale, locale)
+        .preferredColorScheme(colorScheme)
+    }
+}
+
+private final class StatusItemHostingView: NSHostingView<StatusItemLabelRootView> {
     override func hitTest(_ point: NSPoint) -> NSView? {
         nil
+    }
+}
+
+private final class DashboardHostingController: NSHostingController<DashboardRootView> {
+    var onLayout: (() -> Void)?
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        onLayout?()
     }
 }
 
@@ -18,21 +45,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private var statusItem: NSStatusItem?
     private var statusLabelView: StatusItemHostingView?
     private var popover: NSPopover?
-    private var hostingController: NSHostingController<AnyView>?
     private var cancellables = Set<AnyCancellable>()
     private var isTearingDown = false
-
-    private var contextMenu: NSMenu?
-
-    private func makeContextMenu() -> NSMenu {
-        let menu = NSMenu(title: "AICC")
-        menu.addItem(menuItem(StatusItemMenuCommand.openDashboard.rawValue, action: #selector(openDashboardFromMenu)))
-        menu.addItem(menuItem(StatusItemMenuCommand.refreshAll.rawValue, action: #selector(refreshAllFromMenu)))
-        menu.addItem(.separator())
-        menu.addItem(menuItem(StatusItemMenuCommand.settings.rawValue, action: #selector(openSettingsFromMenu)))
-        menu.addItem(menuItem(StatusItemMenuCommand.quit.rawValue, action: #selector(quitFromMenu)))
-        return menu
-    }
+    private var isDashboardVisible = false
+    private var displayState: StatusItemDisplayState
 
     init(
         api: APIService,
@@ -44,9 +60,16 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         self.settings = settings
         self.ocx = ocx
         self.openSettings = openSettings
+        self.displayState = StatusItemDisplayState(
+            status: api.status,
+            showStatus: settings.menuBarShowCodexStatus,
+            showBalance: settings.menuBarShowCodexBalance,
+            languageCode: settings.languageCode,
+            themeMode: settings.themeMode
+        )
         super.init()
         installStatusItem()
-        observeChanges()
+        observeDisplayState()
     }
 
     private func installStatusItem() {
@@ -62,7 +85,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         button.action = #selector(handleStatusItemAction(_:))
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
-        let label = StatusItemHostingView(rootView: statusLabel())
+        let label = StatusItemHostingView(rootView: statusLabelRootView())
         label.translatesAutoresizingMaskIntoConstraints = false
         button.addSubview(label)
         NSLayoutConstraint.activate([
@@ -75,53 +98,59 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         updateStatusItemLength()
     }
 
-    private func observeChanges() {
-        api.objectWillChange
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.updateStatusLabel() }
-            .store(in: &cancellables)
-        settings.objectWillChange
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.updateStatusLabel() }
-            .store(in: &cancellables)
-        // AppStorage updates UserDefaults but does not reliably forward an
-        // ObservableObject change from AppSettings. Observe the defaults
-        // notification so menu-bar visibility, theme, and locale snapshots
-        // are refreshed immediately as well.
-        NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.updateStatusLabel() }
-            .store(in: &cancellables)
-    }
+    private func observeDisplayState() {
+        let remaining = api.$status
+            .map { status in
+                status?.codex?.weekly?.remaining ?? status?.codex?.five_hour?.remaining
+            }
+            .removeDuplicates()
 
-    private func statusLabel() -> AnyView {
-        AnyView(
-            MenuBarStatusLabel(
-                status: api.status,
-                showCodexStatus: settings.menuBarShowCodexStatus,
-                showBalance: settings.menuBarShowCodexBalance
-            )
-            .environment(\.locale, settings.locale)
-            .preferredColorScheme(settings.preferredColorScheme)
+        let settingsState = Publishers.CombineLatest4(
+            settings.$languageCode,
+            settings.$themeMode,
+            settings.$menuBarShowCodexStatus,
+            settings.$menuBarShowCodexBalance
         )
+
+        Publishers.CombineLatest(remaining, settingsState)
+            .map { remaining, values in
+                StatusItemDisplayState(
+                    remaining: remaining,
+                    showStatus: values.2,
+                    showBalance: values.3,
+                    languageCode: values.0,
+                    themeMode: values.1
+                )
+            }
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] state in self?.applyDisplayState(state) }
+            .store(in: &cancellables)
     }
 
-    private func updateStatusLabel() {
+    private func applyDisplayState(_ state: StatusItemDisplayState) {
         guard !isTearingDown else { return }
-        statusLabelView?.rootView = statusLabel()
-        updateContextMenuTitles()
+        displayState = state
+        statusLabelView?.rootView = statusLabelRootView()
         updateStatusItemLength()
     }
 
-    private func updateContextMenuTitles() {
-        guard let contextMenu else { return }
-        let keys = StatusItemMenuCommand.allCases.map(\.rawValue)
-        var keyIndex = 0
-        for item in contextMenu.items where !item.isSeparatorItem {
-            guard keyIndex < keys.count else { break }
-            item.title = settings.localized(keys[keyIndex])
-            keyIndex += 1
+    private func statusLabelRootView() -> StatusItemLabelRootView {
+        let language = AppLanguage(rawValue: displayState.languageCode) ?? .system
+        let colorScheme: ColorScheme?
+        switch displayState.themeMode {
+        case "light": colorScheme = .light
+        case "dark": colorScheme = .dark
+        default: colorScheme = nil
         }
+        let tooltipKey = displayState.showStatus ? "Codex" : "AICC"
+        let tooltip = settings.localized(tooltipKey, languageCode: displayState.languageCode)
+        return StatusItemLabelRootView(
+            displayState: displayState,
+            locale: language.locale,
+            colorScheme: colorScheme,
+            tooltip: tooltip
+        )
     }
 
     private func updateStatusItemLength() {
@@ -131,52 +160,86 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         statusItem.length = width
     }
 
-    private func makePopover() {
-        let dashboard = DashboardView(openSettings: openSettings)
-            .environmentObject(api)
-            .environmentObject(ocx)
-            .environmentObject(settings)
-            .environment(\.locale, settings.locale)
-            .preferredColorScheme(settings.preferredColorScheme)
-        let controller = NSHostingController(rootView: AnyView(dashboard))
-        let popover = NSPopover()
-        popover.behavior = .transient
-        popover.animates = true
-        popover.delegate = self
-        popover.contentViewController = controller
-        popover.contentSize = NSSize(width: 350, height: max(1, controller.view.fittingSize.height))
-        hostingController = controller
-        self.popover = popover
-    }
-
     @objc private func handleStatusItemAction(_ sender: NSStatusBarButton) {
+        let button: StatusItemMouseButton
         switch NSApp.currentEvent?.type {
         case .rightMouseDown, .rightMouseUp:
-            showContextMenu()
+            button = .right
         default:
-            toggleDashboard()
+            button = .left
         }
+        switch StatusItemClickRouter.action(for: button) {
+        case .dashboard:
+            toggleDashboard()
+        case .contextMenu:
+            showContextMenu()
+        }
+    }
+
+    private func makePopover() {
+        let rootView = DashboardRootView(
+            api: api,
+            ocx: ocx,
+            settings: settings,
+            openSettings: openSettings
+        )
+        let controller = DashboardHostingController(rootView: rootView)
+        controller.onLayout = { [weak self, weak controller] in
+            guard let controller else { return }
+            self?.updatePopoverSize(for: controller)
+        }
+
+        let newPopover = NSPopover()
+        newPopover.behavior = .transient
+        newPopover.animates = true
+        newPopover.delegate = self
+        newPopover.contentViewController = controller
+        newPopover.contentSize = NSSize(width: 350, height: 1)
+        popover = newPopover
+    }
+
+    private func updatePopoverSize(for controller: DashboardHostingController) {
+        guard let popover, !isTearingDown else { return }
+        controller.view.layoutSubtreeIfNeeded()
+        let fittingSize = controller.view.fittingSize
+        let visibleHeight = NSScreen.main?.visibleFrame.height ?? 800
+        let maximumHeight = min(680, max(320, visibleHeight * 0.82))
+        let height = min(max(1, fittingSize.height), maximumHeight)
+        let newSize = NSSize(width: 350, height: height)
+        guard abs(popover.contentSize.height - newSize.height) > 1 else { return }
+        popover.contentSize = newSize
     }
 
     private func toggleDashboard() {
         guard !isTearingDown else { return }
-        if popover?.isShown == true {
-            popover?.performClose(nil)
-        } else {
-            guard let button = statusItem?.button else { return }
-            if popover == nil { makePopover() }
-            popover?.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        if let popover, popover.isShown {
+            closePopover()
+            return
         }
+        guard let button = statusItem?.button else { return }
+        if popover == nil { makePopover() }
+        popover?.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
     }
 
     private func showContextMenu() {
         guard !isTearingDown, let button = statusItem?.button else { return }
-        popover?.performClose(nil)
-        if contextMenu == nil {
-            contextMenu = makeContextMenu()
-        }
-        updateContextMenuTitles()
-        contextMenu?.popUp(positioning: nil, at: NSPoint(x: button.bounds.midX, y: button.bounds.minY), in: button)
+        closePopover()
+        let menu = makeContextMenu()
+        menu.popUp(
+            positioning: nil,
+            at: NSPoint(x: button.bounds.midX, y: button.bounds.minY),
+            in: button
+        )
+    }
+
+    private func makeContextMenu() -> NSMenu {
+        let menu = NSMenu(title: "AICC")
+        menu.addItem(menuItem(StatusItemMenuCommand.openDashboard.rawValue, action: #selector(openDashboardFromMenu)))
+        menu.addItem(menuItem(StatusItemMenuCommand.refreshAll.rawValue, action: #selector(refreshAllFromMenu)))
+        menu.addItem(.separator())
+        menu.addItem(menuItem(StatusItemMenuCommand.settings.rawValue, action: #selector(openSettingsFromMenu)))
+        menu.addItem(menuItem(StatusItemMenuCommand.quit.rawValue, action: #selector(quitFromMenu)))
+        return menu
     }
 
     @objc private func openDashboardFromMenu() {
@@ -216,30 +279,50 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     }
 
     func popoverWillShow(_ notification: Notification) {
+        guard !isDashboardVisible else { return }
+        isDashboardVisible = true
         ocx.panelDidAppear()
     }
 
     func popoverDidClose(_ notification: Notification) {
-        ocx.panelDidDisappear()
+        guard let closedPopover = notification.object as? NSPopover else { return }
+        if isDashboardVisible {
+            isDashboardVisible = false
+            ocx.panelDidDisappear()
+        }
+        releasePopover(closedPopover)
+    }
+
+    private func releasePopover(_ closedPopover: NSPopover) {
+        guard popover === closedPopover else { return }
+        closedPopover.delegate = nil
+        closedPopover.contentViewController = nil
+        popover = nil
+    }
+
+    private func closePopover() {
+        guard let currentPopover = popover else { return }
+        let wasVisible = isDashboardVisible
+        currentPopover.delegate = nil
+        currentPopover.performClose(nil)
+        currentPopover.contentViewController = nil
+        popover = nil
+        if wasVisible {
+            isDashboardVisible = false
+            ocx.panelDidDisappear()
+        }
     }
 
     func tearDown() {
         guard !isTearingDown else { return }
         isTearingDown = true
         cancellables.removeAll()
-        popover?.performClose(nil)
-        popover?.delegate = nil
-        popover?.contentViewController = nil
-        popover = nil
-        hostingController = nil
+        closePopover()
         statusLabelView?.removeFromSuperview()
         statusLabelView = nil
-        ocx.panelDidDisappear()
         if let statusItem {
             NSStatusBar.system.removeStatusItem(statusItem)
         }
         self.statusItem = nil
-        contextMenu?.items.forEach { $0.target = nil }
-        contextMenu = nil
     }
 }

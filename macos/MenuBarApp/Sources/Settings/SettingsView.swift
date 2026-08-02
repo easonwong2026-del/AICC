@@ -68,7 +68,7 @@ private struct GeneralSettingsView: View {
             Section("Appearance") {
                 Picker("Language", selection: $settings.languageCode) {
                     ForEach(AppLanguage.allCases) { language in
-                        Text(language.displayName).tag(language.rawValue)
+                        Text(LocalizedStringKey(language.displayNameKey)).tag(language.rawValue)
                     }
                 }
                 Picker("Theme", selection: $settings.themeMode) {

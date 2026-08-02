@@ -1,5 +1,26 @@
 import SwiftUI
 
+struct DashboardRootView: View {
+    @ObservedObject var api: APIService
+    @ObservedObject var ocx: OpenCodexController
+    @ObservedObject var settings: AppSettings
+    let openSettings: () -> Void
+
+    var body: some View {
+        ScrollView(.vertical) {
+            DashboardView(openSettings: openSettings)
+        }
+        .frame(width: 350)
+        .frame(maxHeight: 640)
+        .environmentObject(api)
+        .environmentObject(ocx)
+        .environmentObject(settings)
+        .environment(\.locale, settings.locale)
+        .preferredColorScheme(settings.preferredColorScheme)
+        .id(settings.presentationIdentity)
+    }
+}
+
 struct DashboardView: View {
     let openSettings: () -> Void
     @EnvironmentObject var api: APIService

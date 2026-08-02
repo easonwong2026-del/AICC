@@ -13,4 +13,9 @@ final class StatusItemMenuModelTests: XCTestCase {
             ]
         )
     }
+
+    func testStatusItemClickRouterSeparatesLeftAndRightButtons() {
+        XCTAssertEqual(StatusItemClickRouter.action(for: .left), .dashboard)
+        XCTAssertEqual(StatusItemClickRouter.action(for: .right), .contextMenu)
+    }
 }

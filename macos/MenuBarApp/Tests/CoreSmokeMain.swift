@@ -23,6 +23,32 @@ struct CoreSmokeMain {
             "status item menu contract"
         )
 
+        let displayState = StatusItemDisplayState(
+            remaining: 77,
+            showStatus: true,
+            showBalance: true,
+            languageCode: "en",
+            themeMode: "system"
+        )
+        try require(
+            displayState == StatusItemDisplayState(
+                remaining: 77,
+                showStatus: true,
+                showBalance: true,
+                languageCode: "en",
+                themeMode: "system"
+            ),
+            "status display state duplicate"
+        )
+        try require(AppLanguage.english.localizationIdentifier == "en", "english locale")
+        try require(AppLanguage.simplifiedChinese.localizationIdentifier == "zh-Hans", "Chinese locale")
+        try require(AppThemeMode.allCases.count == 3, "theme modes")
+        var settingsLifecycle = SettingsWindowLifecycle()
+        try require(settingsLifecycle.beginPresentation(), "settings lifecycle begin")
+        try require(settingsLifecycle.state == .presented, "settings lifecycle present")
+        settingsLifecycle.close()
+        try require(settingsLifecycle.state == .closed, "settings lifecycle close")
+
         func fixture(_ name: String) throws -> Data {
             try Data(contentsOf: fixtureRoot.appendingPathComponent(name))
         }

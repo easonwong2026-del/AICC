@@ -270,19 +270,26 @@ final class ServerManager: ObservableObject {
         healthState = stopReason == .appExit || stopReason == .user ? .stopped : .degraded
     }
 
-    private func stopOwnedServer(reason: ServerStopReason) {
+    private func stopOwnedServer(reason: ServerStopReason, waitForExit: Bool = false) {
         guard ownership == .managed else { return }
         stopReason = reason
-        serverProcess?.terminate()
+        let process = serverProcess
+        process?.terminate()
+        if waitForExit, let process, process.isRunning {
+            let deadline = Date().addingTimeInterval(1.5)
+            while process.isRunning && Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            }
+        }
         serverProcess = nil
         ownership = .none
         isServerRunning = false
         healthState = reason == .recovery ? .recovering : .stopped
     }
 
-    func stopServer(reason: ServerStopReason = .user) {
+    func stopServer(reason: ServerStopReason = .user, waitForExit: Bool = false) {
         stopReason = reason
-        stopOwnedServer(reason: reason)
+        stopOwnedServer(reason: reason, waitForExit: waitForExit)
         if ownership == .none {
             healthState = .stopped
         }
@@ -296,7 +303,8 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
     private let singleInstance = SingleInstanceService.shared
     private let serverManager = ServerManager.shared
     private var statusItemController: StatusItemController?
-    private var settingsWindowController: SettingsWindowController?
+    private var settingsWindowCoordinator: SettingsWindowCoordinator?
+    private var hasStartedShutdown = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         guard singleInstance.acquire() else {
@@ -308,11 +316,19 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
+        settingsWindowCoordinator = SettingsWindowCoordinator(
+            api: APIService.shared,
+            ocx: OpenCodexController.shared,
+            settings: AppSettings.shared,
+            server: ServerManager.shared,
+            loginAtLaunch: LaunchAtLoginService.shared
+        )
+
         statusItemController = StatusItemController(
             api: APIService.shared,
             settings: AppSettings.shared,
             ocx: OpenCodexController.shared,
-            openSettings: { [weak self] in self?.presentSettings() }
+            openSettings: { [weak self] in self?.settingsWindowCoordinator?.present() }
         )
 
         // Start and supervise the Python server.
@@ -331,90 +347,37 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        shutDownForTermination()
+        return .terminateNow
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
+        shutDownForTermination()
+    }
+
+    private func shutDownForTermination() {
+        guard !hasStartedShutdown else { return }
+        hasStartedShutdown = true
         APIService.shared.stopAutoRefresh()
         statusItemController?.tearDown()
         statusItemController = nil
-        settingsWindowController?.close()
-        settingsWindowController = nil
-        OpenCodexController.shared.panelDidDisappear()
+        settingsWindowCoordinator?.tearDown()
+        settingsWindowCoordinator = nil
         serverManager.stopMonitoring()
-        serverManager.stopServer(reason: .appExit)
-    }
-
-    private func presentSettings() {
-        NSApp.activate(ignoringOtherApps: true)
-
-        let settingsSelectors = [
-            Selector(("showSettingsWindow:")),
-            Selector(("showPreferencesWindow:"))
-        ]
-        let sceneActionHandled = settingsSelectors.contains {
-            NSApp.sendAction($0, to: nil, from: nil)
-        }
-
-        if !sceneActionHandled {
-            presentFallbackSettings()
-            return
-        }
-
-        // SwiftUI can create the Settings window on a later run-loop turn.
-        // Give the scene a chance first, then guarantee a visible window if
-        // the accessory-app scene did not materialize one.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            guard !self.bringSettingsWindowToFront() else { return }
-            self.presentFallbackSettings()
-        }
-    }
-
-    private func presentFallbackSettings() {
-        if settingsWindowController == nil {
-            settingsWindowController = SettingsWindowController(
-                api: APIService.shared,
-                ocx: OpenCodexController.shared,
-                settings: AppSettings.shared,
-                server: ServerManager.shared,
-                loginAtLaunch: LaunchAtLoginService.shared
-            )
-        }
-        settingsWindowController?.present()
-    }
-
-    @discardableResult
-    private func bringSettingsWindowToFront() -> Bool {
-        NSApp.activate(ignoringOtherApps: true)
-        let window = settingsWindowController?.window ?? NSApp.windows.last {
-            $0.isVisible && $0.canBecomeKey && $0.styleMask.contains(.titled)
-        } ?? NSApp.keyWindow
-        guard let window else { return false }
-        window.makeKeyAndOrderFront(nil)
-        window.orderFrontRegardless()
-        return true
+        serverManager.stopServer(reason: .appExit, waitForExit: true)
     }
 }
 
-// MARK: - App
+// MARK: - AppKit app shell
 
 @main
-struct AICCApp: App {
-    @NSApplicationDelegateAdaptor(AICCAppDelegate.self) var appDelegate
-    @StateObject private var api = APIService.shared
-    @StateObject private var ocx = OpenCodexController.shared
-    @StateObject private var settings = AppSettings.shared
-    @StateObject private var server = ServerManager.shared
-    @StateObject private var loginAtLaunch = LaunchAtLoginService.shared
-
-    var body: some Scene {
-        Settings {
-            SettingsView()
-                .environmentObject(api)
-                .environmentObject(ocx)
-                .environmentObject(settings)
-                .environmentObject(server)
-                .environmentObject(loginAtLaunch)
-                .environment(\.locale, settings.locale)
-                .preferredColorScheme(settings.preferredColorScheme)
-        }
-
+@MainActor
+struct AICCApp {
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = AICCAppDelegate()
+        application.delegate = delegate
+        application.run()
     }
 }
