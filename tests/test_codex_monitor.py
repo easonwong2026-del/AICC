@@ -2,6 +2,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from services.codex_monitor import CodexMonitor
 
@@ -65,6 +66,20 @@ class CodexMonitorTests(unittest.TestCase):
             monitor._load_cache()
         self.assertEqual(monitor._status["limit_buckets"], [])
         self.assertFalse(monitor._status["reset_credits"]["provided"])
+
+    def test_connecting_without_cache_is_reported_stale(self):
+        monitor = CodexMonitor.__new__(CodexMonitor)
+        monitor._lock = threading.Lock()
+        monitor._status = {"available": False, "state": "Connecting"}
+        monitor._last_success_epoch = 0.0
+        monitor._fresh_event = threading.Event()
+        monitor._refresh_seconds = 60
+        monitor._fresh_event.set()
+
+        with patch.object(monitor, "start"):
+            result = monitor.status()
+
+        self.assertTrue(result["stale"])
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ class CollectorSlot:
         "provider", "collect", "interval", "timeout", "value", "running", "worker_alive",
         "running_force", "pending_force", "started_monotonic", "generation",
         "last_attempt", "last_success", "error", "timed_out", "duration_ms",
-        "consecutive_failures", "accepts_force",
+        "consecutive_failures", "snapshot_stale", "accepts_force",
     )
 
     def __init__(self, provider: Provider) -> None:
@@ -40,6 +40,7 @@ class CollectorSlot:
         self.interval = max(30, provider.interval)
         self.timeout = max(1.0, float(getattr(provider, "timeout", DEFAULT_PROVIDER_TIMEOUT)))
         self.value = provider.status()
+        self.snapshot_stale = bool(self.value.get("stale"))
         self.running = False
         self.worker_alive = False
         self.running_force = False
@@ -62,6 +63,7 @@ class CollectorManager:
             provider = definition if hasattr(definition, "refresh") else self._legacy_provider(name, definition)
             self._slots[name] = CollectorSlot(provider)
             self._slots[name].value = provider.status()
+            self._slots[name].snapshot_stale = bool(self._slots[name].value.get("stale"))
 
     @staticmethod
     def _legacy_provider(name: str, definition: tuple) -> Provider:
@@ -206,11 +208,13 @@ class CollectorManager:
             if generation == slot.generation:
                 slot.worker_alive = False
                 slot.value = value
+                slot.snapshot_stale = bool(value.get("stale"))
                 slot.error = None
-                slot.last_success = time.time()
                 slot.running = False
                 slot.timed_out = False
-                slot.consecutive_failures = 0
+                if not slot.snapshot_stale:
+                    slot.last_success = time.time()
+                    slot.consecutive_failures = 0
             elif not slot.running:
                 slot.worker_alive = False
             self._start_pending_force_locked(name, slot, generation, force)
@@ -254,6 +258,7 @@ class CollectorManager:
                     "refreshing" if slot.running
                     else "timeout" if slot.timed_out
                     else "error" if slot.error
+                    else "stale" if slot.snapshot_stale
                     else "ready" if slot.last_success
                     else "pending"
                 ),
@@ -279,9 +284,10 @@ class CollectorManager:
                     provider_health = slot.provider.health()
                 except Exception as error:  # health reporting must never break the server
                     provider_health = {"ok": False, "state": "error", "error": str(error)[:160]}
+                collection_state = metadata[name]["state"]
                 item = metadata[name].copy()
                 item.update(provider_health)
                 item["provider"] = name
-                item["ok"] = bool(provider_health.get("ok")) and item["state"] not in ("error", "timeout")
+                item["ok"] = bool(provider_health.get("ok")) and collection_state not in ("error", "timeout", "stale")
                 result[name] = item
             return result
