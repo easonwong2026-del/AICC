@@ -295,6 +295,7 @@ final class ServerManager: ObservableObject {
 class AICCAppDelegate: NSObject, NSApplicationDelegate {
     private let singleInstance = SingleInstanceService.shared
     private let serverManager = ServerManager.shared
+    private var statusItemController: StatusItemController?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         guard singleInstance.acquire() else {
@@ -305,6 +306,13 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+
+        statusItemController = StatusItemController(
+            api: APIService.shared,
+            settings: AppSettings.shared,
+            ocx: OpenCodexController.shared,
+            openSettings: { [weak self] in self?.presentSettings() }
+        )
 
         // Start and supervise the Python server.
         serverManager.startMonitoring()
@@ -324,9 +332,20 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         APIService.shared.stopAutoRefresh()
+        statusItemController?.tearDown()
+        statusItemController = nil
         OpenCodexController.shared.panelDidDisappear()
         serverManager.stopMonitoring()
         serverManager.stopServer(reason: .appExit)
+    }
+
+    private func presentSettings() {
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.keyWindow?.makeKeyAndOrderFront(nil)
+        }
     }
 }
 
@@ -342,22 +361,6 @@ struct AICCApp: App {
     @StateObject private var loginAtLaunch = LaunchAtLoginService.shared
 
     var body: some Scene {
-        MenuBarExtra {
-            DashboardView()
-                .environmentObject(api)
-                .environmentObject(ocx)
-                .environmentObject(settings)
-                .environment(\.locale, settings.locale)
-                .preferredColorScheme(settings.preferredColorScheme)
-        } label: {
-            MenuBarStatusLabel(
-                status: api.status,
-                showCodexStatus: settings.menuBarShowCodexStatus,
-                showBalance: settings.menuBarShowCodexBalance
-            )
-        }
-        .menuBarExtraStyle(.window)
-
         Settings {
             SettingsView()
                 .environmentObject(api)

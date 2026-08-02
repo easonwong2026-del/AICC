@@ -88,6 +88,9 @@
 "Port" = "端口";
 
 "Settings" = "设置";
+"Open AICC Dashboard" = "打开 AICC 看板";
+"Refresh All Now" = "立即刷新全部";
+"Settings…" = "设置…";
 "All services online" = "所有服务在线";
 "Some services unavailable" = "部分服务不可用";
 "Using cached data" = "正在使用缓存数据";

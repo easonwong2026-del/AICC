@@ -1,10 +1,14 @@
 import SwiftUI
 
 struct DashboardView: View {
-    @Environment(\.openSettings) private var openSettings
+    let openSettings: () -> Void
     @EnvironmentObject var api: APIService
     @EnvironmentObject var ocx: OpenCodexController
     @EnvironmentObject var settings: AppSettings
+
+    init(openSettings: @escaping () -> Void = {}) {
+        self.openSettings = openSettings
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -28,8 +32,6 @@ struct DashboardView: View {
         }
         .frame(width: 350)
         .background(VisualEffect.material)
-        .onAppear { ocx.panelDidAppear() }
-        .onDisappear { ocx.panelDidDisappear() }
     }
 
     // MARK: - Header
@@ -196,18 +198,6 @@ struct DashboardView: View {
                     .foregroundColor(.secondary)
             }
             Spacer()
-            Menu {
-                Button("About AICC") { showAbout() }
-                Divider()
-                Button("Quit AICC") { NSApp.terminate(nil) }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 13))
-            }
-            .buttonStyle(.plain)
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .frame(width: 24, height: 24)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
@@ -233,23 +223,4 @@ struct DashboardView: View {
         )
     }
 
-    private func showAbout() {
-        let alert = NSAlert()
-        alert.messageText = "AICC"
-        let shortVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
-        let buildVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
-        let description = settings.localized("About Description")
-        let versionLabel = settings.localized("Version")
-        alert.informativeText = "\(description)\n\n\(versionLabel) \(shortVersion) (\(buildVersion))"
-        alert.alertStyle = .informational
-        alert.runModal()
-    }
-
-    private func presentSettings() {
-        NSApp.activate(ignoringOtherApps: true)
-        openSettings()
-        DispatchQueue.main.async {
-            NSApp.activate(ignoringOtherApps: true)
-        }
-    }
 }
