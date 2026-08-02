@@ -238,14 +238,16 @@ final class UpdateServiceTests: XCTestCase {
         }
 
         XCTAssertEqual(service.state, .checking)
-        XCTAssertEqual(await service.checkForUpdates(), .checking)
+        let duplicateState = await service.checkForUpdates()
+        XCTAssertEqual(duplicateState, .checking)
         XCTAssertEqual(session.requestCount, 1)
 
         session.finish(
             data: Data(#"{"version":"2.5.0"}"#.utf8),
             response: response(url: "https://updates.example.test/manifest.json")
         )
-        XCTAssertEqual(await firstCheck.value, .upToDate)
+        let firstState = await firstCheck.value
+        XCTAssertEqual(firstState, .upToDate)
     }
 
     private func response(url: String, status: Int = 200) -> HTTPURLResponse {
