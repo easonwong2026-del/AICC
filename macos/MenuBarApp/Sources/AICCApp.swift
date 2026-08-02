@@ -341,11 +341,30 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
 
     private func presentSettings() {
         NSApp.activate(ignoringOtherApps: true)
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        DispatchQueue.main.async {
-            NSApp.activate(ignoringOtherApps: true)
-            NSApp.keyWindow?.makeKeyAndOrderFront(nil)
+
+        let settingsSelectors = [
+            Selector(("showSettingsWindow:")),
+            Selector(("showPreferencesWindow:"))
+        ]
+        for selector in settingsSelectors where NSApp.sendAction(selector, to: nil, from: nil) {
+            break
         }
+
+        DispatchQueue.main.async {
+            self.bringSettingsWindowToFront()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            self.bringSettingsWindowToFront()
+        }
+    }
+
+    private func bringSettingsWindowToFront() {
+        NSApp.activate(ignoringOtherApps: true)
+        let window = NSApp.windows.last {
+            $0.isVisible && $0.canBecomeKey && $0.styleMask.contains(.titled)
+        } ?? NSApp.keyWindow
+        window?.makeKeyAndOrderFront(nil)
+        window?.orderFrontRegardless()
     }
 }
 

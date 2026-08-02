@@ -19,7 +19,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private var statusLabelView: StatusItemHostingView?
     private var popover: NSPopover?
     private var hostingController: NSHostingController<AnyView>?
-    private var secondaryClickRecognizer: NSClickGestureRecognizer?
     private var cancellables = Set<AnyCancellable>()
     private var isTearingDown = false
 
@@ -60,13 +59,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         button.image = nil
         button.isBordered = false
         button.target = self
-        button.action = #selector(toggleDashboard)
-        button.sendAction(on: [.leftMouseUp])
-
-        let recognizer = NSClickGestureRecognizer(target: self, action: #selector(showContextMenu(_:)))
-        recognizer.buttonMask = 1 << 1
-        button.addGestureRecognizer(recognizer)
-        secondaryClickRecognizer = recognizer
+        button.action = #selector(handleStatusItemAction(_:))
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
         let label = StatusItemHostingView(rootView: statusLabel())
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -155,7 +149,16 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         self.popover = popover
     }
 
-    @objc private func toggleDashboard() {
+    @objc private func handleStatusItemAction(_ sender: NSStatusBarButton) {
+        switch NSApp.currentEvent?.type {
+        case .rightMouseDown, .rightMouseUp:
+            showContextMenu()
+        default:
+            toggleDashboard()
+        }
+    }
+
+    private func toggleDashboard() {
         guard !isTearingDown else { return }
         if popover?.isShown == true {
             popover?.performClose(nil)
@@ -166,8 +169,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         }
     }
 
-    @objc private func showContextMenu(_ sender: NSClickGestureRecognizer) {
-        guard sender.state == .ended, !isTearingDown, let button = statusItem?.button else { return }
+    private func showContextMenu() {
+        guard !isTearingDown, let button = statusItem?.button else { return }
         popover?.performClose(nil)
         if contextMenu == nil {
             contextMenu = makeContextMenu()
@@ -224,9 +227,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         guard !isTearingDown else { return }
         isTearingDown = true
         cancellables.removeAll()
-        if let button = statusItem?.button, let recognizer = secondaryClickRecognizer {
-            button.removeGestureRecognizer(recognizer)
-        }
         popover?.performClose(nil)
         popover?.delegate = nil
         popover?.contentViewController = nil
