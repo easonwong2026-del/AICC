@@ -261,17 +261,32 @@ struct UpdateInfo: Codable, Equatable {
         case publishedAt
     }
 
+    private struct AnyCodingKey: CodingKey {
+        let stringValue: String
+        let intValue: Int? = nil
+
+        init?(stringValue: String) {
+            self.stringValue = stringValue
+        }
+
+        init?(intValue: Int) {
+            return nil
+        }
+    }
+
     init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let allKeys = try decoder.container(keyedBy: AnyCodingKey.self)
         let allowedKeys = Set(CodingKeys.allCases.map(\.stringValue))
-        guard container.allKeys.allSatisfy({ allowedKeys.contains($0.stringValue) }) else {
+        guard allKeys.allKeys.allSatisfy({ allowedKeys.contains($0.stringValue) }) else {
             throw DecodingError.dataCorrupted(
                 .init(
-                    codingPath: container.codingPath,
+                    codingPath: decoder.codingPath,
                     debugDescription: "Update manifest contains unknown fields"
                 )
             )
         }
+
+        let container = try decoder.container(keyedBy: CodingKeys.self)
         let version = try container.decode(String.self, forKey: .version)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !version.isEmpty else {
