@@ -101,8 +101,10 @@ private struct AboutAndUpdatesSettingsView: View {
 
     var body: some View {
         Section {
+            Text("AICC")
+                .font(.headline)
             LabeledContent(settings.localized("Version"), value: versionInfo.shortVersion)
-            LabeledContent(settings.localized("Build"), value: versionInfo.build)
+            LabeledContent(settings.localized("Build"), value: versionInfo.buildVersion)
 
             HStack(spacing: 10) {
                 Button {

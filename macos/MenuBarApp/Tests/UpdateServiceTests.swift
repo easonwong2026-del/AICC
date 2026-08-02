@@ -20,6 +20,24 @@ private final class StubUpdateSession: UpdateURLSession {
     }
 }
 
+private final class BlockingUpdateSession: UpdateURLSession {
+    private(set) var requestCount = 0
+    private var continuation: CheckedContinuation<(Data, URLResponse), Error>?
+
+    func data(for _: URLRequest) async throws -> (Data, URLResponse) {
+        requestCount += 1
+        return try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<(Data, URLResponse), Error>) in
+            self.continuation = continuation
+        }
+    }
+
+    func finish(data: Data, response: URLResponse) {
+        continuation?.resume(returning: (data, response))
+        continuation = nil
+    }
+}
+
 @MainActor
 final class UpdateServiceTests: XCTestCase {
     func testAppVersionInfoReadsBundleKeysAndFallsBackSafely() {
@@ -30,6 +48,7 @@ final class UpdateServiceTests: XCTestCase {
         XCTAssertEqual(loaded.shortVersion, "2.5.0")
         XCTAssertEqual(loaded.version, "2.5.0")
         XCTAssertEqual(loaded.build, "4")
+        XCTAssertEqual(loaded.buildVersion, "4")
 
         let missing = AppVersionInfo(infoDictionary: [:])
         XCTAssertEqual(missing.shortVersion, AppVersionInfo.fallbackValue)
@@ -203,6 +222,30 @@ final class UpdateServiceTests: XCTestCase {
         let state = await service.checkForUpdates()
         XCTAssertEqual(state, .failed("Update check timed out."))
         XCTAssertEqual(session.requests.count, 1)
+    }
+
+    func testCheckingDoesNotStartASecondConcurrentRequest() async {
+        let session = BlockingUpdateSession()
+        let service = UpdateService(
+            currentVersion: AppVersionInfo(shortVersion: "2.5.0", build: "4"),
+            manifestURL: URL(string: "https://updates.example.test/manifest.json"),
+            session: session
+        )
+
+        let firstCheck = Task { await service.checkForUpdates() }
+        while session.requestCount == 0 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(service.state, .checking)
+        XCTAssertEqual(await service.checkForUpdates(), .checking)
+        XCTAssertEqual(session.requestCount, 1)
+
+        session.finish(
+            data: Data(#"{"version":"2.5.0"}"#.utf8),
+            response: response(url: "https://updates.example.test/manifest.json")
+        )
+        XCTAssertEqual(await firstCheck.value, .upToDate)
     }
 
     private func response(url: String, status: Int = 200) -> HTTPURLResponse {

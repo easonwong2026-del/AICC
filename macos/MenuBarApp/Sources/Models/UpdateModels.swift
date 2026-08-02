@@ -7,6 +7,7 @@ struct AppVersionInfo: Equatable {
     let build: String
 
     var version: String { shortVersion }
+    var buildVersion: String { build }
 
     init(shortVersion: String?, build: String?) {
         self.shortVersion = Self.normalized(shortVersion)
