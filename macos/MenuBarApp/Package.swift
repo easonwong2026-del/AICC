@@ -31,6 +31,7 @@ let package = Package(
             sources: [
                 "Models/StatusData.swift",
                 "Models/ProviderModels.swift",
+                "Models/StatusItemMenuModel.swift",
                 "Services/APIService.swift",
                 "Services/ProcessRunner.swift",
             ]
@@ -46,6 +47,7 @@ let package = Package(
                 "OCXOperationPolicyTests.swift",
                 "ProcessRunnerTests.swift",
                 "ProviderModelsTests.swift",
+                "StatusItemMenuModelTests.swift",
                 "APIServiceTests.swift",
             ]
         ),

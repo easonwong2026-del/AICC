@@ -27,11 +27,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
     private func makeContextMenu() -> NSMenu {
         let menu = NSMenu(title: "AICC")
-        menu.addItem(menuItem("Open AICC Dashboard", action: #selector(openDashboardFromMenu)))
-        menu.addItem(menuItem("Refresh All Now", action: #selector(refreshAllFromMenu)))
+        menu.addItem(menuItem(StatusItemMenuCommand.openDashboard.rawValue, action: #selector(openDashboardFromMenu)))
+        menu.addItem(menuItem(StatusItemMenuCommand.refreshAll.rawValue, action: #selector(refreshAllFromMenu)))
         menu.addItem(.separator())
-        menu.addItem(menuItem("Settings…", action: #selector(openSettingsFromMenu)))
-        menu.addItem(menuItem("Quit AICC", action: #selector(quitFromMenu)))
+        menu.addItem(menuItem(StatusItemMenuCommand.settings.rawValue, action: #selector(openSettingsFromMenu)))
+        menu.addItem(menuItem(StatusItemMenuCommand.quit.rawValue, action: #selector(quitFromMenu)))
         return menu
     }
 
@@ -121,12 +121,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
     private func updateContextMenuTitles() {
         guard let contextMenu else { return }
-        let keys = [
-            "Open AICC Dashboard",
-            "Refresh All Now",
-            "Settings…",
-            "Quit AICC"
-        ]
+        let keys = StatusItemMenuCommand.allCases.map(\.rawValue)
         var keyIndex = 0
         for item in contextMenu.items where !item.isSeparatorItem {
             guard keyIndex < keys.count else { break }

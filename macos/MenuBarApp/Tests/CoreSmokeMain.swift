@@ -13,6 +13,16 @@ struct CoreSmokeMain {
     static func main() async throws {
         let fixtureRoot = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
 
+        try require(
+            StatusItemMenuCommand.allCases.map(\.rawValue) == [
+                "Open AICC Dashboard",
+                "Refresh All Now",
+                "Settings…",
+                "Quit AICC"
+            ],
+            "status item menu contract"
+        )
+
         func fixture(_ name: String) throws -> Data {
             try Data(contentsOf: fixtureRoot.appendingPathComponent(name))
         }
