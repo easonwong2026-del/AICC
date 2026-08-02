@@ -347,6 +347,13 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// AICC is a menu-bar application, so closing its only regular window
+    /// (currently the Settings window) must not terminate the process.
+    /// Quitting remains an explicit command handled by the status-item menu.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         shutDownForTermination()
         return .terminateNow

@@ -50,4 +50,13 @@ final class SettingsPresentationModelTests: XCTestCase {
         lifecycle.close()
         XCTAssertEqual(lifecycle.state, .closed)
     }
+
+    func testSettingsLifecycleCanBePresentedAgainAfterWindowClose() {
+        var lifecycle = SettingsWindowLifecycle()
+        XCTAssertTrue(lifecycle.beginPresentation())
+        lifecycle.close()
+
+        XCTAssertTrue(lifecycle.beginPresentation())
+        XCTAssertEqual(lifecycle.state, .presented)
+    }
 }

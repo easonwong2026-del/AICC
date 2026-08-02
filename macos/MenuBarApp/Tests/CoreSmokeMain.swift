@@ -48,6 +48,8 @@ struct CoreSmokeMain {
         try require(settingsLifecycle.state == .presented, "settings lifecycle present")
         settingsLifecycle.close()
         try require(settingsLifecycle.state == .closed, "settings lifecycle close")
+        try require(settingsLifecycle.beginPresentation(), "settings lifecycle re-present")
+        try require(settingsLifecycle.state == .presented, "settings lifecycle re-presented")
 
         func fixture(_ name: String) throws -> Data {
             try Data(contentsOf: fixtureRoot.appendingPathComponent(name))
