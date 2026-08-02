@@ -296,6 +296,7 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
     private let singleInstance = SingleInstanceService.shared
     private let serverManager = ServerManager.shared
     private var statusItemController: StatusItemController?
+    private var settingsWindowController: SettingsWindowController?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         guard singleInstance.acquire() else {
@@ -334,6 +335,8 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
         APIService.shared.stopAutoRefresh()
         statusItemController?.tearDown()
         statusItemController = nil
+        settingsWindowController?.close()
+        settingsWindowController = nil
         OpenCodexController.shared.panelDidDisappear()
         serverManager.stopMonitoring()
         serverManager.stopServer(reason: .appExit)
@@ -346,25 +349,47 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
             Selector(("showSettingsWindow:")),
             Selector(("showPreferencesWindow:"))
         ]
-        for selector in settingsSelectors where NSApp.sendAction(selector, to: nil, from: nil) {
-            break
+        let sceneActionHandled = settingsSelectors.contains {
+            NSApp.sendAction($0, to: nil, from: nil)
         }
 
-        DispatchQueue.main.async {
-            self.bringSettingsWindowToFront()
+        if !sceneActionHandled {
+            presentFallbackSettings()
+            return
         }
+
+        // SwiftUI can create the Settings window on a later run-loop turn.
+        // Give the scene a chance first, then guarantee a visible window if
+        // the accessory-app scene did not materialize one.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            self.bringSettingsWindowToFront()
+            guard !self.bringSettingsWindowToFront() else { return }
+            self.presentFallbackSettings()
         }
     }
 
-    private func bringSettingsWindowToFront() {
+    private func presentFallbackSettings() {
+        if settingsWindowController == nil {
+            settingsWindowController = SettingsWindowController(
+                api: APIService.shared,
+                ocx: OpenCodexController.shared,
+                settings: AppSettings.shared,
+                server: ServerManager.shared,
+                loginAtLaunch: LaunchAtLoginService.shared
+            )
+        }
+        settingsWindowController?.present()
+    }
+
+    @discardableResult
+    private func bringSettingsWindowToFront() -> Bool {
         NSApp.activate(ignoringOtherApps: true)
-        let window = NSApp.windows.last {
+        let window = settingsWindowController?.window ?? NSApp.windows.last {
             $0.isVisible && $0.canBecomeKey && $0.styleMask.contains(.titled)
         } ?? NSApp.keyWindow
-        window?.makeKeyAndOrderFront(nil)
-        window?.orderFrontRegardless()
+        guard let window else { return false }
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        return true
     }
 }
 
