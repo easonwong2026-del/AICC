@@ -41,6 +41,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private let settings: AppSettings
     private let ocx: OpenCodexController
     private let openSettings: () -> Void
+    private let quitApplication: () -> Void
 
     private var statusItem: NSStatusItem?
     private var statusLabelView: StatusItemHostingView?
@@ -54,12 +55,14 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         api: APIService,
         settings: AppSettings,
         ocx: OpenCodexController,
-        openSettings: @escaping () -> Void
+        openSettings: @escaping () -> Void,
+        quitApplication: @escaping () -> Void
     ) {
         self.api = api
         self.settings = settings
         self.ocx = ocx
         self.openSettings = openSettings
+        self.quitApplication = quitApplication
         self.displayState = StatusItemDisplayState(
             status: api.status,
             showStatus: settings.menuBarShowCodexStatus,
@@ -269,7 +272,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     }
 
     @objc private func quitFromMenu() {
-        NSApp.terminate(nil)
+        quitApplication()
     }
 
     private func menuItem(_ key: String, action: Selector) -> NSMenuItem {

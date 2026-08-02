@@ -116,3 +116,17 @@ struct SettingsWindowLifecycle: Equatable {
         state = .closed
     }
 }
+
+/// AppKit termination is allowed only after an explicit application-quit
+/// command. Closing the last regular window must never satisfy this gate.
+struct AppTerminationGate: Equatable {
+    private(set) var terminationRequested = false
+
+    mutating func requestTermination() {
+        terminationRequested = true
+    }
+
+    var allowsTermination: Bool {
+        terminationRequested
+    }
+}

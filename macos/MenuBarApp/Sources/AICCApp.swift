@@ -305,9 +305,11 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
     private var statusItemController: StatusItemController?
     private var settingsWindowCoordinator: SettingsWindowCoordinator?
     private var hasStartedShutdown = false
+    private var terminationGate = AppTerminationGate()
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         guard singleInstance.acquire() else {
+            terminationGate.requestTermination()
             NSApp.terminate(nil)
             return
         }
@@ -328,7 +330,8 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
             api: APIService.shared,
             settings: AppSettings.shared,
             ocx: OpenCodexController.shared,
-            openSettings: { [weak self] in self?.settingsWindowCoordinator?.present() }
+            openSettings: { [weak self] in self?.settingsWindowCoordinator?.present() },
+            quitApplication: { [weak self] in self?.requestQuit() }
         )
 
         // Start and supervise the Python server.
@@ -355,12 +358,20 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard terminationGate.allowsTermination else {
+            return .terminateCancel
+        }
         shutDownForTermination()
         return .terminateNow
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         shutDownForTermination()
+    }
+
+    private func requestQuit() {
+        terminationGate.requestTermination()
+        NSApp.terminate(nil)
     }
 
     private func shutDownForTermination() {

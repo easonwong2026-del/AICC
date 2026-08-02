@@ -78,4 +78,13 @@ final class SettingsPresentationModelTests: XCTestCase {
         XCTAssertTrue(lifecycle.beginPresentation())
         XCTAssertEqual(lifecycle.state, .presented)
     }
+
+    func testTerminationGateRequiresExplicitQuitRequest() {
+        var gate = AppTerminationGate()
+        XCTAssertFalse(gate.allowsTermination)
+
+        gate.requestTermination()
+
+        XCTAssertTrue(gate.allowsTermination)
+    }
 }

@@ -60,6 +60,10 @@ struct CoreSmokeMain {
         try require(settingsLifecycle.state == .closed, "settings lifecycle close")
         try require(settingsLifecycle.beginPresentation(), "settings lifecycle re-present")
         try require(settingsLifecycle.state == .presented, "settings lifecycle re-presented")
+        var terminationGate = AppTerminationGate()
+        try require(!terminationGate.allowsTermination, "implicit termination is blocked")
+        terminationGate.requestTermination()
+        try require(terminationGate.allowsTermination, "explicit termination is allowed")
 
         func fixture(_ name: String) throws -> Data {
             try Data(contentsOf: fixtureRoot.appendingPathComponent(name))

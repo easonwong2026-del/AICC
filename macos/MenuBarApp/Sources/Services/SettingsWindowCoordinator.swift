@@ -34,6 +34,10 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
     private let loginAtLaunch: LaunchAtLoginService
 
     private var window: NSWindow?
+    // Keep a recently closed window alive until AppKit has finished its close
+    // transaction. Releasing the SwiftUI hosting tree from windowWillClose
+    // can crash macOS while NSWindowTransformAnimation is being torn down.
+    private var recentlyClosedWindows: [NSWindow] = []
     private var cancellables = Set<AnyCancellable>()
     private var lifecycle = SettingsWindowLifecycle()
 
@@ -86,7 +90,6 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
             return
         }
         settingsWindow.delegate = nil
-        settingsWindow.contentViewController = nil
         settingsWindow.close()
         window = nil
         lifecycle.close()
@@ -107,7 +110,8 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
         settingsWindow.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         settingsWindow.setContentSize(NSSize(width: 640, height: 480))
         settingsWindow.minSize = NSSize(width: 560, height: 420)
-        settingsWindow.isReleasedWhenClosed = true
+        settingsWindow.isReleasedWhenClosed = false
+        settingsWindow.animationBehavior = .none
         settingsWindow.delegate = self
         settingsWindow.center()
         window = settingsWindow
@@ -131,8 +135,12 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         guard let closingWindow = notification.object as? NSWindow, closingWindow === window else { return }
         closingWindow.delegate = nil
-        closingWindow.contentViewController = nil
         window = nil
         lifecycle.close()
+        recentlyClosedWindows.append(closingWindow)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self, weak closingWindow] in
+            guard let closingWindow else { return }
+            self?.recentlyClosedWindows.removeAll { $0 === closingWindow }
+        }
     }
 }
