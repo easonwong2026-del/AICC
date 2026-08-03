@@ -49,6 +49,8 @@ class CodexMonitor:
             if self._last_success_epoch:
                 result["age_seconds"] = max(0, round(time.time() - self._last_success_epoch))
                 result["stale"] = result.get("state") != "Connected" or result["age_seconds"] > max(180, self._refresh_seconds * 3)
+            else:
+                result["stale"] = result.get("state") != "Connected"
             return result
 
     def start(self) -> None:
@@ -85,9 +87,15 @@ class CodexMonitor:
         self._rate_limit_request_id = None
         self._last_request = 0.0
         process = self._process
+        # app-server can answer immediately. Send initialize before starting
+        # the reader so its response cannot race with request-id assignment.
+        # The old order could leave the monitor stuck in Connecting forever.
+        self._initialize_request_id = self._send(
+            "initialize",
+            {"clientInfo": {"name": "ai-eink-dashboard", "version": "2.1"}, "capabilities": {}},
+        )
         threading.Thread(target=self._read_stdout, args=(process,), name="codex-rate-limits", daemon=True).start()
         threading.Thread(target=self._refresh_loop, args=(process,), name="codex-rate-limits-refresh", daemon=True).start()
-        self._initialize_request_id = self._send("initialize", {"clientInfo": {"name": "ai-eink-dashboard", "version": "2.1"}, "capabilities": {}})  # noqa: E501
 
     @classmethod
     def _resolve_cli(cls) -> tuple[str | None, str]:

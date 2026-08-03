@@ -13,6 +13,58 @@ struct CoreSmokeMain {
     static func main() async throws {
         let fixtureRoot = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
 
+        try require(
+            StatusItemMenuCommand.allCases.map(\.rawValue) == [
+                "Open AICC Dashboard",
+                "Refresh All Now",
+                "Settings…",
+                "Quit AICC"
+            ],
+            "status item menu contract"
+        )
+
+        let displayState = StatusItemDisplayState(
+            remaining: 77,
+            showStatus: true,
+            showBalance: true,
+            languageCode: "en",
+            themeMode: "system"
+        )
+        try require(
+            displayState == StatusItemDisplayState(
+                remaining: 77,
+                showStatus: true,
+                showBalance: true,
+                languageCode: "en",
+                themeMode: "system"
+            ),
+            "status display state duplicate"
+        )
+        try require(AppLanguage.english.localizationIdentifier == "en", "english locale")
+        try require(AppLanguage.simplifiedChinese.localizationIdentifier == "zh-Hans", "Chinese locale")
+        try require(
+            AppLanguage.english.pickerDisplayName(localize: { _ in "跟随系统" }) == "English",
+            "English native language name"
+        )
+        try require(
+            AppLanguage.simplifiedChinese.pickerDisplayName(localize: { _ in "System Default" }) == "简体中文",
+            "Chinese native language name"
+        )
+        try require(SemanticVersion("2.5.9")! < SemanticVersion("2.5.10")!, "semantic version ordering")
+        try require(SemanticVersion("2.5.1-beta")! < SemanticVersion("2.5.1")!, "prerelease ordering")
+        try require(AppThemeMode.allCases.count == 3, "theme modes")
+        var settingsLifecycle = SettingsWindowLifecycle()
+        try require(settingsLifecycle.beginPresentation(), "settings lifecycle begin")
+        try require(settingsLifecycle.state == .presented, "settings lifecycle present")
+        settingsLifecycle.close()
+        try require(settingsLifecycle.state == .closed, "settings lifecycle close")
+        try require(settingsLifecycle.beginPresentation(), "settings lifecycle re-present")
+        try require(settingsLifecycle.state == .presented, "settings lifecycle re-presented")
+        var terminationGate = AppTerminationGate()
+        try require(!terminationGate.allowsTermination, "implicit termination is blocked")
+        terminationGate.requestTermination()
+        try require(terminationGate.allowsTermination, "explicit termination is allowed")
+
         func fixture(_ name: String) throws -> Data {
             try Data(contentsOf: fixtureRoot.appendingPathComponent(name))
         }

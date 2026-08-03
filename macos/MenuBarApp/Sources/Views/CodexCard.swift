@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct CodexCard: View {
+    @EnvironmentObject private var settings: AppSettings
     let codex: CodexData
 
     var body: some View {
@@ -101,7 +102,7 @@ struct CodexCard: View {
     }
 
     private func resetText(_ reset: String) -> String {
-        "重置 \(reset)"
+        String(format: settings.localized("Reset %@"), reset)
     }
 
     private var placeholderContent: some View {

@@ -1,13 +1,10 @@
 import SwiftUI
 
 struct MenuBarStatusLabel: View {
-    let status: StatusResponse?
+    let remaining: Double?
     let showCodexStatus: Bool
     let showBalance: Bool
-
-    private var remaining: Double? {
-        status?.codex?.weekly?.remaining ?? status?.codex?.five_hour?.remaining
-    }
+    let tooltip: String?
 
     private var color: Color {
         guard let remaining else { return .secondary }
@@ -37,6 +34,6 @@ struct MenuBarStatusLabel: View {
                     .font(.system(size: 12, weight: .medium))
             }
         }
-        .help(showCodexStatus ? "Codex \(quotaText)" : "AICC")
+        .help(tooltip ?? (showCodexStatus ? "Codex \(quotaText)" : "AICC"))
     }
 }

@@ -46,6 +46,25 @@ App 运行需要 macOS 14 或更高版本、Apple Silicon，以及可执行的 P
 打开日志和配置开机自启；额度采集仍由现有 Python 服务完成。内部数据服务监督只访问
 `/api/health/live`，状态面板读取 `/api/status` 缓存，不会额外触发 Provider 刷新。
 
+### macOS 手动检查更新（可选）
+
+设置 → 通用底部的“关于与更新”只在用户点击“检查更新”后请求一次公开清单，不会后台轮询、自动下载或安装。
+发布版 App 已通过 `Info.plist` 配置公开更新清单：
+`https://raw.githubusercontent.com/easonwong2026-del/AICC/main/updates/aicc-update.json`。
+也可以在启动 App 的环境中设置 `AICC_UPDATE_MANIFEST_URL` 覆盖它。地址和清单中的下载/说明链接都必须使用 HTTPS；
+清单缺失或未配置时会显示“更新源尚未配置”，并提供 GitHub Releases 页面入口。清单格式如下：
+
+```json
+{
+  "version": "2.5.1",
+  "build": "5",
+  "minimumSystemVersion": "14.0",
+  "downloadURL": "https://example.com/AICC-2.5.1.dmg",
+  "releaseNotesURL": "https://example.com/aicc/releases/2.5.1",
+  "publishedAt": "2026-08-03T00:00:00Z"
+}
+```
+
 ### 2.4.1 OpenCodex 控制变更
 
 - AICC **不负责打开 Codex Desktop 或 ChatGPT Desktop**。

@@ -49,6 +49,18 @@ class ResourceUsageTests(unittest.TestCase):
         release.set()
         self.assertEqual(calls, 1)
 
+    def test_stale_provider_snapshot_is_not_marked_ready(self):
+        manager = CollectorManager({
+            "codex": (lambda: {"available": True, "state": "Connecting", "stale": True}, 60, {}),
+        })
+
+        values, metadata = manager.snapshot(force=True, wait_seconds=1.0)
+
+        self.assertTrue(values["codex"]["stale"])
+        self.assertEqual(metadata["codex"]["state"], "stale")
+        self.assertIsNone(metadata["codex"]["last_success"])
+        self.assertFalse(manager.health()["codex"]["ok"])
+
     def test_only_latest_rate_limit_request_is_retained(self):
         monitor = CodexMonitor.__new__(CodexMonitor)
         monitor._last_request = 0.0

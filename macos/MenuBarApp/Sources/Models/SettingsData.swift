@@ -1,49 +1,43 @@
 import Foundation
 import SwiftUI
 
-enum AppLanguage: String, CaseIterable, Identifiable {
-    case system
-    case english = "en"
-    case simplifiedChinese = "zh-Hans"
-
-    var id: String { rawValue }
-
-    var displayName: LocalizedStringKey {
-        switch self {
-        case .system: return "System Default"
-        case .english: return "English"
-        case .simplifiedChinese: return "Simplified Chinese"
-        }
-    }
-
-    var locale: Locale {
-        switch self {
-        case .system: return .autoupdatingCurrent
-        case .english: return Locale(identifier: "en")
-        case .simplifiedChinese: return Locale(identifier: "zh-Hans")
-        }
-    }
-}
-
 class AppSettings: ObservableObject {
-    @AppStorage("launchAtLogin") var launchAtLogin = false
-    @AppStorage("autoRefreshInterval") var autoRefreshInterval = 120.0
-    @AppStorage("themeMode") var themeMode = "system"
+    @Published var launchAtLogin: Bool {
+        didSet { UserDefaults.standard.set(launchAtLogin, forKey: "launchAtLogin") }
+    }
+    @Published var autoRefreshInterval: Double {
+        didSet { UserDefaults.standard.set(autoRefreshInterval, forKey: "autoRefreshInterval") }
+    }
+    @Published var themeMode: String {
+        didSet { UserDefaults.standard.set(themeMode, forKey: "themeMode") }
+    }
     @Published var languageCode: String {
-        didSet {
-            UserDefaults.standard.set(languageCode, forKey: "languageCode")
-        }
+        didSet { UserDefaults.standard.set(languageCode, forKey: "languageCode") }
     }
 
-    @AppStorage("menuBarShowCodexStatus") var menuBarShowCodexStatus = true
-    @AppStorage("menuBarShowCodexBalance") var menuBarShowCodexBalance = true
-    @AppStorage("menuBarShowWorkBuddy") var menuBarShowWorkBuddy = true
-    @AppStorage("menuBarShowDeepSeek") var menuBarShowDeepSeek = true
-    @AppStorage("menuBarShowOpenCodex") var menuBarShowOpenCodex = true
+    @Published var menuBarShowCodexStatus: Bool {
+        didSet { UserDefaults.standard.set(menuBarShowCodexStatus, forKey: "menuBarShowCodexStatus") }
+    }
+    @Published var menuBarShowCodexBalance: Bool {
+        didSet { UserDefaults.standard.set(menuBarShowCodexBalance, forKey: "menuBarShowCodexBalance") }
+    }
+    @Published var menuBarShowWorkBuddy: Bool {
+        didSet { UserDefaults.standard.set(menuBarShowWorkBuddy, forKey: "menuBarShowWorkBuddy") }
+    }
+    @Published var menuBarShowDeepSeek: Bool {
+        didSet { UserDefaults.standard.set(menuBarShowDeepSeek, forKey: "menuBarShowDeepSeek") }
+    }
+    @Published var menuBarShowOpenCodex: Bool {
+        didSet { UserDefaults.standard.set(menuBarShowOpenCodex, forKey: "menuBarShowOpenCodex") }
+    }
 
-    @AppStorage("ocxCustomPath") var ocxCustomPath = ""
+    @Published var ocxCustomPath: String {
+        didSet { UserDefaults.standard.set(ocxCustomPath, forKey: "ocxCustomPath") }
+    }
 
-    @AppStorage("debugMode") var debugMode = false
+    @Published var debugMode: Bool {
+        didSet { UserDefaults.standard.set(debugMode, forKey: "debugMode") }
+    }
 
     // Dynamic provider collection (schema v1). Legacy per-provider toggles
     // are migrated once into these collections; no new per-provider switches
@@ -67,10 +61,10 @@ class AppSettings: ObservableObject {
     }
 
     var preferredColorScheme: ColorScheme? {
-        switch themeMode {
-        case "light": return .light
-        case "dark": return .dark
-        default: return nil
+        switch AppThemeMode(rawValue: themeMode) ?? .system {
+        case .light: return .light
+        case .dark: return .dark
+        case .system: return nil
         }
     }
 
@@ -82,16 +76,17 @@ class AppSettings: ObservableObject {
         language.locale
     }
 
+    var presentationIdentity: SettingsPresentationIdentity {
+        SettingsPresentationIdentity(languageCode: languageCode, themeMode: themeMode)
+    }
+
     func localized(_ key: String) -> String {
-        let localization: String
-        switch language {
-        case .system:
-            localization = Locale.preferredLanguages.first?.hasPrefix("zh") == true ? "zh-Hans" : "en"
-        case .english:
-            localization = "en"
-        case .simplifiedChinese:
-            localization = "zh-Hans"
-        }
+        localized(key, languageCode: languageCode)
+    }
+
+    func localized(_ key: String, languageCode: String) -> String {
+        let selectedLanguage = AppLanguage(rawValue: languageCode) ?? .system
+        let localization = selectedLanguage.localizationIdentifier
 
         guard
             let path = Bundle.main.path(forResource: localization, ofType: "lproj"),
@@ -103,12 +98,22 @@ class AppSettings: ObservableObject {
     }
 
     private init() {
-        languageCode = UserDefaults.standard.string(forKey: "languageCode")
-            ?? AppLanguage.system.rawValue
-        let storedInterval = UserDefaults.standard.double(forKey: "autoRefreshInterval")
+        let defaults = UserDefaults.standard
+        languageCode = defaults.string(forKey: "languageCode") ?? AppLanguage.system.rawValue
+        let storedInterval = defaults.double(forKey: "autoRefreshInterval")
+        autoRefreshInterval = storedInterval < 60 ? 120.0 : storedInterval
         if storedInterval < 60 {
-            UserDefaults.standard.set(120.0, forKey: "autoRefreshInterval")
+            defaults.set(120.0, forKey: "autoRefreshInterval")
         }
+        themeMode = defaults.string(forKey: "themeMode") ?? "system"
+        launchAtLogin = defaults.object(forKey: "launchAtLogin") as? Bool ?? false
+        menuBarShowCodexStatus = defaults.object(forKey: "menuBarShowCodexStatus") as? Bool ?? true
+        menuBarShowCodexBalance = defaults.object(forKey: "menuBarShowCodexBalance") as? Bool ?? true
+        menuBarShowWorkBuddy = defaults.object(forKey: "menuBarShowWorkBuddy") as? Bool ?? true
+        menuBarShowDeepSeek = defaults.object(forKey: "menuBarShowDeepSeek") as? Bool ?? true
+        menuBarShowOpenCodex = defaults.object(forKey: "menuBarShowOpenCodex") as? Bool ?? true
+        ocxCustomPath = defaults.string(forKey: "ocxCustomPath") ?? ""
+        debugMode = defaults.object(forKey: "debugMode") as? Bool ?? false
         // Load or perform the one-time legacy migration. The migration result
         // is persisted inside loadOrMigrate, so initialization never depends
         // on property observers firing during init. didSet below still handles

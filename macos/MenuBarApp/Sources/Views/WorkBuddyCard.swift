@@ -11,7 +11,7 @@ struct WorkBuddyCard: View {
             value: formattedPoints,
             subtitle: statusSubtitle,
             state: state,
-            unit: data.points == nil ? nil : "积分",
+            unit: data.points == nil ? nil : settings.localized("Points"),
             valueFontSize: DashboardTypography.primaryFontSize(number: formattedPoints, compact: true)
         )
     }
@@ -29,10 +29,11 @@ struct WorkBuddyCard: View {
     }
 
     private var statusSubtitle: String {
-        let status = data.balance_state ?? (data.points == nil ? "Unavailable" : "Connected")
+        let statusKey = data.balance_state ?? (data.points == nil ? "Unavailable" : "Connected")
+        let status = settings.localized(statusKey)
         if data.points == nil {
             if data.balance_error_code == "bridge_unavailable" {
-                return "未连接 · 设置 → 重连 WorkBuddy"
+                return settings.localized("Not connected · Settings → reconnect WorkBuddy")
             }
             if let error = data.balance_error {
                 return "\(status) · \(error)"
@@ -51,10 +52,10 @@ struct WorkBuddyCard: View {
     }
 
     private func ageText(_ seconds: Int) -> String {
-        if seconds < 60 { return "\(seconds)s ago" }
-        if seconds < 3600 { return "\(seconds / 60)m ago" }
-        if seconds < 86400 { return "\(seconds / 3600)h ago" }
-        return "\(seconds / 86400)d ago"
+        if seconds < 60 { return String(format: settings.localized("%ds ago"), seconds) }
+        if seconds < 3600 { return String(format: settings.localized("%dm ago"), seconds / 60) }
+        if seconds < 86400 { return String(format: settings.localized("%dh ago"), seconds / 3600) }
+        return String(format: settings.localized("%dd ago"), seconds / 86400)
     }
 
     private var state: CardState {

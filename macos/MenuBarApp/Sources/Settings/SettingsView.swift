@@ -68,7 +68,7 @@ private struct GeneralSettingsView: View {
             Section("Appearance") {
                 Picker("Language", selection: $settings.languageCode) {
                     ForEach(AppLanguage.allCases) { language in
-                        Text(language.displayName).tag(language.rawValue)
+                        Text(language.pickerDisplayName(localize: settings.localized)).tag(language.rawValue)
                     }
                 }
                 Picker("Theme", selection: $settings.themeMode) {
@@ -77,11 +77,106 @@ private struct GeneralSettingsView: View {
                     Text("Dark").tag("dark")
                 }
             }
+
+            AboutAndUpdatesSettingsView()
         }
         .formStyle(.grouped)
         .onChange(of: settings.autoRefreshInterval) { _, interval in
             api.startAutoRefresh(interval: interval)
         }
+    }
+}
+
+private struct AboutAndUpdatesSettingsView: View {
+    @EnvironmentObject private var settings: AppSettings
+    @StateObject private var updateService = UpdateService()
+
+    private var versionInfo: AppVersionInfo {
+        AppVersionProvider().current
+    }
+
+    private var isChecking: Bool {
+        updateService.state == .checking
+    }
+
+    var body: some View {
+        Section {
+            Text("AICC")
+                .font(.headline)
+            LabeledContent(settings.localized("Version"), value: versionInfo.shortVersion)
+            LabeledContent(settings.localized("Build"), value: versionInfo.buildVersion)
+
+            HStack(spacing: 10) {
+                Button {
+                    Task { await updateService.checkForUpdates() }
+                } label: {
+                    HStack(spacing: 6) {
+                        if isChecking {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text(settings.localized("Check for Updates"))
+                    }
+                }
+                .disabled(isChecking)
+
+                Spacer(minLength: 0)
+            }
+
+            updateStatus
+        } header: {
+            Text(settings.localized("About & Updates"))
+        }
+    }
+
+    @ViewBuilder
+    private var updateStatus: some View {
+        switch updateService.state {
+        case .idle:
+            Text(settings.localized("Updates are checked only when you click the button."))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .checking:
+            Text(settings.localized("Checking for Updates…"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .upToDate:
+            Text(settings.localized("You're up to date"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .updateAvailable(let info):
+            VStack(alignment: .leading, spacing: 6) {
+                Text(String(format: settings.localized("Update available: %@"), info.version))
+                    .font(.caption)
+                Button(settings.localized("View Update")) {
+                    openUpdate(info)
+                }
+                .buttonStyle(.link)
+            }
+        case .failed:
+            Text(settings.localized("Update check failed"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .notConfigured:
+            VStack(alignment: .leading, spacing: 6) {
+                Text(settings.localized("Update source not configured"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button(settings.localized("Open Release Page")) {
+                    openHTTPS(updateService.releasePageURL)
+                }
+                .buttonStyle(.link)
+            }
+        }
+    }
+
+    private func openUpdate(_ info: UpdateInfo) {
+        openHTTPS(info.downloadURL ?? info.releaseNotesURL ?? updateService.releasePageURL)
+    }
+
+    private func openHTTPS(_ url: URL) {
+        guard UpdateManifestConfiguration.httpsURL(url.absoluteString) != nil else { return }
+        NSWorkspace.shared.open(url)
     }
 }
 

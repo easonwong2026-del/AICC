@@ -23,6 +23,7 @@ let package = Package(
                 "Services/CacheManager.swift",
                 "Services/LaunchAtLoginService.swift",
                 "Services/OpenCodexController.swift",
+                "Services/StatusItemController.swift",
                 "Services/SingleInstanceService.swift",
                 "Settings",
                 "Views",
@@ -30,8 +31,12 @@ let package = Package(
             sources: [
                 "Models/StatusData.swift",
                 "Models/ProviderModels.swift",
+                "Models/SettingsPresentationModel.swift",
+                "Models/StatusItemMenuModel.swift",
+                "Models/UpdateModels.swift",
                 "Services/APIService.swift",
                 "Services/ProcessRunner.swift",
+                "Services/UpdateService.swift",
             ]
         ),
         .testTarget(
@@ -45,6 +50,9 @@ let package = Package(
                 "OCXOperationPolicyTests.swift",
                 "ProcessRunnerTests.swift",
                 "ProviderModelsTests.swift",
+                "SettingsPresentationModelTests.swift",
+                "StatusItemMenuModelTests.swift",
+                "UpdateServiceTests.swift",
                 "APIServiceTests.swift",
             ]
         ),

@@ -31,6 +31,9 @@ xcrun swiftc \
   -module-cache-path "$TEMP_ROOT/module-cache" \
   "$ROOT/macos/MenuBarApp/Sources/Models/StatusData.swift" \
   "$ROOT/macos/MenuBarApp/Sources/Models/ProviderModels.swift" \
+  "$ROOT/macos/MenuBarApp/Sources/Models/SettingsPresentationModel.swift" \
+  "$ROOT/macos/MenuBarApp/Sources/Models/StatusItemMenuModel.swift" \
+  "$ROOT/macos/MenuBarApp/Sources/Models/UpdateModels.swift" \
   "$ROOT/macos/MenuBarApp/Sources/Services/ProcessRunner.swift" \
   "$TEST_ROOT/CoreSmokeMain.swift" \
   -o "$TEMP_ROOT/aicc-core-smoke"
