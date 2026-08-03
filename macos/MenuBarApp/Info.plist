@@ -24,6 +24,8 @@
 	<string>4</string>
 	<key>AICCReleasePageURL</key>
 	<string>https://github.com/easonwong2026-del/AICC/releases</string>
+	<key>AICCUpdateManifestURL</key>
+	<string>https://raw.githubusercontent.com/easonwong2026-del/AICC/main/updates/aicc-update.json</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>

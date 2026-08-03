@@ -49,9 +49,10 @@ App 运行需要 macOS 14 或更高版本、Apple Silicon，以及可执行的 P
 ### macOS 手动检查更新（可选）
 
 设置 → 通用底部的“关于与更新”只在用户点击“检查更新”后请求一次公开清单，不会后台轮询、自动下载或安装。
-更新清单地址可通过 App `Info.plist` 的 `AICCUpdateManifestURL` 配置，或在启动 App 的环境中设置
-`AICC_UPDATE_MANIFEST_URL` 覆盖它。地址和清单中的下载/说明链接都必须使用 HTTPS；当前仓库未内置公开清单，
-未配置时会显示“更新源尚未配置”，并提供 GitHub Releases 页面入口。清单示例：
+发布版 App 已通过 `Info.plist` 配置公开更新清单：
+`https://raw.githubusercontent.com/easonwong2026-del/AICC/main/updates/aicc-update.json`。
+也可以在启动 App 的环境中设置 `AICC_UPDATE_MANIFEST_URL` 覆盖它。地址和清单中的下载/说明链接都必须使用 HTTPS；
+清单缺失或未配置时会显示“更新源尚未配置”，并提供 GitHub Releases 页面入口。清单格式如下：
 
 ```json
 {
