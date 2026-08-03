@@ -1,5 +1,7 @@
 # Changelog
 
+[English](CHANGELOG.en.md)
+
 ## 2.5.0 - 2026-07-31
 
 - **动态 Provider 架构（P1）**：新增 Provider Manifest v1 规范化层，所有采集器只负责原始数据，展示层只消费 Manifest；`GET /api/providers`、`GET /api/providers/<id>`、`POST /api/providers/<id>/refresh`、`POST /api/providers/<id>/actions/<kind>` 四个新端点；Action 由后端白名单映射（refresh / reconnect / diagnostics），Manifest 永远不能下发 endpoint、shell 命令、脚本路径或远程 URL

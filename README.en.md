@@ -94,4 +94,4 @@ bash macos/build-dmg.sh
 bash scripts/validate-version.sh
 ```
 
-See [CHANGELOG.md](CHANGELOG.md) for release history and [LICENSE](LICENSE) for licensing information.
+See [English changelog](CHANGELOG.en.md), [中文完整 changelog](CHANGELOG.md), and [LICENSE](LICENSE) for release history and licensing information.
