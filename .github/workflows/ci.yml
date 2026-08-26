@@ -27,9 +27,6 @@ jobs:
           python -m py_compile collectors/workbuddy.py
           python -m py_compile collectors/system.py
           python -m py_compile providers/base.py
-          python -m py_compile providers/registry.py
-          python -m py_compile providers/manifest.py
-          python -m py_compile providers/example/__init__.py
           python -m py_compile providers/codex/__init__.py
           python -m py_compile providers/deepseek/__init__.py
           python -m py_compile providers/workbuddy/__init__.py

@@ -98,22 +98,27 @@ echo "$STATUS" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'co
   echo "FAIL: /api/status missing expected providers" >&2; exit 1; }
 
 echo ""
-echo "--- /api/providers ---"
-PROVIDERS=$(curl -sf "$BASE_URL/api/providers") || { echo "FAIL: /api/providers"; exit 1; }
-echo "$PROVIDERS" | python3 -m json.tool | head -20 || echo "(raw, truncated)"
-echo "$PROVIDERS" | python3 -c "
-import sys, json
-payload = json.load(sys.stdin)
-assert payload.get('schema_version') == 1, 'schema_version missing'
-ids = [item['id'] for item in payload['providers']]
-for expected in ('codex', 'workbuddy', 'deepseek', 'system'):
-    assert expected in ids, f'missing provider {expected}'
-required = {'id', 'display_name', 'category', 'icon', 'state', 'available', 'stale',
-            'updated_at', 'sort_order', 'capabilities', 'metrics', 'actions'}
-for item in payload['providers']:
-    assert set(item) == required, f'manifest keys unexpected for {item[\"id\"]}'
-" || {
-  echo "FAIL: /api/providers manifest unexpected" >&2; exit 1; }
+echo "--- /api/health ---"
+HEALTH=$(curl -sf "$BASE_URL/api/health") || { echo "FAIL: /api/health"; exit 1; }
+echo "$HEALTH" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('status') in ('healthy','degraded','unhealthy')" || {
+  echo "FAIL: /api/health payload unexpected" >&2; exit 1; }
+
+echo ""
+echo "--- fixed endpoint regression ---"
+REFRESH_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE_URL/api/refresh")
+if [ "$REFRESH_CODE" != "200" ]; then
+  echo "FAIL: POST /api/refresh returned $REFRESH_CODE" >&2
+  exit 1
+fi
+for route in /api/providers /api/providers/codex /api/providers/codex/refresh; do
+  METHOD=GET
+  if [ "$route" = "/api/providers/codex/refresh" ]; then METHOD=POST; fi
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' -X "$METHOD" "$BASE_URL$route")
+  if [ "$CODE" != "404" ]; then
+    echo "FAIL: $METHOD $route returned $CODE, expected 404" >&2
+    exit 1
+  fi
+done
 
 # ---- Clean shutdown ----
 echo ""
