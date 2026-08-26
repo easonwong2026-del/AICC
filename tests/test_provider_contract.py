@@ -22,5 +22,6 @@ class ProviderContractTests(unittest.TestCase):
             self.assertEqual(provider.health()["state"], "Online")
             self.assertEqual(provider.cache().root, Path(directory))
 
+
 if __name__ == "__main__":
     unittest.main()
