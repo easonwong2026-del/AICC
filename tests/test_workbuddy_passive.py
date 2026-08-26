@@ -3,14 +3,13 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from collectors import workbuddy
 from services.cdp import CdpError
-from providers.base import CacheStore
-from providers.workbuddy import WorkBuddyProvider
 from services.collector_manager import CollectorManager
 
 
@@ -251,32 +250,32 @@ Promise.resolve(eval({expression})).then((result) => process.stdout.write(JSON.s
         completed = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=8, check=True)
         return json.loads(completed.stdout)
 
-    def test_workbuddy_refresh_forwards_force(self):
-        provider = WorkBuddyProvider(CacheStore(Path(".")), lambda: {}, {})
-        with patch("providers.workbuddy.collect", return_value={"points": 5238}) as collect:
-            provider.refresh(force=True)
-        collect.assert_called_once_with({}, force=True)
+    def test_workbuddy_collect_receives_force(self):
+        with patch.object(workbuddy, "_get_account_usage", return_value=None) as account_usage, \
+             patch.object(workbuddy, "_read_today_usage", return_value=None):
+            workbuddy.collect({}, force=True)
+        account_usage.assert_called_once_with(force=True)
 
-    def test_provider_status_recomputes_balance_age_without_collecting(self):
-        provider = WorkBuddyProvider(
-            CacheStore(Path(".")),
-            lambda: {},
-            {"points": 5238, "balance_updated_epoch": 100.0, "balance_state": "Connected"},
-        )
+    def test_collector_snapshot_recomputes_balance_age_without_collecting(self):
+        manager = CollectorManager({
+            "workbuddy": (
+                lambda force=False: {},
+                120,
+                1,
+                {"points": 5238, "balance_updated_epoch": 100.0, "balance_state": "Connected"},
+            ),
+        })
+        manager._slots["workbuddy"].last_attempt = time.monotonic()
         with patch.object(workbuddy.time, "time", return_value=501.0):
-            result = provider.status()
+            result, _ = manager.snapshot(wait_seconds=0)
+        result = result["workbuddy"]
 
         self.assertEqual(result["balance_age_seconds"], 401)
         self.assertTrue(result["balance_stale"])
         self.assertEqual(result["balance_state"], "Cached")
 
-    def test_provider_does_not_expose_old_manual_initial_points(self):
-        provider = WorkBuddyProvider(
-            CacheStore(Path(".")),
-            lambda: {},
-            {"points": 8520, "used_points": 1480, "reset_text": "Manual"},
-        )
-        result = provider.status()
+    def test_collector_does_not_expose_old_manual_initial_points(self):
+        result = workbuddy.initial_status({"points": 8520, "used_points": 1480, "reset_text": "Manual"})
 
         self.assertIsNone(result["points"])
         self.assertIsNone(result["used_points"])
@@ -287,20 +286,21 @@ Promise.resolve(eval({expression})).then((result) => process.stdout.write(JSON.s
         release = threading.Event()
         calls = 0
 
-        def collect(_fallback, force=False):
+        def collect(force=False):
             nonlocal calls
             calls += 1
             started.set()
             release.wait(1)
             return {"points": 5238}
 
-        with tempfile.TemporaryDirectory() as directory, patch("providers.workbuddy.collect", side_effect=collect):
-            provider = WorkBuddyProvider(CacheStore(Path(directory)), lambda: {}, {})
-            manager = CollectorManager({"workbuddy": provider})
-            manager.snapshot(force=True)
-            self.assertTrue(started.wait(1))
-            manager.snapshot(force=True)
-            release.set()
+        manager = CollectorManager({"workbuddy": (collect, 120, 1, {})})
+        manager.snapshot(force=True)
+        self.assertTrue(started.wait(1))
+        manager.snapshot(force=True)
+        release.set()
+        deadline = time.monotonic() + 1
+        while manager._slots["workbuddy"].worker_alive and time.monotonic() < deadline:
+            time.sleep(0.01)
 
         self.assertEqual(calls, 1)
 

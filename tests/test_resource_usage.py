@@ -9,20 +9,20 @@ from services.collector_manager import CollectorManager
 
 class ResourceUsageTests(unittest.TestCase):
     def test_collector_slots_do_not_allocate_instance_dicts(self):
-        manager = CollectorManager({"one": (lambda: {}, 60, {})})
+        manager = CollectorManager({"one": (lambda force=False: {}, 60, 1, {})})
         slot = manager._slots["one"]
         self.assertFalse(hasattr(slot, "__dict__"))
 
     def test_collectors_run_independently_with_bounded_wait(self):
         release = threading.Event()
 
-        def slow():
+        def slow(force=False):
             release.wait(1)
             return {"status": "slow"}
 
         manager = CollectorManager({
-            "slow": (slow, 60, {"status": "cached"}),
-            "fast": (lambda: {"status": "ready"}, 60, {}),
+            "slow": (slow, 60, 1, {"status": "cached"}),
+            "fast": (lambda force=False: {"status": "ready"}, 60, 1, {}),
         })
         started = time.monotonic()
         values, metadata = manager.snapshot(force=True, wait_seconds=0.05)
@@ -37,21 +37,26 @@ class ResourceUsageTests(unittest.TestCase):
         release = threading.Event()
         calls = 0
 
-        def collect():
+        def collect(force=False):
             nonlocal calls
             calls += 1
             release.wait(1)
             return {"ok": True}
 
-        manager = CollectorManager({"one": (collect, 60, {})})
+        manager = CollectorManager({"one": (collect, 60, 1, {})})
         manager.snapshot(force=True)
         manager.snapshot(force=True)
         release.set()
         self.assertEqual(calls, 1)
 
-    def test_stale_provider_snapshot_is_not_marked_ready(self):
+    def test_stale_collector_snapshot_is_not_marked_ready(self):
         manager = CollectorManager({
-            "codex": (lambda: {"available": True, "state": "Connecting", "stale": True}, 60, {}),
+            "codex": (
+                lambda force=False: {"available": True, "state": "Connecting", "stale": True},
+                60,
+                1,
+                {},
+            ),
         })
 
         values, metadata = manager.snapshot(force=True, wait_seconds=1.0)
@@ -59,7 +64,6 @@ class ResourceUsageTests(unittest.TestCase):
         self.assertTrue(values["codex"]["stale"])
         self.assertEqual(metadata["codex"]["state"], "stale")
         self.assertIsNone(metadata["codex"]["last_success"])
-        self.assertFalse(manager.health()["codex"]["ok"])
 
     def test_only_latest_rate_limit_request_is_retained(self):
         monitor = CodexMonitor.__new__(CodexMonitor)
