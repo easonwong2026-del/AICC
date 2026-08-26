@@ -4,7 +4,7 @@
 
 AICC is a local AI status center for macOS. It displays Codex, WorkBuddy, DeepSeek, and system status, with support for Poke4S e-ink devices. The server uses only the Python standard library.
 
-The macOS menu-bar app uses fixed Codex, WorkBuddy, DeepSeek, System, and OpenCodex status cards. It reads `/api/status` and the fixed operation endpoints only. The server still retains the Provider Manifest architecture; see [Provider architecture](docs/provider-architecture.md), [Provider schema v1](docs/provider-schema-v1.md), [Provider UI guidelines](docs/provider-ui-guidelines.md), and the [built-in Provider guide](docs/adding-a-built-in-provider.md).
+The macOS menu-bar app uses fixed Codex, WorkBuddy, DeepSeek, System, and OpenCodex status cards. It reads `/api/status` and the fixed operation endpoints only. The Python server uses four fixed collectors for Codex, WorkBuddy, DeepSeek, and system status.
 
 ## Access
 
@@ -42,7 +42,7 @@ The self-contained App is generated at `dist/mac/AICC.app`; the DMG is written t
 
 The App requires macOS 14 or later, Apple Silicon, and an executable Python 3 (Python 3.10+ recommended). The DMG does not include Python. Without a Developer ID signature, the artifact is ad hoc signed; on another Mac, use Finder's right-click → Open flow if Gatekeeper blocks the first launch.
 
-The menu-bar App displays status, starts and stops the internal data service, controls OpenCodex, opens Settings, shows logs, and configures launch at login. Provider collection remains in the existing Python service. The supervisor only checks `/api/health/live`; the dashboard reads cached `/api/status` data and does not trigger an extra Provider refresh.
+The menu-bar App displays status, starts and stops the internal data service, controls OpenCodex, opens Settings, shows logs, and configures launch at login. Fixed collectors remain in the existing Python service. The supervisor only checks `/api/health/live`; the dashboard reads cached `/api/status` data and does not trigger an extra collector refresh.
 
 ## Manual update checks
 

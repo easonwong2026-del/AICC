@@ -4,7 +4,7 @@
 
 面向 macOS 的 AI 状态中心，显示 Codex、WorkBuddy、DeepSeek 和系统状态。支持 Poke4S 墨水屏显示。服务只依赖 Python 标准库。
 
-macOS 菜单栏使用固定的 Codex、WorkBuddy、DeepSeek、System 和 OpenCodex 状态卡片，只读取 `/api/status` 及固定操作接口。服务端仍保留 Provider Manifest 架构，相关架构与 Schema 见 [docs/provider-architecture.md](docs/provider-architecture.md)、[docs/provider-schema-v1.md](docs/provider-schema-v1.md)，字体与视觉层级规范见 [docs/provider-ui-guidelines.md](docs/provider-ui-guidelines.md)，接入指南见 [docs/adding-a-built-in-provider.md](docs/adding-a-built-in-provider.md)。
+macOS 菜单栏使用固定的 Codex、WorkBuddy、DeepSeek、System 和 OpenCodex 状态卡片，只读取 `/api/status` 及固定操作接口。Python 服务端通过四个固定采集器提供 Codex、WorkBuddy、DeepSeek 和系统状态。
 
 ## 使用地址
 
@@ -47,7 +47,7 @@ SwiftUI 菜单栏 App（AICC）会生成在 `dist/mac/AICC.app`。`SERVER_ROOT` 
 App 运行需要 macOS 14 或更高版本、Apple Silicon，以及可执行的 Python 3（建议 Python 3.10+）；DMG 不包含 Python 解释器。
 没有 Developer ID 时生成的是 ad-hoc 测试包，首次在其他 Mac 安装需要右键选择"打开"。
 菜单栏 App 只负责状态显示、启动/停止内部数据服务、手动控制 OpenCodex、打开原生设置窗口、
-打开日志和配置开机自启；额度采集仍由现有 Python 服务完成。内部数据服务监督只访问
+打开日志和配置开机自启；固定额度采集仍由现有 Python 服务完成。内部数据服务监督只访问
 `/api/health/live`，状态面板读取 `/api/status` 缓存，不会额外触发 Provider 刷新。
 
 ### macOS 手动检查更新（可选）

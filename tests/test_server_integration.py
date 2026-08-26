@@ -79,6 +79,18 @@ class ServerIntegrationTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
         self.assertTrue(server._collector_manager.snapshots[-1]["force"])
 
+    def test_dynamic_provider_routes_are_removed(self):
+        routes = (
+            ("/api/providers", "GET"),
+            ("/api/providers/codex", "GET"),
+            ("/api/providers/codex/refresh", "POST"),
+        )
+        for path, method in routes:
+            with self.subTest(path=path, method=method):
+                with self.assertRaises(HTTPError) as caught:
+                    urlopen(Request(self.base + path, method=method), timeout=2)
+                self.assertEqual(caught.exception.code, 404)
+
     def test_workbuddy_reconnect_uses_bundled_script(self):
         request = Request(self.base + "/api/workbuddy/reconnect", method="POST")
         with patch("server.subprocess.run") as run:
