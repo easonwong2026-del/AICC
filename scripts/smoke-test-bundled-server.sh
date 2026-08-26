@@ -37,7 +37,7 @@ if [ ! -f "$SERVER_DIR/server.py" ]; then
   exit 1
 fi
 
-for dir in providers collectors services web; do
+for dir in collectors services web; do
   if [ ! -d "$SERVER_DIR/$dir" ]; then
     echo "FAIL: $dir/ not found in $SERVER_DIR" >&2
     exit 1

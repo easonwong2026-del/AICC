@@ -26,11 +26,6 @@ jobs:
           python -m py_compile collectors/deepseek.py
           python -m py_compile collectors/workbuddy.py
           python -m py_compile collectors/system.py
-          python -m py_compile providers/base.py
-          python -m py_compile providers/codex/__init__.py
-          python -m py_compile providers/deepseek/__init__.py
-          python -m py_compile providers/workbuddy/__init__.py
-          python -m py_compile providers/system/__init__.py
 
       - name: Run tests
         run: python -m unittest discover -s tests -v

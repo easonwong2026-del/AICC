@@ -18,9 +18,9 @@ class FakeManager:
     def snapshot(self, **kwargs):
         self.snapshots.append(kwargs)
         values = {
-            "codex": {"state": "Connected"},
+            "codex": {"available": True, "state": "Connected"},
             "deepseek": {"status": "Online", "balances": []},
-            "workbuddy": {"points": 12},
+            "workbuddy": {"points": 12, "balance_state": "Connected"},
             "system": {"status": "Online"},
         }
         metadata = {name: {"state": "ready", "last_success": "now"} for name in values}
@@ -73,7 +73,7 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertIn(ready["status"], {"healthy", "degraded"})
         self.assertEqual(server._collector_manager.invalidated, [])
 
-    def test_manual_refresh_forces_provider_refresh(self):
+    def test_manual_refresh_forces_collector_refresh(self):
         request = Request(self.base + "/api/refresh", method="POST")
         with urlopen(request, timeout=2) as response:
             self.assertEqual(response.status, 200)

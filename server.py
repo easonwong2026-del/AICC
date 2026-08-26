@@ -17,12 +17,15 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from providers.base import CacheStore
-from providers.codex import CodexProvider
-from providers.deepseek import DeepSeekProvider
-from providers.system import SystemProvider
-from providers.workbuddy import WorkBuddyProvider
-from services.collector_manager import CollectorManager
+from collectors.deepseek import collect as collect_deepseek
+from collectors.system import collect as collect_system
+from collectors.workbuddy import collect as collect_workbuddy, initial_status
+from services.codex_monitor import monitor
+from services.collector_manager import (
+    DEFAULT_COLLECTOR_INTERVAL,
+    DEFAULT_COLLECTOR_TIMEOUT,
+    CollectorManager,
+)
 
 ROOT = Path(__file__).resolve().parent
 DATA_ROOT = Path(os.environ.get("EINK_DATA_DIR", ROOT / "data")).expanduser()
@@ -77,16 +80,47 @@ def collector_manager() -> CollectorManager:
     global _collector_manager
     if _collector_manager is None:
         fallback = persisted_status()
-        cache = CacheStore(DATA_ROOT)
+
+        def collect_codex(force: bool = False) -> dict:
+            return monitor.status()
+
+        def collect_deepseek_value(force: bool = False) -> dict:
+            return collect_deepseek(DATA_ROOT / "deepseek_history.json")
+
+        def collect_workbuddy_value(force: bool = False) -> dict:
+            return collect_workbuddy(
+                persisted_status().get("workbuddy", {}),
+                force=force,
+            )
+
+        def collect_system_value(force: bool = False) -> dict:
+            return collect_system()
+
         _collector_manager = CollectorManager({
-            "codex": CodexProvider(cache, fallback.get("codex", {})),
-            "deepseek": DeepSeekProvider(cache),
-            "workbuddy": WorkBuddyProvider(
-                cache,
-                lambda: persisted_status().get("workbuddy", {}),
-                fallback.get("workbuddy", {}),
+            "codex": (
+                collect_codex,
+                DEFAULT_COLLECTOR_INTERVAL,
+                DEFAULT_COLLECTOR_TIMEOUT,
+                fallback.get("codex", {}),
             ),
-            "system": SystemProvider(cache),
+            "deepseek": (
+                collect_deepseek_value,
+                300.0,
+                DEFAULT_COLLECTOR_TIMEOUT,
+                {"status": "Loading", "balances": []},
+            ),
+            "workbuddy": (
+                collect_workbuddy_value,
+                DEFAULT_COLLECTOR_INTERVAL,
+                DEFAULT_COLLECTOR_TIMEOUT,
+                initial_status(fallback.get("workbuddy", {})),
+            ),
+            "system": (
+                collect_system_value,
+                DEFAULT_COLLECTOR_INTERVAL,
+                DEFAULT_COLLECTOR_TIMEOUT,
+                {"status": "Loading"},
+            ),
         })
     return _collector_manager
 
@@ -320,19 +354,43 @@ def _cache_health() -> dict:
         return {"writable": False, "exists": False, "error": str(error)[:160]}
 
 
+def _collector_health(values: dict, metadata: dict) -> dict:
+    result = {}
+    for name in ("codex", "workbuddy", "deepseek", "system"):
+        value = values.get(name, {})
+        item = metadata.get(name, {}).copy()
+        collection_state = item.get("state")
+        if name == "codex":
+            collector_ok = bool(value.get("available"))
+            state = value.get("state", "pending")
+        elif name == "workbuddy":
+            collector_ok = value.get("points") is not None
+            state = value.get("balance_state", "pending")
+            if value.get("balance_error_code"):
+                item["error_code"] = value["balance_error_code"]
+                item["error"] = value.get("balance_error")
+        elif name == "deepseek":
+            state = value.get("status", "pending")
+            collector_ok = state in ("Online", "Not configured")
+        else:
+            state = value.get("status", "pending")
+            collector_ok = state == "Online"
+        item.update({"provider": name, "state": state})
+        item["ok"] = (
+            bool(collector_ok)
+            and collection_state is not None
+            and collection_state not in ("error", "timeout", "stale")
+        )
+        result[name] = item
+    return result
+
+
 def health_payload() -> dict:
     cache = _cache_health()
     try:
         manager = collector_manager()
-        health_method = getattr(manager, "health", None)
-        if callable(health_method):
-            provider_items = health_method()
-        else:
-            _, metadata = manager.snapshot(wait_seconds=0)
-            provider_items = {
-                name: {**item, "provider": name, "ok": item.get("state") == "ready"}
-                for name, item in metadata.items()
-            }
+        values, metadata = manager.snapshot(wait_seconds=0)
+        provider_items = _collector_health(values, metadata)
     except Exception as error:  # health must explain a broken scheduler without raising
         return {
             "ok": False,

@@ -48,7 +48,7 @@ App 运行需要 macOS 14 或更高版本、Apple Silicon，以及可执行的 P
 没有 Developer ID 时生成的是 ad-hoc 测试包，首次在其他 Mac 安装需要右键选择"打开"。
 菜单栏 App 只负责状态显示、启动/停止内部数据服务、手动控制 OpenCodex、打开原生设置窗口、
 打开日志和配置开机自启；固定额度采集仍由现有 Python 服务完成。内部数据服务监督只访问
-`/api/health/live`，状态面板读取 `/api/status` 缓存，不会额外触发 Provider 刷新。
+`/api/health/live`，状态面板读取 `/api/status` 缓存，不会额外触发 collector 刷新。
 
 ### macOS 手动检查更新（可选）
 

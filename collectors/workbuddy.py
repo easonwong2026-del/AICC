@@ -332,12 +332,27 @@ ACCOUNT_EXPRESSION = r"""
 """
 
 
+def initial_status(value: dict[str, Any]) -> dict[str, Any]:
+    """Hide manual points until WorkBuddy has produced a real balance."""
+    result = value.copy()
+    if result.get("balance_updated_epoch") is not None:
+        return result
+    for key in ("points", "total_points", "cycle_used_points", "used_points", "reset_text"):
+        result[key] = None
+    result.update({
+        "balance_state": "Unavailable",
+        "balance_stale": True,
+        "balance_updated_at": None,
+        "balance_age_seconds": None,
+        "usage_source": "WorkBuddy unavailable",
+    })
+    result.pop("balance_error_code", None)
+    result.pop("balance_error", None)
+    return result
+
+
 def collect(fallback: dict, force: bool = False, *, database_path: Path = DEFAULT_DB_PATH) -> dict:
     """Read balance through WorkBuddy itself and today's usage from its local DB."""
-    # Keep the pre-2.4.3 collect(fallback, database_path) call shape usable
-    # for local integrations while allowing the new force keyword.
-    if isinstance(force, (str, Path)):
-        database_path, force = Path(force), False
     result = fallback.copy()
     account = _get_account_usage(force=force)
     if account:

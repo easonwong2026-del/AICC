@@ -1,43 +1,10 @@
-"""Concurrency tests for single-provider force refresh semantics (0.4).
-
-Manual refresh must always produce at least one force=True collection while
-keeping at most one live worker per provider and never growing threads with
-repeated clicks.
-"""
+"""Concurrency tests for fixed collector force refresh semantics."""
 
 import threading
 import time
 import unittest
 
 from services.collector_manager import CollectorManager
-
-
-class GatedProvider:
-    """Provider whose refresh duration is controllable per test."""
-
-    def __init__(self, name="p", delay=0.2, timeout=1.0):
-        self.name = name
-        self.interval = 60.0
-        self.timeout = timeout
-        self.delay = delay
-        self.calls = []
-        self._lock = threading.Lock()
-        self._status = {"v": 0}
-
-    def status(self):
-        with self._lock:
-            return dict(self._status)
-
-    def refresh(self, force=False):
-        with self._lock:
-            self.calls.append(force)
-        time.sleep(self.delay)
-        with self._lock:
-            self._status = {"v": len(self.calls), "force": force}
-            return dict(self._status)
-
-    def health(self):
-        return {"ok": True, "state": "connected"}
 
 
 class ForceRefreshTests(unittest.TestCase):
@@ -49,93 +16,152 @@ class ForceRefreshTests(unittest.TestCase):
             time.sleep(0.01)
         raise AssertionError("condition not met in time")
 
-    def test_refresh_one_without_worker_runs_force_immediately(self):
-        provider = GatedProvider(delay=0.05)
-        manager = CollectorManager({"p": provider})
-        values, metadata = manager.refresh_one("p", wait_seconds=1.0)
-        self.assertEqual(provider.calls, [True])
-        self.assertEqual(values["force"], True)
-        self.assertEqual(metadata["state"], "ready")
+    def test_idle_snapshot_runs_force_immediately(self):
+        calls = []
+
+        def collect(force=False):
+            calls.append(force)
+            return {"force": force}
+
+        manager = CollectorManager({"p": (collect, 60.0, 1.0, {})})
+        values, metadata = manager.snapshot(force=True, wait_seconds=1.0)
+
+        self.assertEqual(calls, [True])
+        self.assertTrue(values["p"]["force"])
+        self.assertEqual(metadata["p"]["state"], "ready")
 
     def test_force_request_during_normal_refresh_runs_after_it(self):
-        provider = GatedProvider(delay=0.15)
-        manager = CollectorManager({"p": provider})
-        snapshot_result = {}
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+        calls_lock = threading.Lock()
 
-        def run_snapshot():
-            snapshot_result["values"], snapshot_result["metadata"] = manager.snapshot(
+        def collect(force=False):
+            with calls_lock:
+                calls.append(force)
+            started.set()
+            if not force:
+                release.wait(2.0)
+            return {"force": force}
+
+        manager = CollectorManager({"p": (collect, 60.0, 1.0, {})})
+        normal_result = {}
+
+        def run_normal():
+            normal_result["values"], normal_result["metadata"] = manager.snapshot(
                 force=False, wait_seconds=3.0
             )
 
-        thread = threading.Thread(target=run_snapshot)
-        thread.start()
-        self._wait_until(lambda: manager._slots["p"].running)
-        # The normal (non-force) worker is live; a manual refresh must be
-        # deferred and followed by exactly one force=True run.
-        values, metadata = manager.refresh_one("p", wait_seconds=3.0)
-        thread.join(timeout=4.0)
-        self.assertEqual(provider.calls, [False, True])
-        self.assertEqual(values["force"], True)
-        self.assertEqual(metadata["state"], "ready")
-        self.assertEqual(snapshot_result["values"]["p"]["force"], True)
+        normal_thread = threading.Thread(target=run_normal)
+        normal_thread.start()
+        self._wait_until(lambda: started.is_set() and manager._slots["p"].running)
 
-    def test_repeated_force_clicks_merge_into_one_worker(self):
-        provider = GatedProvider(delay=0.15)
-        manager = CollectorManager({"p": provider})
-        # Start one force worker without waiting for it.
-        manager.refresh_one("p", wait_seconds=0)
-        self._wait_until(lambda: manager._slots["p"].running)
-        # Many clicks while it is running must merge, not spawn workers.
-        for _ in range(8):
-            manager.refresh_one("p", wait_seconds=0)
-        self._wait_until(lambda: not manager._slots["p"].running)
-        self.assertEqual(provider.calls, [True])
+        force_result = {}
+
+        def run_force():
+            force_result["values"], force_result["metadata"] = manager.snapshot(
+                force=True, wait_seconds=3.0
+            )
+
+        force_thread = threading.Thread(target=run_force)
+        force_thread.start()
+        self._wait_until(lambda: manager._slots["p"].pending_force)
+        release.set()
+        normal_thread.join(timeout=4.0)
+        force_thread.join(timeout=4.0)
+
+        self.assertFalse(normal_thread.is_alive())
+        self.assertFalse(force_thread.is_alive())
+        self.assertEqual(calls, [False, True])
+        self.assertTrue(force_result["values"]["p"]["force"])
+        self.assertEqual(force_result["metadata"]["p"]["state"], "ready")
+        self.assertTrue(normal_result["values"]["p"]["force"])
+
+    def test_repeated_forced_snapshots_merge_and_keep_one_thread(self):
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+        calls_lock = threading.Lock()
+
+        def collect(force=False):
+            with calls_lock:
+                calls.append(force)
+            started.set()
+            release.wait(2.0)
+            return {"force": force}
+
+        manager = CollectorManager({"p": (collect, 60.0, 1.0, {})})
+        manager.snapshot(force=True, wait_seconds=0)
+        self.assertTrue(started.wait(1.0))
+        for _ in range(20):
+            manager.snapshot(force=True, wait_seconds=0)
+
+        self.assertEqual([thread.name for thread in threading.enumerate()].count("collect-p"), 1)
+        release.set()
+        self._wait_until(lambda: not manager._slots["p"].running and not manager._slots["p"].worker_alive)
+        self.assertEqual(calls, [True])
 
     def test_refresh_after_timeout_starts_fresh_force_worker(self):
+        calls = []
+        calls_lock = threading.Lock()
+
+        def collect(force=False):
+            with calls_lock:
+                calls.append(force)
+                call_number = len(calls)
+            if call_number == 1:
+                time.sleep(1.6)
+            return {"force": force, "call": call_number}
+
         # CollectorSlot clamps timeouts to a 1.0s minimum.
-        provider = GatedProvider(delay=1.6, timeout=0.8)
-        manager = CollectorManager({"p": provider})
-        _, metadata = manager.refresh_one("p", wait_seconds=1.4)
-        self.assertEqual(metadata["state"], "timeout")
-        # Let the follow-up collection finish quickly.
-        provider.delay = 0.1
-        # The stale thread may still be alive; the slot must be reclaimable
-        # and a fresh force=True run must start immediately.
-        values, second_metadata = manager.refresh_one("p", wait_seconds=2.0)
-        self.assertEqual(provider.calls, [True, True])
-        self.assertEqual(values["force"], True)
-        self.assertEqual(second_metadata["state"], "ready")
+        manager = CollectorManager({"p": (collect, 60.0, 0.8, {})})
+        _, metadata = manager.snapshot(force=True, wait_seconds=1.4)
+        self.assertEqual(metadata["p"]["state"], "timeout")
 
-    def test_providers_refresh_independently(self):
-        first = GatedProvider("first", delay=0.15)
-        second = GatedProvider("second", delay=0.15)
-        manager = CollectorManager({"first": first, "second": second})
-        manager.snapshot(force=False, wait_seconds=0)
-        self._wait_until(
-            lambda: manager._slots["first"].running and manager._slots["second"].running
-        )
-        manager.refresh_one("first", wait_seconds=3.0)
-        self.assertEqual(first.calls, [False, True])
-        self.assertEqual(second.calls, [False])
+        values, second_metadata = manager.snapshot(force=True, wait_seconds=2.0)
+        self.assertEqual(calls, [True, True])
+        self.assertEqual(values["p"]["call"], 2)
+        self.assertEqual(second_metadata["p"]["state"], "ready")
+        self._wait_until(lambda: not any(t.name == "collect-p" for t in threading.enumerate()))
+        values, _ = manager.snapshot(wait_seconds=0)
+        self.assertEqual(values["p"]["call"], 2)
 
-    def test_thread_count_stays_bounded_under_click_storm(self):
-        provider = GatedProvider(delay=0.3)
-        manager = CollectorManager({"p": provider})
-        manager.refresh_one("p", wait_seconds=0)
-        self._wait_until(lambda: manager._slots["p"].running)
-        for _ in range(20):
-            manager.refresh_one("p", wait_seconds=0)
+    def test_collectors_refresh_independently(self):
+        started = {name: threading.Event() for name in ("first", "second")}
+        release = threading.Event()
+        calls = {name: [] for name in ("first", "second")}
+        calls_lock = threading.Lock()
 
-        def collect_threads():
-            return [t for t in threading.enumerate() if t.name == "collect-p"]
+        def make_collect(name):
+            def collect(force=False):
+                with calls_lock:
+                    calls[name].append(force)
+                started[name].set()
+                if not force:
+                    release.wait(2.0)
+                return {"force": force}
 
-        # At most one live collector thread despite 21 refresh clicks.
-        self._wait_until(lambda: len(collect_threads()) == 1)
-        self.assertLessEqual(len(collect_threads()), 1)
-        self._wait_until(lambda: not manager._slots["p"].running)
-        time.sleep(0.05)
-        self.assertEqual(provider.calls, [True])
-        self.assertEqual(collect_threads(), [])
+            return collect
+
+        manager = CollectorManager({
+            "first": (make_collect("first"), 60.0, 1.0, {}),
+            "second": (make_collect("second"), 60.0, 1.0, {}),
+        })
+        normal_thread = threading.Thread(target=lambda: manager.snapshot(force=False, wait_seconds=3.0))
+        normal_thread.start()
+        self._wait_until(lambda: all(event.is_set() for event in started.values()))
+
+        force_thread = threading.Thread(target=lambda: manager.snapshot(force=True, wait_seconds=3.0))
+        force_thread.start()
+        self._wait_until(lambda: all(manager._slots[name].pending_force for name in started))
+        release.set()
+        normal_thread.join(timeout=4.0)
+        force_thread.join(timeout=4.0)
+
+        self.assertFalse(normal_thread.is_alive())
+        self.assertFalse(force_thread.is_alive())
+        self.assertEqual(calls["first"], [False, True])
+        self.assertEqual(calls["second"], [False, True])
 
 
 if __name__ == "__main__":
