@@ -30,7 +30,7 @@ let package = Package(
             ],
             sources: [
                 "Models/StatusData.swift",
-                "Models/ProviderModels.swift",
+                "Models/DashboardTypography.swift",
                 "Models/SettingsPresentationModel.swift",
                 "Models/StatusItemMenuModel.swift",
                 "Models/UpdateModels.swift",
@@ -49,7 +49,7 @@ let package = Package(
                 "OCXCommandBuilderTests.swift",
                 "OCXOperationPolicyTests.swift",
                 "ProcessRunnerTests.swift",
-                "ProviderModelsTests.swift",
+                "DashboardTypographyTests.swift",
                 "SettingsPresentationModelTests.swift",
                 "StatusItemMenuModelTests.swift",
                 "UpdateServiceTests.swift",

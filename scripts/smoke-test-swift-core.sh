@@ -30,7 +30,7 @@ xcrun swiftc \
   -target arm64-apple-macosx14.0 \
   -module-cache-path "$TEMP_ROOT/module-cache" \
   "$ROOT/macos/MenuBarApp/Sources/Models/StatusData.swift" \
-  "$ROOT/macos/MenuBarApp/Sources/Models/ProviderModels.swift" \
+  "$ROOT/macos/MenuBarApp/Sources/Models/DashboardTypography.swift" \
   "$ROOT/macos/MenuBarApp/Sources/Models/SettingsPresentationModel.swift" \
   "$ROOT/macos/MenuBarApp/Sources/Models/StatusItemMenuModel.swift" \
   "$ROOT/macos/MenuBarApp/Sources/Models/UpdateModels.swift" \

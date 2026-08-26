@@ -4,7 +4,7 @@
 
 AICC is a local AI status center for macOS. It displays Codex, WorkBuddy, DeepSeek, and system status, with support for Poke4S e-ink devices. The server uses only the Python standard library.
 
-Since 2.5.0, AICC uses a dynamic Provider architecture. Collectors expose raw status, a manifest adapter produces display data, and the macOS menu-bar app drives cards, ordering, visibility, and actions from the manifest. Adding a built-in Provider does not require changes to the Dashboard core. See [Provider architecture](docs/provider-architecture.md), [Provider schema v1](docs/provider-schema-v1.md), [Provider UI guidelines](docs/provider-ui-guidelines.md), and the [built-in Provider guide](docs/adding-a-built-in-provider.md).
+The macOS menu-bar app uses fixed Codex, WorkBuddy, DeepSeek, System, and OpenCodex status cards. It reads `/api/status` and the fixed operation endpoints only. The server still retains the Provider Manifest architecture; see [Provider architecture](docs/provider-architecture.md), [Provider schema v1](docs/provider-schema-v1.md), [Provider UI guidelines](docs/provider-ui-guidelines.md), and the [built-in Provider guide](docs/adding-a-built-in-provider.md).
 
 ## Access
 

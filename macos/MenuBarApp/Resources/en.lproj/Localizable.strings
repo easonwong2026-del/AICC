@@ -35,12 +35,10 @@
 "Updates are checked only when you click the button." = "Updates are checked only when you click the button.";
 "Points" = "Points";
 "Providers" = "Providers";
-"OpenAI" = "OpenAI";
 "Codex" = "Codex";
 "WorkBuddy" = "WorkBuddy";
 "DeepSeek" = "DeepSeek";
-"Account used by Codex" = "Account used by Codex";
-"Credentials are read from the existing local application, environment, or Keychain integrations. AICC does not display or store tokens here." = "Credentials are read from the existing local application, environment, or Keychain integrations. AICC does not display or store tokens here.";
+"Reconnect WorkBuddy" = "Reconnect WorkBuddy";
 "Connected" = "Connected";
 "Unavailable" = "Unavailable";
 "Cached" = "Cached";
@@ -133,11 +131,3 @@
 "Today %@" = "Today %@";
 "Updated" = "Updated";
 "Temporarily unavailable" = "Temporarily unavailable";
-"Pending" = "Pending";
-"Disabled" = "Disabled";
-"Close" = "Close";
-"Show" = "Show";
-"Hide" = "Hide";
-"Reset default order" = "Reset default order";
-"Loading providers…" = "Loading providers…";
-"Providers are listed dynamically from the local manifest. Use the arrows to reorder, the switch to show or hide a provider, and the info button for diagnostics. Credentials are read from the existing local application, environment, or Keychain integrations; AICC never displays tokens." = "Providers are listed dynamically from the local manifest. Use the arrows to reorder, the switch to show or hide a provider, and the info button for diagnostics. Credentials are read from the existing local application, environment, or Keychain integrations; AICC never displays tokens.";

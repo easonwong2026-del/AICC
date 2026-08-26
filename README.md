@@ -4,7 +4,7 @@
 
 面向 macOS 的 AI 状态中心，显示 Codex、WorkBuddy、DeepSeek 和系统状态。支持 Poke4S 墨水屏显示。服务只依赖 Python 标准库。
 
-2.5.0 起采用**动态 Provider 架构**：采集器只输出原始状态，Manifest 适配层统一输出展示数据，macOS 菜单栏由 Manifest 数组驱动卡片、排序、隐藏与操作；新增内置 Provider 不再需要修改 Dashboard 核心代码。架构与 Schema 见 [docs/provider-architecture.md](docs/provider-architecture.md)、[docs/provider-schema-v1.md](docs/provider-schema-v1.md)，字体与视觉层级规范见 [docs/provider-ui-guidelines.md](docs/provider-ui-guidelines.md)，接入指南见 [docs/adding-a-built-in-provider.md](docs/adding-a-built-in-provider.md)。
+macOS 菜单栏使用固定的 Codex、WorkBuddy、DeepSeek、System 和 OpenCodex 状态卡片，只读取 `/api/status` 及固定操作接口。服务端仍保留 Provider Manifest 架构，相关架构与 Schema 见 [docs/provider-architecture.md](docs/provider-architecture.md)、[docs/provider-schema-v1.md](docs/provider-schema-v1.md)，字体与视觉层级规范见 [docs/provider-ui-guidelines.md](docs/provider-ui-guidelines.md)，接入指南见 [docs/adding-a-built-in-provider.md](docs/adding-a-built-in-provider.md)。
 
 ## 使用地址
 
