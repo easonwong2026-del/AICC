@@ -30,8 +30,6 @@ final class MockURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
-// MARK: - APIService provider snapshot behavior (0.3)
-
 @MainActor
 final class APIServiceTests: XCTestCase {
     override func setUp() {
@@ -54,29 +52,9 @@ final class APIServiceTests: XCTestCase {
         )
     }
 
-    private static let providersJSON = """
-    {
-      "schema_version": 1,
-      "updated_at": "2026-07-31 20:00:00",
-      "providers": [
-        {
-          "id": "codex",
-          "display_name": "Codex",
-          "category": "quota",
-          "state": "connected",
-          "available": true,
-          "metrics": [
-            {"key": "weekly", "label": "Weekly", "value": 92, "value_type": "number", "format": "percent", "unit": "%", "primary": true}
-          ],
-          "actions": []
-        }
-      ]
-    }
-    """
-
     private static let statusJSON = """
     {
-      "system": {"status": "Online"},
+      "system": {"label": "System", "status": "Online", "platform": "macOS"},
       "codex": {"weekly": {"remaining": 92}},
       "workbuddy": {"points": 12},
       "deepseek": {"status": "Online"}
@@ -95,104 +73,78 @@ final class APIServiceTests: XCTestCase {
         return (response, Data(body.utf8))
     }
 
-    func testFirstProviderFailureKeepsSafeEmptyState() async {
+    func testFetchStatusUsesOnlyStatusEndpoint() async throws {
         let service = makeService()
-        MockURLProtocol.handler = { _ in throw URLError(.cannotConnectToHost) }
-        await service.fetchProviders()
-        XCTAssertNil(service.providers)
-        XCTAssertNotNil(service.providerErrorMessage)
-        XCTAssertNil(service.providerLastSuccess)
-        // A provider failure must never touch the dashboard connection state.
-        guard case .loading = service.state else {
-            return XCTFail("expected loading state, got \(service.state)")
-        }
-    }
+        MockURLProtocol.handler = { [self] _ in try respond(Self.statusJSON) }
 
-    func testProviderFailureKeepsLastKnownSnapshot() async throws {
-        let service = makeService()
-        MockURLProtocol.handler = { [self] _ in try respond(Self.providersJSON) }
-        await service.fetchProviders()
-        let snapshot = try XCTUnwrap(service.providers)
-        XCTAssertEqual(snapshot.providers.first?.id, "codex")
-        XCTAssertNil(service.providerErrorMessage)
-        XCTAssertNotNil(service.providerLastSuccess)
-
-        MockURLProtocol.handler = { _ in throw URLError(.timedOut) }
-        await service.fetchProviders()
-        XCTAssertEqual(service.providers, snapshot)
-        XCTAssertNotNil(service.providerErrorMessage)
-        XCTAssertNotNil(service.providerLastSuccess)
-        guard case .loading = service.state else {
-            return XCTFail("expected loading state, got \(service.state)")
-        }
-    }
-
-    func testProviderRecoveryReplacesSnapshotAndClearsError() async throws {
-        let service = makeService()
-        MockURLProtocol.handler = { [self] _ in try respond(Self.providersJSON) }
-        await service.fetchProviders()
-        XCTAssertNil(service.providerErrorMessage)
-
-        MockURLProtocol.handler = { _ in throw URLError(.cannotConnectToHost) }
-        await service.fetchProviders()
-        XCTAssertNotNil(service.providerErrorMessage)
-
-        let recoveredJSON = Self.providersJSON.replacingOccurrences(
-            of: "\"state\": \"connected\"",
-            with: "\"state\": \"cached\""
-        )
-        MockURLProtocol.handler = { [self] _ in try respond(recoveredJSON) }
-        await service.fetchProviders()
-        XCTAssertEqual(service.providers?.providers.first?.state, "cached")
-        XCTAssertNil(service.providerErrorMessage)
-        XCTAssertNotNil(service.providerLastSuccess)
-    }
-
-    func testProviderFailureDoesNotFlipDashboardStateAfterStatusSuccess() async throws {
-        let service = makeService()
-        MockURLProtocol.handler = { [self] request in
-            if request.url?.path == "/api/status" {
-                return try respond(Self.statusJSON)
-            }
-            throw URLError(.cannotConnectToHost)
-        }
         await service.fetchStatus()
+
         guard case .ready = service.state else {
             return XCTFail("expected ready state, got \(service.state)")
         }
-        XCTAssertNil(service.providers)
-        XCTAssertNotNil(service.providerErrorMessage)
+        XCTAssertEqual(service.status?.system?.status, "Online")
+        XCTAssertEqual(MockURLProtocol.requests.map { $0.url?.path }, ["/api/status"])
+        XCTAssertEqual(MockURLProtocol.requests.first?.httpMethod, "GET")
     }
 
-    func testActionRequestUsesKindInPath() async throws {
+    func testForceFetchUsesRefreshEndpoint() async throws {
         let service = makeService()
-        MockURLProtocol.handler = { request in
+        MockURLProtocol.handler = { [self] _ in try respond(Self.statusJSON) }
+
+        await service.fetchStatus(force: true)
+
+        XCTAssertEqual(MockURLProtocol.requests.map { $0.url?.path }, ["/api/refresh"])
+        XCTAssertEqual(MockURLProtocol.requests.first?.httpMethod, "POST")
+    }
+
+    func testMalformedStatusSetsDecodingError() async throws {
+        let service = makeService()
+        MockURLProtocol.handler = { [self] _ in try respond(#"{"codex":{"weekly":}}"#) }
+
+        await service.fetchStatus()
+
+        guard case .error = service.state else {
+            return XCTFail("expected decoding error, got \(service.state)")
+        }
+        XCTAssertNotNil(service.errorMessage)
+    }
+
+    func testStatusFailureSetsUnavailableState() async {
+        let service = makeService()
+        MockURLProtocol.handler = { _ in throw URLError(.cannotConnectToHost) }
+
+        await service.fetchStatus()
+
+        guard case .unavailable = service.state else {
+            return XCTFail("expected unavailable state, got \(service.state)")
+        }
+        XCTAssertEqual(service.errorMessage, "Cannot connect to AICC server")
+    }
+
+    func testReconnectWorkBuddyUsesFixedEndpointAndReloadsStatus() async throws {
+        let service = makeService()
+        MockURLProtocol.handler = { [self] request in
             switch request.url?.path {
+            case "/api/workbuddy/reconnect":
+                XCTAssertEqual(request.httpMethod, "POST")
+                return try respond(#"{"ok":true}"#)
             case "/api/status":
-                return try self.respond(Self.statusJSON)
-            case "/api/providers":
-                // performProviderAction reloads the snapshot afterwards via
-                // fetchStatus -> fetchProviders.
-                return try self.respond(Self.providersJSON)
+                XCTAssertEqual(request.httpMethod, "GET")
+                return try respond(Self.statusJSON)
             default:
-                XCTAssertEqual(
-                    request.url?.path,
-                    "/api/providers/workbuddy/actions/reconnect"
-                )
-                return try self.respond(#"{"id":"workbuddy"}"#)
+                XCTFail("unexpected endpoint \(request.url?.path ?? "nil")")
+                return try respond("{}", status: 404)
             }
         }
-        let result = await service.performProviderAction(
-            providerId: "workbuddy",
-            kind: "reconnect"
-        )
-        XCTAssertEqual(result, #"{"id":"workbuddy"}"#)
-        // `actionID` from a manifest such as "reconnect_workbuddy" must never
-        // leak into the route.
-        let actionPaths = MockURLProtocol.requests
-            .compactMap { $0.url?.path }
-            .filter { $0.contains("/actions/") }
-        XCTAssertEqual(actionPaths, ["/api/providers/workbuddy/actions/reconnect"])
-        XCTAssertFalse(actionPaths.contains("/api/providers/workbuddy/actions/reconnect_workbuddy"))
+
+        await service.reconnectWorkBuddy()
+
+        XCTAssertEqual(MockURLProtocol.requests.map { $0.url?.path }, [
+            "/api/workbuddy/reconnect",
+            "/api/status"
+        ])
+        guard case .ready = service.state else {
+            return XCTFail("expected ready state, got \(service.state)")
+        }
     }
 }

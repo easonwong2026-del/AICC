@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Render real SwiftUI card components to PNGs for PR before/after screenshots.
+# Render fixed SwiftUI card components to PNGs for PR before/after screenshots.
 # Requires a macOS GUI session and CommandLineTools.
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -38,15 +38,15 @@ xcrun swiftc \
   -framework AppKit \
   -framework Foundation \
   -module-cache-path "$TEMP_ROOT/module-cache" \
-  "$SRC/Models/ProviderModels.swift" \
+  "$SRC/Models/DashboardTypography.swift" \
   "$SRC/Models/StatusData.swift" \
+  "$SRC/Models/SettingsPresentationModel.swift" \
   "$SRC/Models/SettingsData.swift" \
-  "$SRC/Services/APIService.swift" \
-  "$SRC/Views/ProviderCard.swift" \
   "$SRC/Views/CodexCard.swift" \
   "$SRC/Views/WorkBuddyCard.swift" \
   "$SRC/Views/DeepSeekCard.swift" \
   "$SRC/Views/ServiceRow.swift" \
+  "$SRC/Views/SystemCard.swift" \
   "$ROOT/scripts/render-provider-screenshots.swift" \
   -o "$TEMP_ROOT/aicc-screenshots"
 

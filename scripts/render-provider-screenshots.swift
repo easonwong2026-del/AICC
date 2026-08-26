@@ -1,9 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// Offscreen renderer for PR screenshots. Compiles the real card components
-/// (ProviderCard / CodexCard / WorkBuddyCard / DeepSeekCard / CompactCard)
-/// with fixture manifests and writes 2x PNGs. Requires a GUI session.
+/// Offscreen renderer for the fixed SwiftUI cards and before/after screenshots.
+/// Requires a macOS GUI session.
 
 @MainActor
 @main
@@ -12,62 +11,6 @@ struct ScreenshotHarness {
         let output = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "/tmp/aicc-screenshots"
         try? FileManager.default.createDirectory(atPath: output, withIntermediateDirectories: true)
         let settings = AppSettings.shared
-        let api = APIService.shared
-
-        func summary(_ json: String) -> ProviderSummary {
-            try! JSONDecoder().decode(ProvidersResponse.self, from: Data(json.utf8)).providers[0]
-        }
-
-        let codex = summary("""
-        {"schema_version":1,"providers":[{"id":"codex","display_name":"Codex","category":"quota","icon":"chart.bar.fill","state":"connected","available":true,"stale":false,"updated_at":"2026-07-31 19:19:50","sort_order":10,"capabilities":["refresh"],"metrics":[
-          {"key":"weekly_remaining","label":"Codex Weekly 剩余","value":92,"value_type":"percentage","format":"percent","unit":"%","primary":true},
-          {"key":"weekly_reset","label":"Weekly 重置","value":"7月17日","value_type":"text","format":"plain","primary":false},
-          {"key":"five_hour_remaining","label":"5 Hour 剩余","value":65,"value_type":"percentage","format":"percent","unit":"%","primary":true},
-          {"key":"five_hour_reset","label":"5 Hour 重置","value":"14:27","value_type":"text","format":"plain","primary":false}
-        ],"actions":[{"id":"refresh","label":"刷新 Codex","kind":"refresh","local_only":true}]}]}
-        """)
-
-        let workbuddy = summary("""
-        {"schema_version":1,"providers":[{"id":"workbuddy","display_name":"WorkBuddy","category":"credits","icon":"wand.and.stars","state":"connected","available":true,"stale":false,"updated_at":"2026-07-31 19:19:50","sort_order":20,"capabilities":["refresh","reconnect","diagnostics"],"metrics":[
-          {"key":"points","label":"剩余积分","value":5343.37,"value_type":"number","format":"decimal","unit":"积分","primary":true},
-          {"key":"used_today","label":"今日使用","value":126,"value_type":"number","format":"decimal","unit":"积分","primary":false}
-        ],"actions":[{"id":"refresh","label":"刷新 WorkBuddy","kind":"refresh","local_only":true},{"id":"reconnect","label":"重连 WorkBuddy","kind":"reconnect","local_only":true}]}]}
-        """)
-
-        let deepseek = summary("""
-        {"schema_version":1,"providers":[{"id":"deepseek","display_name":"DeepSeek","category":"credits","icon":"brain.head.profile","state":"connected","available":true,"stale":false,"updated_at":"2026-07-31 19:18:00","sort_order":30,"capabilities":["refresh"],"metrics":[
-          {"key":"balance","label":"当前余额","value":128.50,"value_type":"currency","format":"currency","unit":"CNY","primary":true},
-          {"key":"used_today","label":"今日使用","value":2.34,"value_type":"currency","format":"currency","unit":"CNY","primary":false}
-        ],"actions":[{"id":"refresh","label":"刷新 DeepSeek","kind":"refresh","local_only":true}]}]}
-        """)
-
-        let example = summary("""
-        {"schema_version":1,"providers":[{"id":"example","display_name":"Example Provider","category":"credits","icon":"sparkles","state":"connected","available":true,"stale":false,"updated_at":"2026-07-31 19:20:00","sort_order":200,"capabilities":["refresh"],"metrics":[
-          {"key":"points","label":"示例积分","value":12345.67,"value_type":"number","format":"decimal","unit":"积分","primary":true},
-          {"key":"used_today","label":"今日使用","value":126,"value_type":"number","format":"decimal","unit":"积分","primary":false}
-        ],"actions":[{"id":"refresh","label":"刷新示例 Provider","kind":"refresh","local_only":true}]}]}
-        """)
-
-        let longNumber = summary("""
-        {"schema_version":1,"providers":[{"id":"long","display_name":"Long Number Provider","category":"credits","icon":"number","state":"connected","available":true,"stale":false,"updated_at":"2026-07-31 19:20:00","sort_order":150,"capabilities":["refresh"],"metrics":[
-          {"key":"points","label":"剩余积分","value":999999.99,"value_type":"number","format":"decimal","unit":"积分","primary":true},
-          {"key":"used_today","label":"今日使用","value":1234567,"value_type":"number","format":"decimal","unit":"积分","primary":false}
-        ],"actions":[]}]}
-        """)
-
-        let unavailable = summary("""
-        {"schema_version":1,"providers":[{"id":"workbuddy","display_name":"WorkBuddy","category":"credits","icon":"wand.and.stars","state":"error","available":false,"stale":false,"updated_at":null,"sort_order":20,"capabilities":["refresh","reconnect","diagnostics"],"metrics":[
-          {"key":"points","label":"剩余积分","value":null,"value_type":"number","format":"decimal","unit":"积分","primary":true}
-        ],"actions":[{"id":"reconnect","label":"重连 WorkBuddy","kind":"reconnect","local_only":true}]}]}
-        """)
-
-        let cached = summary("""
-        {"schema_version":1,"providers":[{"id":"workbuddy","display_name":"WorkBuddy","category":"credits","icon":"wand.and.stars","state":"cached","available":true,"stale":true,"updated_at":"2026-07-31 19:00:00","sort_order":20,"capabilities":["refresh","reconnect","diagnostics"],"metrics":[
-          {"key":"points","label":"剩余积分","value":5343.37,"value_type":"number","format":"decimal","unit":"积分","primary":true},
-          {"key":"used_today","label":"今日使用","value":126,"value_type":"number","format":"decimal","unit":"积分","primary":false},
-          {"key":"cache_age","label":"缓存年龄","value":400,"value_type":"duration","format":"plain","unit":"秒","primary":false}
-        ],"actions":[{"id":"refresh","label":"刷新 WorkBuddy","kind":"refresh","local_only":true}]}]}
-        """)
 
         let workbuddyData = WorkBuddyData(
             points: 5343.37,
@@ -99,30 +42,22 @@ struct ScreenshotHarness {
             stale: false,
             available: true
         )
+        let systemData = SystemData(
+            label: "System",
+            status: "Online",
+            cpu: "18%",
+            platform: "macOS",
+            ram: "8.2 GB",
+            gpu: nil
+        )
 
         let cardWidth: CGFloat = 322
         let miniWidth: CGFloat = 156
 
-        // Dynamic provider cards — the P1 "after" design.
-        render(ProviderCard(provider: codex).environmentObject(settings).environmentObject(api), name: "provider-codex-light", width: cardWidth, scheme: .aqua, to: output)
-        render(ProviderCard(provider: workbuddy).environmentObject(settings).environmentObject(api), name: "provider-workbuddy-light", width: cardWidth, scheme: .aqua, to: output)
-        render(ProviderCard(provider: deepseek).environmentObject(settings).environmentObject(api), name: "provider-deepseek-light", width: cardWidth, scheme: .aqua, to: output)
-        render(ProviderCard(provider: example).environmentObject(settings).environmentObject(api), name: "provider-example-light", width: cardWidth, scheme: .aqua, to: output)
-        render(ProviderCard(provider: longNumber).environmentObject(settings).environmentObject(api), name: "provider-long-number-light", width: cardWidth, scheme: .aqua, to: output)
-        render(ProviderCard(provider: unavailable).environmentObject(settings).environmentObject(api), name: "provider-unavailable-light", width: cardWidth, scheme: .aqua, to: output)
-        render(ProviderCard(provider: cached).environmentObject(settings).environmentObject(api), name: "provider-cached-light", width: cardWidth, scheme: .aqua, to: output)
-        render(ProviderCard(provider: workbuddy).environmentObject(settings).environmentObject(api), name: "provider-workbuddy-dark", width: cardWidth, scheme: .darkAqua, to: output)
-
-        // English labels through the known-metric-key mapping.
-        let originalLanguage = settings.languageCode
-        settings.languageCode = "en"
-        render(ProviderCard(provider: workbuddy).environmentObject(settings).environmentObject(api), name: "provider-workbuddy-english", width: cardWidth, scheme: .aqua, to: output)
-        settings.languageCode = originalLanguage
-
-        // Real legacy cards used by the current dashboard (upgraded typography).
-        render(CodexCard(codex: codexData), name: "legacy-codex-card", width: cardWidth, scheme: .aqua, to: output)
+        render(CodexCard(codex: codexData).environmentObject(settings), name: "legacy-codex-card", width: cardWidth, scheme: .aqua, to: output)
         render(WorkBuddyCard(data: workbuddyData).environmentObject(settings), name: "legacy-workbuddy-card", width: miniWidth, scheme: .aqua, to: output)
         render(DeepSeekCard(data: deepseekData).environmentObject(settings), name: "legacy-deepseek-card", width: miniWidth, scheme: .aqua, to: output)
+        render(SystemCard(data: systemData).environmentObject(settings), name: "system-card", width: cardWidth, scheme: .aqua, to: output)
 
         // Reconstructed pre-P1 typography for before/after comparison.
         render(LegacyCompactCard(title: "WorkBuddy", icon: "wand.and.stars", value: "5,343.37", subtitle: "Connected · 19:19:50", state: .online), name: "before-workbuddy", width: miniWidth, scheme: .aqua, to: output)
