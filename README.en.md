@@ -36,6 +36,8 @@ bash macos/rollback-from-backup.sh /path/to/backup
 
 Logs are stored in `~/Library/Logs/AICC-Dashboard/` with daily size limits.
 
+The AICC server owns WorkBuddy bridge auto-heal; `install-autostart.sh` only registers the dashboard and log-maintenance agents.
+
 The self-contained App is generated at `dist/mac/AICC.app`; the DMG is written to `dist/` by default. Set `RELEASE_DIR` to place release artifacts elsewhere. The DMG bundles the server code and can be dragged into `/Applications`. Runtime data is stored in `~/Library/Application Support/AICC-Dashboard/data/`, not inside the App bundle.
 
 The App requires macOS 14 or later, Apple Silicon, and an executable Python 3 (Python 3.10+ recommended). The DMG does not include Python. Without a Developer ID signature, the artifact is ad hoc signed; on another Mac, use Finder's right-click → Open flow if Gatekeeper blocks the first launch.

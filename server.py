@@ -31,7 +31,6 @@ DATA_ROOT = Path(os.environ.get("EINK_DATA_DIR", ROOT / "data")).expanduser()
 DATA_PATH = DATA_ROOT / "status.json"
 WEB_ROOT = Path(os.environ.get("EINK_WEB_ROOT", ROOT / "web")).expanduser()
 COLLECTOR_WAIT_SECONDS = max(0, min(5, float(os.environ.get("COLLECTOR_WAIT_SECONDS", "3.2"))))
-MAX_POST_BYTES = 16 * 1024
 SERVER_STARTED_AT = time.time()
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 DEFAULT_STATUS = {
@@ -278,7 +277,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return self.send_json(values.get("codex", {}))
         if path == "/api/health":
             return self.send_json(health_payload())
-        self.path = "/settings.html" if path == "/settings" else "/index.html" if path == "/" else self.path
+        if path == "/":
+            self.path = "/index.html"
         return super().do_GET()
 
     def do_POST(self) -> None:
@@ -320,29 +320,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 return
             self.send_json({"error": "Unknown provider action"}, HTTPStatus.NOT_FOUND)
             return
-        if path != "/api/status":
-            self.send_error(HTTPStatus.NOT_FOUND)
-            return
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-            if length < 0 or length > MAX_POST_BYTES:
-                self.send_json({"error": "Request body too large"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
-                return
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            data = persisted_status()
-            if isinstance(payload.get("workbuddy"), dict):
-                workbuddy = payload["workbuddy"]
-                clean = data.setdefault("workbuddy", {})
-                for name in ("points", "used_points"):
-                    if name in workbuddy:
-                        clean[name] = max(0, float(workbuddy[name]))
-                if "reset_text" in workbuddy:
-                    clean["reset_text"] = str(workbuddy["reset_text"])[:60]
-            save_status(data)
-            collector_manager().invalidate("workbuddy")
-            self.send_json(load_status(force=True))
-        except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+        self.send_error(HTTPStatus.NOT_FOUND)
 
     def send_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
