@@ -32,6 +32,7 @@ xcrun swiftc \
   "$ROOT/macos/MenuBarApp/Sources/Models/StatusData.swift" \
   "$ROOT/macos/MenuBarApp/Sources/Models/DashboardTypography.swift" \
   "$ROOT/macos/MenuBarApp/Sources/Models/SettingsPresentationModel.swift" \
+  "$ROOT/macos/MenuBarApp/Sources/Models/SettingsData.swift" \
   "$ROOT/macos/MenuBarApp/Sources/Models/StatusItemMenuModel.swift" \
   "$ROOT/macos/MenuBarApp/Sources/Models/UpdateModels.swift" \
   "$ROOT/macos/MenuBarApp/Sources/Services/ProcessRunner.swift" \

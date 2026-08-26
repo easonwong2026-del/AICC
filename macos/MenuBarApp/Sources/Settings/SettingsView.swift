@@ -390,6 +390,7 @@ private struct MenuBarSettingsView: View {
             Section("Menu bar items") {
                 Toggle("WorkBuddy", isOn: $settings.menuBarShowWorkBuddy)
                 Toggle("DeepSeek", isOn: $settings.menuBarShowDeepSeek)
+                Toggle("System", isOn: $settings.menuBarShowSystem)
                 Toggle("OpenCodex", isOn: $settings.menuBarShowOpenCodex)
             }
 

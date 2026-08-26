@@ -42,8 +42,10 @@ struct DashboardView: View {
                 Divider().padding(.horizontal, 14)
                 miniCardsSection
             }
-            Divider().padding(.horizontal, 14)
-            systemSection
+            if settings.menuBarShowSystem {
+                Divider().padding(.horizontal, 14)
+                systemSection
+            }
             if settings.menuBarShowOpenCodex {
                 Divider().padding(.horizontal, 14)
                 servicesSection
