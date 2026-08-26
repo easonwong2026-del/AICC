@@ -152,19 +152,22 @@ class ServerIntegrationTests(unittest.TestCase):
         result = server.load_status(force=True)
         self.assertIsNone(result["workbuddy"]["points"])
 
-    def test_local_post_is_validated_and_saved(self):
+    def test_legacy_settings_route_is_removed(self):
+        with self.assertRaises(HTTPError) as caught:
+            urlopen(self.base + "/settings", timeout=2)
+        self.assertEqual(caught.exception.code, 404)
+
+    def test_status_post_no_longer_accepts_manual_workbuddy_writes(self):
+        server.save_status({"workbuddy": {"points": 45, "used_points": 3, "reset_text": "keep"}})
         body = json.dumps({"workbuddy": {"points": 45, "used_points": 3, "reset_text": "ok"}}).encode()
         request = Request(self.base + "/api/status", data=body, headers={"Content-Type": "application/json"}, method="POST")
-        with urlopen(request, timeout=2) as response:
-            self.assertEqual(response.status, 200)
-        saved = json.loads(server.DATA_PATH.read_text(encoding="utf-8"))
-        self.assertEqual(saved["workbuddy"]["points"], 45)
-
-    def test_oversized_post_is_rejected(self):
-        request = Request(self.base + "/api/status", data=b"x" * (server.MAX_POST_BYTES + 1), method="POST")
         with self.assertRaises(HTTPError) as caught:
             urlopen(request, timeout=2)
-        self.assertEqual(caught.exception.code, 413)
+        self.assertEqual(caught.exception.code, 404)
+        saved = json.loads(server.DATA_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(saved["workbuddy"]["points"], 45)
+        self.assertEqual(saved["workbuddy"]["reset_text"], "keep")
+        self.assertEqual(server._collector_manager.invalidated, [])
 
     def test_remote_write_check(self):
         handler = server.DashboardHandler.__new__(server.DashboardHandler)

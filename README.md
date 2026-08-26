@@ -20,12 +20,14 @@ Mac 与 Poke4S 需要连接同一 Wi-Fi。原生 Android 客户端也可以通�
 
 ```bash
 bash macos/start-dashboard.sh              # 前台启动
-bash macos/install-autostart.sh            # 安装自动启动与监控
+bash macos/install-autostart.sh            # 安装 Dashboard 自动启动与日志维护
 bash macos/uninstall-autostart.sh          # 移除自动启动
 bash macos/set-deepseek-key.sh             # 更新 DeepSeek 密钥
 BUNDLE_SERVER=1 bash macos/build-aicc-swiftui.sh  # 构建自包含 SwiftUI 菜单栏 App（含 Python 服务）
 bash macos/build-dmg.sh  # 构建自包含 AICC DMG 安装包
 ```
+
+WorkBuddy 调试桥自动修复由 AICC server 内部负责；`install-autostart.sh` 只注册 Dashboard 和日志维护。
 
 安全更新会先跑测试并完整备份，同时保留当前额度历史和缓存：
 

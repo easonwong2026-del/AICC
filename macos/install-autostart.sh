@@ -5,8 +5,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || true)}"
 LABEL="com.aieink.dashboard"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-WORKBUDDY_LABEL="com.aieink.workbuddy-monitor"
-WORKBUDDY_PLIST="$HOME/Library/LaunchAgents/$WORKBUDDY_LABEL.plist"
+LEGACY_WORKBUDDY_LABEL="com.aieink.workbuddy-monitor"
+LEGACY_WORKBUDDY_PLIST="$HOME/Library/LaunchAgents/$LEGACY_WORKBUDDY_LABEL.plist"
 LOG_TRIM_LABEL="com.aieink.log-maintenance"
 LOG_TRIM_PLIST="$HOME/Library/LaunchAgents/$LOG_TRIM_LABEL.plist"
 LOG_DIR="$HOME/Library/Logs/AI-EInk-Dashboard"
@@ -52,6 +52,10 @@ reload_agent() {
 }
 
 mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
+# Older AICC releases installed a duplicate WorkBuddy monitor. Remove it when
+# installing the server-owned monitor path; failure is intentionally harmless.
+launchctl bootout "gui/$UID/$LEGACY_WORKBUDDY_LABEL" >/dev/null 2>&1 || true
+rm -f "$LEGACY_WORKBUDDY_PLIST" >/dev/null 2>&1 || true
 ROOT_XML="$(xml_escape "$ROOT")"
 PYTHON_XML="$(xml_escape "$PYTHON_BIN")"
 PATH_XML="$(xml_escape "$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")"
@@ -81,26 +85,6 @@ cat > "$PLIST" <<EOF
 </plist>
 EOF
 
-cat > "$WORKBUDDY_PLIST" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>$WORKBUDDY_LABEL</string>
-  <key>ProgramArguments</key>
-  <array><string>/bin/bash</string><string>$ROOT_XML/macos/start-workbuddy-monitored.sh</string><string>--monitor</string></array>
-  <key>WorkingDirectory</key><string>$ROOT_XML</string>
-  <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>$PATH_XML</string></dict>
-  <key>RunAtLoad</key><true/>
-  <key>StartInterval</key><integer>60</integer>
-  <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>$LOG_DIR_XML/workbuddy-monitor.log</string>
-  <key>StandardErrorPath</key><string>$LOG_DIR_XML/workbuddy-monitor-error.log</string>
-</dict>
-</plist>
-EOF
-
 cat > "$LOG_TRIM_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -117,11 +101,8 @@ cat > "$LOG_TRIM_PLIST" <<EOF
 EOF
 
 plutil -lint "$PLIST"
-plutil -lint "$WORKBUDDY_PLIST"
 plutil -lint "$LOG_TRIM_PLIST"
 reload_agent "$LABEL" "$PLIST"
-reload_agent "$WORKBUDDY_LABEL" "$WORKBUDDY_PLIST"
 reload_agent "$LOG_TRIM_LABEL" "$LOG_TRIM_PLIST"
 echo "Dashboard auto-start installed: $PLIST"
-echo "WorkBuddy monitored auto-start installed: $WORKBUDDY_PLIST"
 echo "Log maintenance installed: $LOG_TRIM_PLIST"

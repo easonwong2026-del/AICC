@@ -40,8 +40,8 @@ bash macos/start-workbuddy-monitored.sh
 ```
 
 The WorkBuddy macOS client must be validated on the actual machine. If its app
-bundle or local database differs from Windows, the dashboard retains the manual
-fallback instead of failing.
+bundle or local database differs from Windows, the dashboard retains its
+last-known-good cache instead of failing.
 
 ## Auto-start
 
@@ -51,8 +51,9 @@ After the manual checks pass:
 bash macos/install-autostart.sh
 ```
 
-The LaunchAgents start the dashboard and WorkBuddy's localhost-only monitoring
-bridge at sign-in. The dashboard restarts after a crash.
+The LaunchAgents start the dashboard and log maintenance at sign-in. WorkBuddy
+bridge auto-heal runs inside the AICC server, and the dashboard restarts after a
+crash.
 Logs are stored in `~/Library/Logs/AICC-Dashboard/`.
 
 To remove it:
