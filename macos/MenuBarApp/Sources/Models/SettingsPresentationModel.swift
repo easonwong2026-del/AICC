@@ -97,26 +97,6 @@ struct StatusItemDisplayState: Equatable {
     }
 }
 
-enum SettingsWindowLifecycleState: String, Equatable {
-    case closed
-    case presented
-}
-
-struct SettingsWindowLifecycle: Equatable {
-    private(set) var state: SettingsWindowLifecycleState = .closed
-
-    @discardableResult
-    mutating func beginPresentation() -> Bool {
-        guard state == .closed else { return false }
-        state = .presented
-        return true
-    }
-
-    mutating func close() {
-        state = .closed
-    }
-}
-
 /// AppKit termination is allowed only after an explicit application-quit
 /// command. Closing the last regular window must never satisfy this gate.
 struct AppTerminationGate: Equatable {

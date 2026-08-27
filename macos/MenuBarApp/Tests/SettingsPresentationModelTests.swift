@@ -60,25 +60,6 @@ final class SettingsPresentationModelTests: XCTestCase {
         XCTAssertEqual(first, same)
     }
 
-    func testSettingsLifecycleReturnsToClosedAfterClose() {
-        var lifecycle = SettingsWindowLifecycle()
-        XCTAssertEqual(lifecycle.state, .closed)
-        XCTAssertTrue(lifecycle.beginPresentation())
-        XCTAssertEqual(lifecycle.state, .presented)
-        XCTAssertFalse(lifecycle.beginPresentation())
-        lifecycle.close()
-        XCTAssertEqual(lifecycle.state, .closed)
-    }
-
-    func testSettingsLifecycleCanBePresentedAgainAfterWindowClose() {
-        var lifecycle = SettingsWindowLifecycle()
-        XCTAssertTrue(lifecycle.beginPresentation())
-        lifecycle.close()
-
-        XCTAssertTrue(lifecycle.beginPresentation())
-        XCTAssertEqual(lifecycle.state, .presented)
-    }
-
     func testTerminationGateRequiresExplicitQuitRequest() {
         var gate = AppTerminationGate()
         XCTAssertFalse(gate.allowsTermination)

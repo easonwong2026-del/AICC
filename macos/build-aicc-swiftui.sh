@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SERVER_ROOT="${SERVER_ROOT:-$ROOT}"
 BUNDLE_SERVER="${BUNDLE_SERVER:-0}"
 SIGNING_IDENTITY="${AICC_SIGNING_IDENTITY:--}"
+VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 
 # Required server directories for BUNDLE_SERVER=1
 REQUIRED_SERVER_DIRS=("collectors" "services" "web")
@@ -26,6 +27,7 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
 # Copy Info.plist
 cp "$ROOT/macos/MenuBarApp/Info.plist" "$CONTENTS/Info.plist"
+plutil -insert CFBundleShortVersionString -string "$VERSION" "$CONTENTS/Info.plist"
 
 # Copy localized resources
 if [ -d "$ROOT/macos/MenuBarApp/Resources" ]; then
@@ -50,7 +52,7 @@ if [[ "$BUNDLE_SERVER" == "1" ]]; then
   done
 
   mkdir -p "$BUNDLED_SERVER_DIR"
-  cp "$ROOT/server.py" "$ROOT/VERSION" "$ROOT/PACKAGE.json" "$BUNDLED_SERVER_DIR/"
+  cp "$ROOT/server.py" "$ROOT/VERSION" "$BUNDLED_SERVER_DIR/"
   cp -R "$ROOT/collectors" "$ROOT/services" "$ROOT/web" "$BUNDLED_SERVER_DIR/"
   mkdir -p "$BUNDLED_SERVER_DIR/macos"
   cp "$ROOT/macos/start-workbuddy-monitored.sh" "$BUNDLED_SERVER_DIR/macos/"
