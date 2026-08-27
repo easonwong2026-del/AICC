@@ -75,13 +75,6 @@ struct CoreSmokeMain {
         settings.menuBarShowSystem = true
         try require(defaults.bool(forKey: systemSettingKey), "system menu bar setting reads back on")
 
-        var settingsLifecycle = SettingsWindowLifecycle()
-        try require(settingsLifecycle.beginPresentation(), "settings lifecycle begin")
-        try require(settingsLifecycle.state == .presented, "settings lifecycle present")
-        settingsLifecycle.close()
-        try require(settingsLifecycle.state == .closed, "settings lifecycle close")
-        try require(settingsLifecycle.beginPresentation(), "settings lifecycle re-present")
-        try require(settingsLifecycle.state == .presented, "settings lifecycle re-presented")
         var terminationGate = AppTerminationGate()
         try require(!terminationGate.allowsTermination, "implicit termination is blocked")
         terminationGate.requestTermination()

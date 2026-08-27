@@ -164,18 +164,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     }
 
     @objc private func handleStatusItemAction(_ sender: NSStatusBarButton) {
-        let button: StatusItemMouseButton
         switch NSApp.currentEvent?.type {
         case .rightMouseDown, .rightMouseUp:
-            button = .right
-        default:
-            button = .left
-        }
-        switch StatusItemClickRouter.action(for: button) {
-        case .dashboard:
-            toggleDashboard()
-        case .contextMenu:
             showContextMenu()
+        default:
+            toggleDashboard()
         }
     }
 

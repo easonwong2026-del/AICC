@@ -1,8 +1,0 @@
-{
-  "created_at": "2026-07-18T16:15:00+08:00",
-  "format": 2,
-  "version": "2.5.0",
-  "contains_secrets": false,
-  "target": "macOS",
-  "windows_runtime_included": false
-}

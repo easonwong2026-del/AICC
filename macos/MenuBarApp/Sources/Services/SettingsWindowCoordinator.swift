@@ -39,7 +39,6 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
     // can crash macOS while NSWindowTransformAnimation is being torn down.
     private var recentlyClosedWindows: [NSWindow] = []
     private var cancellables = Set<AnyCancellable>()
-    private var lifecycle = SettingsWindowLifecycle()
 
     init(
         api: APIService,
@@ -57,10 +56,6 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
         observeSettings()
     }
 
-    var isPresented: Bool {
-        lifecycle.state == .presented && window != nil
-    }
-
     func present() {
         NSApp.activate(ignoringOtherApps: true)
 
@@ -73,7 +68,6 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
             return
         }
 
-        guard lifecycle.beginPresentation() else { return }
         let settingsWindow = makeWindow()
         if settingsWindow.isMiniaturized {
             settingsWindow.deminiaturize(nil)
@@ -86,13 +80,11 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
     func tearDown() {
         guard let settingsWindow = window else {
             cancellables.removeAll()
-            lifecycle.close()
             return
         }
         settingsWindow.delegate = nil
         settingsWindow.close()
         window = nil
-        lifecycle.close()
         cancellables.removeAll()
     }
 
@@ -136,7 +128,6 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
         guard let closingWindow = notification.object as? NSWindow, closingWindow === window else { return }
         closingWindow.delegate = nil
         window = nil
-        lifecycle.close()
         recentlyClosedWindows.append(closingWindow)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self, weak closingWindow] in
             guard let closingWindow else { return }
