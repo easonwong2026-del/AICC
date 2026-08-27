@@ -53,6 +53,28 @@ struct CoreSmokeMain {
         try require(SemanticVersion("2.5.9")! < SemanticVersion("2.5.10")!, "semantic version ordering")
         try require(SemanticVersion("2.5.1-beta")! < SemanticVersion("2.5.1")!, "prerelease ordering")
         try require(AppThemeMode.allCases.count == 3, "theme modes")
+
+        let defaults = UserDefaults.standard
+        let systemSettingKey = "menuBarShowSystem"
+        let previousSystemSetting = defaults.object(forKey: systemSettingKey)
+        defer {
+            if let previousSystemSetting {
+                defaults.set(previousSystemSetting, forKey: systemSettingKey)
+            } else {
+                defaults.removeObject(forKey: systemSettingKey)
+            }
+        }
+        defaults.removeObject(forKey: systemSettingKey)
+        let settings = AppSettings.shared
+        try require(settings.menuBarShowSystem, "system menu bar setting defaults on")
+        settings.menuBarShowSystem = false
+        try require(
+            defaults.object(forKey: systemSettingKey) as? Bool == false,
+            "system menu bar setting persists off"
+        )
+        settings.menuBarShowSystem = true
+        try require(defaults.bool(forKey: systemSettingKey), "system menu bar setting reads back on")
+
         var settingsLifecycle = SettingsWindowLifecycle()
         try require(settingsLifecycle.beginPresentation(), "settings lifecycle begin")
         try require(settingsLifecycle.state == .presented, "settings lifecycle present")

@@ -220,8 +220,17 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             return
         }
         guard let button = statusItem?.button else { return }
+        showDashboardPopover(from: button)
+    }
+
+    private func showDashboardPopover(from button: NSStatusBarButton) {
         if popover == nil { makePopover() }
-        popover?.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        guard let popover else { return }
+        if !popover.isShown {
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        popover.contentViewController?.view.window?.makeKey()
     }
 
     private func showContextMenu() {
@@ -251,13 +260,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
     private func toggleDashboardIfNeeded() {
         guard !isTearingDown else { return }
-        if popover == nil { makePopover() }
-        guard let button = statusItem?.button, let popover else { return }
-        if popover.isShown {
-            popover.contentViewController?.view.window?.makeKeyAndOrderFront(nil)
-        } else {
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        }
+        guard let button = statusItem?.button else { return }
+        showDashboardPopover(from: button)
     }
 
     @objc private func refreshAllFromMenu() {
