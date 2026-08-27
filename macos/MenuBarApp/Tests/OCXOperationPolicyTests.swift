@@ -51,4 +51,52 @@ final class OCXOperationPolicyTests: XCTestCase {
         XCTAssertNotEqual(OCXStatus.notInstalled, .running)
         XCTAssertNotEqual(OCXStatus.unhealthy, .running)
     }
+
+    func testUpdateStateTracksBusyAndCompletionCases() {
+        XCTAssertTrue(OCXUpdateState.checking.isBusy)
+        XCTAssertTrue(OCXUpdateState.updating.isBusy)
+        XCTAssertFalse(OCXUpdateState.upToDate.isBusy)
+        XCTAssertEqual(OCXUpdateState.available("2.5.1"), .available("2.5.1"))
+        XCTAssertEqual(
+            OCXUpdateState.updated(from: "2.5.0", to: "2.5.1", restartRequired: true),
+            .updated(from: "2.5.0", to: "2.5.1", restartRequired: true)
+        )
+        XCTAssertEqual(OCXUpdateState.failed("Command timed out"), .failed("Command timed out"))
+    }
+
+    func testUpdateCheckTransitionsUseSemanticVersionComparison() {
+        XCTAssertEqual(
+            OCXUpdateState.checkResult(current: "1.2.3", latest: "1.2.3"),
+            .upToDate
+        )
+        XCTAssertEqual(
+            OCXUpdateState.checkResult(current: "1.2.3", latest: "1.2.4"),
+            .available("1.2.4")
+        )
+        XCTAssertEqual(
+            OCXUpdateState.checkResult(current: "1.2.3", latest: nil),
+            .failed("Unable to check for updates")
+        )
+    }
+
+    func testUpdateCompletionRejectsNoChangeAndAcceptsVersionRefresh() {
+        XCTAssertEqual(
+            OCXUpdateState.completion(from: "1.2.3", to: "1.2.4", restartRequired: false),
+            .updated(from: "1.2.3", to: "1.2.4", restartRequired: false)
+        )
+        XCTAssertEqual(
+            OCXUpdateState.completion(from: "1.2.3", to: "1.2.3", restartRequired: false),
+            .failed("OpenCodex update completed, but version did not change.")
+        )
+        XCTAssertEqual(
+            OCXUpdateState.completion(from: "1.2.3", to: nil, restartRequired: false),
+            .failed("OpenCodex update completed, but version could not be verified.")
+        )
+    }
+
+    func testUpdateTimeoutAllowsRegistryCheckAndLongRunningOfficialUpdate() {
+        XCTAssertEqual(OCXOperationPolicy.updateCheckTimeout, 12)
+        XCTAssertEqual(OCXOperationPolicy.updateTimeout, 180)
+        XCTAssertGreaterThan(OCXOperationPolicy.updateTimeout, OCXOperationPolicy.updateCheckTimeout)
+    }
 }

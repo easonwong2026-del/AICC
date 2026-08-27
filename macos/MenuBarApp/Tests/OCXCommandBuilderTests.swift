@@ -60,4 +60,18 @@ final class OCXCommandBuilderTests: XCTestCase {
         XCTAssertEqual(ensure.executable, "/bin/zsh")
         XCTAssertEqual(stop.executable, "/bin/zsh")
     }
+
+    func testUpdateCheckUsesTheOfficialNpmRegistryQueryWithoutAShell() {
+        let inv = OCXCommandBuilder.updateCheck()
+        XCTAssertEqual(inv.executable, "/usr/bin/env")
+        XCTAssertEqual(inv.arguments, ["npm", "view", "@bitkyc08/opencodex@latest", "version"])
+        XCTAssertTrue(inv.environmentOverrides.isEmpty)
+    }
+
+    func testUpdateUsesTheOfficialCliDirectly() {
+        let inv = OCXCommandBuilder.update(ocxPath: "/Users/test/.npm-global/bin/ocx")
+        XCTAssertEqual(inv.executable, "/Users/test/.npm-global/bin/ocx")
+        XCTAssertEqual(inv.arguments, ["update"])
+        XCTAssertTrue(inv.environmentOverrides.isEmpty)
+    }
 }

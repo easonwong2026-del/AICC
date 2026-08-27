@@ -68,6 +68,11 @@ final class OCXStatusTests: XCTestCase {
         let snapshot = try OCXSnapshot(jsonData: fixture("ocx-running.json"))
         XCTAssertEqual(snapshot.version, "0.146.0")
         XCTAssertEqual(OCXVersionParser.parse("opencodex 2.7.42\n"), "opencodex 2.7.42")
+        XCTAssertEqual(
+            OCXVersionParser.semanticVersion(from: "opencodex 2.7.42\n")?.description,
+            "2.7.42"
+        )
+        XCTAssertEqual(OCXVersionParser.semanticVersion(from: "2.7.42\n")?.description, "2.7.42")
         XCTAssertNil(OCXVersionParser.parse(" \n\r\n"))
     }
 

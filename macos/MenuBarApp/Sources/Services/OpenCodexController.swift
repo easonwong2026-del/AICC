@@ -11,6 +11,7 @@ final class OpenCodexController: ObservableObject {
     @Published private(set) var detectedPath: String?
     @Published private(set) var snapshot: OCXSnapshot?
     @Published private(set) var ocxVersion: String?
+    @Published private(set) var updateState: OCXUpdateState = .idle
 
     private let logger = Logger(subsystem: "com.aieink.dashboard.menubar", category: "OpenCodex")
     private let processRunner: ProcessRunning
@@ -79,7 +80,7 @@ final class OpenCodexController: ObservableObject {
     /// Performs one executable resolution and one `ocx status --json` check.
     /// There is no permanent OpenCodex polling task outside the visible panel.
     func checkOnce() async {
-        guard operationTask == nil, !isDetecting else { return }
+        guard operationTask == nil, !isDetecting, !updateState.isBusy else { return }
 
         if let currentTask = statusTask {
             await currentTask.value
@@ -103,7 +104,7 @@ final class OpenCodexController: ObservableObject {
     }
 
     func detectExecutable() async {
-        guard operationTask == nil, !isDetecting else { return }
+        guard operationTask == nil, !isDetecting, !updateState.isBusy else { return }
         isDetecting = true
         defer { isDetecting = false }
         invalidateStatusTask()
@@ -214,13 +215,14 @@ final class OpenCodexController: ObservableObject {
         return nil
     }
 
-    private func refreshVersionIfNeeded(force: Bool = false) async {
-        guard let path = detectedPath else { return }
+    @discardableResult
+    private func refreshVersionIfNeeded(force: Bool = false) async -> String? {
+        guard let path = detectedPath else { return nil }
         let now = Date()
         if !force,
            let lastVersionCheck,
            now.timeIntervalSince(lastVersionCheck) < versionRefreshInterval {
-            return
+            return ocxVersion
         }
 
         lastVersionCheck = now
@@ -233,10 +235,191 @@ final class OpenCodexController: ObservableObject {
             )
             if let version = OCXVersionParser.parse(result.stdout) {
                 ocxVersion = version
+                return version
             }
         } catch {
             logger.debug("Unable to read ocx version: \(String(describing: error))")
         }
+        return nil
+    }
+
+    // MARK: - Update management
+
+    func checkForUpdate() async {
+        guard operationTask == nil, !isDetecting, !updateState.isBusy else { return }
+
+        operationGeneration += 1
+        let generation = operationGeneration
+        invalidateStatusTask()
+        updateState = .checking
+
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performUpdateCheck(generation: generation)
+        }
+        operationTask = task
+        await task.value
+
+        if operationGeneration == generation {
+            operationTask = nil
+        }
+    }
+
+    func updateOpenCodex() async {
+        guard case .available = updateState, operationTask == nil, !isDetecting else { return }
+        guard let oldVersion = OCXVersionParser.semanticVersion(from: ocxVersion ?? "")?.description else {
+            updateState = .failed("Unable to read OpenCodex version")
+            return
+        }
+
+        let wasRunning = status == .running || status == .unhealthy
+        operationGeneration += 1
+        let generation = operationGeneration
+        invalidateStatusTask()
+        updateState = .updating
+
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performUpdate(
+                from: oldVersion,
+                wasRunning: wasRunning,
+                generation: generation
+            )
+        }
+        operationTask = task
+        await task.value
+
+        if operationGeneration == generation {
+            operationTask = nil
+        }
+    }
+
+    private func performUpdateCheck(generation: Int) async {
+        guard generation == operationGeneration, !Task.isCancelled else { return }
+
+        guard let path = await resolveExecutable() else {
+            detectedPath = nil
+            snapshot = nil
+            status = .notInstalled
+            updateState = .failed("OpenCodex is not installed")
+            return
+        }
+
+        guard generation == operationGeneration, !Task.isCancelled else { return }
+        setDetectedPath(path)
+
+        guard
+            let currentOutput = await refreshVersionIfNeeded(force: true),
+            let current = OCXVersionParser.semanticVersion(from: currentOutput)
+        else {
+            updateState = .failed("Unable to read OpenCodex version")
+            return
+        }
+
+        let invocation = OCXCommandBuilder.updateCheck()
+        do {
+            let result = try await processRunner.run(
+                executable: invocation.executable,
+                arguments: invocation.arguments,
+                environment: processEnvironment,
+                timeout: OCXOperationPolicy.updateCheckTimeout
+            )
+            guard generation == operationGeneration, !Task.isCancelled else { return }
+
+            guard let latest = OCXVersionParser.semanticVersion(from: result.stdout) else {
+                updateState = .failed("Unable to check for updates")
+                return
+            }
+
+            updateState = .checkResult(
+                current: current.description,
+                latest: latest.description
+            )
+        } catch is CancellationError {
+            return
+        } catch let error as ProcessRunnerError {
+            if case .cancelled = error { return }
+            logger.error("OpenCodex update check failed: \(String(describing: error))")
+            updateState = .failed(Self.shortUpdateError(error, fallback: "Unable to check for updates"))
+        } catch {
+            logger.error("OpenCodex update check failed: \(String(describing: error))")
+            updateState = .failed("Unable to check for updates")
+        }
+    }
+
+    private func performUpdate(from oldVersion: String, wasRunning: Bool, generation: Int) async {
+        guard generation == operationGeneration, !Task.isCancelled else { return }
+
+        guard let path = await resolveExecutable() else {
+            updateState = .failed("OpenCodex update failed")
+            return
+        }
+
+        guard generation == operationGeneration, !Task.isCancelled else { return }
+        setDetectedPath(path)
+
+        let invocation = OCXCommandBuilder.update(ocxPath: path)
+        do {
+            _ = try await processRunner.run(
+                executable: invocation.executable,
+                arguments: invocation.arguments,
+                environment: processEnvironment,
+                timeout: OCXOperationPolicy.updateTimeout
+            )
+        } catch is CancellationError {
+            return
+        } catch let error as ProcessRunnerError {
+            if case .cancelled = error { return }
+            logger.error("OpenCodex update failed: \(String(describing: error))")
+            updateState = .failed(Self.shortUpdateError(error, fallback: "OpenCodex update failed"))
+            return
+        } catch {
+            logger.error("OpenCodex update failed: \(String(describing: error))")
+            updateState = .failed("OpenCodex update failed")
+            return
+        }
+
+        guard generation == operationGeneration, !Task.isCancelled else { return }
+        guard let refreshedPath = await resolveExecutable() else {
+            updateState = .failed("OpenCodex update failed")
+            return
+        }
+        setDetectedPath(refreshedPath)
+        let newVersionOutput = await refreshVersionIfNeeded(force: true)
+        await refreshStatusAfterUpdate(path: refreshedPath, generation: generation)
+
+        guard generation == operationGeneration, !Task.isCancelled else { return }
+        updateState = .completion(
+            from: oldVersion,
+            to: newVersionOutput.flatMap { OCXVersionParser.semanticVersion(from: $0)?.description },
+            restartRequired: wasRunning && status == .stopped
+        )
+    }
+
+    private func refreshStatusAfterUpdate(path: String, generation: Int) async {
+        do {
+            let result = try await processRunner.run(
+                executable: path,
+                arguments: ["status", "--json"],
+                environment: processEnvironment,
+                timeout: OCXOperationPolicy.statusTimeout
+            )
+            let nextSnapshot = try OCXSnapshot(jsonData: result.stdoutData)
+            guard generation == operationGeneration, !Task.isCancelled else { return }
+            apply(nextSnapshot)
+        } catch is CancellationError {
+            return
+        } catch {
+            logger.error("OpenCodex status refresh after update failed: \(String(describing: error))")
+        }
+    }
+
+    private static func shortUpdateError(_ error: Error, fallback: String) -> String {
+        if let runnerError = error as? ProcessRunnerError,
+           case .timedOut = runnerError {
+            return "Command timed out"
+        }
+        return fallback
     }
 
     // MARK: - Manual lifecycle
@@ -262,6 +445,10 @@ final class OpenCodexController: ObservableObject {
 
     var knownPort: Int? {
         snapshot?.port
+    }
+
+    var controlsBusy: Bool {
+        status.isBusy || updateState.isBusy
     }
 
     private enum Operation {
@@ -291,7 +478,7 @@ final class OpenCodexController: ObservableObject {
     }
 
     private func runOperation(_ operation: Operation) async {
-        guard !isDetecting else { return }
+        guard !isDetecting, !updateState.isBusy else { return }
         if let existingTask = operationTask {
             existingTask.cancel()
             await existingTask.value

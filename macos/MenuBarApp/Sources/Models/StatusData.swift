@@ -106,7 +106,7 @@ enum OCXStatus: Equatable {
         switch self {
         case .unknown: return "Unknown"
         case .checking: return "Checking..."
-        case .notInstalled: return "Not Found"
+        case .notInstalled: return "Not Installed"
         case .stopped: return "Stopped"
         case .starting: return "Starting..."
         case .running: return "Running"
@@ -140,10 +140,69 @@ enum OCXStatus: Equatable {
     }
 }
 
+enum OCXUpdateState: Equatable {
+    case idle
+    case checking
+    case upToDate
+    case available(String)
+    case updating
+    case updated(from: String, to: String, restartRequired: Bool)
+    case failed(String)
+
+    var isBusy: Bool {
+        switch self {
+        case .checking, .updating:
+            return true
+        case .idle, .upToDate, .available, .updated, .failed:
+            return false
+        }
+    }
+
+    static func checkResult(current: String, latest: String?) -> OCXUpdateState {
+        guard
+            let latest,
+            let currentVersion = SemanticVersion(current),
+            let latestVersion = SemanticVersion(latest)
+        else {
+            return .failed("Unable to check for updates")
+        }
+        let normalizedLatest = latestVersion.description
+        return VersionComparator.isNewer(normalizedLatest, than: currentVersion.description)
+            ? .available(normalizedLatest)
+            : .upToDate
+    }
+
+    static func completion(
+        from oldVersion: String,
+        to newVersion: String?,
+        restartRequired: Bool
+    ) -> OCXUpdateState {
+        guard let newVersion else {
+            return .failed("OpenCodex update completed, but version could not be verified.")
+        }
+        guard
+            let old = SemanticVersion(oldVersion),
+            let new = SemanticVersion(newVersion)
+        else {
+            return .failed("OpenCodex update completed, but version could not be verified.")
+        }
+        guard old != new else {
+            return .failed("OpenCodex update completed, but version did not change.")
+        }
+        return .updated(
+            from: old.description,
+            to: new.description,
+            restartRequired: restartRequired
+        )
+    }
+}
+
 enum OCXOperationPolicy {
     static let panelPollIntervalNanoseconds: UInt64 = 9_000_000_000
     static let statusTimeout: TimeInterval = 4.5
     static let operationTimeout: TimeInterval = 12
+    static let updateCheckTimeout: TimeInterval = 12
+    static let updateTimeout: TimeInterval = 180
     static let confirmationDelays: [UInt64] = [
         300_000_000,
         700_000_000,
@@ -175,6 +234,15 @@ enum OCXVersionParser {
         }
         let value = String(firstLine).trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? nil : value
+    }
+
+    static func semanticVersion(from output: String) -> SemanticVersion? {
+        guard let line = parse(output) else { return nil }
+        return line
+            .split(whereSeparator: { $0 == " " || $0 == "\t" })
+            .reversed()
+            .compactMap { SemanticVersion(String($0)) }
+            .first
     }
 }
 
@@ -393,6 +461,7 @@ struct OCXCommandInvocation: Equatable {
 
 enum OCXCommandBuilder {
     private static let envKey = "AICC_OCX_PATH"
+    private static let packageName = "@bitkyc08/opencodex"
     private static let allowedCommands: Set<String> = ["ensure", "stop"]
 
     /// Build a login-shell invocation for a lifecycle command.
@@ -410,6 +479,22 @@ enum OCXCommandBuilder {
             executable: "/bin/zsh",
             arguments: ["-lc", "exec \"$\(envKey)\" \(command)"],
             environmentOverrides: [envKey: ocxPath]
+        )
+    }
+
+    static func updateCheck() -> OCXCommandInvocation {
+        OCXCommandInvocation(
+            executable: "/usr/bin/env",
+            arguments: ["npm", "view", "\(packageName)@latest", "version"],
+            environmentOverrides: [:]
+        )
+    }
+
+    static func update(ocxPath: String) -> OCXCommandInvocation {
+        OCXCommandInvocation(
+            executable: ocxPath,
+            arguments: ["update"],
+            environmentOverrides: [:]
         )
     }
 }
