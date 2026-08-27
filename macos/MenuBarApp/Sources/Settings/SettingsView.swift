@@ -414,6 +414,7 @@ private struct AdvancedSettingsView: View {
 
     @State private var notice = ""
     @State private var showingClearCacheConfirmation = false
+    @State private var showingOpenCodexUpdateConfirmation = false
 
     var body: some View {
         Form {
@@ -430,14 +431,23 @@ private struct AdvancedSettingsView: View {
                         Task { await ocx.detectExecutable() }
                     }
                     .buttonStyle(.borderless)
+                    .disabled(ocx.controlsBusy)
                 }
 
+                LabeledContent("Status", value: settings.localized(ocx.status.label))
                 if let version = ocx.ocxVersion {
                     LabeledContent("Version", value: version)
                 }
                 if let port = ocx.knownPort {
                     LabeledContent("Port", value: String(port))
                 }
+
+                Button("Check for Update") {
+                    Task { await ocx.checkForUpdate() }
+                }
+                .disabled(ocx.controlsBusy)
+
+                openCodexUpdateStatus
             }
 
             Section("Diagnostics") {
@@ -484,6 +494,85 @@ private struct AdvancedSettingsView: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("Provider credentials are not stored in this cache.")
+        }
+        .confirmationDialog(
+            "OpenCodex is running",
+            isPresented: $showingOpenCodexUpdateConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Update OpenCodex") {
+                Task { await ocx.updateOpenCodex() }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Updating the running OpenCodex may restart the proxy.")
+        }
+    }
+
+    @ViewBuilder
+    private var openCodexUpdateStatus: some View {
+        switch ocx.updateState {
+        case .idle:
+            EmptyView()
+        case .checking:
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(settings.localized("Checking for OpenCodex updates…"))
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        case .upToDate:
+            Text(settings.localized("Up to date"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .available(let version):
+            VStack(alignment: .leading, spacing: 6) {
+                Text(String(format: settings.localized("Update available: %@"), version))
+                    .font(.caption)
+                Button("Update OpenCodex") {
+                    startOpenCodexUpdate()
+                }
+                .buttonStyle(.borderless)
+                .disabled(ocx.controlsBusy)
+            }
+        case .updating:
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(settings.localized("Updating OpenCodex…"))
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        case .updated(let from, let to, let restartRequired):
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(format: settings.localized("Updated %@ → %@"), from, to))
+                    .font(.caption)
+                if restartRequired {
+                    Text(settings.localized("Restart OpenCodex to use the new version."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        case .failed(let message):
+            VStack(alignment: .leading, spacing: 6) {
+                Text(settings.localized(message))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Try Again") {
+                    Task { await ocx.checkForUpdate() }
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+    }
+
+    private func startOpenCodexUpdate() {
+        guard case .available = ocx.updateState else { return }
+        if ocx.status == .running {
+            showingOpenCodexUpdateConfirmation = true
+        } else {
+            Task { await ocx.updateOpenCodex() }
         }
     }
 

@@ -67,6 +67,13 @@ Manifest format:
 }
 ```
 
+### Release version rules
+
+- `VERSION` is the only manual source of the AICC product version.
+- A new user-feature release increments the minor version; a bugfix release increments the patch version.
+- Increment `CFBundleVersion` for every formal macOS release; ordinary development commits do not bump versions automatically.
+- Update `updates/aicc-update.json` only after the corresponding GitHub Release and DMG both exist.
+
 ## Data collection and privacy
 
 - Codex: starts `codex app-server` on demand, reads account limits, and stops the child process after 30 seconds without panel access while retaining the last successful cache.

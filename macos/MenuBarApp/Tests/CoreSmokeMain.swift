@@ -52,6 +52,39 @@ struct CoreSmokeMain {
         )
         try require(SemanticVersion("2.5.9")! < SemanticVersion("2.5.10")!, "semantic version ordering")
         try require(SemanticVersion("2.5.1-beta")! < SemanticVersion("2.5.1")!, "prerelease ordering")
+        try require(
+            OCXVersionParser.semanticVersion(from: "opencodex 2.31.0\n")?.description == "2.31.0",
+            "OpenCodex CLI version parsing"
+        )
+        try require(
+            OCXUpdateState.checkResult(current: "1.2.3", latest: "1.2.3") == .upToDate,
+            "OpenCodex up-to-date result"
+        )
+        try require(
+            OCXUpdateState.checkResult(current: "1.2.3", latest: "1.2.4") == .available("1.2.4"),
+            "OpenCodex update available result"
+        )
+        try require(
+            OCXUpdateState.completion(from: "1.2.3", to: "1.2.4", restartRequired: false)
+                == .updated(from: "1.2.3", to: "1.2.4", restartRequired: false),
+            "OpenCodex updated result"
+        )
+        try require(
+            OCXUpdateState.completion(from: "1.2.3", to: "1.2.3", restartRequired: false)
+                == .failed("OpenCodex update completed, but version did not change."),
+            "OpenCodex no-change result"
+        )
+        try require(OCXUpdateState.checking.isBusy && OCXUpdateState.updating.isBusy, "update busy state")
+        let updateCheck = OCXCommandBuilder.updateCheck()
+        try require(
+            updateCheck.executable == "/usr/bin/env"
+                && updateCheck.arguments == ["npm", "view", "@bitkyc08/opencodex@latest", "version"],
+            "official update check command"
+        )
+        let update = OCXCommandBuilder.update(ocxPath: "/bin/ocx")
+        try require(update.executable == "/bin/ocx" && update.arguments == ["update"], "official update command")
+        try require(OCXOperationPolicy.updateCheckTimeout == 12, "update check timeout")
+        try require(OCXOperationPolicy.updateTimeout == 180, "update timeout")
         try require(AppThemeMode.allCases.count == 3, "theme modes")
 
         let defaults = UserDefaults.standard

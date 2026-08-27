@@ -70,7 +70,26 @@
 
 "Executable" = "可执行文件";
 "Not detected" = "未检测到";
+"Not Installed" = "未安装";
 "Redetect" = "重新检测";
+"Status" = "状态";
+"Check for Update" = "检查更新";
+"Checking for OpenCodex updates…" = "正在检查 OpenCodex 更新…";
+"Up to date" = "当前已是最新版本";
+"Update OpenCodex" = "更新 OpenCodex";
+"OpenCodex is running" = "OpenCodex 正在运行";
+"Updating the running OpenCodex may restart the proxy." = "更新正在运行的 OpenCodex 可能会重启代理。";
+"Updating OpenCodex…" = "正在更新 OpenCodex…";
+"Updated %@ → %@" = "已从 %@ 更新到 %@";
+"Restart OpenCodex to use the new version." = "请重启 OpenCodex 以使用新版本。";
+"Try Again" = "重试";
+"OpenCodex is not installed" = "OpenCodex 未安装";
+"Unable to read OpenCodex version" = "无法读取 OpenCodex 版本";
+"Unable to check for updates" = "无法检查更新";
+"Command timed out" = "命令超时";
+"OpenCodex update failed" = "OpenCodex 更新失败";
+"OpenCodex update completed, but version could not be verified." = "OpenCodex 更新完成，但无法验证版本。";
+"OpenCodex update completed, but version did not change." = "OpenCodex 更新命令已完成，但版本没有变化。";
 "Open Dashboard" = "打开仪表盘";
 "Diagnostics" = "诊断";
 "Debug mode" = "调试模式";

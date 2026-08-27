@@ -161,7 +161,7 @@ struct DashboardView: View {
                     statusText: settings.localized(ocx.status.label),
                     isOnline: ocx.status.isRunning,
                     toggleOn: ocx.status.isToggleOn,
-                    isBusy: ocx.status.isBusy,
+                    isBusy: ocx.controlsBusy,
                     statusColor: ocxStatusColor,
                     onToggle: { newValue in
                         Task {
