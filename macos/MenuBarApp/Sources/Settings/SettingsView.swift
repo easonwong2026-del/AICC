@@ -414,6 +414,7 @@ private struct AdvancedSettingsView: View {
 
     @State private var notice = ""
     @State private var showingClearCacheConfirmation = false
+    @State private var showingOpenCodexUpdateConfirmation = false
 
     var body: some View {
         Form {
@@ -494,6 +495,18 @@ private struct AdvancedSettingsView: View {
         } message: {
             Text("Provider credentials are not stored in this cache.")
         }
+        .confirmationDialog(
+            "OpenCodex is running",
+            isPresented: $showingOpenCodexUpdateConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Update OpenCodex") {
+                Task { await ocx.updateOpenCodex() }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Updating the running OpenCodex may restart the proxy.")
+        }
     }
 
     @ViewBuilder
@@ -518,7 +531,7 @@ private struct AdvancedSettingsView: View {
                 Text(String(format: settings.localized("Update available: %@"), version))
                     .font(.caption)
                 Button("Update OpenCodex") {
-                    Task { await ocx.updateOpenCodex() }
+                    startOpenCodexUpdate()
                 }
                 .buttonStyle(.borderless)
                 .disabled(ocx.controlsBusy)
@@ -551,6 +564,15 @@ private struct AdvancedSettingsView: View {
                 }
                 .buttonStyle(.borderless)
             }
+        }
+    }
+
+    private func startOpenCodexUpdate() {
+        guard case .available = ocx.updateState else { return }
+        if ocx.status == .running {
+            showingOpenCodexUpdateConfirmation = true
+        } else {
+            Task { await ocx.updateOpenCodex() }
         }
     }
 

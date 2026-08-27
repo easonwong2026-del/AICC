@@ -19,7 +19,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleVersion</key>
-	<string>4</string>
+	<string>5</string>
 	<key>AICCReleasePageURL</key>
 	<string>https://github.com/easonwong2026-del/AICC/releases</string>
 	<key>AICCUpdateManifestURL</key>

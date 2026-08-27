@@ -69,6 +69,13 @@ App 运行需要 macOS 14 或更高版本、Apple Silicon，以及可执行的 P
 }
 ```
 
+### 发布版本规则
+
+- `VERSION` 是 AICC 产品版本唯一人工源。
+- 新用户功能发布：minor 版本号加 1；bugfix 发布：patch 版本号加 1。
+- 每个正式 macOS 发布都将 `CFBundleVersion` 加 1；普通开发 commit 不自动 bump 版本。
+- 只有对应 GitHub Release 和 DMG 都已真实存在后，才更新 `updates/aicc-update.json`。
+
 ### 2.4.1 OpenCodex 控制变更
 
 - AICC **不负责打开 Codex Desktop 或 ChatGPT Desktop**。

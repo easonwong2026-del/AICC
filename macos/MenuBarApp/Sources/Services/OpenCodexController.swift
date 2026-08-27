@@ -272,7 +272,7 @@ final class OpenCodexController: ObservableObject {
             return
         }
 
-        let wasRunning = status == .running || status == .unhealthy
+        let wasRunning = status == .running
         operationGeneration += 1
         let generation = operationGeneration
         invalidateStatusTask()

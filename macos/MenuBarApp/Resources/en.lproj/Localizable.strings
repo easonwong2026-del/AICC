@@ -77,6 +77,8 @@
 "Checking for OpenCodex updates…" = "Checking for OpenCodex updates…";
 "Up to date" = "Up to date";
 "Update OpenCodex" = "Update OpenCodex";
+"OpenCodex is running" = "OpenCodex is running";
+"Updating the running OpenCodex may restart the proxy." = "Updating the running OpenCodex may restart the proxy.";
 "Updating OpenCodex…" = "Updating OpenCodex…";
 "Updated %@ → %@" = "Updated %@ → %@";
 "Restart OpenCodex to use the new version." = "Restart OpenCodex to use the new version.";

@@ -77,6 +77,8 @@
 "Checking for OpenCodex updates…" = "正在检查 OpenCodex 更新…";
 "Up to date" = "当前已是最新版本";
 "Update OpenCodex" = "更新 OpenCodex";
+"OpenCodex is running" = "OpenCodex 正在运行";
+"Updating the running OpenCodex may restart the proxy." = "更新正在运行的 OpenCodex 可能会重启代理。";
 "Updating OpenCodex…" = "正在更新 OpenCodex…";
 "Updated %@ → %@" = "已从 %@ 更新到 %@";
 "Restart OpenCodex to use the new version." = "请重启 OpenCodex 以使用新版本。";
