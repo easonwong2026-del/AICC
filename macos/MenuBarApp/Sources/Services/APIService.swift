@@ -1,4 +1,46 @@
 import Foundation
+import WidgetKit
+
+struct WidgetDisplaySignature: Equatable {
+    let codexRemaining: Double?
+    let workbuddyPoints: Double?
+    let deepseekBalance: String?
+    let systemStatus: String?
+
+    init(from response: StatusResponse) {
+        self.codexRemaining = response.codex?.weekly?.remaining ?? response.codex?.five_hour?.remaining
+        self.workbuddyPoints = response.workbuddy?.points
+        let chosenBalance = response.deepseek?.balances?.first(where: { $0.currency == "CNY" })
+            ?? response.deepseek?.balances?.first
+        let total = chosenBalance?.total_balance?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let curr = chosenBalance?.currency?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.deepseekBalance = total.isEmpty ? nil : (curr.isEmpty ? total : "\(total) \(curr)")
+        self.systemStatus = response.system?.status?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    init(
+        codexRemaining: Double? = nil,
+        workbuddyPoints: Double? = nil,
+        deepseekBalance: String? = nil,
+        systemStatus: String? = nil
+    ) {
+        self.codexRemaining = codexRemaining
+        self.workbuddyPoints = workbuddyPoints
+        self.deepseekBalance = deepseekBalance
+        self.systemStatus = systemStatus
+    }
+
+    static func shouldReloadWidget(
+        previous: WidgetDisplaySignature?,
+        current: WidgetDisplaySignature,
+        force: Bool
+    ) -> Bool {
+        if force || previous == nil {
+            return true
+        }
+        return previous != current
+    }
+}
 
 @MainActor
 class APIService: ObservableObject {
@@ -13,6 +55,7 @@ class APIService: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     private var fetchInFlight = false
     private let session: URLSession
+    private var lastWidgetSignature: WidgetDisplaySignature?
 
     convenience init() {
         let port = ProcessInfo.processInfo.environment["EINK_PORT"] ?? "8765"
@@ -56,6 +99,16 @@ class APIService: ObservableObject {
             lastRefresh = Date()
             state = .ready
             errorMessage = nil
+
+            let newSignature = WidgetDisplaySignature(from: decoded)
+            if WidgetDisplaySignature.shouldReloadWidget(
+                previous: lastWidgetSignature,
+                current: newSignature,
+                force: force
+            ) {
+                lastWidgetSignature = newSignature
+                WidgetCenter.shared.reloadAllTimelines()
+            }
         } catch let decodingError as DecodingError {
             let detail = decodingError.failureReason ?? decodingError.localizedDescription
             state = .error(detail)

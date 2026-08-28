@@ -17,13 +17,19 @@ CONTENTS="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS/MacOS"
 RESOURCES_DIR="$CONTENTS/Resources"
 SOURCE_DIR="$ROOT/macos/MenuBarApp/Sources"
+WIDGET_SOURCE_DIR="$ROOT/macos/Widget"
+WIDGET_APP_DIR="$CONTENTS/PlugIns/AICCWidget.appex"
+WIDGET_MACOS_DIR="$WIDGET_APP_DIR/Contents/MacOS"
+WIDGET_INFO="$WIDGET_APP_DIR/Contents/Info.plist"
+WIDGET_ENTITLEMENTS="$WIDGET_SOURCE_DIR/entitlements.plist"
+BUILD_VERSION="$(plutil -extract CFBundleVersion raw -o - "$ROOT/macos/MenuBarApp/Info.plist")"
 
 echo "=== Building AICC SwiftUI App ==="
 echo "Root: $ROOT"
 
 # Clean and create bundle structure
 rm -rf "$APP_DIR"
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$WIDGET_MACOS_DIR"
 
 # Copy Info.plist
 cp "$ROOT/macos/MenuBarApp/Info.plist" "$CONTENTS/Info.plist"
@@ -107,20 +113,71 @@ xcrun swiftc \
   -framework SwiftUI \
   -framework AppKit \
   -framework Foundation \
+  -framework WidgetKit \
   -module-cache-path /tmp/swift-module-cache \
   -Xlinker -rpath -Xlinker /usr/lib/swift \
   "${SWIFT_FILES[@]}" \
   -o "$MACOS_DIR/$APP_NAME"
 
+echo "=== Building Widget extension ==="
+WIDGET_FILES=(
+  "$WIDGET_SOURCE_DIR/WidgetStatus.swift"
+  "$WIDGET_SOURCE_DIR/AICCWidget.swift"
+  "$WIDGET_SOURCE_DIR/RefreshWidgetIntent.swift"
+)
+for file in "${WIDGET_FILES[@]}"; do
+  if [ ! -f "$file" ]; then
+    echo "ERROR: Widget source not found: $file" >&2
+    exit 1
+  fi
+done
+if [ ! -f "$WIDGET_SOURCE_DIR/Info.plist" ] || [ ! -f "$WIDGET_ENTITLEMENTS" ]; then
+  echo "ERROR: Widget metadata or entitlements missing" >&2
+  exit 1
+fi
+cp "$WIDGET_SOURCE_DIR/Info.plist" "$WIDGET_INFO"
+plutil -replace CFBundleShortVersionString -string "$VERSION" "$WIDGET_INFO"
+plutil -replace CFBundleVersion -string "$BUILD_VERSION" "$WIDGET_INFO"
+xcrun swiftc \
+  -parse-as-library \
+  -application-extension \
+  -module-name AICCWidget \
+  -O \
+  -sdk "$SDK_PATH" \
+  -target arm64-apple-macosx14.0 \
+  -framework WidgetKit \
+  -framework SwiftUI \
+  -framework AppIntents \
+  -framework Foundation \
+  -module-cache-path /tmp/swift-module-cache \
+  -Xlinker -e \
+  -Xlinker _NSExtensionMain \
+  "${WIDGET_FILES[@]}" \
+  -o "$WIDGET_MACOS_DIR/AICCWidget"
+
 echo "=== Signing ==="
 if [[ "$SIGNING_IDENTITY" == "-" ]]; then
-  codesign --force --deep --sign - "$APP_DIR"
+  codesign --force --sign - --entitlements "$WIDGET_ENTITLEMENTS" "$WIDGET_APP_DIR"
 else
-  codesign --force --deep --options runtime --timestamp \
+  codesign --force --options runtime --timestamp \
+    --entitlements "$WIDGET_ENTITLEMENTS" \
+    --sign "$SIGNING_IDENTITY" "$WIDGET_APP_DIR"
+fi
+codesign --verify --strict "$WIDGET_APP_DIR"
+
+if [[ "$SIGNING_IDENTITY" == "-" ]]; then
+  codesign --force --sign - "$APP_DIR"
+else
+  codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/macos/entitlements.plist" \
     --sign "$SIGNING_IDENTITY" "$APP_DIR"
 fi
+test -x "$WIDGET_MACOS_DIR/AICCWidget"
+test "$(plutil -extract CFBundleShortVersionString raw -o - "$WIDGET_INFO")" = "$VERSION"
+test "$(plutil -extract CFBundleVersion raw -o - "$WIDGET_INFO")" = "$BUILD_VERSION"
+codesign --verify --strict "$WIDGET_APP_DIR"
 codesign --verify --deep --strict "$APP_DIR"
 
 echo "=== Done ==="
 echo "$APP_DIR"
+echo "$WIDGET_APP_DIR"

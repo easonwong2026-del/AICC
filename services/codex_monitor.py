@@ -409,33 +409,72 @@ class CodexMonitor:
             except OSError:
                 pass
 
-    def _find_windows(self, value: Any) -> dict[str, dict[str, Any]]:
+    def _find_windows(self, payload: Any) -> dict[str, dict[str, Any]]:
         found: dict[str, dict[str, Any]] = {}
-        aliases = {"five_hour": "five_hour", "fiveHour": "five_hour", "weekly": "weekly", "week": "weekly"}
-        if isinstance(value, dict):
-            if "usedPercent" in value or "used_percent" in value:
-                duration = value.get("windowDurationMins", value.get("window_duration_mins"))
+        if not isinstance(payload, dict):
+            return found
+
+        metric_keys = ("usedPercent", "used_percent", "usedPercentage", "remaining_percent", "remainingPercentage")
+
+        def inspect_container(container: dict[str, Any]) -> dict[str, dict[str, Any]]:
+            res: dict[str, dict[str, Any]] = {}
+            aliases = {"five_hour": "five_hour", "fiveHour": "five_hour", "weekly": "weekly", "week": "weekly"}
+            for key, target in aliases.items():
+                child = container.get(key)
+                if isinstance(child, dict) and any(k in child for k in metric_keys):
+                    res[target] = child
+
+            slots = [("primary", container.get("primary")), ("secondary", container.get("secondary"))]
+            for slot_name, child in slots:
+                if not isinstance(child, dict):
+                    continue
+                if not any(k in child for k in metric_keys):
+                    continue
+                raw_duration = child.get("windowDurationMins", child.get("window_duration_mins"))
                 try:
-                    duration = int(duration)
+                    duration = int(raw_duration) if raw_duration is not None else None
                 except (TypeError, ValueError):
                     duration = None
+
                 if duration == 300:
-                    found["five_hour"] = value
+                    res["five_hour"] = child
                 elif duration == 10080:
-                    found["weekly"] = value
-            for key, child in value.items():
-                if key in aliases and isinstance(child, dict):
-                    found[aliases[key]] = child
-                elif key == "primary" and isinstance(child, dict):
-                    duration = child.get("windowDurationMins", child.get("window_duration_mins"))
-                    if duration in (None, 300, "300"):
-                        found.setdefault("five_hour", child)
-                elif key == "secondary" and isinstance(child, dict):
-                    found.setdefault("weekly", child)
-                found.update({name: item for name, item in self._find_windows(child).items() if name not in found})
-        elif isinstance(value, list):
-            for child in value:
-                found.update({name: item for name, item in self._find_windows(child).items() if name not in found})
+                    res["weekly"] = child
+                elif duration is None:
+                    if slot_name == "primary":
+                        res.setdefault("five_hour", child)
+                    elif slot_name == "secondary":
+                        res.setdefault("weekly", child)
+
+            return res
+
+        # 1. Primary canonical single-bucket view: payload["rateLimits"]
+        rate_limits = payload.get("rateLimits", payload.get("rate_limits"))
+        limit_id_target = None
+        if isinstance(rate_limits, dict):
+            found.update(inspect_container(rate_limits))
+            limit_id_target = rate_limits.get("limitId") or rate_limits.get("limit_id")
+
+        # 2. Secondary fallback for missing windows: inspect rateLimitsByLimitId for the primary bucket
+        if not (found.get("five_hour") and found.get("weekly")):
+            by_id = payload.get("rateLimitsByLimitId", payload.get("rate_limits_by_limit_id"))
+            if isinstance(by_id, dict):
+                candidates = []
+                if limit_id_target and str(limit_id_target) in by_id:
+                    candidates.append(by_id[str(limit_id_target)])
+                for key in ("codex", "main"):
+                    if key in by_id and by_id[key] not in candidates:
+                        candidates.append(by_id[key])
+                for bucket in candidates:
+                    if isinstance(bucket, dict):
+                        for k, v in inspect_container(bucket).items():
+                            found.setdefault(k, v)
+
+        # 3. Flat payload fallback (e.g. legacy notifications or test fixtures)
+        if not (found.get("five_hour") and found.get("weekly")):
+            for k, v in inspect_container(payload).items():
+                found.setdefault(k, v)
+
         return found
 
     def _extract_limit_buckets(self, payload: Any) -> list[dict[str, Any]]:
