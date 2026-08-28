@@ -14,7 +14,7 @@ struct WidgetStatusSmokeMain {
         let fullPayload = try decode(
             """
             {
-              "codex": { "weekly": { "remaining": 78 } },
+              "codex": { "five_hour": { "remaining": 92 }, "weekly": { "remaining": 78 } },
               "workbuddy": { "points": 1245 },
               "deepseek": {
                 "status": "Online",
@@ -27,11 +27,17 @@ struct WidgetStatusSmokeMain {
         )
         let fetchedAt = Date(timeIntervalSince1970: 123)
         let snapshot = WidgetDisplaySnapshot(payload: fullPayload, fetchedAt: fetchedAt)
-        try require(snapshot.codex == "78%", "full Codex snapshot")
+        try require(snapshot.codex == "78%", "Codex weekly takes precedence over five_hour: \(snapshot.codex)")
         try require(snapshot.workbuddy != "—", "full WorkBuddy snapshot")
         try require(snapshot.deepseek == "86.42 CNY", "full DeepSeek snapshot: \(snapshot.deepseek)")
         try require(snapshot.system == "Online", "full System snapshot")
         try require(!snapshot.stale, "fresh snapshot state")
+
+        let fiveHourOnly = WidgetDisplaySnapshot(
+            payload: try decode("{\"codex\": {\"five_hour\": {\"remaining\": 88}}}"),
+            fetchedAt: fetchedAt
+        )
+        try require(fiveHourOnly.codex == "88%", "Codex falls back to five_hour when weekly is missing")
 
         let missingCodex = WidgetDisplaySnapshot(
             payload: try decode("{\"workbuddy\": {\"points\": 10}}"),

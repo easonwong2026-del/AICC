@@ -120,10 +120,10 @@ private struct WidgetMetric: View {
 
 @main
 struct AICCWidget: Widget {
-    let kind = "com.aieink.dashboard.menubar.widget"
+    nonisolated static let kind = "com.aieink.dashboard.menubar.widget"
 
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: kind, provider: AICCWidgetProvider()) { entry in
+        StaticConfiguration(kind: Self.kind, provider: AICCWidgetProvider()) { entry in
             AICCWidgetView(entry: entry)
         }
         .configurationDisplayName("AICC")

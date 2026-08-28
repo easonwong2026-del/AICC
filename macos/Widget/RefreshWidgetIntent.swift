@@ -1,4 +1,5 @@
 import AppIntents
+import WidgetKit
 
 struct RefreshWidgetIntent: AppIntent {
     static let title: LocalizedStringResource = "Refresh Widget"
@@ -6,6 +7,7 @@ struct RefreshWidgetIntent: AppIntent {
     static let openAppWhenRun = false
 
     func perform() async throws -> some IntentResult {
-        .result()
+        WidgetCenter.shared.reloadTimelines(ofKind: AICCWidget.kind)
+        return .result()
     }
 }

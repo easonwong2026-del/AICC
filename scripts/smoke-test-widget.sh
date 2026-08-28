@@ -22,6 +22,26 @@ if [[ -z "$SDK_PATH" ]]; then
   SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
 fi
 
+if grep -RniE 'Text\(".*(Updated|ago)' "$ROOT/macos/Widget"; then
+  echo "Error: Found user-visible Updated text in Widget views" >&2
+  exit 1
+fi
+
+if ! grep -q 'WidgetCenter.shared.reloadTimelines' "$ROOT/macos/Widget/RefreshWidgetIntent.swift"; then
+  echo "Error: RefreshWidgetIntent does not call WidgetCenter.shared.reloadTimelines" >&2
+  exit 1
+fi
+
+if ! grep -q 'com.apple.security.app-sandbox' "$ROOT/macos/Widget/entitlements.plist"; then
+  echo "Error: Widget entitlements missing app-sandbox" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'supportedFamilies([.systemSmall, .systemMedium])' "$ROOT/macos/Widget/AICCWidget.swift"; then
+  echo "Error: Widget missing supportedFamilies declaration" >&2
+  exit 1
+fi
+
 xcrun swiftc \
   -parse-as-library \
   -O \
