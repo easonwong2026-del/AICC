@@ -80,6 +80,9 @@ jobs:
       - name: Run Swift core smoke tests
         run: bash scripts/smoke-test-swift-core.sh
 
+      - name: Run Widget status smoke tests
+        run: bash scripts/smoke-test-widget.sh
+
       - name: Run Swift core library tests
         run: swift test --package-path macos/MenuBarApp
 
