@@ -193,11 +193,13 @@ def version() -> str:
     except OSError:
         return "dev"
 
+
 def build_version() -> str | None:
     build = os.environ.get("AICC_BUILD")
     if build:
         return build.strip()
     return None
+
 
 def live_health_payload() -> dict:
     payload = {"ok": True, "status": "live", "version": version()}
