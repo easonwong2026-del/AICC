@@ -1,8 +1,13 @@
 # macOS migration checklist
 
-The Mac-ready backend uses native Python and `launchd`. Docker is intentionally
+The legacy source-deployment backend uses native Python and `launchd`. Docker is intentionally
 not used because Codex authentication and WorkBuddy desktop collection belong
 to the signed-in macOS user session.
+
+For normal users, the recommended path is the AICC DMG: drag the App into
+`/Applications`, then let `ServerManager` start the bundled Python server on
+port `8765`. The App's login-at-launch setting uses `SMAppService`. The shell
+LaunchAgent flow below is retained for legacy/source deployment and maintenance.
 
 ## Package contents
 
@@ -11,13 +16,14 @@ settings, and history. It does not contain DeepSeek keys, Codex/ChatGPT
 credentials, WorkBuddy tokens, Windows executables, Android SDK, or Gradle
 downloads.
 
-## First run on the Mac
+## Legacy/source deployment first run on the Mac
 
 1. Install and sign in to the current ChatGPT desktop app.
 2. Verify that `codex --version` works in Terminal. If the command is installed
    somewhere unusual, set `CODEX_CLI_PATH` to its full path before starting.
 3. Unzip the package into a stable location such as
    `~/AICC`. Avoid moving it after installing auto-start.
+   Python 3.10 or newer is required.
 4. In Terminal, enter that directory and prepare the scripts:
 
 ```bash
@@ -43,7 +49,7 @@ The WorkBuddy macOS client must be validated on the actual machine. If its app
 bundle or local database differs from Windows, the dashboard retains its
 last-known-good cache instead of failing.
 
-## Auto-start
+## Legacy/source deployment auto-start
 
 After the manual checks pass:
 
@@ -51,10 +57,12 @@ After the manual checks pass:
 bash macos/install-autostart.sh
 ```
 
-The LaunchAgents start the dashboard and log maintenance at sign-in. WorkBuddy
+These LaunchAgents start the legacy dashboard and log maintenance at sign-in. WorkBuddy
 bridge auto-heal runs inside the AICC server, and the dashboard restarts after a
 crash.
-Logs are stored in `~/Library/Logs/AICC-Dashboard/`.
+Legacy LaunchAgent logs are stored in `~/Library/Logs/AI-EInk-Dashboard/`.
+The DMG App instead uses `~/Library/Logs/AICC-Dashboard/` and bounds its two
+server logs at App startup.
 
 To remove it:
 
@@ -78,4 +86,4 @@ Wi-Fi address manually, for example `http://192.168.0.20:8765`.
 - `/api/status` shows DeepSeek after Keychain configuration.
 - WorkBuddy balance updates or clearly falls back to manual data.
 - Poke4S discovers the Mac after both devices join the same Wi-Fi.
-- Re-login test confirms the LaunchAgent starts automatically.
+- Re-login test confirms the legacy LaunchAgent starts automatically.

@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 APP_PLIST="$ROOT/dist/mac/AICC.app/Contents/Info.plist"
+WIDGET_PLIST="$ROOT/dist/mac/AICC.app/Contents/PlugIns/AICCWidget.appex/Contents/Info.plist"
 
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
   echo "Invalid VERSION: $VERSION" >&2
@@ -11,6 +12,10 @@ APP_PLIST="$ROOT/dist/mac/AICC.app/Contents/Info.plist"
 }
 [[ -f "$APP_PLIST" ]] || {
   echo "Built app metadata not found: $APP_PLIST" >&2
+  exit 1
+}
+[[ -f "$WIDGET_PLIST" ]] || {
+  echo "Built widget metadata not found: $WIDGET_PLIST" >&2
   exit 1
 }
 
@@ -23,6 +28,17 @@ BUILD_VERSION="$(plutil -extract CFBundleVersion raw -o - "$APP_PLIST")"
 }
 [[ -n "$BUILD_VERSION" ]] || {
   echo "Generated Info.plist is missing CFBundleVersion" >&2
+  exit 1
+}
+
+WIDGET_VERSION="$(plutil -extract CFBundleShortVersionString raw -o - "$WIDGET_PLIST")"
+WIDGET_BUILD="$(plutil -extract CFBundleVersion raw -o - "$WIDGET_PLIST")"
+[[ "$VERSION" == "$WIDGET_VERSION" ]] || {
+  echo "Version mismatch: VERSION=$VERSION generated Widget Info.plist=$WIDGET_VERSION" >&2
+  exit 1
+}
+[[ "$BUILD_VERSION" == "$WIDGET_BUILD" ]] || {
+  echo "Build mismatch: App=$BUILD_VERSION generated Widget Info.plist=$WIDGET_BUILD" >&2
   exit 1
 }
 

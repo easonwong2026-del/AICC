@@ -29,6 +29,7 @@ enum ServerStopReason {
 @MainActor
 final class ServerManager: ObservableObject {
     static let shared = ServerManager()
+    private static let productPort = 8765
 
     @Published var isServerRunning = false
     @Published var healthState: ServerHealthState = .stopped
@@ -110,6 +111,8 @@ final class ServerManager: ObservableObject {
         env["PATH"] = path
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["EINK_ACCESS_LOG"] = AppSettings.shared.debugMode ? "1" : "0"
+        // The shipped App uses the fixed product port; EINK_PORT remains for direct/dev server runs.
+        env.removeValue(forKey: "EINK_PORT")
         let hostBuild = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !hostBuild.isEmpty {
@@ -128,6 +131,7 @@ final class ServerManager: ObservableObject {
         try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
 
         let outLog = logsDir.appendingPathComponent("aicc-server.log")
+        LogFileLimiter.trimIfNeeded(outLog)
         FileManager.default.createFile(atPath: outLog.path, contents: nil)
         if let handle = FileHandle(forWritingAtPath: outLog.path) {
             handle.seekToEndOfFile()
@@ -135,6 +139,7 @@ final class ServerManager: ObservableObject {
         }
 
         let errLog = logsDir.appendingPathComponent("aicc-server-error.log")
+        LogFileLimiter.trimIfNeeded(errLog)
         FileManager.default.createFile(atPath: errLog.path, contents: nil)
         if let handle = FileHandle(forWritingAtPath: errLog.path) {
             handle.seekToEndOfFile()
@@ -224,8 +229,7 @@ final class ServerManager: ObservableObject {
     }
 
     private func checkServerIdentity() async -> (alive: Bool, compatible: Bool) {
-        guard let port = ProcessInfo.processInfo.environment["EINK_PORT"] ?? Optional("8765"),
-              let url = URL(string: "http://127.0.0.1:\(port)/api/health/live") else {
+        guard let url = URL(string: "http://127.0.0.1:\(Self.productPort)/api/health/live") else {
             return (false, false)
         }
         var request = URLRequest(url: url)

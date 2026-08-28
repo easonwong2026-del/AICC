@@ -58,8 +58,7 @@ class APIService: ObservableObject {
     private var lastWidgetSignature: WidgetDisplaySignature?
 
     convenience init() {
-        let port = ProcessInfo.processInfo.environment["EINK_PORT"] ?? "8765"
-        self.init(baseURL: "http://127.0.0.1:\(port)")
+        self.init(baseURL: "http://127.0.0.1:8765")
     }
 
     init(baseURL: String, session: URLSession? = nil) {
