@@ -4,6 +4,21 @@
 
 This file summarizes the current and recent public releases. The Chinese changelog contains the older detailed history.
 
+## 2.7.0 - 2026-08-28 (Release Candidate)
+
+- Added native macOS WidgetKit Small and Medium widgets; Small shows Codex/WorkBuddy and Medium shows Codex, WorkBuddy, DeepSeek, and System.
+- Added manual timeline refresh and WidgetKit reload notifications on App launch and displayed-data changes. The Widget reads only the fixed `/api/status` endpoint, keeps the last successful snapshot as stale data when the server is unavailable, and shows placeholders on a first install without a cache.
+- Fixed Codex quota parsing by classifying live `account/rateLimits/read` windows by duration while preserving multi-bucket limits, sparse weekly updates, and the legacy fallback when duration is absent.
+- Closed the DMG runtime gaps: the production local endpoint is fixed at `127.0.0.1:8765`, and the bundled server's `aicc-server.log` and `aicc-server-error.log` are bounded to 1 MiB at startup without blocking server launch if maintenance fails. App/server build identity validation remains enabled to prevent stale backend reuse.
+- Version: AICC 2.7.0, macOS Build 9. Android/Poke4S remains on its independent `1.2.5-pencil-home` version.
+
+## 2.6.0 - 2026-08-27
+
+- Added OpenCodex version checks, one-click updates, and post-update version/status refresh. Running OpenCodex shows a warning before an update because the proxy may restart briefly.
+- Improved macOS menu-bar and Settings stability while preserving the System, Codex, WorkBuddy, DeepSeek, and OpenCodex status surfaces.
+- Simplified the architecture by removing unused Provider, Manifest, and legacy compatibility paths while preserving real collectors and the Poke4S/Android `/api/status` contract.
+- Version: AICC 2.6.0, macOS Build 5. Android/Poke4S was unchanged; the public Release contained macOS artifacts only.
+
 ## 2.5.0 - 2026-07-31
 
 - Added the dynamic Provider Manifest v1 layer while preserving the existing `/api/status` contract and Android/Poke4S compatibility.

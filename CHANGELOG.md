@@ -2,6 +2,21 @@
 
 [English](CHANGELOG.en.md)
 
+## 2.7.0 - 2026-08-28 (Release Candidate)
+
+- **macOS 桌面 Widget**：新增 WidgetKit 小尺寸和中尺寸 Widget；小尺寸显示 Codex/WorkBuddy，中尺寸显示 Codex、WorkBuddy、DeepSeek 和 System
+- **Widget 刷新与缓存边界**：支持手动刷新时间线；AICC App 启动或状态变化时通知 WidgetKit；Widget 只读取固定的 `/api/status`，Server 暂时不可达时保留最近成功数据并标记 stale，首次安装无缓存时显示占位符
+- **Codex 额度修复**：按实时 `account/rateLimits/read` 的窗口时长识别 5 小时和 weekly 额度，保留多 bucket、稀疏 weekly 更新和无窗口时长时的旧字段回退
+- **运行时收口**：DMG App 的正式本机端点固定为 `127.0.0.1:8765`；内置 Server 的 `aicc-server.log` 和 `aicc-server-error.log` 启动前限制为最多 1 MiB，日志处理失败不影响 Server 启动；App/Server build identity 校验继续防止旧后端复用
+- **版本**：AICC 2.7.0，macOS Build 9；Android/Poke4S 继续使用独立的 `1.2.5-pencil-home` 版本
+
+## 2.6.0 - 2026-08-27
+
+- **OpenCodex 更新管理**：可检查已安装 OpenCodex 版本、查看新版本并执行一次性更新；更新后刷新版本和运行状态，运行中的 OpenCodex 更新前会提示可能短暂重启
+- **macOS 稳定性**：优化菜单栏和 Settings 行为，保持 System、Codex、WorkBuddy、DeepSeek、OpenCodex 状态显示稳定
+- **架构精简**：删除无实际使用价值的旧 Provider、Manifest 和 legacy compatibility 路径，同时保留真实数据采集及 Poke4S/Android `/api/status` 兼容
+- **版本**：AICC 2.6.0，macOS Build 5；Android/Poke4S 本版本未变更，正式 Release 只发布 macOS 产物
+
 ## 2.5.0 - 2026-07-31
 
 - **动态 Provider 架构（P1）**：新增 Provider Manifest v1 规范化层，所有采集器只负责原始数据，展示层只消费 Manifest；`GET /api/providers`、`GET /api/providers/<id>`、`POST /api/providers/<id>/refresh`、`POST /api/providers/<id>/actions/<kind>` 四个新端点；Action 由后端白名单映射（refresh / reconnect / diagnostics），Manifest 永远不能下发 endpoint、shell 命令、脚本路径或远程 URL

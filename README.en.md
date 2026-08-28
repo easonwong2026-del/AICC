@@ -4,6 +4,8 @@
 
 AICC is a local AI status center for macOS. It displays Codex, WorkBuddy, DeepSeek, and system status, with support for Poke4S e-ink devices. The server uses only the Python standard library.
 
+The current macOS version is AICC 2.7.0 (Build 9); Android/Poke4S use an independent version line.
+
 The macOS menu-bar app uses fixed Codex, WorkBuddy, DeepSeek, System, and OpenCodex status cards. It reads `/api/status` and the fixed operation endpoints only. The Python server uses four fixed collectors for Codex, WorkBuddy, DeepSeek, and system status.
 
 ## Access
@@ -18,10 +20,15 @@ The Mac and Poke4S device must be on the same Wi-Fi network. The native Android 
 
 See [MAC-MIGRATION.md](MAC-MIGRATION.md) for the first deployment. Common commands:
 
+For end users, download the DMG from [GitHub Releases](https://github.com/easonwong2026-del/AICC/releases) and drag AICC
+into `/Applications`. The AICC App starts the bundled Python server through `ServerManager`, and its login-at-launch
+setting uses `SMAppService`. The `install-autostart.sh` and related LaunchAgent scripts remain available for
+legacy/source deployment and maintenance; they are not the preferred path for new users.
+
 ```bash
-bash macos/start-dashboard.sh
-bash macos/install-autostart.sh
-bash macos/uninstall-autostart.sh
+bash macos/start-dashboard.sh              # legacy/source deployment: foreground server
+bash macos/install-autostart.sh            # legacy/source deployment: install LaunchAgents
+bash macos/uninstall-autostart.sh          # legacy/source deployment: remove LaunchAgents
 bash macos/set-deepseek-key.sh
 BUNDLE_SERVER=1 bash macos/build-aicc-swiftui.sh
 bash macos/build-dmg.sh
@@ -34,13 +41,16 @@ bash macos/update-from-directory.sh /path/to/new-dashboard
 bash macos/rollback-from-backup.sh /path/to/backup
 ```
 
-Logs are stored in `~/Library/Logs/AICC-Dashboard/` with daily size limits.
+The DMG App stores logs in `~/Library/Logs/AICC-Dashboard/`. Before the bundled server starts,
+`aicc-server.log` and `aicc-server-error.log` are capped at 1 MiB by retaining their latest 256 KiB;
+log maintenance failures never block server startup.
 
-The AICC server owns WorkBuddy bridge auto-heal; `install-autostart.sh` only registers the dashboard and log-maintenance agents.
+The AICC server owns WorkBuddy bridge auto-heal. The legacy `install-autostart.sh` only registers the old dashboard
+and log-maintenance LaunchAgents.
 
 The self-contained App is generated at `dist/mac/AICC.app`; the DMG is written to `dist/` by default. Set `RELEASE_DIR` to place release artifacts elsewhere. The DMG bundles the server code and can be dragged into `/Applications`. Runtime data is stored in `~/Library/Application Support/AICC-Dashboard/data/`, not inside the App bundle.
 
-The App requires macOS 14 or later, Apple Silicon, and an executable Python 3 (Python 3.10+ recommended). The DMG does not include Python. Without a Developer ID signature, the artifact is ad hoc signed; on another Mac, use Finder's right-click → Open flow if Gatekeeper blocks the first launch.
+The App requires macOS 14 or later, Apple Silicon, and an executable Python 3.10+. The DMG does not include Python. Without a Developer ID signature, the artifact is ad hoc signed; on another Mac, use Finder's right-click → Open flow if Gatekeeper blocks the first launch.
 
 The menu-bar App displays status, starts and stops the internal data service, controls OpenCodex, opens Settings, shows logs, and configures launch at login. Fixed collectors remain in the existing Python service. The supervisor only checks `/api/health/live`; the dashboard reads cached `/api/status` data and does not trigger an extra collector refresh.
 
@@ -73,6 +83,17 @@ Manifest format:
 - A new user-feature release increments the minor version; a bugfix release increments the patch version.
 - Increment `CFBundleVersion` for every formal macOS release; ordinary development commits do not bump versions automatically.
 - Update `updates/aicc-update.json` only after the corresponding GitHub Release and DMG both exist.
+- The 2.7.0 Release Candidate is not in the public update manifest yet; `updates/aicc-update.json` remains on 2.6.0 until the formal Release and DMG exist.
+
+### macOS desktop Widget
+
+- Requirements: macOS 14+, Apple Silicon, with the AICC App installed and running.
+- Add it from the desktop: right-click → Edit Widgets → search for “AICC”, then choose Small or Medium.
+- Small shows Codex and WorkBuddy; Medium shows Codex, WorkBuddy, DeepSeek, and System.
+- The Widget reads `http://127.0.0.1:8765/api/status`. The production port is fixed at `8765`; the Widget does not call the refresh endpoint or start the server.
+- Use the refresh button in the Widget to reload its timeline. The AICC App also notifies WidgetKit on launch and when displayed data changes.
+- If the server is temporarily unavailable, the Widget keeps the last successful snapshot as stale data; a first install without a cache shows `—` placeholders.
+- The AICC App starts and supervises the backend. After an App restart, it reloads Widget timelines and resumes live data.
 
 ## Data collection and privacy
 
@@ -89,6 +110,8 @@ LAN devices can read the dashboard. Refresh, write, and WorkBuddy reconnect endp
 
 Open the kiosk page and tap “Enter e-ink mode”. The page refreshes every five minutes and keeps the last successful data.
 
+The current Android source version is `1.2.5-pencil-home` (versionCode 11) and is independent of macOS 2.7.0. Do not use an old or nonexistent APK path from the repository; download the latest APK from [GitHub Releases](https://github.com/easonwong2026-del/AICC/releases). The published 1.2.5 APK is currently attached to the [v2.5.0 release](https://github.com/easonwong2026-del/AICC/releases/tag/v2.5.0), with a direct [APK download](https://github.com/easonwong2026-del/AICC/releases/download/v2.5.0/Poke4S-AI-Dashboard-v1.2.5-pencil-home.apk).
+
 The Android source is in `android/poke-dashboard/` and is independently buildable with the Gradle wrapper. It is not a runtime dependency of the Mac server. Release builds enable code and resource shrinking.
 
 ## Validation
@@ -97,10 +120,12 @@ The Android source is in `android/poke-dashboard/` and is independently buildabl
 python3 -B -m unittest discover -s tests -v
 swift test --package-path macos/MenuBarApp
 bash scripts/smoke-test-swift-core.sh
+bash scripts/smoke-test-widget.sh
 BUNDLE_SERVER=1 bash macos/build-aicc-swiftui.sh
 bash scripts/smoke-test-bundled-server.sh
 bash macos/build-dmg.sh
 bash scripts/validate-version.sh
+( cd android/poke-dashboard && ./gradlew test assembleRelease )
 ```
 
 See [English changelog](CHANGELOG.en.md), [中文完整 changelog](CHANGELOG.md), and [LICENSE](LICENSE) for release history and licensing information.

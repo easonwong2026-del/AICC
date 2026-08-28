@@ -35,6 +35,7 @@ let package = Package(
                 "Models/StatusItemMenuModel.swift",
                 "Models/UpdateModels.swift",
                 "Services/APIService.swift",
+                "Services/LogFileLimiter.swift",
                 "Services/ProcessRunner.swift",
                 "Services/UpdateService.swift",
             ]
@@ -52,6 +53,7 @@ let package = Package(
                 "DashboardTypographyTests.swift",
                 "SettingsPresentationModelTests.swift",
                 "StatusItemMenuModelTests.swift",
+                "LogFileLimiterTests.swift",
                 "UpdateServiceTests.swift",
                 "APIServiceTests.swift",
             ]
