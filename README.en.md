@@ -22,31 +22,30 @@ See [MAC-MIGRATION.md](MAC-MIGRATION.md) for the first deployment. Common comman
 
 For end users, download the DMG from [GitHub Releases](https://github.com/easonwong2026-del/AICC/releases) and drag AICC
 into `/Applications`. The AICC App starts the bundled Python server through `ServerManager`, and its login-at-launch
-setting uses `SMAppService`. The `install-autostart.sh` and related LaunchAgent scripts remain available for
-legacy/source deployment and maintenance; they are not the preferred path for new users.
+setting uses `SMAppService`. This is the only supported production macOS runtime path.
+
+When upgrading from an older installation, the first AICC launch performs a one-time cleanup scoped to the three exact
+LaunchAgent identities owned by the retired installer. It unloads the old jobs, removes their matching plists when safe,
+and continues normal startup; failures do not crash the App or scan/kill unrelated services or processes.
+
+Source checkouts support development debugging only; they are not a production installation path.
 
 ```bash
-bash macos/start-dashboard.sh              # legacy/source deployment: foreground server
-bash macos/install-autostart.sh            # legacy/source deployment: install LaunchAgents
-bash macos/uninstall-autostart.sh          # legacy/source deployment: remove LaunchAgents
+bash macos/start-dashboard.sh              # DEV ONLY: foreground server, no background registration
 bash macos/set-deepseek-key.sh
 BUNDLE_SERVER=1 bash macos/build-aicc-swiftui.sh
 bash macos/build-dmg.sh
 ```
 
-Safe updates run tests and create a complete backup while preserving quota history and caches:
-
-```bash
-bash macos/update-from-directory.sh /path/to/new-dashboard
-bash macos/rollback-from-backup.sh /path/to/backup
-```
+Formal users check the public manifest through Settings → General → About & Updates, then download and replace the
+published DMG. Source directories do not provide a second production updater or rollback system.
 
 The DMG App stores logs in `~/Library/Logs/AICC-Dashboard/`. Before the bundled server starts,
 `aicc-server.log` and `aicc-server-error.log` are capped at 1 MiB by retaining their latest 256 KiB;
 log maintenance failures never block server startup.
 
-The AICC server owns WorkBuddy bridge auto-heal. The legacy `install-autostart.sh` only registers the old dashboard
-and log-maintenance LaunchAgents.
+The AICC server owns WorkBuddy bridge auto-heal. The bundled App owns the server lifecycle; no external LaunchAgent is
+registered by the production path.
 
 The self-contained App is generated at `dist/mac/AICC.app`; the DMG is written to `dist/` by default. Set `RELEASE_DIR` to place release artifacts elsewhere. The DMG bundles the server code and can be dragged into `/Applications`. Runtime data is stored in `~/Library/Application Support/AICC-Dashboard/data/`, not inside the App bundle.
 
@@ -83,7 +82,7 @@ Manifest format:
 - A new user-feature release increments the minor version; a bugfix release increments the patch version.
 - Increment `CFBundleVersion` for every formal macOS release; ordinary development commits do not bump versions automatically.
 - Update `updates/aicc-update.json` only after the corresponding GitHub Release and DMG both exist.
-- The 2.7.0 Release Candidate is not in the public update manifest yet; `updates/aicc-update.json` remains on 2.6.0 until the formal Release and DMG exist.
+- The 2.7.0 release is published and is present in the public update manifest.
 
 ### macOS desktop Widget
 

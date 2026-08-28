@@ -22,33 +22,28 @@ Mac 与 Poke4S 需要连接同一 Wi-Fi。原生 Android 客户端也可以通�
 
 正式用户推荐下载 [GitHub Releases](https://github.com/easonwong2026-del/AICC/releases) 中的 DMG，拖入
 `/Applications` 后由 AICC App 通过 `ServerManager` 启动内置 Python Server，并可在设置中使用
-`SMAppService` 管理登录启动。下面的 `install-autostart.sh` 等 LaunchAgent 脚本保留用于
-legacy/source deployment 和维护，不是新用户的首选路径。
+`SMAppService` 管理登录启动。这是 macOS 正式用户唯一支持的运行路径。
+
+从旧版本升级时，AICC 首次启动会只针对旧版安装器创建的 3 个精确 LaunchAgent 身份执行一次清理，
+卸载旧服务并移除对应 plist 后继续正常启动；清理失败不会让 App 崩溃，也不会扫描或杀掉其他服务/进程。
+
+源码检出仅支持开发调试，不是生产安装方式：
 
 ```bash
-bash macos/start-dashboard.sh              # legacy/source deployment：前台启动
-bash macos/install-autostart.sh            # legacy/source deployment：安装 LaunchAgent
-bash macos/uninstall-autostart.sh          # legacy/source deployment：移除 LaunchAgent
+bash macos/start-dashboard.sh              # DEV ONLY：前台启动源码 Server，不注册后台服务
 bash macos/set-deepseek-key.sh             # 更新 DeepSeek 密钥
 BUNDLE_SERVER=1 bash macos/build-aicc-swiftui.sh  # 构建自包含 SwiftUI 菜单栏 App（含 Python 服务）
 bash macos/build-dmg.sh  # 构建自包含 AICC DMG 安装包
 ```
 
-WorkBuddy 调试桥自动修复由 AICC server 内部负责；legacy `install-autostart.sh` 只注册旧的 Dashboard
-和日志维护 LaunchAgent。
-
-安全更新会先跑测试并完整备份，同时保留当前额度历史和缓存：
-
-```bash
-bash macos/update-from-directory.sh /path/to/new-dashboard
-bash macos/rollback-from-backup.sh /path/to/backup
-```
+WorkBuddy 调试桥自动修复由 AICC Server 内部负责。正式用户通过设置中的“关于与更新”检查公开清单，
+再下载并替换正式 DMG；源码目录不提供另一套生产更新或回滚机制。
 
 DMG App 日志位于 `~/Library/Logs/AICC-Dashboard/`。启动内置 Server 前，
 `aicc-server.log` 和 `aicc-server-error.log` 超过 1 MiB 时会保留最近 256 KiB；日志限制失败不会阻止 Server 启动。
 
-SwiftUI 菜单栏 App（AICC）会生成在 `dist/mac/AICC.app`。`SERVER_ROOT` 不填时
-默认管理当前项目目录，填入生产目录时可让安装版 App 直接管理日常运行的服务。
+SwiftUI 菜单栏 App（AICC）会生成在 `dist/mac/AICC.app`。`SERVER_ROOT` 仅用于本地开发/调试构建；
+正式 DMG 始终使用 `BUNDLE_SERVER=1`，由 App 管理自带 Server，不指向源码目录。
 `build-dmg.sh` 会打包同一套 SwiftUI App，并生成自包含安装包，默认输出到 `dist/`；传入 `RELEASE_DIR` 后可输出到
 `/Users/easonwong/AICC/releases/mac/` 这类成品目录。DMG 里的 App 自带服务器代码，
 可拖入 `/Applications`。自包含 App 的运行数据写入
@@ -83,8 +78,7 @@ App 运行需要 macOS 14 或更高版本、Apple Silicon，以及可执行的 P
 - `VERSION` 是 AICC 产品版本唯一人工源。
 - 新用户功能发布：minor 版本号加 1；bugfix 发布：patch 版本号加 1。
 - 每个正式 macOS 发布都将 `CFBundleVersion` 加 1；普通开发 commit 不自动 bump 版本。
-- 只有对应 GitHub Release 和 DMG 都已真实存在后，才更新 `updates/aicc-update.json`。
-- 当前 2.7.0 Release Candidate 尚未进入公开更新清单；`updates/aicc-update.json` 暂保持 2.6.0，直到正式 Release 和 DMG 都存在。
+- 只有对应 GitHub Release 和 DMG 都已真实存在后，才将版本写入 `updates/aicc-update.json`；当前 2.7.0 已进入公开清单。
 
 ### macOS 桌面 Widget
 

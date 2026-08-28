@@ -38,6 +38,7 @@ xcrun swiftc \
   "$ROOT/macos/MenuBarApp/Sources/Models/StatusItemMenuModel.swift" \
   "$ROOT/macos/MenuBarApp/Sources/Models/UpdateModels.swift" \
   "$ROOT/macos/MenuBarApp/Sources/Services/ProcessRunner.swift" \
+  "$ROOT/macos/MenuBarApp/Sources/Services/LegacyLaunchAgentMigration.swift" \
   "$ROOT/macos/MenuBarApp/Sources/Services/APIService.swift" \
   "$TEST_ROOT/CoreSmokeMain.swift" \
   -o "$TEMP_ROOT/aicc-core-smoke"

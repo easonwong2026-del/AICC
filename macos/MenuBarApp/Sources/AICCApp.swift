@@ -366,6 +366,9 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        // Retire exact LaunchAgents from pre-DMG installs before ServerManager
+        // checks port 8765 and starts the bundled server.
+        LegacyLaunchAgentMigration.run()
         WidgetCenter.shared.reloadAllTimelines()
 
         settingsWindowCoordinator = SettingsWindowCoordinator(
