@@ -193,6 +193,19 @@ def version() -> str:
     except OSError:
         return "dev"
 
+def build_version() -> str | None:
+    build = os.environ.get("AICC_BUILD")
+    if build:
+        return build.strip()
+    return None
+
+def live_health_payload() -> dict:
+    payload = {"ok": True, "status": "live", "version": version()}
+    build = build_version()
+    if build:
+        payload["build"] = build
+    return payload
+
 
 class DashboardHandler(SimpleHTTPRequestHandler):
     server_version = f"AICC/{version()}"
@@ -207,7 +220,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return
         path = urlparse(self.path).path
         if path == "/api/health/live":
-            return self.send_json({"ok": True, "status": "live", "version": version()})
+            return self.send_json(live_health_payload())
         if path == "/api/health/ready":
             payload = health_payload()
             status = HTTPStatus.OK if payload["status"] != "unhealthy" else HTTPStatus.SERVICE_UNAVAILABLE

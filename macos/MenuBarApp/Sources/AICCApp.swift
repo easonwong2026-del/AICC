@@ -61,7 +61,8 @@ final class ServerManager: ObservableObject {
 
     func startServer() async -> Bool {
         if serverProcess?.isRunning == true {
-            return await serverIsAlive()
+            let identity = await checkServerIdentity()
+            return identity.alive && identity.compatible
         }
 
         stopReason = .none
@@ -77,11 +78,19 @@ final class ServerManager: ObservableObject {
             return false
         }
 
-        if await serverIsAlive() {
-            isServerRunning = true
-            ownership = .external
-            healthState = .healthy
-            return true
+        let identity = await checkServerIdentity()
+        if identity.alive {
+            if identity.compatible {
+                isServerRunning = true
+                ownership = .external
+                healthState = .healthy
+                return true
+            } else {
+                isServerRunning = false
+                ownership = .external
+                healthState = .degraded
+                return false
+            }
         }
 
         guard let python = resolvePython() else {
@@ -100,6 +109,11 @@ final class ServerManager: ObservableObject {
         env["PATH"] = path
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["EINK_ACCESS_LOG"] = AppSettings.shared.debugMode ? "1" : "0"
+        let hostBuild = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !hostBuild.isEmpty {
+            env["AICC_BUILD"] = hostBuild
+        }
         if root.path.contains(".app/Contents/Resources/Server") {
             let dataDirectory = URL(fileURLWithPath: NSHomeDirectory())
                 .appendingPathComponent("Library/Application Support/AICC-Dashboard/data", isDirectory: true)
@@ -201,25 +215,48 @@ final class ServerManager: ObservableObject {
         return candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
     }
 
-    private func serverIsAlive() async -> Bool {
+    private struct LiveHealthResponse: Decodable {
+        let ok: Bool?
+        let status: String?
+        let version: String?
+        let build: String?
+    }
+
+    private func checkServerIdentity() async -> (alive: Bool, compatible: Bool) {
         guard let port = ProcessInfo.processInfo.environment["EINK_PORT"] ?? Optional("8765"),
               let url = URL(string: "http://127.0.0.1:\(port)/api/health/live") else {
-            return false
+            return (false, false)
         }
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.timeoutInterval = 1.0
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
-            return (response as? HTTPURLResponse)?.statusCode == 200
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                return (false, false)
+            }
+            guard let health = try? JSONDecoder().decode(LiveHealthResponse.self, from: data),
+                  health.ok == true else {
+                return (true, false)
+            }
+            let currentVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let currentBuild = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            let versionMatch = currentVersion == nil || currentVersion?.isEmpty == true || health.version == currentVersion
+            let buildMatch = currentBuild != nil && !currentBuild!.isEmpty && health.build == currentBuild
+
+            return (true, versionMatch && buildMatch)
         } catch {
-            return false
+            return (false, false)
         }
     }
 
     private func waitForServerAlive() async -> Bool {
         for _ in 0..<10 {
-            if await serverIsAlive() { return true }
+            let identity = await checkServerIdentity()
+            if identity.alive && identity.compatible { return true }
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
         return false
@@ -227,11 +264,18 @@ final class ServerManager: ObservableObject {
 
     private func superviseOnce() async {
         guard stopReason == .none || stopReason == .recovery else { return }
-        if await serverIsAlive() {
+        let identity = await checkServerIdentity()
+        if identity.alive && identity.compatible {
             isServerRunning = true
             healthState = .healthy
             restartFailures = 0
             nextRetryDelay = 1_000_000_000
+            return
+        }
+
+        if identity.alive && !identity.compatible {
+            isServerRunning = false
+            healthState = .degraded
             return
         }
 

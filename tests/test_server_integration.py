@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -72,6 +73,39 @@ class ServerIntegrationTests(unittest.TestCase):
             ready = json.load(response)
         self.assertIn(ready["status"], {"healthy", "degraded"})
         self.assertEqual(server._collector_manager.invalidated, [])
+
+    def test_live_health_payload_server_identity(self):
+        # 1. Default (no AICC_BUILD env var)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AICC_BUILD", None)
+            payload = server.live_health_payload()
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["status"], "live")
+            self.assertEqual(payload["version"], server.version())
+            self.assertNotIn("build", payload)
+
+        # 2. Injected AICC_BUILD
+        with patch.dict(os.environ, {"AICC_BUILD": "8"}):
+            payload = server.live_health_payload()
+            self.assertEqual(payload["build"], "8")
+
+        # 3. Identity matching validation
+        def is_compatible(health: dict, expected_version: str, expected_build: str) -> bool:
+            version_match = not expected_version or health.get("version") == expected_version
+            build_match = bool(expected_build) and health.get("build") == expected_build
+            return bool(health.get("ok")) and version_match and build_match
+
+        # Match: version 2.7.0 / build 8
+        self.assertTrue(is_compatible({"ok": True, "version": "2.7.0", "build": "8"}, "2.7.0", "8"))
+
+        # Same version / old build mismatch
+        self.assertFalse(is_compatible({"ok": True, "version": "2.7.0", "build": "7"}, "2.7.0", "8"))
+
+        # Old version mismatch
+        self.assertFalse(is_compatible({"ok": True, "version": "2.6.0", "build": "8"}, "2.7.0", "8"))
+
+        # Missing build is not confirmed match
+        self.assertFalse(is_compatible({"ok": True, "version": "2.7.0"}, "2.7.0", "8"))
 
     def test_manual_refresh_forces_collector_refresh(self):
         request = Request(self.base + "/api/refresh", method="POST")
