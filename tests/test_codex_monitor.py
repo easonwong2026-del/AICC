@@ -38,6 +38,110 @@ class CodexMonitorTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in buckets], ["Main", "Review"])
         self.assertEqual(buckets[0]["windows"][0]["remaining"], 75)
 
+    def test_find_windows_primary_300_secondary_10080(self):
+        monitor = CodexMonitor.__new__(CodexMonitor)
+        payload = {
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {"usedPercent": 10, "windowDurationMins": 300},
+                "secondary": {"usedPercent": 20, "windowDurationMins": 10080},
+            }
+        }
+        windows = monitor._find_windows(payload)
+        self.assertEqual(windows["five_hour"]["usedPercent"], 10)
+        self.assertEqual(windows["weekly"]["usedPercent"], 20)
+
+    def test_find_windows_primary_10080_maps_to_weekly(self):
+        monitor = CodexMonitor.__new__(CodexMonitor)
+        payload = {
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {"usedPercent": 15, "windowDurationMins": 10080},
+            }
+        }
+        windows = monitor._find_windows(payload)
+        self.assertNotIn("five_hour", windows)
+        self.assertEqual(windows["weekly"]["usedPercent"], 15)
+
+    def test_find_windows_secondary_300_maps_to_five_hour_not_weekly(self):
+        monitor = CodexMonitor.__new__(CodexMonitor)
+        payload = {
+            "rateLimits": {
+                "limitId": "codex",
+                "secondary": {"usedPercent": 25, "windowDurationMins": 300},
+            }
+        }
+        windows = monitor._find_windows(payload)
+        self.assertEqual(windows["five_hour"]["usedPercent"], 25)
+        self.assertNotIn("weekly", windows)
+
+    def test_find_windows_prefers_main_rate_limits_over_other_buckets(self):
+        monitor = CodexMonitor.__new__(CodexMonitor)
+        payload = {
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {"usedPercent": 5, "windowDurationMins": 300},
+                "secondary": {"usedPercent": 12, "windowDurationMins": 10080},
+            },
+            "rateLimitsByLimitId": {
+                "codex": {
+                    "limitId": "codex",
+                    "primary": {"usedPercent": 5, "windowDurationMins": 300},
+                    "secondary": {"usedPercent": 12, "windowDurationMins": 10080},
+                },
+                "review": {
+                    "limitId": "review",
+                    "primary": {"usedPercent": 90, "windowDurationMins": 10080},
+                },
+            },
+        }
+        windows = monitor._find_windows(payload)
+        self.assertEqual(windows["five_hour"]["usedPercent"], 5)
+        self.assertEqual(windows["weekly"]["usedPercent"], 12)
+        buckets = monitor._extract_limit_buckets(payload)
+        self.assertEqual(len(buckets), 2)
+        self.assertEqual([b["id"] for b in buckets], ["codex", "review"])
+
+    def test_find_windows_legacy_fallback_when_duration_missing(self):
+        monitor = CodexMonitor.__new__(CodexMonitor)
+        payload = {
+            "primary": {"usedPercent": 30},
+            "secondary": {"usedPercent": 40},
+        }
+        windows = monitor._find_windows(payload)
+        self.assertEqual(windows["five_hour"]["usedPercent"], 30)
+        self.assertEqual(windows["weekly"]["usedPercent"], 40)
+
+    def test_sparse_update_preserves_weekly_quota(self):
+        monitor = CodexMonitor.__new__(CodexMonitor)
+        monitor._lock = threading.Lock()
+        monitor._refresh_seconds = 60
+        monitor._last_success_epoch = 0.0
+        monitor._restart_attempts = 0
+        monitor._status = {
+            "source": "test",
+            "five_hour": {"remaining": 80, "duration_minutes": 300},
+            "weekly": {"remaining": 63, "duration_minutes": 10080},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            monitor._cache_path = Path(directory) / "cache.json"
+            # Sparse update with only 5-hour
+            monitor._apply_limits({
+                "primary": {"usedPercent": 10, "windowDurationMins": 300}
+            })
+        self.assertEqual(monitor._status["five_hour"]["remaining"], 90)
+        self.assertEqual(monitor._status["weekly"]["remaining"], 63)
+
+    def test_duration_always_takes_precedence_over_slot_name(self):
+        monitor = CodexMonitor.__new__(CodexMonitor)
+        payload = {
+            "primary": {"usedPercent": 50, "windowDurationMins": 10080},
+            "secondary": {"usedPercent": 10, "windowDurationMins": 300},
+        }
+        windows = monitor._find_windows(payload)
+        self.assertEqual(windows["five_hour"]["usedPercent"], 10)
+        self.assertEqual(windows["weekly"]["usedPercent"], 50)
+
     def test_sparse_update_keeps_previous_reset_credit_summary(self):
         monitor = CodexMonitor.__new__(CodexMonitor)
         monitor._lock = threading.Lock()
