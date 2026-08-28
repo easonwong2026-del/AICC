@@ -389,9 +389,9 @@ class CodexMonitor:
 
     def _save_cache(self, snapshot: dict[str, Any]) -> None:
         temporary = self._cache_path.with_suffix(".json.tmp")
-       try:
-           self._cache_path.parent.mkdir(parents=True, exist_ok=True)
-           try:
+        try:
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
                 existing = json.loads(self._cache_path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 existing = {}
@@ -414,19 +414,21 @@ class CodexMonitor:
         if not isinstance(payload, dict):
             return found
 
+        metric_keys = ("usedPercent", "used_percent", "usedPercentage", "remaining_percent", "remainingPercentage")
+
         def inspect_container(container: dict[str, Any]) -> dict[str, dict[str, Any]]:
             res: dict[str, dict[str, Any]] = {}
             aliases = {"five_hour": "five_hour", "fiveHour": "five_hour", "weekly": "weekly", "week": "weekly"}
             for key, target in aliases.items():
                 child = container.get(key)
-                if isinstance(child, dict) and any(k in child for k in ("usedPercent", "used_percent", "usedPercentage", "remaining_percent", "remainingPercentage")):
+                if isinstance(child, dict) and any(k in child for k in metric_keys):
                     res[target] = child
 
             slots = [("primary", container.get("primary")), ("secondary", container.get("secondary"))]
             for slot_name, child in slots:
                 if not isinstance(child, dict):
                     continue
-                if not any(k in child for k in ("usedPercent", "used_percent", "usedPercentage", "remaining_percent", "remainingPercentage")):
+                if not any(k in child for k in metric_keys):
                     continue
                 raw_duration = child.get("windowDurationMins", child.get("window_duration_mins"))
                 try:
