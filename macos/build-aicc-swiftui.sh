@@ -113,6 +113,7 @@ xcrun swiftc \
   -framework SwiftUI \
   -framework AppKit \
   -framework Foundation \
+  -framework WidgetKit \
   -module-cache-path /tmp/swift-module-cache \
   -Xlinker -rpath -Xlinker /usr/lib/swift \
   "${SWIFT_FILES[@]}" \

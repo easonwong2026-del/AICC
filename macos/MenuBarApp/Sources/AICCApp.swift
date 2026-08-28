@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import WidgetKit
 
 // MARK: - Server Manager
 
@@ -361,6 +362,7 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        WidgetCenter.shared.reloadAllTimelines()
 
         settingsWindowCoordinator = SettingsWindowCoordinator(
             api: APIService.shared,

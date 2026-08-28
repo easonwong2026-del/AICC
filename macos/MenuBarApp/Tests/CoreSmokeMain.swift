@@ -153,6 +153,86 @@ struct CoreSmokeMain {
             guard case .timedOut = error else { throw error }
         }
 
+        // Widget display signature & reload decision tests
+        let initialSig = WidgetDisplaySignature(
+            codexRemaining: 96,
+            workbuddyPoints: 5609,
+            deepseekBalance: "58.81 CNY",
+            systemStatus: "Online"
+        )
+
+        // A. Initial signature (previous is nil) -> shouldReload = true
+        try require(
+            WidgetDisplaySignature.shouldReloadWidget(previous: nil, current: initialSig, force: false),
+            "initial signature triggers reload"
+        )
+
+        // B. Same values -> shouldReload = false
+        let sameSig = WidgetDisplaySignature(
+            codexRemaining: 96,
+            workbuddyPoints: 5609,
+            deepseekBalance: "58.81 CNY",
+            systemStatus: "Online"
+        )
+        try require(
+            !WidgetDisplaySignature.shouldReloadWidget(previous: initialSig, current: sameSig, force: false),
+            "unchanged values do not reload widget"
+        )
+
+        // C. Codex changed -> shouldReload = true
+        let codexChanged = WidgetDisplaySignature(
+            codexRemaining: 95,
+            workbuddyPoints: 5609,
+            deepseekBalance: "58.81 CNY",
+            systemStatus: "Online"
+        )
+        try require(
+            WidgetDisplaySignature.shouldReloadWidget(previous: initialSig, current: codexChanged, force: false),
+            "codex change triggers reload"
+        )
+
+        // D. WorkBuddy changed -> shouldReload = true
+        let wbChanged = WidgetDisplaySignature(
+            codexRemaining: 96,
+            workbuddyPoints: 5500,
+            deepseekBalance: "58.81 CNY",
+            systemStatus: "Online"
+        )
+        try require(
+            WidgetDisplaySignature.shouldReloadWidget(previous: initialSig, current: wbChanged, force: false),
+            "workbuddy change triggers reload"
+        )
+
+        // E. DeepSeek changed -> shouldReload = true
+        let dsChanged = WidgetDisplaySignature(
+            codexRemaining: 96,
+            workbuddyPoints: 5609,
+            deepseekBalance: "60.00 CNY",
+            systemStatus: "Online"
+        )
+        try require(
+            WidgetDisplaySignature.shouldReloadWidget(previous: initialSig, current: dsChanged, force: false),
+            "deepseek change triggers reload"
+        )
+
+        // F. System changed -> shouldReload = true
+        let sysChanged = WidgetDisplaySignature(
+            codexRemaining: 96,
+            workbuddyPoints: 5609,
+            deepseekBalance: "58.81 CNY",
+            systemStatus: "Degraded"
+        )
+        try require(
+            WidgetDisplaySignature.shouldReloadWidget(previous: initialSig, current: sysChanged, force: false),
+            "system change triggers reload"
+        )
+
+        // G. Force = true -> shouldReload = true (even with same values)
+        try require(
+            WidgetDisplaySignature.shouldReloadWidget(previous: initialSig, current: sameSig, force: true),
+            "forced fetch triggers reload"
+        )
+
         print("AICC Swift core smoke tests passed.")
     }
 }
