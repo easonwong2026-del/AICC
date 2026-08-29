@@ -58,17 +58,18 @@ struct AICCWidgetView: View {
     // MARK: - Medium Widget (Flattened Large-Typography Layout)
 
     private var mediumContent: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             header
+                .fixedSize(horizontal: false, vertical: true)
 
             GeometryReader { geo in
-                let gap: CGFloat = 16
+                let gap: CGFloat = 14
                 let leftWidth = (geo.size.width - gap) * 0.58
                 let rightWidth = (geo.size.width - gap) * 0.42
 
                 HStack(alignment: .top, spacing: gap) {
                     codexMainView
-                        .frame(width: leftWidth, height: geo.size.height, alignment: .topLeading)
+                        .frame(width: leftWidth, alignment: .topLeading)
 
                     VStack(alignment: .leading, spacing: 0) {
                         workbuddyView
@@ -76,7 +77,7 @@ struct AICCWidgetView: View {
 
                         Divider()
                             .overlay(Color.primary.opacity(0.12))
-                            .padding(.vertical, 3)
+                            .padding(.vertical, 2)
 
                         deepseekView
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -87,9 +88,11 @@ struct AICCWidgetView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             footer
+                .frame(height: 12, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.horizontal, 15)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
     }
 
     // MARK: - Small Widget (Unchanged)
@@ -113,14 +116,14 @@ struct AICCWidgetView: View {
     private var header: some View {
         HStack(alignment: .center) {
             Text("AICC")
-                .font(.system(size: 13, weight: .bold))
+                .font(.system(size: 12.5, weight: .bold))
                 .foregroundStyle(.primary)
 
             Spacer(minLength: 8)
 
             Button(intent: RefreshWidgetIntent()) {
                 Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 10.5, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
@@ -174,8 +177,8 @@ struct AICCWidgetView: View {
                 }
             }
             .frame(height: 5.5)
-
-            Spacer(minLength: 4)
+            .padding(.top, 1)
+            .padding(.bottom, 3)
 
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .center, spacing: 6) {
@@ -223,13 +226,13 @@ struct AICCWidgetView: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     // MARK: - Medium Right Top Component (WorkBuddy View)
 
     private var workbuddyView: some View {
-        VStack(alignment: .leading, spacing: 1.5) {
+        VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 4) {
                 Circle()
                     .fill(Color.purple)
@@ -242,7 +245,7 @@ struct AICCWidgetView: View {
 
             HStack(alignment: .lastTextBaseline, spacing: 2.5) {
                 Text(entry.snapshot.workbuddyPointsText)
-                    .font(.system(size: 22, weight: .bold).monospacedDigit())
+                    .font(.system(size: 21, weight: .bold).monospacedDigit())
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
@@ -259,13 +262,13 @@ struct AICCWidgetView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     // MARK: - Medium Right Bottom Component (DeepSeek View)
 
     private var deepseekView: some View {
-        VStack(alignment: .leading, spacing: 1.5) {
+        VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 4) {
                 Circle()
                     .fill(Color.cyan)
@@ -278,7 +281,7 @@ struct AICCWidgetView: View {
 
             HStack(alignment: .lastTextBaseline, spacing: 2.5) {
                 Text(entry.snapshot.deepseekBalanceText)
-                    .font(.system(size: 22, weight: .bold).monospacedDigit())
+                    .font(.system(size: 21, weight: .bold).monospacedDigit())
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
@@ -295,7 +298,7 @@ struct AICCWidgetView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     // MARK: - Footer
