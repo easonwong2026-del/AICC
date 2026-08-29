@@ -92,7 +92,7 @@ private struct AboutAndUpdatesSettingsView: View {
     @StateObject private var updateService = UpdateService()
 
     private var versionInfo: AppVersionInfo {
-        AppVersionProvider().current
+        AppVersionInfo(bundle: .main)
     }
 
     private var isChecking: Bool {

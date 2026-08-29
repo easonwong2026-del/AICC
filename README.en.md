@@ -117,7 +117,6 @@ The Android source is in `android/poke-dashboard/` and is independently buildabl
 ```bash
 python3 -B -m unittest discover -s tests -v
 swift test --package-path macos/MenuBarApp
-bash scripts/smoke-test-swift-core.sh
 bash scripts/smoke-test-widget.sh
 BUNDLE_SERVER=1 bash macos/build-aicc-swiftui.sh
 bash scripts/smoke-test-bundled-server.sh

@@ -20,6 +20,7 @@ final class OCXStatusTests: XCTestCase {
         XCTAssertEqual(snapshot.pid, 4321)
         XCTAssertEqual(snapshot.port, 12001)
         XCTAssertEqual(snapshot.dashboardURL?.host, "localhost")
+        XCTAssertEqual(snapshot.dashboardURL?.port, 12001)
         XCTAssertEqual(snapshot.healthURL?.port, 12001)
     }
 

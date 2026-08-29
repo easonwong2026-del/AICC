@@ -97,6 +97,65 @@ final class APIServiceTests: XCTestCase {
         XCTAssertEqual(MockURLProtocol.requests.first?.httpMethod, "POST")
     }
 
+    func testWidgetDisplaySignatureReloadsOnlyWhenValuesChange() {
+        let initial = WidgetDisplaySignature(
+            codexRemaining: 96,
+            workbuddyPoints: 5609,
+            deepseekBalance: "58.81 CNY",
+            systemStatus: "Online"
+        )
+        let same = WidgetDisplaySignature(
+            codexRemaining: 96,
+            workbuddyPoints: 5609,
+            deepseekBalance: "58.81 CNY",
+            systemStatus: "Online"
+        )
+
+        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(previous: nil, current: initial, force: false))
+        XCTAssertFalse(WidgetDisplaySignature.shouldReloadWidget(previous: initial, current: same, force: false))
+        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
+            previous: initial,
+            current: WidgetDisplaySignature(
+                codexRemaining: 95,
+                workbuddyPoints: 5609,
+                deepseekBalance: "58.81 CNY",
+                systemStatus: "Online"
+            ),
+            force: false
+        ))
+        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
+            previous: initial,
+            current: WidgetDisplaySignature(
+                codexRemaining: 96,
+                workbuddyPoints: 5500,
+                deepseekBalance: "58.81 CNY",
+                systemStatus: "Online"
+            ),
+            force: false
+        ))
+        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
+            previous: initial,
+            current: WidgetDisplaySignature(
+                codexRemaining: 96,
+                workbuddyPoints: 5609,
+                deepseekBalance: "60.00 CNY",
+                systemStatus: "Online"
+            ),
+            force: false
+        ))
+        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
+            previous: initial,
+            current: WidgetDisplaySignature(
+                codexRemaining: 96,
+                workbuddyPoints: 5609,
+                deepseekBalance: "58.81 CNY",
+                systemStatus: "Degraded"
+            ),
+            force: false
+        ))
+        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(previous: initial, current: same, force: true))
+    }
+
     func testMalformedStatusSetsDecodingError() async throws {
         let service = makeService()
         MockURLProtocol.handler = { [self] _ in try respond(#"{"codex":{"weekly":}}"#) }

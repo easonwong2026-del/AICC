@@ -129,9 +129,6 @@ python3 -B -m unittest discover -s tests -v
 # SwiftPM 核心包测试
 swift test --package-path macos/MenuBarApp
 
-# 无 XCTest 环境也可运行的核心 smoke test
-bash scripts/smoke-test-swift-core.sh
-
 # Widget smoke test
 bash scripts/smoke-test-widget.sh
 
