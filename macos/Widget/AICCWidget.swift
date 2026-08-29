@@ -40,12 +40,13 @@ struct AICCWidgetProvider: TimelineProvider {
 
 struct AICCWidgetView: View {
     @Environment(\.widgetFamily) private var family
+    var familyOverride: WidgetFamily? = nil
 
     let entry: AICCWidgetEntry
 
     var body: some View {
         Group {
-            if family == .systemMedium {
+            if (familyOverride ?? family) == .systemMedium {
                 mediumContent
             } else {
                 smallContent
@@ -54,67 +55,325 @@ struct AICCWidgetView: View {
         .containerBackground(.fill.tertiary, for: .widget)
     }
 
-    private var smallContent: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            header
+    // MARK: - Medium Widget (Flattened Large-Typography Layout)
 
-            WidgetMetric(title: "Codex", value: entry.snapshot.codex)
-            WidgetMetric(title: "WorkBuddy", value: entry.snapshot.workbuddy)
+    private var mediumContent: some View {
+        ZStack(alignment: .topTrailing) {
+            GeometryReader { geo in
+                let gap: CGFloat = 16
+                let leftWidth = (geo.size.width - gap) * 0.58
+                let rightWidth = (geo.size.width - gap) * 0.42
+
+                HStack(alignment: .top, spacing: gap) {
+                    codexMainView
+                        .frame(width: leftWidth, height: geo.size.height)
+
+                    VStack(alignment: .leading, spacing: 0) {
+                        workbuddyView
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+
+                        Divider()
+                            .overlay(Color.primary.opacity(0.12))
+                            .padding(.vertical, 5)
+
+                        deepseekView
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                    }
+                    .frame(width: rightWidth, height: geo.size.height)
+                }
+            }
+
+            Button(intent: RefreshWidgetIntent()) {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Refresh Widget")
+        }
+        .padding(.horizontal, 15)
+        .padding(.vertical, 13)
+    }
+
+    // MARK: - Small Widget (Unchanged)
+
+    private var smallContent: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            smallHeader
+
+            smallCodexCard
+
+            smallWorkBuddyCard
 
             Spacer(minLength: 0)
         }
-        .padding()
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
     }
 
-    private var mediumContent: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            header
+    // MARK: - Small Header (Unchanged)
 
-            HStack(spacing: 12) {
-                WidgetMetric(title: "CODEX", value: entry.snapshot.codex)
-                WidgetMetric(title: "WORKBUDDY", value: entry.snapshot.workbuddy)
-            }
-
-            HStack(spacing: 12) {
-                WidgetMetric(title: "DEEPSEEK", value: entry.snapshot.deepseek)
-                WidgetMetric(title: "SYSTEM", value: entry.snapshot.system)
-            }
-        }
-        .padding()
-    }
-
-    private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
+    private var smallHeader: some View {
+        HStack(alignment: .center) {
             Text("AICC")
-                .font(.headline)
+                .font(.system(size: 12.5, weight: .bold))
+                .foregroundStyle(.primary)
+
             Spacer(minLength: 8)
+
             Button(intent: RefreshWidgetIntent()) {
                 Image(systemName: "arrow.clockwise")
-                    .font(.caption.weight(.semibold))
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
             .accessibilityLabel("Refresh Widget")
         }
     }
-}
 
-private struct WidgetMetric: View {
-    let title: String
-    let value: String
+    // MARK: - Medium Left Component (Codex Main View)
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            Text(value)
-                .font(.title3.weight(.semibold).monospacedDigit())
-                .lineLimit(1)
-                .minimumScaleFactor(0.65)
+    private var codexMainView: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 4.5) {
+                Circle()
+                    .fill(Color.green)
+                    .frame(width: 4.5, height: 4.5)
+                Text(entry.snapshot.codexTitle)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.green)
+                Spacer(minLength: 0)
+            }
+
+            Spacer(minLength: 2)
+
+            HStack(alignment: .lastTextBaseline, spacing: 2) {
+                Spacer()
+                Text(entry.snapshot.codexWeeklyNumber)
+                    .font(.system(size: 46, weight: .bold, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+
+                if entry.snapshot.codexWeeklyNumber != "—" {
+                    Text("%")
+                        .font(.system(size: 23, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.primary)
+                }
+                Spacer()
+            }
+
+            Spacer(minLength: 4)
+
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.primary.opacity(0.12))
+                        .frame(height: 6)
+
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [Color.green, Color.mint],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(
+                            width: max(0, min(geo.size.width * CGFloat(entry.snapshot.codexWeeklyProgress), geo.size.width)),
+                            height: 6
+                        )
+                }
+            }
+            .frame(height: 6)
+
+            Spacer(minLength: 6)
+
+            HStack(alignment: .center, spacing: 4) {
+                if let resetText = entry.snapshot.codexResetShortText {
+                    Text(resetText)
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 2)
+
+                if let fiveRem = entry.snapshot.codexSecondaryFiveHourRemaining {
+                    HStack(spacing: 1.5) {
+                        Text("5小时")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.secondary)
+                        Text(String(format: " %.0f%%", fiveRem))
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(.green)
+                    }
+                    .lineLimit(1)
+                }
+            }
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+    }
+
+    // MARK: - Medium Right Top Component (WorkBuddy View)
+
+    private var workbuddyView: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4.5) {
+                Circle()
+                    .fill(entry.snapshot.workbuddyIsOnline ? Color.purple : Color.secondary)
+                    .frame(width: 4.5, height: 4.5)
+                Text("WorkBuddy")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(entry.snapshot.workbuddyIsOnline ? Color.purple : .secondary)
+                Spacer(minLength: 16)
+            }
+
+            HStack(alignment: .lastTextBaseline, spacing: 2.5) {
+                Text(entry.snapshot.workbuddyPointsText)
+                    .font(.system(size: 24, weight: .bold).monospacedDigit())
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+
+                if entry.snapshot.workbuddyPointsText != "—" {
+                    Text("积分")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    // MARK: - Medium Right Bottom Component (DeepSeek View)
+
+    private var deepseekView: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4.5) {
+                Circle()
+                    .fill(entry.snapshot.deepseekIsOnline ? Color.cyan : Color.secondary)
+                    .frame(width: 4.5, height: 4.5)
+                Text("DeepSeek")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(entry.snapshot.deepseekIsOnline ? Color.cyan : .secondary)
+                Spacer(minLength: 0)
+            }
+
+            HStack(alignment: .lastTextBaseline, spacing: 2.5) {
+                Text(entry.snapshot.deepseekBalanceText)
+                    .font(.system(size: 24, weight: .bold).monospacedDigit())
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+
+                if entry.snapshot.deepseekBalanceText != "—" && !entry.snapshot.deepseekCurrency.isEmpty {
+                    Text(entry.snapshot.deepseekCurrency)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    // MARK: - Small Components (Unchanged)
+
+    private var smallCodexCard: some View {
+        VStack(alignment: .leading, spacing: 2.5) {
+            Text(entry.snapshot.codexTitle)
+                .font(.system(size: 9.5, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            HStack(alignment: .lastTextBaseline, spacing: 2) {
+                Text(entry.snapshot.codexWeeklyNumber)
+                    .font(.system(size: 24, weight: .bold, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.primary)
+
+                if entry.snapshot.codexWeeklyNumber != "—" {
+                    Text("%")
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.primary)
+                }
+            }
+
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.primary.opacity(0.12))
+                        .frame(height: 4.5)
+
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [Color.green, Color.mint],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(
+                            width: max(0, min(geo.size.width * CGFloat(entry.snapshot.codexWeeklyProgress), geo.size.width)),
+                            height: 4.5
+                        )
+                }
+            }
+            .frame(height: 4.5)
+        }
+        .padding(6.5)
+        .background(
+            RoundedRectangle(cornerRadius: 7)
+                .fill(Color.primary.opacity(0.04))
+                .background(
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(Color.green.opacity(0.05))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7)
+                        .strokeBorder(Color.green.opacity(0.12), lineWidth: 0.8)
+                )
+        )
+    }
+
+    private var smallWorkBuddyCard: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 3) {
+                Circle()
+                    .fill(Color.purple)
+                    .frame(width: 3.5, height: 3.5)
+                Text("WorkBuddy")
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundStyle(Color.purple)
+            }
+
+            HStack(alignment: .lastTextBaseline, spacing: 2) {
+                Text(entry.snapshot.workbuddyPointsText)
+                    .font(.system(size: 13, weight: .bold).monospacedDigit())
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+
+                if entry.snapshot.workbuddyPointsText != "—" {
+                    Text("积分")
+                        .font(.system(size: 7.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(.horizontal, 6.5)
+        .padding(.vertical, 4.5)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 7)
+                .fill(Color.primary.opacity(0.04))
+                .background(
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(Color.purple.opacity(0.05))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7)
+                        .strokeBorder(Color.purple.opacity(0.12), lineWidth: 0.8)
+                )
+        )
     }
 }
 
@@ -129,5 +388,6 @@ struct AICCWidget: Widget {
         .configurationDisplayName("AICC")
         .description("AICC status at a glance")
         .supportedFamilies([.systemSmall, .systemMedium])
+        .contentMarginsDisabled()
     }
 }
