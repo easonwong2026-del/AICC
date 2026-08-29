@@ -142,14 +142,14 @@ struct AICCWidgetView: View {
 
             HStack(alignment: .lastTextBaseline, spacing: 2) {
                 Text(entry.snapshot.codexWeeklyNumber)
-                    .font(.system(size: 38, weight: .bold, design: .rounded).monospacedDigit())
+                    .font(.system(size: 36, weight: .bold, design: .rounded).monospacedDigit())
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
 
                 if entry.snapshot.codexWeeklyNumber != "—" {
                     Text("%")
-                        .font(.system(size: 19, weight: .semibold, design: .rounded))
+                        .font(.system(size: 18, weight: .semibold, design: .rounded))
                         .foregroundStyle(.primary)
                 }
 
@@ -180,51 +180,30 @@ struct AICCWidgetView: View {
             .padding(.top, 1)
             .padding(.bottom, 3)
 
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .center, spacing: 6) {
-                    if let resetText = entry.snapshot.codexResetShortText {
-                        Text(resetText)
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-
-                    Spacer(minLength: 2)
-
-                    if let fiveRem = entry.snapshot.codexSecondaryFiveHourRemaining {
-                        HStack(spacing: 2) {
-                            Text("5小时")
-                                .font(.system(size: 9.5))
-                                .foregroundStyle(.secondary)
-                            Text(String(format: " %.0f%%", fiveRem))
-                                .font(.system(size: 9.5, weight: .semibold))
-                                .foregroundStyle(.green)
-                        }
+            HStack(alignment: .center, spacing: 4) {
+                if let resetText = entry.snapshot.codexResetShortText {
+                    Text(resetText)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
-                    }
                 }
 
-                VStack(alignment: .leading, spacing: 2) {
-                    if let resetText = entry.snapshot.codexResetShortText {
-                        Text(resetText)
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
+                Spacer(minLength: 2)
 
-                    if let fiveRem = entry.snapshot.codexSecondaryFiveHourRemaining {
-                        HStack(spacing: 2) {
-                            Text("5小时")
-                                .font(.system(size: 9.5))
-                                .foregroundStyle(.secondary)
-                            Text(String(format: " %.0f%%", fiveRem))
-                                .font(.system(size: 9.5, weight: .semibold))
-                                .foregroundStyle(.green)
-                        }
-                        .lineLimit(1)
+                if let fiveRem = entry.snapshot.codexSecondaryFiveHourRemaining {
+                    HStack(spacing: 1.5) {
+                        Text("5小时")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                        Text(String(format: " %.0f%%", fiveRem))
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.green)
                     }
+                    .lineLimit(1)
                 }
             }
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
@@ -421,5 +400,6 @@ struct AICCWidget: Widget {
         .configurationDisplayName("AICC")
         .description("AICC status at a glance")
         .supportedFamilies([.systemSmall, .systemMedium])
+        .contentMarginsDisabled()
     }
 }
