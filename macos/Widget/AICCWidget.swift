@@ -58,12 +58,9 @@ struct AICCWidgetView: View {
     // MARK: - Medium Widget (Flattened Large-Typography Layout)
 
     private var mediumContent: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            header
-                .fixedSize(horizontal: false, vertical: true)
-
+        ZStack(alignment: .topTrailing) {
             GeometryReader { geo in
-                let gap: CGFloat = 14
+                let gap: CGFloat = 16
                 let leftWidth = (geo.size.width - gap) * 0.58
                 let rightWidth = (geo.size.width - gap) * 0.42
 
@@ -77,7 +74,7 @@ struct AICCWidgetView: View {
 
                         Divider()
                             .overlay(Color.primary.opacity(0.12))
-                            .padding(.vertical, 2)
+                            .padding(.vertical, 4)
 
                         deepseekView
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -85,21 +82,24 @@ struct AICCWidgetView: View {
                     .frame(width: rightWidth, height: geo.size.height)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            footer
-                .frame(height: 12, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
+            Button(intent: RefreshWidgetIntent()) {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Refresh Widget")
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.vertical, 12)
     }
 
     // MARK: - Small Widget (Unchanged)
 
     private var smallContent: some View {
         VStack(alignment: .leading, spacing: 4) {
-            header
+            smallHeader
 
             smallCodexCard
 
@@ -111,9 +111,9 @@ struct AICCWidgetView: View {
         .padding(.vertical, 8)
     }
 
-    // MARK: - Shared Header
+    // MARK: - Small Header (Unchanged)
 
-    private var header: some View {
+    private var smallHeader: some View {
         HStack(alignment: .center) {
             Text("AICC")
                 .font(.system(size: 12.5, weight: .bold))
@@ -134,22 +134,22 @@ struct AICCWidgetView: View {
     // MARK: - Medium Left Component (Codex Main View)
 
     private var codexMainView: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 3) {
             Text(entry.snapshot.codexTitle)
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 10.5, weight: .medium))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
 
             HStack(alignment: .lastTextBaseline, spacing: 2) {
                 Text(entry.snapshot.codexWeeklyNumber)
-                    .font(.system(size: 36, weight: .bold, design: .rounded).monospacedDigit())
+                    .font(.system(size: 38, weight: .bold, design: .rounded).monospacedDigit())
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
 
                 if entry.snapshot.codexWeeklyNumber != "—" {
                     Text("%")
-                        .font(.system(size: 18, weight: .semibold, design: .rounded))
+                        .font(.system(size: 19, weight: .semibold, design: .rounded))
                         .foregroundStyle(.primary)
                 }
 
@@ -177,13 +177,13 @@ struct AICCWidgetView: View {
                 }
             }
             .frame(height: 5.5)
-            .padding(.top, 1)
-            .padding(.bottom, 3)
+            .padding(.top, 2)
+            .padding(.bottom, 4)
 
             HStack(alignment: .center, spacing: 4) {
                 if let resetText = entry.snapshot.codexResetShortText {
                     Text(resetText)
-                        .font(.system(size: 9))
+                        .font(.system(size: 9.5))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
@@ -193,10 +193,10 @@ struct AICCWidgetView: View {
                 if let fiveRem = entry.snapshot.codexSecondaryFiveHourRemaining {
                     HStack(spacing: 1.5) {
                         Text("5小时")
-                            .font(.system(size: 9))
+                            .font(.system(size: 9.5))
                             .foregroundStyle(.secondary)
                         Text(String(format: " %.0f%%", fiveRem))
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(.system(size: 9.5, weight: .semibold))
                             .foregroundStyle(.green)
                     }
                     .lineLimit(1)
@@ -211,20 +211,20 @@ struct AICCWidgetView: View {
     // MARK: - Medium Right Top Component (WorkBuddy View)
 
     private var workbuddyView: some View {
-        VStack(alignment: .leading, spacing: 1) {
+        VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 4) {
                 Circle()
-                    .fill(Color.purple)
+                    .fill(entry.snapshot.workbuddyIsOnline ? Color.purple : Color.secondary)
                     .frame(width: 4.5, height: 4.5)
                 Text("WorkBuddy")
                     .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(Color.purple)
-                Spacer(minLength: 0)
+                    .foregroundStyle(entry.snapshot.workbuddyIsOnline ? Color.purple : .secondary)
+                Spacer(minLength: 16)
             }
 
             HStack(alignment: .lastTextBaseline, spacing: 2.5) {
                 Text(entry.snapshot.workbuddyPointsText)
-                    .font(.system(size: 21, weight: .bold).monospacedDigit())
+                    .font(.system(size: 22, weight: .bold).monospacedDigit())
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
@@ -235,11 +235,6 @@ struct AICCWidgetView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-
-            Text(entry.snapshot.workbuddySubtitle)
-                .font(.system(size: 9.5))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
@@ -247,20 +242,20 @@ struct AICCWidgetView: View {
     // MARK: - Medium Right Bottom Component (DeepSeek View)
 
     private var deepseekView: some View {
-        VStack(alignment: .leading, spacing: 1) {
+        VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 4) {
                 Circle()
-                    .fill(Color.cyan)
+                    .fill(entry.snapshot.deepseekIsOnline ? Color.cyan : Color.secondary)
                     .frame(width: 4.5, height: 4.5)
                 Text("DeepSeek")
                     .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(Color.cyan)
+                    .foregroundStyle(entry.snapshot.deepseekIsOnline ? Color.cyan : .secondary)
                 Spacer(minLength: 0)
             }
 
             HStack(alignment: .lastTextBaseline, spacing: 2.5) {
                 Text(entry.snapshot.deepseekBalanceText)
-                    .font(.system(size: 21, weight: .bold).monospacedDigit())
+                    .font(.system(size: 22, weight: .bold).monospacedDigit())
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
@@ -271,22 +266,8 @@ struct AICCWidgetView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-
-            Text(entry.snapshot.deepseekStatusText)
-                .font(.system(size: 9.5))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
-    }
-
-    // MARK: - Footer
-
-    private var footer: some View {
-        Text(entry.snapshot.formattedFooterTime(at: entry.date))
-            .font(.system(size: 9))
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
     }
 
     // MARK: - Small Components (Unchanged)
