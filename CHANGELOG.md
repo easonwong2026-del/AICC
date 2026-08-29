@@ -2,6 +2,14 @@
 
 [English](CHANGELOG.en.md)
 
+## 2.7.1 - 2026-08-29
+
+- **macOS Widget 重设计**：中尺寸 Widget 改为适合横向尺寸的左右布局；Codex 每周额度成为主视觉指标，居中展示大字号百分比与真实进度条、重置时间和 5 小时额度；WorkBuddy 积分与 DeepSeek 余额作为右侧次级指标对称排布。
+- **Widget 信息收口**：删除中尺寸顶部冗余标题、底部更新时间、以及缓存年龄和连接状态等辅助文字；服务异常时保留稳定占位，不把诊断和错误信息暴露到桌面；右上角保留轻量化刷新按钮。
+- **Widget 兼容性**：保留手动刷新、15 分钟 timeline、last-success 缓存与 stale fallback；向下兼容 2.7.0 保存的旧 Widget 快照缓存。
+- **macOS runtime 收口**：正式安装统一使用 DMG App + SMAppService + ServerManager + bundled Python Server；退休 legacy LaunchAgent production runtime，并保留精确安全的一次性旧服务迁移。
+- **版本**：AICC 2.7.1，macOS Build 10；Android/Poke4S 继续使用独立的 `1.2.5-pencil-home` / versionCode 11。
+
 ## 2.7.0 - 2026-08-28 (Release Candidate)
 
 - **macOS 桌面 Widget**：新增 WidgetKit 小尺寸和中尺寸 Widget；小尺寸显示 Codex/WorkBuddy，中尺寸显示 Codex、WorkBuddy、DeepSeek 和 System
