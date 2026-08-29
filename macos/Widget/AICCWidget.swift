@@ -55,24 +55,31 @@ struct AICCWidgetView: View {
         .containerBackground(.fill.tertiary, for: .widget)
     }
 
-    // MARK: - Medium Widget (Left-Right Split)
+    // MARK: - Medium Widget (Flattened Large-Typography Layout)
 
     private var mediumContent: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             header
 
             GeometryReader { geo in
-                let gap: CGFloat = 6
+                let gap: CGFloat = 16
                 let leftWidth = (geo.size.width - gap) * 0.58
                 let rightWidth = (geo.size.width - gap) * 0.42
 
                 HStack(alignment: .top, spacing: gap) {
-                    codexMainCard
-                        .frame(width: leftWidth, height: geo.size.height)
+                    codexMainView
+                        .frame(width: leftWidth, height: geo.size.height, alignment: .topLeading)
 
-                    VStack(spacing: gap) {
-                        workbuddyCard
-                        deepseekCard
+                    VStack(alignment: .leading, spacing: 0) {
+                        workbuddyView
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+                        Divider()
+                            .overlay(Color.primary.opacity(0.12))
+                            .padding(.vertical, 3)
+
+                        deepseekView
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
                     .frame(width: rightWidth, height: geo.size.height)
                 }
@@ -81,11 +88,11 @@ struct AICCWidgetView: View {
 
             footer
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 15)
+        .padding(.vertical, 10)
     }
 
-    // MARK: - Small Widget
+    // MARK: - Small Widget (Unchanged)
 
     private var smallContent: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -106,14 +113,14 @@ struct AICCWidgetView: View {
     private var header: some View {
         HStack(alignment: .center) {
             Text("AICC")
-                .font(.system(size: 12, weight: .bold))
+                .font(.system(size: 13, weight: .bold))
                 .foregroundStyle(.primary)
 
             Spacer(minLength: 8)
 
             Button(intent: RefreshWidgetIntent()) {
                 Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 10.5, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
@@ -121,27 +128,25 @@ struct AICCWidgetView: View {
         }
     }
 
-    // MARK: - Medium Left Component (Codex Main Card)
+    // MARK: - Medium Left Component (Codex Main View)
 
-    private var codexMainCard: some View {
+    private var codexMainView: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(entry.snapshot.codexTitle)
-                .font(.system(size: 9.5, weight: .medium))
+                .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
 
-            Spacer(minLength: 0)
-
-            HStack(alignment: .lastTextBaseline, spacing: 1.5) {
+            HStack(alignment: .lastTextBaseline, spacing: 2) {
                 Text(entry.snapshot.codexWeeklyNumber)
-                    .font(.system(size: 28, weight: .bold, design: .rounded).monospacedDigit())
+                    .font(.system(size: 38, weight: .bold, design: .rounded).monospacedDigit())
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
 
                 if entry.snapshot.codexWeeklyNumber != "—" {
                     Text("%")
-                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        .font(.system(size: 19, weight: .semibold, design: .rounded))
                         .foregroundStyle(.primary)
                 }
 
@@ -152,7 +157,7 @@ struct AICCWidgetView: View {
                 ZStack(alignment: .leading) {
                     Capsule()
                         .fill(Color.primary.opacity(0.12))
-                        .frame(height: 4.5)
+                        .frame(height: 5.5)
 
                     Capsule()
                         .fill(
@@ -164,20 +169,19 @@ struct AICCWidgetView: View {
                         )
                         .frame(
                             width: max(0, min(geo.size.width * CGFloat(entry.snapshot.codexWeeklyProgress), geo.size.width)),
-                            height: 4.5
+                            height: 5.5
                         )
                 }
             }
-            .frame(height: 4.5)
+            .frame(height: 5.5)
 
-            Spacer(minLength: 2)
+            Spacer(minLength: 4)
 
             ViewThatFits(in: .horizontal) {
-                // Try single line if space permits
-                HStack(alignment: .center, spacing: 4) {
+                HStack(alignment: .center, spacing: 6) {
                     if let resetText = entry.snapshot.codexResetShortText {
                         Text(resetText)
-                            .font(.system(size: 8.5))
+                            .font(.system(size: 9.5))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
@@ -187,21 +191,20 @@ struct AICCWidgetView: View {
                     if let fiveRem = entry.snapshot.codexSecondaryFiveHourRemaining {
                         HStack(spacing: 2) {
                             Text("5小时")
-                                .font(.system(size: 8.5))
+                                .font(.system(size: 9.5))
                                 .foregroundStyle(.secondary)
                             Text(String(format: " %.0f%%", fiveRem))
-                                .font(.system(size: 8.5, weight: .semibold))
+                                .font(.system(size: 9.5, weight: .semibold))
                                 .foregroundStyle(.green)
                         }
                         .lineLimit(1)
                     }
                 }
 
-                // Otherwise stack vertically
-                VStack(alignment: .leading, spacing: 1.5) {
+                VStack(alignment: .leading, spacing: 2) {
                     if let resetText = entry.snapshot.codexResetShortText {
                         Text(resetText)
-                            .font(.system(size: 8.5))
+                            .font(.system(size: 9.5))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
@@ -209,10 +212,10 @@ struct AICCWidgetView: View {
                     if let fiveRem = entry.snapshot.codexSecondaryFiveHourRemaining {
                         HStack(spacing: 2) {
                             Text("5小时")
-                                .font(.system(size: 8.5))
+                                .font(.system(size: 9.5))
                                 .foregroundStyle(.secondary)
                             Text(String(format: " %.0f%%", fiveRem))
-                                .font(.system(size: 8.5, weight: .semibold))
+                                .font(.system(size: 9.5, weight: .semibold))
                                 .foregroundStyle(.green)
                         }
                         .lineLimit(1)
@@ -220,147 +223,91 @@ struct AICCWidgetView: View {
                 }
             }
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 7)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color.primary.opacity(0.04))
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(
-                            LinearGradient(
-                                colors: [Color.green.opacity(0.07), Color.mint.opacity(0.03), Color.clear],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .strokeBorder(Color.green.opacity(0.15), lineWidth: 0.8)
-                )
-        )
     }
 
-    // MARK: - Medium Right Top Component (WorkBuddy Card)
+    // MARK: - Medium Right Top Component (WorkBuddy View)
 
-    private var workbuddyCard: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 3.5) {
+    private var workbuddyView: some View {
+        VStack(alignment: .leading, spacing: 1.5) {
+            HStack(spacing: 4) {
                 Circle()
                     .fill(Color.purple)
-                    .frame(width: 4, height: 4)
+                    .frame(width: 4.5, height: 4.5)
                 Text("WorkBuddy")
-                    .font(.system(size: 9.5, weight: .medium))
+                    .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(Color.purple)
                 Spacer(minLength: 0)
             }
 
-            Spacer(minLength: 0)
-
-            HStack(alignment: .lastTextBaseline, spacing: 2) {
+            HStack(alignment: .lastTextBaseline, spacing: 2.5) {
                 Text(entry.snapshot.workbuddyPointsText)
-                    .font(.system(size: 16, weight: .bold).monospacedDigit())
+                    .font(.system(size: 22, weight: .bold).monospacedDigit())
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
 
                 if entry.snapshot.workbuddyPointsText != "—" {
                     Text("积分")
-                        .font(.system(size: 8.5, weight: .medium))
+                        .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
             }
 
-            Spacer(minLength: 0)
-
             Text(entry.snapshot.workbuddySubtitle)
-                .font(.system(size: 8.5))
+                .font(.system(size: 9.5))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 7)
-                .fill(Color.primary.opacity(0.04))
-                .background(
-                    RoundedRectangle(cornerRadius: 7)
-                        .fill(Color.purple.opacity(0.05))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 7)
-                        .strokeBorder(Color.purple.opacity(0.15), lineWidth: 0.8)
-                )
-        )
     }
 
-    // MARK: - Medium Right Bottom Component (DeepSeek Card)
+    // MARK: - Medium Right Bottom Component (DeepSeek View)
 
-    private var deepseekCard: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 3.5) {
+    private var deepseekView: some View {
+        VStack(alignment: .leading, spacing: 1.5) {
+            HStack(spacing: 4) {
                 Circle()
                     .fill(Color.cyan)
-                    .frame(width: 4, height: 4)
+                    .frame(width: 4.5, height: 4.5)
                 Text("DeepSeek")
-                    .font(.system(size: 9.5, weight: .medium))
+                    .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(Color.cyan)
                 Spacer(minLength: 0)
             }
 
-            Spacer(minLength: 0)
-
-            HStack(alignment: .lastTextBaseline, spacing: 2) {
+            HStack(alignment: .lastTextBaseline, spacing: 2.5) {
                 Text(entry.snapshot.deepseekBalanceText)
-                    .font(.system(size: 16, weight: .bold).monospacedDigit())
+                    .font(.system(size: 22, weight: .bold).monospacedDigit())
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
 
                 if entry.snapshot.deepseekBalanceText != "—" && !entry.snapshot.deepseekCurrency.isEmpty {
                     Text(entry.snapshot.deepseekCurrency)
-                        .font(.system(size: 8.5, weight: .medium))
+                        .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
             }
 
-            Spacer(minLength: 0)
-
             Text(entry.snapshot.deepseekStatusText)
-                .font(.system(size: 8.5))
+                .font(.system(size: 9.5))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 7)
-                .fill(Color.primary.opacity(0.04))
-                .background(
-                    RoundedRectangle(cornerRadius: 7)
-                        .fill(Color.cyan.opacity(0.05))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 7)
-                        .strokeBorder(Color.cyan.opacity(0.15), lineWidth: 0.8)
-                )
-        )
     }
 
     // MARK: - Footer
 
     private var footer: some View {
         Text(entry.snapshot.formattedFooterTime(at: entry.date))
-            .font(.system(size: 8.5))
+            .font(.system(size: 9))
             .foregroundStyle(.secondary)
             .lineLimit(1)
     }
 
-    // MARK: - Small Components
+    // MARK: - Small Components (Unchanged)
 
     private var smallCodexCard: some View {
         VStack(alignment: .leading, spacing: 2.5) {
