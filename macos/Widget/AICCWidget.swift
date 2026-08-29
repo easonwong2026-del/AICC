@@ -74,7 +74,7 @@ struct AICCWidgetView: View {
 
                         Divider()
                             .overlay(Color.primary.opacity(0.12))
-                            .padding(.vertical, 6)
+                            .padding(.vertical, 5)
 
                         deepseekView
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -135,27 +135,32 @@ struct AICCWidgetView: View {
 
     private var codexMainView: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(entry.snapshot.codexTitle)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            HStack(spacing: 4.5) {
+                Circle()
+                    .fill(Color.green)
+                    .frame(width: 4.5, height: 4.5)
+                Text(entry.snapshot.codexTitle)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.green)
+                Spacer(minLength: 0)
+            }
 
             Spacer(minLength: 2)
 
             HStack(alignment: .lastTextBaseline, spacing: 2) {
+                Spacer()
                 Text(entry.snapshot.codexWeeklyNumber)
-                    .font(.system(size: 44, weight: .bold, design: .rounded).monospacedDigit())
+                    .font(.system(size: 46, weight: .bold, design: .rounded).monospacedDigit())
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
 
                 if entry.snapshot.codexWeeklyNumber != "—" {
                     Text("%")
-                        .font(.system(size: 22, weight: .semibold, design: .rounded))
+                        .font(.system(size: 23, weight: .semibold, design: .rounded))
                         .foregroundStyle(.primary)
                 }
-
-                Spacer(minLength: 0)
+                Spacer()
             }
 
             Spacer(minLength: 4)
@@ -215,7 +220,7 @@ struct AICCWidgetView: View {
     // MARK: - Medium Right Top Component (WorkBuddy View)
 
     private var workbuddyView: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 4.5) {
                 Circle()
                     .fill(entry.snapshot.workbuddyIsOnline ? Color.purple : Color.secondary)
@@ -245,7 +250,7 @@ struct AICCWidgetView: View {
     // MARK: - Medium Right Bottom Component (DeepSeek View)
 
     private var deepseekView: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 4.5) {
                 Circle()
                     .fill(entry.snapshot.deepseekIsOnline ? Color.cyan : Color.secondary)
