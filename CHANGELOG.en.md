@@ -4,6 +4,14 @@
 
 This file summarizes the current and recent public releases. The Chinese changelog contains the older detailed history.
 
+## 2.7.1 - 2026-08-29
+
+- **macOS Widget redesign**: Redesigned the Medium Widget into a balanced horizontal split layout. Codex weekly quota serves as the primary metric with centered large typography, real progress, reset time, and 5-hour quota; WorkBuddy points and DeepSeek balance are cleanly displayed on the right.
+- **Widget presentation simplification**: Removed redundant header title, footer timestamps, and extra status text from the Medium Widget; preserved stable placeholders on error without leaking diagnostic details to the desktop, and kept the unobtrusive top-right refresh control.
+- **Widget compatibility**: Preserved manual refresh, 15-minute timeline, last-success cache, and stale fallback; backward-compatible with 2.7.0 widget snapshot cache format.
+- **macOS runtime consolidation**: Consolidated the production runtime around the DMG App, SMAppService, ServerManager, and the bundled Python server; retired legacy LaunchAgent production paths while preserving safe one-time migration.
+- **Version**: AICC 2.7.1, macOS Build 10. Android/Poke4S remains on its independent `1.2.5-pencil-home` (versionCode 11) release.
+
 ## 2.7.0 - 2026-08-28 (Release Candidate)
 
 - Added native macOS WidgetKit Small and Medium widgets; Small shows Codex/WorkBuddy and Medium shows Codex, WorkBuddy, DeepSeek, and System.
