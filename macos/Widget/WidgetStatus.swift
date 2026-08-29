@@ -103,6 +103,38 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
     let fetchedAt: Date
     let stale: Bool
 
+    // Helper presentation accessors
+    var codexTitle: String {
+        if codexWeeklyRemaining != nil {
+            return "Codex 每周额度"
+        } else if codexFiveHourRemaining != nil {
+            return "Codex 5小时额度"
+        } else {
+            return "Codex 额度"
+        }
+    }
+
+    var codexSecondaryFiveHourRemaining: Double? {
+        // Only show secondary 5h when weekly is present as the primary metric
+        if codexWeeklyRemaining != nil {
+            return codexFiveHourRemaining
+        }
+        return nil
+    }
+
+    var codexResetShortText: String? {
+        guard let text = codexResetText else { return nil }
+        let prefix = text.hasPrefix("重置于 ") ? "重置于 " : (text.hasPrefix("重置于") ? "重置于" : "")
+        let datePart = prefix.isEmpty ? text : String(text.dropFirst(prefix.count))
+
+        if let match = datePart.range(of: #"^\d{4}-(\d{2}-\d{2} \d{2}:\d{2})"#, options: .regularExpression) {
+            let sub = String(datePart[match])
+            let shortDate = String(sub.dropFirst(5)) // drops "YYYY-"
+            return "重置于 \(shortDate)"
+        }
+        return text
+    }
+
     // Legacy accessors for backward compatibility
     var codex: String {
         guard codexWeeklyNumber != "—" else { return "—" }
@@ -116,10 +148,6 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
     var deepseek: String {
         guard deepseekBalanceText != "—" else { return "—" }
         return deepseekCurrency.isEmpty ? deepseekBalanceText : "\(deepseekBalanceText) \(deepseekCurrency)"
-    }
-
-    var system: String {
-        deepseekIsOnline ? "Online" : "—"
     }
 
     static let placeholder = WidgetDisplaySnapshot(
@@ -140,6 +168,31 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         fetchedAt: .now,
         stale: true
     )
+
+    private enum CodingKeys: String, CodingKey {
+        case codexWeeklyNumber
+        case codexWeeklyRemaining
+        case codexFiveHourRemaining
+        case codexWeeklyReset
+        case codexResetText
+        case codexWeeklyProgress
+        case workbuddyPoints
+        case workbuddyPointsText
+        case workbuddySubtitle
+        case workbuddyIsOnline
+        case deepseekBalanceText
+        case deepseekCurrency
+        case deepseekStatusText
+        case deepseekIsOnline
+        case fetchedAt
+        case stale
+
+        // Legacy 2.7.0 keys
+        case codex
+        case workbuddy
+        case deepseek
+        case system
+    }
 
     init(
         codexWeeklyNumber: String,
@@ -177,6 +230,91 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         self.stale = stale
     }
 
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        if let num = try? container.decodeIfPresent(String.self, forKey: .codexWeeklyNumber) {
+            self.codexWeeklyNumber = num
+            self.codexWeeklyRemaining = try? container.decodeIfPresent(Double.self, forKey: .codexWeeklyRemaining)
+            self.codexFiveHourRemaining = try? container.decodeIfPresent(Double.self, forKey: .codexFiveHourRemaining)
+            self.codexWeeklyReset = try? container.decodeIfPresent(String.self, forKey: .codexWeeklyReset)
+            self.codexResetText = try? container.decodeIfPresent(String.self, forKey: .codexResetText)
+            self.codexWeeklyProgress = (try? container.decodeIfPresent(Double.self, forKey: .codexWeeklyProgress)) ?? 0.0
+            self.workbuddyPoints = try? container.decodeIfPresent(Double.self, forKey: .workbuddyPoints)
+            self.workbuddyPointsText = (try? container.decodeIfPresent(String.self, forKey: .workbuddyPointsText)) ?? "—"
+            self.workbuddySubtitle = (try? container.decodeIfPresent(String.self, forKey: .workbuddySubtitle)) ?? "未连接"
+            self.workbuddyIsOnline = (try? container.decodeIfPresent(Bool.self, forKey: .workbuddyIsOnline)) ?? false
+            self.deepseekBalanceText = (try? container.decodeIfPresent(String.self, forKey: .deepseekBalanceText)) ?? "—"
+            self.deepseekCurrency = (try? container.decodeIfPresent(String.self, forKey: .deepseekCurrency)) ?? "CNY"
+            self.deepseekStatusText = (try? container.decodeIfPresent(String.self, forKey: .deepseekStatusText)) ?? "—"
+            self.deepseekIsOnline = (try? container.decodeIfPresent(Bool.self, forKey: .deepseekIsOnline)) ?? false
+            self.fetchedAt = (try? container.decodeIfPresent(Date.self, forKey: .fetchedAt)) ?? .now
+            self.stale = (try? container.decodeIfPresent(Bool.self, forKey: .stale)) ?? true
+            return
+        }
+
+        // Fallback for legacy 2.7.0 cache format
+        let legacyCodex = (try? container.decodeIfPresent(String.self, forKey: .codex)) ?? "—"
+        let legacyWorkbuddy = (try? container.decodeIfPresent(String.self, forKey: .workbuddy)) ?? "—"
+        let legacyDeepseek = (try? container.decodeIfPresent(String.self, forKey: .deepseek)) ?? "—"
+        self.fetchedAt = (try? container.decodeIfPresent(Date.self, forKey: .fetchedAt)) ?? .now
+        self.stale = (try? container.decodeIfPresent(Bool.self, forKey: .stale)) ?? true
+
+        let numStr = legacyCodex.replacingOccurrences(of: "%", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if let val = Double(numStr), val.isFinite {
+            self.codexWeeklyNumber = String(format: "%.0f", val)
+            self.codexWeeklyRemaining = val
+            self.codexWeeklyProgress = min(max(val / 100.0, 0.0), 1.0)
+        } else {
+            self.codexWeeklyNumber = "—"
+            self.codexWeeklyRemaining = nil
+            self.codexWeeklyProgress = 0.0
+        }
+        self.codexFiveHourRemaining = nil
+        self.codexWeeklyReset = nil
+        self.codexResetText = nil
+
+        self.workbuddyPointsText = legacyWorkbuddy
+        let cleanedPoints = legacyWorkbuddy.replacingOccurrences(of: ",", with: "")
+        self.workbuddyPoints = Double(cleanedPoints)
+        self.workbuddySubtitle = (legacyWorkbuddy == "—" ? "未连接" : "已连接")
+        self.workbuddyIsOnline = (legacyWorkbuddy != "—")
+
+        let dsParts = legacyDeepseek.split(separator: " ")
+        if dsParts.count >= 2 {
+            self.deepseekBalanceText = String(dsParts[0])
+            self.deepseekCurrency = String(dsParts[1])
+        } else if dsParts.count == 1 {
+            self.deepseekBalanceText = String(dsParts[0])
+            self.deepseekCurrency = "CNY"
+        } else {
+            self.deepseekBalanceText = "—"
+            self.deepseekCurrency = "CNY"
+        }
+        self.deepseekStatusText = (legacyDeepseek == "—" ? "—" : "在线")
+        self.deepseekIsOnline = (legacyDeepseek != "—")
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(codexWeeklyNumber, forKey: .codexWeeklyNumber)
+        try container.encodeIfPresent(codexWeeklyRemaining, forKey: .codexWeeklyRemaining)
+        try container.encodeIfPresent(codexFiveHourRemaining, forKey: .codexFiveHourRemaining)
+        try container.encodeIfPresent(codexWeeklyReset, forKey: .codexWeeklyReset)
+        try container.encodeIfPresent(codexResetText, forKey: .codexResetText)
+        try container.encode(codexWeeklyProgress, forKey: .codexWeeklyProgress)
+        try container.encodeIfPresent(workbuddyPoints, forKey: .workbuddyPoints)
+        try container.encode(workbuddyPointsText, forKey: .workbuddyPointsText)
+        try container.encode(workbuddySubtitle, forKey: .workbuddySubtitle)
+        try container.encode(workbuddyIsOnline, forKey: .workbuddyIsOnline)
+        try container.encode(deepseekBalanceText, forKey: .deepseekBalanceText)
+        try container.encode(deepseekCurrency, forKey: .deepseekCurrency)
+        try container.encode(deepseekStatusText, forKey: .deepseekStatusText)
+        try container.encode(deepseekIsOnline, forKey: .deepseekIsOnline)
+        try container.encode(fetchedAt, forKey: .fetchedAt)
+        try container.encode(stale, forKey: .stale)
+    }
+
     init(payload: WidgetStatusPayload, fetchedAt: Date) {
         // 1. Codex Weekly & 5-hour
         let weeklyRem = payload.codex?.weekly?.remaining
@@ -207,7 +345,7 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
 
         self.init(
             codexWeeklyNumber: weeklyNum,
-            codexWeeklyRemaining: weeklyRem ?? (payload.codex?.weekly == nil ? fiveHourRem : nil),
+            codexWeeklyRemaining: weeklyRem,
             codexFiveHourRemaining: fiveHourRem,
             codexWeeklyReset: rawReset,
             codexResetText: resetText,

@@ -36,11 +36,14 @@ struct WidgetStatusSmokeMain {
         let snapshot = WidgetDisplaySnapshot(payload: fullPayload, fetchedAt: fetchedAt)
 
         // MARK: - 1. Codex Tests
+        try require(snapshot.codexTitle == "Codex 每周额度", "Codex title when weekly is present: \(snapshot.codexTitle)")
         try require(snapshot.codexWeeklyNumber == "83", "Codex weekly number: \(snapshot.codexWeeklyNumber)")
         try require(snapshot.codex == "83%", "Codex weekly string formatted with %: \(snapshot.codex)")
         try require(abs(snapshot.codexWeeklyProgress - 0.83) < 0.001, "Codex weekly progress is 0.83: \(snapshot.codexWeeklyProgress)")
         try require(snapshot.codexFiveHourRemaining == 87, "Codex five-hour remaining: \(String(describing: snapshot.codexFiveHourRemaining))")
+        try require(snapshot.codexSecondaryFiveHourRemaining == 87, "Secondary five-hour remaining when weekly is present")
         try require(snapshot.codexResetText == "重置于 2026-09-04 08:01", "Codex reset text: \(String(describing: snapshot.codexResetText))")
+        try require(snapshot.codexResetShortText == "重置于 09-04 08:01", "Codex shortened reset text: \(String(describing: snapshot.codexResetShortText))")
 
         // Reset parsing variants
         let alreadyPrefixed = WidgetDisplaySnapshot(
@@ -48,12 +51,14 @@ struct WidgetStatusSmokeMain {
             fetchedAt: fetchedAt
         )
         try require(alreadyPrefixed.codexResetText == "重置于 2026-09-04 08:01", "Does not duplicate 重置于 prefix")
+        try require(alreadyPrefixed.codexResetShortText == "重置于 09-04 08:01", "Shortens already-prefixed reset date")
 
         let invalidReset = WidgetDisplaySnapshot(
             payload: try decode(#"{"codex": {"weekly": {"remaining": 50, "reset": "--"}}}"#),
             fetchedAt: fetchedAt
         )
         try require(invalidReset.codexResetText == nil, "Invalid reset string '--' returns nil")
+        try require(invalidReset.codexResetShortText == nil, "Invalid reset string short returns nil")
 
         let emptyReset = WidgetDisplaySnapshot(
             payload: try decode(#"{"codex": {"weekly": {"remaining": 50, "reset": "   "}}}"#),
@@ -66,15 +71,19 @@ struct WidgetStatusSmokeMain {
             payload: try decode(#"{"codex": {"five_hour": {"remaining": 88, "reset": "14:00"}}}"#),
             fetchedAt: fetchedAt
         )
+        try require(fiveHourOnly.codexTitle == "Codex 5小时额度", "Codex title when only five_hour is present: \(fiveHourOnly.codexTitle)")
         try require(fiveHourOnly.codexWeeklyNumber == "88", "Codex falls back to five_hour number")
         try require(fiveHourOnly.codex == "88%", "Codex falls back to five_hour string")
         try require(fiveHourOnly.codexResetText == "重置于 14:00", "Codex falls back to five_hour reset")
+        try require(fiveHourOnly.codexResetShortText == "重置于 14:00", "Preserves time-only reset string")
+        try require(fiveHourOnly.codexSecondaryFiveHourRemaining == nil, "Does not duplicate five_hour as secondary when it is primary")
 
         // Nil codex
         let missingCodex = WidgetDisplaySnapshot(
             payload: try decode(#"{"workbuddy": {"points": 10}}"#),
             fetchedAt: fetchedAt
         )
+        try require(missingCodex.codexTitle == "Codex 额度", "Codex title when no codex data: \(missingCodex.codexTitle)")
         try require(missingCodex.codexWeeklyNumber == "—", "Missing codex number is —")
         try require(missingCodex.codex == "—", "Missing codex is —")
         try require(missingCodex.codexWeeklyProgress == 0.0, "Missing codex progress is 0")
@@ -160,7 +169,26 @@ struct WidgetStatusSmokeMain {
         try require(refStale.stale, "Cached snapshot is stale")
         try require(refStale.formattedFooterTime(at: refMinutes) == "2 分钟前更新 · 已缓存", "Footer stale label appended")
 
-        // MARK: - 5. Store & Cache Tests
+        // MARK: - 5. Backward Compatibility (Legacy 2.7.0 Cache Decode)
+        let legacyCacheJSON = """
+        {
+          "codex": "83%",
+          "workbuddy": "5,760",
+          "deepseek": "58.70 CNY",
+          "system": "Online",
+          "fetchedAt": 1000,
+          "stale": false
+        }
+        """
+        let legacyDecoded = try JSONDecoder().decode(WidgetDisplaySnapshot.self, from: Data(legacyCacheJSON.utf8))
+        try require(legacyDecoded.codexWeeklyNumber == "83", "Legacy 2.7.0 codex decoded number: \(legacyDecoded.codexWeeklyNumber)")
+        try require(legacyDecoded.codex == "83%", "Legacy 2.7.0 codex accessor")
+        try require(abs(legacyDecoded.codexWeeklyProgress - 0.83) < 0.001, "Legacy 2.7.0 codex progress")
+        try require(legacyDecoded.workbuddyPointsText == "5,760", "Legacy 2.7.0 workbuddy points text")
+        try require(legacyDecoded.deepseekBalanceText == "58.70", "Legacy 2.7.0 deepseek balance")
+        try require(legacyDecoded.deepseekCurrency == "CNY", "Legacy 2.7.0 deepseek currency")
+
+        // MARK: - 6. Store & Cache Tests
         let previous = WidgetStatusStore.load()
         defer {
             if let previous {

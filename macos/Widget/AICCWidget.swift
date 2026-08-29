@@ -55,19 +55,29 @@ struct AICCWidgetView: View {
         .containerBackground(.fill.tertiary, for: .widget)
     }
 
-    // MARK: - Medium Widget
+    // MARK: - Medium Widget (Left-Right Split)
 
     private var mediumContent: some View {
-        VStack(alignment: .leading, spacing: 3.5) {
+        VStack(alignment: .leading, spacing: 4) {
             header
 
-            codexMainCard
+            GeometryReader { geo in
+                let gap: CGFloat = 6
+                let leftWidth = (geo.size.width - gap) * 0.58
+                let rightWidth = (geo.size.width - gap) * 0.42
 
-            HStack(spacing: 6) {
-                workbuddyCard
-                deepseekCard
+                HStack(alignment: .top, spacing: gap) {
+                    codexMainCard
+                        .frame(width: leftWidth, height: geo.size.height)
+
+                    VStack(spacing: gap) {
+                        workbuddyCard
+                        deepseekCard
+                    }
+                    .frame(width: rightWidth, height: geo.size.height)
+                }
             }
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             footer
         }
@@ -111,28 +121,31 @@ struct AICCWidgetView: View {
         }
     }
 
-    // MARK: - Medium Components
+    // MARK: - Medium Left Component (Codex Main Card)
 
     private var codexMainCard: some View {
-        VStack(alignment: .leading, spacing: 2.5) {
-            Text("Codex 每周额度")
+        VStack(alignment: .leading, spacing: 2) {
+            Text(entry.snapshot.codexTitle)
                 .font(.system(size: 9.5, weight: .medium))
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
 
             HStack(alignment: .lastTextBaseline, spacing: 1.5) {
                 Text(entry.snapshot.codexWeeklyNumber)
-                    .font(.system(size: 25, weight: .bold, design: .rounded).monospacedDigit())
+                    .font(.system(size: 28, weight: .bold, design: .rounded).monospacedDigit())
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
 
                 if entry.snapshot.codexWeeklyNumber != "—" {
                     Text("%")
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .font(.system(size: 14, weight: .semibold, design: .rounded))
                         .foregroundStyle(.primary)
                 }
 
-                Spacer(minLength: 8)
+                Spacer(minLength: 0)
             }
 
             GeometryReader { geo in
@@ -157,35 +170,59 @@ struct AICCWidgetView: View {
             }
             .frame(height: 4.5)
 
-            HStack(alignment: .center) {
-                if let resetText = entry.snapshot.codexResetText {
-                    HStack(spacing: 2.5) {
-                        Image(systemName: "clock")
-                            .font(.system(size: 8))
+            Spacer(minLength: 2)
+
+            ViewThatFits(in: .horizontal) {
+                // Try single line if space permits
+                HStack(alignment: .center, spacing: 4) {
+                    if let resetText = entry.snapshot.codexResetShortText {
                         Text(resetText)
                             .font(.system(size: 8.5))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+
+                    Spacer(minLength: 2)
+
+                    if let fiveRem = entry.snapshot.codexSecondaryFiveHourRemaining {
+                        HStack(spacing: 2) {
+                            Text("5小时")
+                                .font(.system(size: 8.5))
+                                .foregroundStyle(.secondary)
+                            Text(String(format: " %.0f%%", fiveRem))
+                                .font(.system(size: 8.5, weight: .semibold))
+                                .foregroundStyle(.green)
+                        }
+                        .lineLimit(1)
+                    }
                 }
 
-                Spacer(minLength: 4)
-
-                if let fiveRem = entry.snapshot.codexFiveHourRemaining {
-                    HStack(spacing: 2) {
-                        Text("5 小时")
+                // Otherwise stack vertically
+                VStack(alignment: .leading, spacing: 1.5) {
+                    if let resetText = entry.snapshot.codexResetShortText {
+                        Text(resetText)
                             .font(.system(size: 8.5))
                             .foregroundStyle(.secondary)
-                        Text(String(format: " %.0f%%", fiveRem))
-                            .font(.system(size: 8.5, weight: .semibold))
-                            .foregroundStyle(.green)
+                            .lineLimit(1)
                     }
-                    .lineLimit(1)
+
+                    if let fiveRem = entry.snapshot.codexSecondaryFiveHourRemaining {
+                        HStack(spacing: 2) {
+                            Text("5小时")
+                                .font(.system(size: 8.5))
+                                .foregroundStyle(.secondary)
+                            Text(String(format: " %.0f%%", fiveRem))
+                                .font(.system(size: 8.5, weight: .semibold))
+                                .foregroundStyle(.green)
+                        }
+                        .lineLimit(1)
+                    }
                 }
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 8)
                 .fill(Color.primary.opacity(0.04))
@@ -206,6 +243,8 @@ struct AICCWidgetView: View {
         )
     }
 
+    // MARK: - Medium Right Top Component (WorkBuddy Card)
+
     private var workbuddyCard: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 3.5) {
@@ -217,6 +256,8 @@ struct AICCWidgetView: View {
                     .foregroundStyle(Color.purple)
                 Spacer(minLength: 0)
             }
+
+            Spacer(minLength: 0)
 
             HStack(alignment: .lastTextBaseline, spacing: 2) {
                 Text(entry.snapshot.workbuddyPointsText)
@@ -232,19 +273,16 @@ struct AICCWidgetView: View {
                 }
             }
 
-            HStack(spacing: 2.5) {
-                Image(systemName: "link")
-                    .font(.system(size: 8))
-                    .foregroundStyle(entry.snapshot.workbuddyIsOnline ? Color.purple : Color.secondary)
-                Text(entry.snapshot.workbuddySubtitle)
-                    .font(.system(size: 8.5))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
+            Spacer(minLength: 0)
+
+            Text(entry.snapshot.workbuddySubtitle)
+                .font(.system(size: 8.5))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 4)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 7)
                 .fill(Color.primary.opacity(0.04))
@@ -259,6 +297,8 @@ struct AICCWidgetView: View {
         )
     }
 
+    // MARK: - Medium Right Bottom Component (DeepSeek Card)
+
     private var deepseekCard: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 3.5) {
@@ -270,6 +310,8 @@ struct AICCWidgetView: View {
                     .foregroundStyle(Color.cyan)
                 Spacer(minLength: 0)
             }
+
+            Spacer(minLength: 0)
 
             HStack(alignment: .lastTextBaseline, spacing: 2) {
                 Text(entry.snapshot.deepseekBalanceText)
@@ -285,19 +327,16 @@ struct AICCWidgetView: View {
                 }
             }
 
-            HStack(spacing: 2.5) {
-                Image(systemName: "link")
-                    .font(.system(size: 8))
-                    .foregroundStyle(entry.snapshot.deepseekIsOnline ? Color.cyan : Color.secondary)
-                Text(entry.snapshot.deepseekStatusText)
-                    .font(.system(size: 8.5))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
+            Spacer(minLength: 0)
+
+            Text(entry.snapshot.deepseekStatusText)
+                .font(.system(size: 8.5))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 4)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 7)
                 .fill(Color.primary.opacity(0.04))
@@ -312,22 +351,20 @@ struct AICCWidgetView: View {
         )
     }
 
+    // MARK: - Footer
+
     private var footer: some View {
-        HStack(spacing: 2.5) {
-            Image(systemName: "clock")
-                .font(.system(size: 8))
-            Text(entry.snapshot.formattedFooterTime(at: entry.date))
-                .font(.system(size: 8.5))
-        }
-        .foregroundStyle(.secondary)
-        .lineLimit(1)
+        Text(entry.snapshot.formattedFooterTime(at: entry.date))
+            .font(.system(size: 8.5))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
     }
 
     // MARK: - Small Components
 
     private var smallCodexCard: some View {
         VStack(alignment: .leading, spacing: 2.5) {
-            Text("Codex 每周额度")
+            Text(entry.snapshot.codexTitle)
                 .font(.system(size: 9.5, weight: .medium))
                 .foregroundStyle(.secondary)
 
