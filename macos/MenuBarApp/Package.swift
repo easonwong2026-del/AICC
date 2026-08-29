@@ -19,7 +19,6 @@ let package = Package(
             exclude: [
                 "AICCApp.swift",
                 "Helpers",
-                "Models/SettingsData.swift",
                 "Services/CacheManager.swift",
                 "Services/LaunchAtLoginService.swift",
                 "Services/OpenCodexController.swift",
@@ -31,6 +30,7 @@ let package = Package(
             sources: [
                 "Models/StatusData.swift",
                 "Models/DashboardTypography.swift",
+                "Models/SettingsData.swift",
                 "Models/SettingsPresentationModel.swift",
                 "Models/StatusItemMenuModel.swift",
                 "Models/UpdateModels.swift",
@@ -45,8 +45,9 @@ let package = Package(
             name: "AICCCoreTests",
             dependencies: ["AICCCore"],
             path: "Tests",
-            exclude: ["CoreSmokeMain.swift", "Fixtures"],
+            exclude: ["Fixtures"],
             sources: [
+                "AppSettingsTests.swift",
                 "OCXStatusTests.swift",
                 "OCXCommandBuilderTests.swift",
                 "OCXOperationPolicyTests.swift",

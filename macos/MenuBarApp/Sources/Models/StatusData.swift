@@ -167,7 +167,7 @@ enum OCXUpdateState: Equatable {
             return .failed("Unable to check for updates")
         }
         let normalizedLatest = latestVersion.description
-        return VersionComparator.isNewer(normalizedLatest, than: currentVersion.description)
+        return latestVersion > currentVersion
             ? .available(normalizedLatest)
             : .upToDate
     }

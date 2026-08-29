@@ -35,18 +35,6 @@ struct AppVersionInfo: Equatable {
     }
 }
 
-struct AppVersionProvider {
-    private let bundle: Bundle
-
-    init(bundle: Bundle = .main) {
-        self.bundle = bundle
-    }
-
-    var current: AppVersionInfo {
-        AppVersionInfo(bundle: bundle)
-    }
-}
-
 struct SemanticVersion: Comparable, Codable, CustomStringConvertible, Equatable, Hashable {
     private enum PrereleaseIdentifier: Equatable, Hashable {
         case numeric(String)
@@ -209,22 +197,6 @@ struct SemanticVersion: Comparable, Codable, CustomStringConvertible, Equatable,
             if lhsValue == rhsValue { return .orderedSame }
             return lhsValue < rhsValue ? .orderedAscending : .orderedDescending
         }
-    }
-}
-
-enum VersionComparator {
-    static func compare(_ lhs: SemanticVersion, _ rhs: SemanticVersion) -> ComparisonResult {
-        if lhs == rhs { return .orderedSame }
-        return lhs < rhs ? .orderedAscending : .orderedDescending
-    }
-
-    static func compare(_ lhs: String, _ rhs: String) -> ComparisonResult? {
-        guard let lhs = SemanticVersion(lhs), let rhs = SemanticVersion(rhs) else { return nil }
-        return compare(lhs, rhs)
-    }
-
-    static func isNewer(_ candidate: String, than current: String) -> Bool {
-        compare(candidate, current) == .orderedDescending
     }
 }
 

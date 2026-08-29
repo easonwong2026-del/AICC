@@ -62,20 +62,23 @@ final class UpdateServiceTests: XCTestCase {
         XCTAssertLessThan(SemanticVersion("2.5.0")!, SemanticVersion("2.5.1")!)
         XCTAssertLessThan(SemanticVersion("2.5.9")!, SemanticVersion("2.5.10")!)
         XCTAssertEqual(SemanticVersion("2.5.0")!, SemanticVersion("v2.5.0")!)
+        XCTAssertEqual(SemanticVersion("V2.5.0")!, SemanticVersion("2.5.0")!)
         XCTAssertGreaterThan(SemanticVersion("2.6.0")!, SemanticVersion("2.5.10")!)
         XCTAssertLessThan(SemanticVersion("2.5.1-beta")!, SemanticVersion("2.5.1")!)
+        XCTAssertLessThan(SemanticVersion("2.5.1-alpha.9")!, SemanticVersion("2.5.1-alpha.10")!)
+        XCTAssertLessThan(SemanticVersion("2.5.1-alpha")!, SemanticVersion("2.5.1-beta")!)
         XCTAssertEqual(SemanticVersion("2.5.0+build-1")!, SemanticVersion("2.5.0+build-2")!)
         XCTAssertNil(SemanticVersion("2.5"))
         XCTAssertNil(SemanticVersion("not-a-version"))
         XCTAssertNil(SemanticVersion("2.05.0"))
     }
 
-    func testVersionComparatorRejectsInvalidInput() {
-        XCTAssertEqual(VersionComparator.compare("2.5.0", "v2.5.0"), .orderedSame)
-        XCTAssertEqual(VersionComparator.compare("2.5.10", "2.5.9"), .orderedDescending)
-        XCTAssertNil(VersionComparator.compare("invalid", "2.5.0"))
-        XCTAssertTrue(VersionComparator.isNewer("2.5.1", than: "2.5.0"))
-        XCTAssertFalse(VersionComparator.isNewer("invalid", than: "2.5.0"))
+    func testSemanticVersionComparisonRejectsInvalidInput() {
+        XCTAssertEqual(SemanticVersion("2.5.0"), SemanticVersion("v2.5.0"))
+        XCTAssertGreaterThan(SemanticVersion("2.5.10")!, SemanticVersion("2.5.9")!)
+        XCTAssertNil(SemanticVersion("invalid"))
+        XCTAssertTrue(SemanticVersion("2.5.1")! > SemanticVersion("2.5.0")!)
+        XCTAssertFalse(SemanticVersion("invalid").map { $0 > SemanticVersion("2.5.0")! } ?? false)
     }
 
     func testUpdateCheckStateCasesRemainEquatable() {

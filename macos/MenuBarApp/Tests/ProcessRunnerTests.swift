@@ -5,6 +5,16 @@ import XCTest
 final class ProcessRunnerTests: XCTestCase {
     private let runner = ProcessRunner()
 
+    func testCapturesStdoutAndStderrText() async throws {
+        let result = try await runner.run(
+            executable: "/bin/sh",
+            arguments: ["-c", "printf stdout; printf stderr 1>&2"],
+            timeout: 2
+        )
+        XCTAssertEqual(result.stdout, "stdout")
+        XCTAssertEqual(result.stderr, "stderr")
+    }
+
     func testConcurrentStdoutAndStderrDrain() async throws {
         let result = try await runner.run(
             executable: "/bin/sh",

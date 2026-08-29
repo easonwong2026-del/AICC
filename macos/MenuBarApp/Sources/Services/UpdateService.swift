@@ -50,7 +50,7 @@ final class UpdateService: ObservableObject {
     private let sessionDelegate: HTTPSOnlyRedirectDelegate?
 
     init(
-        currentVersion: AppVersionInfo = AppVersionProvider().current,
+        currentVersion: AppVersionInfo = AppVersionInfo(bundle: .main),
         manifestURL: URL? = UpdateManifestConfiguration.manifestURL(),
         releasePageURL: URL = UpdateManifestConfiguration.releasePageURL(),
         session: UpdateURLSession? = nil,
