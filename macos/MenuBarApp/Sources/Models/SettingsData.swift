@@ -2,9 +2,6 @@ import Foundation
 import SwiftUI
 
 class AppSettings: ObservableObject {
-    @Published var launchAtLogin: Bool {
-        didSet { UserDefaults.standard.set(launchAtLogin, forKey: "launchAtLogin") }
-    }
     @Published var autoRefreshInterval: Double {
         didSet { UserDefaults.standard.set(autoRefreshInterval, forKey: "autoRefreshInterval") }
     }
@@ -88,7 +85,6 @@ class AppSettings: ObservableObject {
             defaults.set(120.0, forKey: "autoRefreshInterval")
         }
         themeMode = defaults.string(forKey: "themeMode") ?? "system"
-        launchAtLogin = defaults.object(forKey: "launchAtLogin") as? Bool ?? false
         menuBarShowCodexStatus = defaults.object(forKey: "menuBarShowCodexStatus") as? Bool ?? true
         menuBarShowCodexBalance = defaults.object(forKey: "menuBarShowCodexBalance") as? Bool ?? true
         menuBarShowWorkBuddy = defaults.object(forKey: "menuBarShowWorkBuddy") as? Bool ?? true

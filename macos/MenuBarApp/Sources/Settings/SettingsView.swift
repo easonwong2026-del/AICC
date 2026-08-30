@@ -25,7 +25,6 @@ struct SettingsView: View {
         .frame(width: 640, height: 480)
         .onAppear {
             loginAtLaunch.refresh()
-            settings.launchAtLogin = loginAtLaunch.isEnabled
         }
     }
 }
@@ -43,7 +42,6 @@ private struct GeneralSettingsView: View {
                 Toggle("Launch AICC at login", isOn: Binding(
                     get: { loginAtLaunch.isEnabled },
                     set: { enabled in
-                        settings.launchAtLogin = enabled
                         loginAtLaunch.setEnabled(enabled)
                     }
                 ))
@@ -214,7 +212,7 @@ private struct AIProvidersSettingsView: View {
                     )
                     DataSourceRow(
                         name: "System",
-                        status: systemStatus,
+                        status: systemProviderStatus,
                         lastUpdate: updateText(api.status?.collection?.system),
                         action: refresh
                     )
@@ -254,7 +252,7 @@ private struct AIProvidersSettingsView: View {
         settings.localized(api.status?.deepseek?.status ?? "Unavailable")
     }
 
-    private var systemStatus: String {
+    private var systemProviderStatus: String {
         settings.localized(api.status?.system?.status ?? "Unavailable")
     }
 
