@@ -99,7 +99,7 @@ final class APIServiceTests: XCTestCase {
 
     func testWidgetDisplaySignatureTracksVisibleValues() throws {
         let initial = WidgetDisplaySignature(
-            codexPrimaryRemaining: 83,
+            codexWeeklyRemaining: 85,
             codexFiveHourRemaining: 85,
             codexReset: "2026-09-04 08:01",
             workbuddyPoints: 5760,
@@ -108,7 +108,7 @@ final class APIServiceTests: XCTestCase {
             deepseekIsOnline: true
         )
         let same = WidgetDisplaySignature(
-            codexPrimaryRemaining: 83,
+            codexWeeklyRemaining: 85,
             codexFiveHourRemaining: 85,
             codexReset: "2026-09-04 08:01",
             workbuddyPoints: 5760,
@@ -120,39 +120,71 @@ final class APIServiceTests: XCTestCase {
         XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(previous: nil, current: initial, force: false))
         XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(previous: initial, current: same, force: true))
         XCTAssertFalse(WidgetDisplaySignature.shouldReloadWidget(previous: initial, current: same, force: false))
+        let fiveHourOnly = WidgetDisplaySignature(
+            codexWeeklyRemaining: nil,
+            codexFiveHourRemaining: 85,
+            codexReset: "2026-09-04 08:01",
+            workbuddyPoints: 5760,
+            deepseekBalance: "58.70",
+            deepseekCurrency: "CNY",
+            deepseekIsOnline: true
+        )
         XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
             previous: initial,
-            current: WidgetDisplaySignature(codexPrimaryRemaining: 82, codexFiveHourRemaining: 85, codexReset: "2026-09-04 08:01", workbuddyPoints: 5760, deepseekBalance: "58.70", deepseekCurrency: "CNY", deepseekIsOnline: true),
+            current: fiveHourOnly,
+            force: false
+        ))
+        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
+            previous: fiveHourOnly,
+            current: initial,
+            force: false
+        ))
+        XCTAssertFalse(WidgetDisplaySignature.shouldReloadWidget(
+            previous: fiveHourOnly,
+            current: WidgetDisplaySignature(
+                codexWeeklyRemaining: nil,
+                codexFiveHourRemaining: 85,
+                codexReset: "2026-09-04 08:01",
+                workbuddyPoints: 5760,
+                deepseekBalance: "58.70",
+                deepseekCurrency: "CNY",
+                deepseekIsOnline: true
+            ),
             force: false
         ))
         XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
             previous: initial,
-            current: WidgetDisplaySignature(codexPrimaryRemaining: 83, codexFiveHourRemaining: 80, codexReset: "2026-09-04 08:01", workbuddyPoints: 5760, deepseekBalance: "58.70", deepseekCurrency: "CNY", deepseekIsOnline: true),
+            current: WidgetDisplaySignature(codexWeeklyRemaining: 82, codexFiveHourRemaining: 85, codexReset: "2026-09-04 08:01", workbuddyPoints: 5760, deepseekBalance: "58.70", deepseekCurrency: "CNY", deepseekIsOnline: true),
             force: false
         ))
         XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
             previous: initial,
-            current: WidgetDisplaySignature(codexPrimaryRemaining: 83, codexFiveHourRemaining: 85, codexReset: "2026-09-05 08:01", workbuddyPoints: 5760, deepseekBalance: "58.70", deepseekCurrency: "CNY", deepseekIsOnline: true),
+            current: WidgetDisplaySignature(codexWeeklyRemaining: 85, codexFiveHourRemaining: 80, codexReset: "2026-09-04 08:01", workbuddyPoints: 5760, deepseekBalance: "58.70", deepseekCurrency: "CNY", deepseekIsOnline: true),
             force: false
         ))
         XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
             previous: initial,
-            current: WidgetDisplaySignature(codexPrimaryRemaining: 83, codexFiveHourRemaining: 85, codexReset: "2026-09-04 08:01", workbuddyPoints: 5759, deepseekBalance: "58.70", deepseekCurrency: "CNY", deepseekIsOnline: true),
+            current: WidgetDisplaySignature(codexWeeklyRemaining: 85, codexFiveHourRemaining: 85, codexReset: "2026-09-05 08:01", workbuddyPoints: 5760, deepseekBalance: "58.70", deepseekCurrency: "CNY", deepseekIsOnline: true),
             force: false
         ))
         XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
             previous: initial,
-            current: WidgetDisplaySignature(codexPrimaryRemaining: 83, codexFiveHourRemaining: 85, codexReset: "2026-09-04 08:01", workbuddyPoints: 5760, deepseekBalance: "58.71", deepseekCurrency: "CNY", deepseekIsOnline: true),
+            current: WidgetDisplaySignature(codexWeeklyRemaining: 85, codexFiveHourRemaining: 85, codexReset: "2026-09-04 08:01", workbuddyPoints: 5759, deepseekBalance: "58.70", deepseekCurrency: "CNY", deepseekIsOnline: true),
             force: false
         ))
         XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
             previous: initial,
-            current: WidgetDisplaySignature(codexPrimaryRemaining: 83, codexFiveHourRemaining: 85, codexReset: "2026-09-04 08:01", workbuddyPoints: 5760, deepseekBalance: "58.70", deepseekCurrency: "USD", deepseekIsOnline: true),
+            current: WidgetDisplaySignature(codexWeeklyRemaining: 85, codexFiveHourRemaining: 85, codexReset: "2026-09-04 08:01", workbuddyPoints: 5760, deepseekBalance: "58.71", deepseekCurrency: "CNY", deepseekIsOnline: true),
             force: false
         ))
         XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
             previous: initial,
-            current: WidgetDisplaySignature(codexPrimaryRemaining: 83, codexFiveHourRemaining: 85, codexReset: "2026-09-04 08:01", workbuddyPoints: 5760, deepseekBalance: "58.70", deepseekCurrency: "CNY", deepseekIsOnline: false),
+            current: WidgetDisplaySignature(codexWeeklyRemaining: 85, codexFiveHourRemaining: 85, codexReset: "2026-09-04 08:01", workbuddyPoints: 5760, deepseekBalance: "58.70", deepseekCurrency: "USD", deepseekIsOnline: true),
+            force: false
+        ))
+        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
+            previous: initial,
+            current: WidgetDisplaySignature(codexWeeklyRemaining: 85, codexFiveHourRemaining: 85, codexReset: "2026-09-04 08:01", workbuddyPoints: 5760, deepseekBalance: "58.70", deepseekCurrency: "CNY", deepseekIsOnline: false),
             force: false
         ))
 

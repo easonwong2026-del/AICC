@@ -2,7 +2,7 @@ import Foundation
 import WidgetKit
 
 struct WidgetDisplaySignature: Equatable {
-    let codexPrimaryRemaining: Double?
+    let codexWeeklyRemaining: Double?
     let codexFiveHourRemaining: Double?
     let codexReset: String?
     let workbuddyPoints: Double?
@@ -11,7 +11,7 @@ struct WidgetDisplaySignature: Equatable {
     let deepseekIsOnline: Bool
 
     init(from response: StatusResponse) {
-        self.codexPrimaryRemaining = response.codex?.weekly?.remaining ?? response.codex?.five_hour?.remaining
+        self.codexWeeklyRemaining = response.codex?.weekly?.remaining
         self.codexFiveHourRemaining = response.codex?.five_hour?.remaining
         self.codexReset = (response.codex?.weekly?.reset ?? response.codex?.five_hour?.reset)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -27,7 +27,7 @@ struct WidgetDisplaySignature: Equatable {
     }
 
     init(
-        codexPrimaryRemaining: Double? = nil,
+        codexWeeklyRemaining: Double? = nil,
         codexFiveHourRemaining: Double? = nil,
         codexReset: String? = nil,
         workbuddyPoints: Double? = nil,
@@ -35,7 +35,7 @@ struct WidgetDisplaySignature: Equatable {
         deepseekCurrency: String? = nil,
         deepseekIsOnline: Bool = false
     ) {
-        self.codexPrimaryRemaining = codexPrimaryRemaining
+        self.codexWeeklyRemaining = codexWeeklyRemaining
         self.codexFiveHourRemaining = codexFiveHourRemaining
         self.codexReset = codexReset
         self.workbuddyPoints = workbuddyPoints
