@@ -1,15 +1,17 @@
-# AICC 2.7.0 / Build 9 — manual macOS acceptance
+# macOS Release Acceptance Checklist
 
-Status: **NOT EXECUTED by automation**. Complete this checklist on the target Mac before publishing the tag, GitHub Release, or final artifact.
+Use this checklist for each candidate macOS release. Record the candidate version and build in the release PR or release report.
 
-1. Install the built DMG into `/Applications`, launch AICC, and confirm About shows `2.7.0` / Build `9`.
-2. Confirm the backend is live at `http://127.0.0.1:8765/api/health/live` and that the dashboard shows current data.
-3. Add the AICC Widget from the desktop widget editor; verify Small and Medium layouts render.
-4. With the server online, verify the Widget displays current data, then use its refresh button and confirm it updates.
-5. Stop the AICC server, wait for a Widget refresh, and confirm the last successful values remain available as stale cache data.
-6. Verify a first-install/no-cache Widget shows `—` placeholders rather than failing.
-7. Restart AICC and confirm the server returns on port `8765` and the Widget resumes live data.
-8. In AICC Settings, enable login at launch; log out and back in, then confirm `SMAppService` restores AICC, the server, and Widget data.
-9. Check `~/Library/Logs/AICC-Dashboard/aicc-server.log` and `aicc-server-error.log`; after restarting AICC with oversized files, confirm each is bounded and startup still succeeds.
+Status: **NOT EXECUTED by automation**
 
-Do not publish until every item passes.
+- [ ] Install the candidate DMG into `/Applications` and confirm About shows the recorded version/build.
+- [ ] Confirm the bundled server is live at `http://127.0.0.1:8765/api/health/live` and `/api/status` shows current data.
+- [ ] Confirm exactly one AICC process and one bundled Python server are running.
+- [ ] Add the AICC Widget from the desktop widget editor; verify Small and Medium layouts render.
+- [ ] With the server online, verify current Widget data and manual refresh.
+- [ ] Stop the server and verify last-successful stale cache data remains available.
+- [ ] Verify a first-install/no-cache Widget shows `—` placeholders rather than failing.
+- [ ] Restart AICC and confirm port `8765`, live data, and Widget recovery.
+- [ ] In AICC Settings, enable login at launch and verify recovery through `SMAppService` after logout/login.
+- [ ] Confirm `~/Library/Logs/AICC-Dashboard/aicc-server.log` and `aicc-server-error.log` remain bounded after restart.
+- [ ] Run version validation and record signing/notarization status.
