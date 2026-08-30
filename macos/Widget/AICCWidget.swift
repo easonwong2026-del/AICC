@@ -134,14 +134,15 @@ struct AICCWidgetView: View {
     // MARK: - Medium Left Component (Codex Main View)
 
     private var codexMainView: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        let codexAvailable = entry.snapshot.codexWeeklyNumber != "—"
+        return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 4.5) {
                 Circle()
-                    .fill(Color.green)
+                    .fill(codexAvailable ? Color.green : Color.secondary)
                     .frame(width: 4.5, height: 4.5)
                 Text(entry.snapshot.codexTitle)
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Color.green)
+                    .foregroundStyle(codexAvailable ? Color.green : .secondary)
                 Spacer(minLength: 0)
             }
 
@@ -338,11 +339,11 @@ struct AICCWidgetView: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 3) {
                 Circle()
-                    .fill(Color.purple)
+                    .fill(entry.snapshot.workbuddyIsOnline ? Color.purple : Color.secondary)
                     .frame(width: 3.5, height: 3.5)
                 Text("WorkBuddy")
                     .font(.system(size: 8.5, weight: .medium))
-                    .foregroundStyle(Color.purple)
+                    .foregroundStyle(entry.snapshot.workbuddyIsOnline ? Color.purple : .secondary)
             }
 
             HStack(alignment: .lastTextBaseline, spacing: 2) {

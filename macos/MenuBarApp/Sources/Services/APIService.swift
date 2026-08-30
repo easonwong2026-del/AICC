@@ -2,32 +2,46 @@ import Foundation
 import WidgetKit
 
 struct WidgetDisplaySignature: Equatable {
-    let codexRemaining: Double?
+    let codexPrimaryRemaining: Double?
+    let codexFiveHourRemaining: Double?
+    let codexReset: String?
     let workbuddyPoints: Double?
     let deepseekBalance: String?
-    let systemStatus: String?
+    let deepseekCurrency: String?
+    let deepseekIsOnline: Bool
 
     init(from response: StatusResponse) {
-        self.codexRemaining = response.codex?.weekly?.remaining ?? response.codex?.five_hour?.remaining
+        self.codexPrimaryRemaining = response.codex?.weekly?.remaining ?? response.codex?.five_hour?.remaining
+        self.codexFiveHourRemaining = response.codex?.five_hour?.remaining
+        self.codexReset = (response.codex?.weekly?.reset ?? response.codex?.five_hour?.reset)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         self.workbuddyPoints = response.workbuddy?.points
         let chosenBalance = response.deepseek?.balances?.first(where: { $0.currency == "CNY" })
             ?? response.deepseek?.balances?.first
         let total = chosenBalance?.total_balance?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let curr = chosenBalance?.currency?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        self.deepseekBalance = total.isEmpty ? nil : (curr.isEmpty ? total : "\(total) \(curr)")
-        self.systemStatus = response.system?.status?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayTotal = Double(total).map { String(format: "%.2f", $0) } ?? total
+        self.deepseekBalance = total.isEmpty ? nil : displayTotal
+        self.deepseekCurrency = total.isEmpty ? nil : (curr.isEmpty ? "CNY" : curr)
+        self.deepseekIsOnline = response.deepseek?.status?.trimmingCharacters(in: .whitespacesAndNewlines) == "Online"
     }
 
     init(
-        codexRemaining: Double? = nil,
+        codexPrimaryRemaining: Double? = nil,
+        codexFiveHourRemaining: Double? = nil,
+        codexReset: String? = nil,
         workbuddyPoints: Double? = nil,
         deepseekBalance: String? = nil,
-        systemStatus: String? = nil
+        deepseekCurrency: String? = nil,
+        deepseekIsOnline: Bool = false
     ) {
-        self.codexRemaining = codexRemaining
+        self.codexPrimaryRemaining = codexPrimaryRemaining
+        self.codexFiveHourRemaining = codexFiveHourRemaining
+        self.codexReset = codexReset
         self.workbuddyPoints = workbuddyPoints
         self.deepseekBalance = deepseekBalance
-        self.systemStatus = systemStatus
+        self.deepseekCurrency = deepseekCurrency
+        self.deepseekIsOnline = deepseekIsOnline
     }
 
     static func shouldReloadWidget(

@@ -4,13 +4,11 @@ struct WidgetStatusPayload: Decodable {
     let codex: WidgetCodexData?
     let workbuddy: WidgetWorkBuddyData?
     let deepseek: WidgetDeepSeekData?
-    let system: WidgetSystemData?
 
     enum CodingKeys: String, CodingKey {
         case codex
         case workbuddy
         case deepseek
-        case system
     }
 }
 
@@ -40,17 +38,9 @@ struct WidgetRateWindow: Decodable {
 
 struct WidgetWorkBuddyData: Decodable {
     let points: Double?
-    let balanceState: String?
-    let balanceAgeSeconds: Int?
-    let balanceUpdatedAt: String?
-    let balanceStale: Bool?
 
     enum CodingKeys: String, CodingKey {
         case points
-        case balanceState = "balance_state"
-        case balanceAgeSeconds = "balance_age_seconds"
-        case balanceUpdatedAt = "balance_updated_at"
-        case balanceStale = "balance_stale"
     }
 }
 
@@ -74,10 +64,6 @@ struct WidgetDeepSeekBalance: Decodable {
     }
 }
 
-struct WidgetSystemData: Decodable {
-    let status: String?
-}
-
 struct WidgetDisplaySnapshot: Codable, Equatable {
     // Codex properties
     let codexWeeklyNumber: String
@@ -90,13 +76,11 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
     // WorkBuddy properties
     let workbuddyPoints: Double?
     let workbuddyPointsText: String
-    let workbuddySubtitle: String
     let workbuddyIsOnline: Bool
 
     // DeepSeek properties
     let deepseekBalanceText: String
     let deepseekCurrency: String
-    let deepseekStatusText: String
     let deepseekIsOnline: Bool
 
     // Metadata
@@ -135,21 +119,6 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         return text
     }
 
-    // Legacy accessors for backward compatibility
-    var codex: String {
-        guard codexWeeklyNumber != "—" else { return "—" }
-        return "\(codexWeeklyNumber)%"
-    }
-
-    var workbuddy: String {
-        workbuddyPointsText
-    }
-
-    var deepseek: String {
-        guard deepseekBalanceText != "—" else { return "—" }
-        return deepseekCurrency.isEmpty ? deepseekBalanceText : "\(deepseekBalanceText) \(deepseekCurrency)"
-    }
-
     static let placeholder = WidgetDisplaySnapshot(
         codexWeeklyNumber: "—",
         codexWeeklyRemaining: nil,
@@ -159,11 +128,9 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         codexWeeklyProgress: 0.0,
         workbuddyPoints: nil,
         workbuddyPointsText: "—",
-        workbuddySubtitle: "未连接",
         workbuddyIsOnline: false,
         deepseekBalanceText: "—",
         deepseekCurrency: "CNY",
-        deepseekStatusText: "—",
         deepseekIsOnline: false,
         fetchedAt: .now,
         stale: true
@@ -178,11 +145,9 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         case codexWeeklyProgress
         case workbuddyPoints
         case workbuddyPointsText
-        case workbuddySubtitle
         case workbuddyIsOnline
         case deepseekBalanceText
         case deepseekCurrency
-        case deepseekStatusText
         case deepseekIsOnline
         case fetchedAt
         case stale
@@ -203,11 +168,9 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         codexWeeklyProgress: Double,
         workbuddyPoints: Double?,
         workbuddyPointsText: String,
-        workbuddySubtitle: String,
         workbuddyIsOnline: Bool,
         deepseekBalanceText: String,
         deepseekCurrency: String,
-        deepseekStatusText: String,
         deepseekIsOnline: Bool,
         fetchedAt: Date,
         stale: Bool
@@ -220,11 +183,9 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         self.codexWeeklyProgress = codexWeeklyProgress
         self.workbuddyPoints = workbuddyPoints
         self.workbuddyPointsText = workbuddyPointsText
-        self.workbuddySubtitle = workbuddySubtitle
         self.workbuddyIsOnline = workbuddyIsOnline
         self.deepseekBalanceText = deepseekBalanceText
         self.deepseekCurrency = deepseekCurrency
-        self.deepseekStatusText = deepseekStatusText
         self.deepseekIsOnline = deepseekIsOnline
         self.fetchedAt = fetchedAt
         self.stale = stale
@@ -242,11 +203,9 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
             self.codexWeeklyProgress = (try? container.decodeIfPresent(Double.self, forKey: .codexWeeklyProgress)) ?? 0.0
             self.workbuddyPoints = try? container.decodeIfPresent(Double.self, forKey: .workbuddyPoints)
             self.workbuddyPointsText = (try? container.decodeIfPresent(String.self, forKey: .workbuddyPointsText)) ?? "—"
-            self.workbuddySubtitle = (try? container.decodeIfPresent(String.self, forKey: .workbuddySubtitle)) ?? "未连接"
             self.workbuddyIsOnline = (try? container.decodeIfPresent(Bool.self, forKey: .workbuddyIsOnline)) ?? false
             self.deepseekBalanceText = (try? container.decodeIfPresent(String.self, forKey: .deepseekBalanceText)) ?? "—"
             self.deepseekCurrency = (try? container.decodeIfPresent(String.self, forKey: .deepseekCurrency)) ?? "CNY"
-            self.deepseekStatusText = (try? container.decodeIfPresent(String.self, forKey: .deepseekStatusText)) ?? "—"
             self.deepseekIsOnline = (try? container.decodeIfPresent(Bool.self, forKey: .deepseekIsOnline)) ?? false
             self.fetchedAt = (try? container.decodeIfPresent(Date.self, forKey: .fetchedAt)) ?? .now
             self.stale = (try? container.decodeIfPresent(Bool.self, forKey: .stale)) ?? true
@@ -277,7 +236,6 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         self.workbuddyPointsText = legacyWorkbuddy
         let cleanedPoints = legacyWorkbuddy.replacingOccurrences(of: ",", with: "")
         self.workbuddyPoints = Double(cleanedPoints)
-        self.workbuddySubtitle = (legacyWorkbuddy == "—" ? "未连接" : "已连接")
         self.workbuddyIsOnline = (legacyWorkbuddy != "—")
 
         let dsParts = legacyDeepseek.split(separator: " ")
@@ -291,7 +249,6 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
             self.deepseekBalanceText = "—"
             self.deepseekCurrency = "CNY"
         }
-        self.deepseekStatusText = (legacyDeepseek == "—" ? "—" : "在线")
         self.deepseekIsOnline = (legacyDeepseek != "—")
     }
 
@@ -305,11 +262,9 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         try container.encode(codexWeeklyProgress, forKey: .codexWeeklyProgress)
         try container.encodeIfPresent(workbuddyPoints, forKey: .workbuddyPoints)
         try container.encode(workbuddyPointsText, forKey: .workbuddyPointsText)
-        try container.encode(workbuddySubtitle, forKey: .workbuddySubtitle)
         try container.encode(workbuddyIsOnline, forKey: .workbuddyIsOnline)
         try container.encode(deepseekBalanceText, forKey: .deepseekBalanceText)
         try container.encode(deepseekCurrency, forKey: .deepseekCurrency)
-        try container.encode(deepseekStatusText, forKey: .deepseekStatusText)
         try container.encode(deepseekIsOnline, forKey: .deepseekIsOnline)
         try container.encode(fetchedAt, forKey: .fetchedAt)
         try container.encode(stale, forKey: .stale)
@@ -337,11 +292,11 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         // 2. WorkBuddy
         let wbPoints = payload.workbuddy?.points
         let wbPointsFormatted = Self.formatWorkBuddyPoints(wbPoints)
-        let (wbSubtitle, wbOnline) = Self.formatWorkBuddyStatus(payload.workbuddy)
+        let wbOnline = wbPoints?.isFinite == true
 
         // 3. DeepSeek
         let (dsBalance, dsCurrency) = Self.formatDeepSeekBalance(payload.deepseek)
-        let (dsStatus, dsOnline) = Self.formatDeepSeekStatus(payload.deepseek)
+        let dsOnline = payload.deepseek?.status?.trimmingCharacters(in: .whitespacesAndNewlines) == "Online"
 
         self.init(
             codexWeeklyNumber: weeklyNum,
@@ -352,11 +307,9 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
             codexWeeklyProgress: progress,
             workbuddyPoints: wbPoints,
             workbuddyPointsText: wbPointsFormatted,
-            workbuddySubtitle: wbSubtitle,
             workbuddyIsOnline: wbOnline,
             deepseekBalanceText: dsBalance,
             deepseekCurrency: dsCurrency,
-            deepseekStatusText: dsStatus,
             deepseekIsOnline: dsOnline,
             fetchedAt: fetchedAt,
             stale: false
@@ -373,30 +326,13 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
             codexWeeklyProgress: codexWeeklyProgress,
             workbuddyPoints: workbuddyPoints,
             workbuddyPointsText: workbuddyPointsText,
-            workbuddySubtitle: workbuddySubtitle,
             workbuddyIsOnline: workbuddyIsOnline,
             deepseekBalanceText: deepseekBalanceText,
             deepseekCurrency: deepseekCurrency,
-            deepseekStatusText: deepseekStatusText,
             deepseekIsOnline: deepseekIsOnline,
             fetchedAt: fetchedAt,
             stale: true
         )
-    }
-
-    func formattedFooterTime(at referenceDate: Date = .now) -> String {
-        let diff = max(0, Int(referenceDate.timeIntervalSince(fetchedAt)))
-        let timeStr: String
-        if diff < 60 {
-            timeStr = diff <= 5 ? "刚刚更新" : "\(diff) 秒前更新"
-        } else if diff < 3600 {
-            timeStr = "\(diff / 60) 分钟前更新"
-        } else {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "HH:mm"
-            timeStr = "\(formatter.string(from: fetchedAt)) 更新"
-        }
-        return stale ? "\(timeStr) · 已缓存" : timeStr
     }
 
     private static func formatReset(_ reset: String?) -> String? {
@@ -419,35 +355,6 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         return formatter.string(from: NSNumber(value: points)) ?? "—"
     }
 
-    private static func formatWorkBuddyStatus(_ data: WidgetWorkBuddyData?) -> (String, Bool) {
-        guard let data, let points = data.points, points.isFinite else {
-            return ("未连接", false)
-        }
-
-        let isCached = data.balanceStale == true || data.balanceState == "Cached"
-        let baseState = isCached ? "已缓存" : "已连接"
-
-        if let age = data.balanceAgeSeconds, age >= 0 {
-            let ageText: String
-            if age < 60 {
-                ageText = "刚刚"
-            } else if age < 3600 {
-                ageText = "\(age / 60) 分钟前"
-            } else if age < 86400 {
-                ageText = "\(age / 3600) 小时前"
-            } else {
-                ageText = "\(age / 86400) 天前"
-            }
-            return ("\(baseState) · \(ageText)", true)
-        }
-
-        if let updated = data.balanceUpdatedAt?.trimmingCharacters(in: .whitespacesAndNewlines), !updated.isEmpty {
-            return ("\(baseState) · \(updated)", true)
-        }
-
-        return (baseState, true)
-    }
-
     private static func formatDeepSeekBalance(_ data: WidgetDeepSeekData?) -> (String, String) {
         guard
             let balance = data?.balances?.first(where: { $0.currency == "CNY" }) ?? data?.balances?.first,
@@ -464,24 +371,6 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         return (total, currency.isEmpty ? "CNY" : currency)
     }
 
-    private static func formatDeepSeekStatus(_ data: WidgetDeepSeekData?) -> (String, Bool) {
-        guard let rawStatus = data?.status?.trimmingCharacters(in: .whitespacesAndNewlines), !rawStatus.isEmpty else {
-            return ("—", false)
-        }
-
-        switch rawStatus {
-        case "Online":
-            return ("在线", true)
-        case "Not configured":
-            return ("未配置", false)
-        case "Offline":
-            return ("离线", false)
-        case "Loading":
-            return ("加载中", false)
-        default:
-            return (rawStatus, false)
-        }
-    }
 }
 
 enum WidgetStatusStore {
