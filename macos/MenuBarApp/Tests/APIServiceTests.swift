@@ -97,63 +97,118 @@ final class APIServiceTests: XCTestCase {
         XCTAssertEqual(MockURLProtocol.requests.first?.httpMethod, "POST")
     }
 
-    func testWidgetDisplaySignatureReloadsOnlyWhenValuesChange() {
+    func testWidgetDisplaySignatureTracksVisibleValues() throws {
         let initial = WidgetDisplaySignature(
-            codexRemaining: 96,
-            workbuddyPoints: 5609,
-            deepseekBalance: "58.81 CNY",
-            systemStatus: "Online"
+            codexWeeklyRemaining: 85,
+            codexFiveHourRemaining: 85,
+            codexReset: "2026-09-04 08:01",
+            workbuddyPoints: 5760,
+            deepseekBalance: "58.70",
+            deepseekCurrency: "CNY",
+            deepseekIsOnline: true
         )
         let same = WidgetDisplaySignature(
-            codexRemaining: 96,
-            workbuddyPoints: 5609,
-            deepseekBalance: "58.81 CNY",
-            systemStatus: "Online"
+            codexWeeklyRemaining: 85,
+            codexFiveHourRemaining: 85,
+            codexReset: "2026-09-04 08:01",
+            workbuddyPoints: 5760,
+            deepseekBalance: "58.70",
+            deepseekCurrency: "CNY",
+            deepseekIsOnline: true
         )
 
         XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(previous: nil, current: initial, force: false))
-        XCTAssertFalse(WidgetDisplaySignature.shouldReloadWidget(previous: initial, current: same, force: false))
-        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
-            previous: initial,
-            current: WidgetDisplaySignature(
-                codexRemaining: 95,
-                workbuddyPoints: 5609,
-                deepseekBalance: "58.81 CNY",
-                systemStatus: "Online"
-            ),
-            force: false
-        ))
-        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
-            previous: initial,
-            current: WidgetDisplaySignature(
-                codexRemaining: 96,
-                workbuddyPoints: 5500,
-                deepseekBalance: "58.81 CNY",
-                systemStatus: "Online"
-            ),
-            force: false
-        ))
-        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
-            previous: initial,
-            current: WidgetDisplaySignature(
-                codexRemaining: 96,
-                workbuddyPoints: 5609,
-                deepseekBalance: "60.00 CNY",
-                systemStatus: "Online"
-            ),
-            force: false
-        ))
-        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
-            previous: initial,
-            current: WidgetDisplaySignature(
-                codexRemaining: 96,
-                workbuddyPoints: 5609,
-                deepseekBalance: "58.81 CNY",
-                systemStatus: "Degraded"
-            ),
-            force: false
-        ))
         XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(previous: initial, current: same, force: true))
+        XCTAssertFalse(WidgetDisplaySignature.shouldReloadWidget(previous: initial, current: same, force: false))
+        let fiveHourOnly = WidgetDisplaySignature(
+            codexWeeklyRemaining: nil,
+            codexFiveHourRemaining: 85,
+            codexReset: "2026-09-04 08:01",
+            workbuddyPoints: 5760,
+            deepseekBalance: "58.70",
+            deepseekCurrency: "CNY",
+            deepseekIsOnline: true
+        )
+        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
+            previous: initial,
+            current: fiveHourOnly,
+            force: false
+        ))
+        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
+            previous: fiveHourOnly,
+            current: initial,
+            force: false
+        ))
+        XCTAssertFalse(WidgetDisplaySignature.shouldReloadWidget(
+            previous: fiveHourOnly,
+            current: WidgetDisplaySignature(
+                codexWeeklyRemaining: nil,
+                codexFiveHourRemaining: 85,
+                codexReset: "2026-09-04 08:01",
+                workbuddyPoints: 5760,
+                deepseekBalance: "58.70",
+                deepseekCurrency: "CNY",
+                deepseekIsOnline: true
+            ),
+            force: false
+        ))
+        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
+            previous: initial,
+            current: WidgetDisplaySignature(codexWeeklyRemaining: 82, codexFiveHourRemaining: 85, codexReset: "2026-09-04 08:01", workbuddyPoints: 5760, deepseekBalance: "58.70", deepseekCurrency: "CNY", deepseekIsOnline: true),
+            force: false
+        ))
+        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
+            previous: initial,
+            current: WidgetDisplaySignature(codexWeeklyRemaining: 85, codexFiveHourRemaining: 80, codexReset: "2026-09-04 08:01", workbuddyPoints: 5760, deepseekBalance: "58.70", deepseekCurrency: "CNY", deepseekIsOnline: true),
+            force: false
+        ))
+        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
+            previous: initial,
+            current: WidgetDisplaySignature(codexWeeklyRemaining: 85, codexFiveHourRemaining: 85, codexReset: "2026-09-05 08:01", workbuddyPoints: 5760, deepseekBalance: "58.70", deepseekCurrency: "CNY", deepseekIsOnline: true),
+            force: false
+        ))
+        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
+            previous: initial,
+            current: WidgetDisplaySignature(codexWeeklyRemaining: 85, codexFiveHourRemaining: 85, codexReset: "2026-09-04 08:01", workbuddyPoints: 5759, deepseekBalance: "58.70", deepseekCurrency: "CNY", deepseekIsOnline: true),
+            force: false
+        ))
+        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
+            previous: initial,
+            current: WidgetDisplaySignature(codexWeeklyRemaining: 85, codexFiveHourRemaining: 85, codexReset: "2026-09-04 08:01", workbuddyPoints: 5760, deepseekBalance: "58.71", deepseekCurrency: "CNY", deepseekIsOnline: true),
+            force: false
+        ))
+        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
+            previous: initial,
+            current: WidgetDisplaySignature(codexWeeklyRemaining: 85, codexFiveHourRemaining: 85, codexReset: "2026-09-04 08:01", workbuddyPoints: 5760, deepseekBalance: "58.70", deepseekCurrency: "USD", deepseekIsOnline: true),
+            force: false
+        ))
+        XCTAssertTrue(WidgetDisplaySignature.shouldReloadWidget(
+            previous: initial,
+            current: WidgetDisplaySignature(codexWeeklyRemaining: 85, codexFiveHourRemaining: 85, codexReset: "2026-09-04 08:01", workbuddyPoints: 5760, deepseekBalance: "58.70", deepseekCurrency: "CNY", deepseekIsOnline: false),
+            force: false
+        ))
+
+        let onlineResponse = try JSONDecoder().decode(StatusResponse.self, from: Data("""
+        {
+            "codex": {"five_hour": {"remaining": 85, "reset": "2026-09-04 08:01"}, "weekly": {"remaining": 83, "reset": "2026-09-04 08:01"}},
+            "workbuddy": {"points": 5760},
+            "deepseek": {"status": "Online", "balances": [{"currency": "CNY", "total_balance": "58.70"}]},
+            "system": {"status": "Online"}
+        }
+        """.utf8))
+        let degradedResponse = try JSONDecoder().decode(StatusResponse.self, from: Data("""
+        {
+            "codex": {"five_hour": {"remaining": 85, "reset": "2026-09-04 08:01"}, "weekly": {"remaining": 83, "reset": "2026-09-04 08:01"}},
+            "workbuddy": {"points": 5760},
+            "deepseek": {"status": "Online", "balances": [{"currency": "CNY", "total_balance": "58.70"}]},
+            "system": {"status": "Degraded"}
+        }
+        """.utf8))
+        XCTAssertFalse(WidgetDisplaySignature.shouldReloadWidget(
+            previous: WidgetDisplaySignature(from: onlineResponse),
+            current: WidgetDisplaySignature(from: degradedResponse),
+            force: false
+        ))
     }
 
     func testMalformedStatusSetsDecodingError() async throws {

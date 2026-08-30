@@ -52,6 +52,64 @@ class ServerIntegrationTests(unittest.TestCase):
         server._collector_manager = self.original_manager
         self.temporary.cleanup()
 
+    def test_first_run_status_has_no_seeded_codex_quota(self):
+        status = server.persisted_status()
+
+        self.assertNotIn("codex", status)
+        self.assertNotIn("83", json.dumps(status))
+        self.assertNotIn("97", json.dumps(status))
+        loaded = server.load_status()
+        self.assertNotIn("14:27", json.dumps(loaded))
+        self.assertNotIn("7月17日", json.dumps(loaded))
+
+    def test_legacy_manual_codex_fallback_is_sanitized(self):
+        server.DATA_PATH.write_text(
+            json.dumps({
+                "codex": {
+                    "five_hour": {"remaining": 83, "reset": "14:27"},
+                    "weekly": {"remaining": 97, "reset": "7月17日"},
+                    "source": "Manual",
+                },
+                "workbuddy": {"points": None},
+            }),
+            encoding="utf-8",
+        )
+
+        status = server.persisted_status()
+
+        self.assertNotIn("codex", status)
+        self.assertNotIn("codex", json.loads(server.DATA_PATH.read_text(encoding="utf-8")))
+
+    def test_non_manual_persisted_codex_state_is_preserved(self):
+        codex = {
+            "five_hour": {"remaining": 85, "reset": "15:00"},
+            "weekly": {"remaining": 91, "reset": "2026-09-05"},
+            "source": "Codex app-server",
+        }
+        server.DATA_PATH.write_text(json.dumps({"codex": codex}), encoding="utf-8")
+
+        status = server.persisted_status()
+
+        self.assertEqual(status["codex"], codex)
+
+    def test_real_codex_collector_data_reaches_status(self):
+        codex = {
+            "available": True,
+            "state": "Connected",
+            "source": "Codex app-server",
+            "five_hour": {"remaining": 85, "reset": "15:00"},
+            "weekly": {"remaining": 91, "reset": "2026-09-05"},
+        }
+
+        class RealManager:
+            def snapshot(self, **kwargs):
+                return {"codex": codex}, {"codex": {"state": "ready"}}
+
+        server._collector_manager = RealManager()
+        status = server.load_status(force=True)
+
+        self.assertEqual(status["codex"], codex)
+
     def test_health_and_status_have_security_headers(self):
         with urlopen(self.base + "/api/health", timeout=2) as response:
             payload = json.load(response)

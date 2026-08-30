@@ -35,7 +35,6 @@ COLLECTOR_WAIT_SECONDS = max(0, min(5, float(os.environ.get("COLLECTOR_WAIT_SECO
 SERVER_STARTED_AT = time.time()
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 DEFAULT_STATUS = {
-    "codex": {"five_hour": {"remaining": 83, "reset": "14:27"}, "weekly": {"remaining": 97, "reset": "7月17日"}, "source": "Manual"},
     "workbuddy": {
         "points": None,
         "balance_state": "Unavailable",
@@ -71,9 +70,18 @@ def persisted_status() -> dict:
     if not DATA_PATH.exists():
         save_status(DEFAULT_STATUS)
     try:
-        return json.loads(DATA_PATH.read_text(encoding="utf-8"))
+        status = json.loads(DATA_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return DEFAULT_STATUS.copy()
+    if (
+        isinstance(status, dict)
+        and isinstance(status.get("codex"), dict)
+        and status["codex"].get("source") == "Manual"
+    ):
+        status = status.copy()
+        status.pop("codex")
+        save_status(status)
+    return status
 
 
 def collector_manager() -> CollectorManager:
