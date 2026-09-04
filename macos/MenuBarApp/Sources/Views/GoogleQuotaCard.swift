@@ -1,4 +1,3 @@
-import Foundation
 import SwiftUI
 
 struct GoogleQuotaCard: View {
@@ -22,7 +21,6 @@ struct GoogleQuotaCard: View {
 
             if let quota {
                 quotaRow(label: "Gem", window: quota.gem)
-                quotaRow(label: "Cla", window: quota.cla)
             } else {
                 Text(settings.localized(emptyMessage))
                     .font(.system(size: 11))
@@ -55,12 +53,6 @@ struct GoogleQuotaCard: View {
                 progressBar(remaining)
             }
 
-            if let resetAt = window?.resetAt {
-                Text(resetText(resetAt))
-                    .font(.system(size: DashboardTypography.timestamp))
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
         }
     }
 
@@ -76,17 +68,6 @@ struct GoogleQuotaCard: View {
             }
         }
         .frame(height: 6)
-    }
-
-    private func resetText(_ date: Date) -> String {
-        guard date > Date() else { return settings.localized("Resetting") }
-        let formatter = RelativeDateTimeFormatter()
-        formatter.locale = settings.locale
-        formatter.unitsStyle = .full
-        return String(
-            format: settings.localized("Resets %@"),
-            formatter.localizedString(for: date, relativeTo: Date())
-        )
     }
 
     private var emptyMessage: String {
