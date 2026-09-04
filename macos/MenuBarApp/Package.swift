@@ -21,7 +21,6 @@ let package = Package(
                 "Helpers",
                 "Services/CacheManager.swift",
                 "Services/LaunchAtLoginService.swift",
-                "Services/OpenCodexController.swift",
                 "Services/SettingsWindowCoordinator.swift",
                 "Services/StatusItemController.swift",
                 "Services/SingleInstanceService.swift",
@@ -38,6 +37,7 @@ let package = Package(
                 "Services/APIService.swift",
                 "Services/LegacyLaunchAgentMigration.swift",
                 "Services/LogFileLimiter.swift",
+                "Services/OpenCodexController.swift",
                 "Services/ProcessRunner.swift",
                 "Services/UpdateService.swift",
             ]
@@ -60,6 +60,7 @@ let package = Package(
                 "LegacyLaunchAgentMigrationTests.swift",
                 "UpdateServiceTests.swift",
                 "APIServiceTests.swift",
+                "OpenCodexQuotaTests.swift",
             ]
         ),
     ]

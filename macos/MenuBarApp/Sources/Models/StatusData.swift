@@ -27,6 +27,125 @@ struct RateWindow: Codable {
     let duration_minutes: Int?
 }
 
+// MARK: - OpenCodex Provider Quota
+
+struct OCXProviderQuotaResponse: Decodable, Equatable {
+    let generatedAt: Double?
+    let reports: [OCXProviderQuotaReport]
+
+    init(jsonData: Data) throws {
+        self = try JSONDecoder().decode(Self.self, from: jsonData)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case generatedAt
+        case reports
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        generatedAt = (try? container.decode(OCXLossyDouble.self, forKey: .generatedAt))?.value
+        reports = (try? container.decode([OCXProviderQuotaReport].self, forKey: .reports)) ?? []
+    }
+}
+
+struct OCXProviderQuotaReport: Decodable, Equatable {
+    let provider: String?
+    let label: String?
+    let source: String?
+    let quota: OCXProviderQuota?
+
+    private enum CodingKeys: String, CodingKey {
+        case provider
+        case label
+        case source
+        case quota
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try? container.decode(String.self, forKey: .provider)
+        label = try? container.decode(String.self, forKey: .label)
+        source = try? container.decode(String.self, forKey: .source)
+        quota = try? container.decode(OCXProviderQuota.self, forKey: .quota)
+    }
+}
+
+struct OCXProviderQuota: Decodable, Equatable {
+    let customWindows: [OCXProviderQuotaWindow]?
+    let updatedAt: Double?
+
+    private enum CodingKeys: String, CodingKey {
+        case customWindows
+        case updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        customWindows = try? container.decode([OCXProviderQuotaWindow].self, forKey: .customWindows)
+        updatedAt = (try? container.decode(OCXLossyDouble.self, forKey: .updatedAt))?.value
+    }
+}
+
+struct OCXProviderQuotaWindow: Decodable, Equatable {
+    let label: String?
+    let percent: Double?
+    let resetAt: Date?
+
+    var remainingPercent: Double? {
+        guard let percent, percent.isFinite else { return nil }
+        return min(max(100 - percent, 0), 100)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case label
+        case percent
+        case resetAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        label = try? container.decode(String.self, forKey: .label)
+        percent = (try? container.decode(OCXLossyDouble.self, forKey: .percent))?.value
+        resetAt = (try? container.decode(OCXLossyDate.self, forKey: .resetAt))?.value
+    }
+}
+
+struct GoogleQuota: Equatable {
+    let gem: OCXProviderQuotaWindow?
+    let cla: OCXProviderQuotaWindow?
+    let updatedAt: Date?
+}
+
+enum OCXGoogleQuotaState: Equatable {
+    case unknown
+    case loading
+    case live
+    case stale
+    case noData
+    case stopped
+    case notInstalled
+    case unavailable
+}
+
+enum OCXProviderQuotaParser {
+    static func googleQuota(from response: OCXProviderQuotaResponse) -> GoogleQuota? {
+        guard
+            let report = response.reports.first(where: { $0.provider == "google-antigravity" }),
+            let quota = report.quota
+        else {
+            return nil
+        }
+
+        let windows = quota.customWindows ?? []
+        return GoogleQuota(
+            gem: windows.first(where: { $0.label == "Gem" }),
+            cla: windows.first(where: { $0.label == "Cla" }),
+            updatedAt: quota.updatedAt.flatMap { Date(timeIntervalSince1970: $0) }
+        )
+    }
+}
+
 // MARK: - WorkBuddy
 struct WorkBuddyData: Codable {
     let points: Double?
@@ -200,6 +319,8 @@ enum OCXUpdateState: Equatable {
 enum OCXOperationPolicy {
     static let panelPollIntervalNanoseconds: UInt64 = 9_000_000_000
     static let statusTimeout: TimeInterval = 4.5
+    static let providerQuotaTTL: TimeInterval = 5 * 60
+    static let providerQuotaTimeout: TimeInterval = 8
     static let operationTimeout: TimeInterval = 12
     static let updateCheckTimeout: TimeInterval = 12
     static let updateTimeout: TimeInterval = 180
@@ -220,6 +341,16 @@ enum OCXOperationPolicy {
 
     static func shouldContinuePanel(isVisible: Bool, taskIsCancelled: Bool) -> Bool {
         isVisible && !taskIsCancelled
+    }
+
+    static func shouldRefreshProviderQuota(
+        force: Bool,
+        lastAttempt: Date?,
+        now: Date
+    ) -> Bool {
+        guard !force else { return true }
+        guard let lastAttempt else { return true }
+        return now.timeIntervalSince(lastAttempt) >= providerQuotaTTL
     }
 
     static func reachedTarget(_ observed: OCXStatus, target: OCXStatus) -> Bool {
@@ -414,6 +545,43 @@ private struct OCXRuntimeDocument: Decodable {
     }
 }
 
+private struct OCXLossyDouble: Decodable {
+    let value: Double?
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            value = nil
+        } else if let number = try? container.decode(Double.self), number.isFinite {
+            value = number
+        } else if let string = try? container.decode(String.self) {
+            value = Double(string.trimmingCharacters(in: .whitespacesAndNewlines))
+        } else {
+            value = nil
+        }
+    }
+}
+
+private struct OCXLossyDate: Decodable {
+    let value: Date?
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let number = try? container.decode(Double.self), number.isFinite {
+            value = Date(timeIntervalSince1970: number)
+        } else if let string = try? container.decode(String.self) {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let seconds = Double(trimmed), seconds.isFinite {
+                value = Date(timeIntervalSince1970: seconds)
+            } else {
+                value = ISO8601DateFormatter().date(from: trimmed)
+            }
+        } else {
+            value = nil
+        }
+    }
+}
+
 private struct LossyInt: Decodable {
     let value: Int?
 
@@ -450,9 +618,8 @@ enum DataSourceState {
 /// No path string is concatenated into the shell argument, so spaces,
 /// single quotes, and other special characters in the path are safe.
 ///
-/// Only lifecycle commands (`ensure`, `stop`) use this path. Read-only
-/// operations (`status --json`, `--version`) continue to execute the
-/// binary directly.
+/// Only lifecycle commands (`ensure`, `stop`) use the shell invocation.
+/// Read-only operations execute the detected binary directly.
 struct OCXCommandInvocation: Equatable {
     let executable: String
     let arguments: [String]
@@ -494,6 +661,14 @@ enum OCXCommandBuilder {
         OCXCommandInvocation(
             executable: ocxPath,
             arguments: ["update"],
+            environmentOverrides: [:]
+        )
+    }
+
+    static func providerQuota(ocxPath: String, force: Bool) -> OCXCommandInvocation {
+        OCXCommandInvocation(
+            executable: ocxPath,
+            arguments: ["provider", "quota"] + (force ? ["--refresh"] : []) + ["--json"],
             environmentOverrides: [:]
         )
     }

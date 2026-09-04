@@ -40,6 +40,10 @@
 "Codex" = "Codex";
 "WorkBuddy" = "WorkBuddy";
 "DeepSeek" = "DeepSeek";
+"Google" = "Google";
+"Gem" = "Gem";
+"Cla" = "Cla";
+"Google Quota" = "Google 额度";
 "Reconnect WorkBuddy" = "重连 WorkBuddy";
 "Connected" = "已连接";
 "Unavailable" = "不可用";
@@ -158,3 +162,7 @@
 
 "Updated" = "更新于";
 "Temporarily unavailable" = "暂不可用";
+"OpenCodex is not running" = "OpenCodex 未运行";
+"OpenCodex is not installed" = "OpenCodex 未安装";
+"Resets %@" = "%@重置";
+"Resetting" = "即将重置";

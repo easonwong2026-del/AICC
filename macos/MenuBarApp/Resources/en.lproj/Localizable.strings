@@ -38,6 +38,10 @@
 "Codex" = "Codex";
 "WorkBuddy" = "WorkBuddy";
 "DeepSeek" = "DeepSeek";
+"Google" = "Google";
+"Gem" = "Gem";
+"Cla" = "Cla";
+"Google Quota" = "Google Quota";
 "Reconnect WorkBuddy" = "Reconnect WorkBuddy";
 "Connected" = "Connected";
 "Unavailable" = "Unavailable";
@@ -150,3 +154,7 @@
 "Today %@" = "Today %@";
 "Updated" = "Updated";
 "Temporarily unavailable" = "Temporarily unavailable";
+"OpenCodex is not running" = "OpenCodex is not running";
+"OpenCodex is not installed" = "OpenCodex is not installed";
+"Resets %@" = "Resets %@";
+"Resetting" = "Resetting";
