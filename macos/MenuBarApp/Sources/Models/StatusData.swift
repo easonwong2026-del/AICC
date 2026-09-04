@@ -141,7 +141,7 @@ enum OCXProviderQuotaParser {
         return GoogleQuota(
             gem: windows.first(where: { $0.label == "Gem" }),
             cla: windows.first(where: { $0.label == "Cla" }),
-            updatedAt: quota.updatedAt.flatMap { Date(timeIntervalSince1970: $0) }
+            updatedAt: ocxDate(fromEpoch: quota.updatedAt)
         )
     }
 }
@@ -567,12 +567,12 @@ private struct OCXLossyDate: Decodable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
-        if let number = try? container.decode(Double.self), number.isFinite {
-            value = Date(timeIntervalSince1970: number)
+        if let number = try? container.decode(Double.self) {
+            value = ocxDate(fromEpoch: number)
         } else if let string = try? container.decode(String.self) {
             let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let seconds = Double(trimmed), seconds.isFinite {
-                value = Date(timeIntervalSince1970: seconds)
+            if let epoch = Double(trimmed) {
+                value = ocxDate(fromEpoch: epoch)
             } else {
                 value = ISO8601DateFormatter().date(from: trimmed)
             }
@@ -580,6 +580,13 @@ private struct OCXLossyDate: Decodable {
             value = nil
         }
     }
+}
+
+private func ocxDate(fromEpoch value: Double?) -> Date? {
+    guard let value, value.isFinite, value > 0 else { return nil }
+    let seconds = value > 10_000_000_000 ? value / 1000 : value
+    guard seconds.isFinite, seconds <= 8_640_000_000_000 else { return nil }
+    return Date(timeIntervalSince1970: seconds)
 }
 
 private struct LossyInt: Decodable {

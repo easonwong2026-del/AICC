@@ -60,7 +60,7 @@ final class OpenCodexQuotaTests: XCTestCase {
               "unknown": {"ignored": true},
               "quota": {
                 "customWindows": [
-                  {"label": "Cla", "percent": "51", "resetAt": 1788003600, "extra": 1},
+                  {"label": "Cla", "percent": "51", "resetAt": 1788003600000, "extra": 1},
                   {"label": "Gem", "percent": 22, "resetAt": "1788001800"}
                 ],
                 "updatedAt": 1788000000
