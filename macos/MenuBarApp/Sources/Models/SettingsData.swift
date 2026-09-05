@@ -30,6 +30,9 @@ class AppSettings: ObservableObject {
     @Published var menuBarShowOpenCodex: Bool {
         didSet { UserDefaults.standard.set(menuBarShowOpenCodex, forKey: "menuBarShowOpenCodex") }
     }
+    @Published var menuBarShowGoogleQuota: Bool {
+        didSet { UserDefaults.standard.set(menuBarShowGoogleQuota, forKey: "menuBarShowGoogleQuota") }
+    }
 
     @Published var ocxCustomPath: String {
         didSet { UserDefaults.standard.set(ocxCustomPath, forKey: "ocxCustomPath") }
@@ -91,6 +94,7 @@ class AppSettings: ObservableObject {
         menuBarShowDeepSeek = defaults.object(forKey: "menuBarShowDeepSeek") as? Bool ?? true
         menuBarShowSystem = defaults.object(forKey: "menuBarShowSystem") as? Bool ?? true
         menuBarShowOpenCodex = defaults.object(forKey: "menuBarShowOpenCodex") as? Bool ?? true
+        menuBarShowGoogleQuota = defaults.object(forKey: "menuBarShowGoogleQuota") as? Bool ?? true
         ocxCustomPath = defaults.string(forKey: "ocxCustomPath") ?? ""
         debugMode = defaults.object(forKey: "debugMode") as? Bool ?? false
     }

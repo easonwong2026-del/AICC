@@ -390,6 +390,7 @@ private struct MenuBarSettingsView: View {
                 Toggle("DeepSeek", isOn: $settings.menuBarShowDeepSeek)
                 Toggle("System", isOn: $settings.menuBarShowSystem)
                 Toggle("OpenCodex", isOn: $settings.menuBarShowOpenCodex)
+                Toggle(settings.localized("Google Quota"), isOn: $settings.menuBarShowGoogleQuota)
             }
 
             Section {

@@ -12,6 +12,9 @@ final class OpenCodexController: ObservableObject {
     @Published private(set) var snapshot: OCXSnapshot?
     @Published private(set) var ocxVersion: String?
     @Published private(set) var updateState: OCXUpdateState = .idle
+    @Published private(set) var googleQuota: GoogleQuota?
+    @Published private(set) var googleQuotaState: OCXGoogleQuotaState = .unknown
+    @Published private(set) var googleQuotaLastRefresh: Date?
 
     private let logger = Logger(subsystem: "com.aieink.dashboard.menubar", category: "OpenCodex")
     private let processRunner: ProcessRunning
@@ -26,9 +29,16 @@ final class OpenCodexController: ObservableObject {
     private var isPanelVisible = false
     private var isDetecting = false
     private var lastVersionCheck: Date?
+    private var quotaTask: Task<Void, Never>?
+    private var lastQuotaAttempt: Date?
+    private let dateProvider: () -> Date
 
-    init(processRunner: ProcessRunning = ProcessRunner()) {
+    init(
+        processRunner: ProcessRunning = ProcessRunner(),
+        dateProvider: @escaping () -> Date = { Date() }
+    ) {
         self.processRunner = processRunner
+        self.dateProvider = dateProvider
         candidates = [
             "/opt/homebrew/bin/ocx",
             "/usr/local/bin/ocx",
@@ -73,6 +83,8 @@ final class OpenCodexController: ObservableObject {
         panelMonitorTask = nil
         statusTask?.cancel()
         statusTask = nil
+        quotaTask?.cancel()
+        quotaTask = nil
     }
 
     // MARK: - Detection and status
@@ -84,22 +96,97 @@ final class OpenCodexController: ObservableObject {
 
         if let currentTask = statusTask {
             await currentTask.value
+        } else {
+            statusGeneration += 1
+            let requestGeneration = statusGeneration
+            status = .checking
+
+            let task = Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.performStatusCheck(generation: requestGeneration)
+            }
+            statusTask = task
+            await task.value
+
+            if requestGeneration == statusGeneration {
+                statusTask = nil
+            }
+        }
+
+        await refreshProviderQuota()
+    }
+
+    // MARK: - Provider quota
+
+    func refreshProviderQuota(force: Bool = false) async {
+        if let currentTask = quotaTask {
+            await currentTask.value
             return
         }
 
-        statusGeneration += 1
-        let requestGeneration = statusGeneration
-        status = .checking
+        let now = dateProvider()
+        guard OCXOperationPolicy.shouldRefreshProviderQuota(
+            force: force,
+            lastAttempt: lastQuotaAttempt,
+            now: now
+        ) else { return }
+
+        lastQuotaAttempt = now
+        googleQuotaState = .loading
 
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.performStatusCheck(generation: requestGeneration)
+            await self.performProviderQuotaRefresh(force: force)
         }
-        statusTask = task
+        quotaTask = task
         await task.value
+        quotaTask = nil
+    }
 
-        if requestGeneration == statusGeneration {
-            statusTask = nil
+    private func performProviderQuotaRefresh(force: Bool) async {
+        guard let path = await resolveExecutable() else {
+            markProviderQuotaUnavailable()
+            return
+        }
+        setDetectedPath(path)
+
+        do {
+            let invocation = OCXCommandBuilder.providerQuota(ocxPath: path, force: force)
+            let result = try await processRunner.run(
+                executable: invocation.executable,
+                arguments: invocation.arguments,
+                environment: processEnvironment,
+                timeout: OCXOperationPolicy.providerQuotaTimeout
+            )
+            let response = try OCXProviderQuotaResponse(jsonData: result.stdoutData)
+            guard let nextQuota = OCXProviderQuotaParser.googleQuota(from: response) else {
+                googleQuotaState = googleQuota == nil ? .noData : .stale
+                return
+            }
+            googleQuota = nextQuota
+            googleQuotaState = .live
+            googleQuotaLastRefresh = dateProvider()
+        } catch is CancellationError {
+            return
+        } catch {
+            markProviderQuotaUnavailable()
+            logger.debug("OpenCodex provider quota read failed")
+        }
+    }
+
+    private func markProviderQuotaUnavailable() {
+        guard googleQuota == nil else {
+            googleQuotaState = .stale
+            return
+        }
+
+        switch status {
+        case .notInstalled:
+            googleQuotaState = .notInstalled
+        case .stopped:
+            googleQuotaState = .stopped
+        default:
+            googleQuotaState = .unavailable
         }
     }
 

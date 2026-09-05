@@ -41,4 +41,28 @@ final class AppSettingsTests: XCTestCase {
         settings.menuBarShowSystem = true
         XCTAssertTrue(defaults.bool(forKey: settingKey))
     }
+
+    func testMenuBarShowGoogleQuotaDefaultsAndPersists() {
+        let defaults = UserDefaults.standard
+        let settingKey = "menuBarShowGoogleQuota"
+        let previous = defaults.object(forKey: settingKey)
+        defaults.removeObject(forKey: settingKey)
+        let settings = AppSettings.shared
+
+        defer {
+            if let previous {
+                defaults.set(previous, forKey: settingKey)
+                settings.menuBarShowGoogleQuota = (previous as? Bool) ?? true
+            } else {
+                settings.menuBarShowGoogleQuota = true
+                defaults.removeObject(forKey: settingKey)
+            }
+        }
+
+        XCTAssertTrue(settings.menuBarShowGoogleQuota)
+        settings.menuBarShowGoogleQuota = false
+        XCTAssertEqual(defaults.object(forKey: settingKey) as? Bool, false)
+        settings.menuBarShowGoogleQuota = true
+        XCTAssertTrue(defaults.bool(forKey: settingKey))
+    }
 }

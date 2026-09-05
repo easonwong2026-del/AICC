@@ -38,6 +38,10 @@ struct DashboardView: View {
                 Divider().padding(.horizontal, 14)
                 codexSection
             }
+            if settings.menuBarShowGoogleQuota {
+                Divider().padding(.horizontal, 14)
+                googleQuotaSection
+            }
             if settings.menuBarShowWorkBuddy || settings.menuBarShowDeepSeek {
                 Divider().padding(.horizontal, 14)
                 miniCardsSection
@@ -69,7 +73,7 @@ struct DashboardView: View {
             }
             Spacer()
             HStack(spacing: 12) {
-                Button(action: { Task { await api.fetchStatus(force: true) } }) {
+                Button(action: refreshAll) {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 13, weight: .medium))
                 }
@@ -135,6 +139,14 @@ struct DashboardView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+
+    // MARK: - Google quota
+
+    private var googleQuotaSection: some View {
+        GoogleQuotaCard(quota: ocx.googleQuota, state: ocx.googleQuotaState)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
     }
 
     // MARK: - System
@@ -230,6 +242,14 @@ struct DashboardView: View {
             RoundedRectangle(cornerRadius: 10)
                 .fill(Color.primary.opacity(0.04))
         )
+    }
+
+    private func refreshAll() {
+        Task { @MainActor in
+            async let statusRefresh = api.fetchStatus(force: true)
+            async let quotaRefresh = ocx.refreshProviderQuota(force: true)
+            _ = await (statusRefresh, quotaRefresh)
+        }
     }
 
 }

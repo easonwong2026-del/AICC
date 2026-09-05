@@ -260,7 +260,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     @objc private func refreshAllFromMenu() {
         Task { @MainActor [weak self] in
             guard let self, !self.isTearingDown else { return }
-            await api.fetchStatus(force: true)
+            async let statusRefresh = api.fetchStatus(force: true)
+            async let quotaRefresh = ocx.refreshProviderQuota(force: true)
+            _ = await (statusRefresh, quotaRefresh)
         }
     }
 
