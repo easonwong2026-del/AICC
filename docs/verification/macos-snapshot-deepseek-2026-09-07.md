@@ -65,4 +65,4 @@ Live Swift data-path comparison on this Mac (not a screenshot assertion):
 
 The quota reset changed during this session; these values are real observations, not replacements hardcoded from the original report. Later actual Widget cache reads showed 97% / 81% / 5,947 / 58.36 CNY with the new schema, demonstrating ongoing extension writes.
 
-Native UI automation timed out repeatedly before obtaining the Dashboard accessibility tree or screenshot. A real click-and-screenshot acceptance check remains pending; the user has been asked to refresh both views and provide a screenshot. Do not label the visual acceptance or full CI as passed. A draft PR is reasonable for CI/review; merge should wait for XCTest and the visual acceptance check.
+Native UI automation timed out repeatedly before obtaining the Dashboard accessibility tree or screenshot. After installation, the user reported that internal testing looked good and authorized submitting the PR. This is user-reported acceptance; no automated screenshot evidence was captured. Full XCTest and remote CI remain to be verified on GitHub before merge.
