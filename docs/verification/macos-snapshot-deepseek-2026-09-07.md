@@ -66,3 +66,15 @@ Live Swift data-path comparison on this Mac (not a screenshot assertion):
 The quota reset changed during this session; these values are real observations, not replacements hardcoded from the original report. Later actual Widget cache reads showed 97% / 81% / 5,947 / 58.36 CNY with the new schema, demonstrating ongoing extension writes.
 
 Native UI automation timed out repeatedly before obtaining the Dashboard accessibility tree or screenshot. After installation, the user reported that internal testing looked good and authorized submitting the PR. This is user-reported acceptance; no automated screenshot evidence was captured. Full XCTest and remote CI remain to be verified on GitHub before merge.
+
+## PR #40 correctness follow-up
+
+Starting head: `0457e3e61bc8181974a180bf1e64163ef9fcf4b6` (all five CI jobs passed).
+
+- A timed-out normal generation now starts its pending force immediately. Every force caller joins the active/follow-up run, and expired generations return without touching values or metadata.
+- DeepSeek watchdog budget includes the 5s Keychain lookup, 8s HTTP timeout and 2s cleanup margin. The server force wait derives from two watchdog budgets plus 1s (31s); host and Widget share a 40s transport timeout.
+- Each failure replaces all three diagnostic fields together. Only balance, usage and last-success time survive; sequential HTTP/DNS/manager failures cannot reuse old diagnostics.
+- `No balance` is fresh successful data with separate account status. `Not configured` is unavailable, not cached. The new account field round-trips through the shared snapshot while legacy decoding remains supported.
+- APIService callers share one task: a running normal request gets at most one pending force, and an active force absorbs subsequent clicks. The complete local response is assigned on MainActor before awaiting snapshot publication.
+
+Local follow-up verification: 92 Python tests passed; the force test file (7 tests) and DeepSeek regression file (10 tests, including three sequential-failure subcases) also passed independently. Widget and shared display smoke passed; app/extension build and signing passed. Four new XCTest cases cover request coalescing, publication ordering and account freshness. Local `swift test` remains unavailable because XCTest is missing; the updated PR's GitHub CI must run these tests before merge review. DMG/Android results and final CI status are recorded in the PR follow-up report. No merge was requested or performed.

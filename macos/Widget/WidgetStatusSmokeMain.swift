@@ -169,6 +169,20 @@ struct WidgetStatusSmokeMain {
         try require(failedBalance.deepseekStatusText.contains("connection_error"), "safe error shown")
         let neverSucceeded = WidgetDisplaySnapshot(payload: try decode(#"{"deepseek":{"status":"Connection error","stale":true,"balances":[]}}"#), fetchedAt: fetchedAt)
         try require(neverSucceeded.deepseekState == "unavailable", "no success means unavailable")
+        for (status, balance, expectedState, expectedText) in [
+            ("Online", "58.39", "live", "Online"),
+            ("No balance", "0.00", "live", "No balance"),
+            ("Not configured", "", "unavailable", "Not configured")
+        ] {
+            let balances = balance.isEmpty ? [] : [["currency": "CNY", "total_balance": balance]]
+            let json = try JSONSerialization.data(withJSONObject: ["deepseek": ["status": status, "balances": balances, "stale": false]])
+            let value = WidgetDisplaySnapshot(payload: try JSONDecoder().decode(WidgetStatusPayload.self, from: json), fetchedAt: .now)
+            try require(value.deepseekState == expectedState, "freshness: \(status)")
+            try require(value.deepseekStatusText == expectedText, "account status: \(status)")
+            try require(!value.deepseekStale, "fresh/not configured is not cache")
+            let roundTrip = try JSONDecoder().decode(WidgetDisplaySnapshot.self, from: JSONEncoder().encode(value))
+            try require(roundTrip == value, "shared cache preserves account status")
+        }
         print("AICC Widget status smoke tests passed.")
     }
 

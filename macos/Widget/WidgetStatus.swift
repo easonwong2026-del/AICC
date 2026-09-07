@@ -40,7 +40,7 @@ enum WidgetStatusLoader {
         var request = URLRequest(url: endpoint)
         request.httpMethod = force ? "POST" : "GET"
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.timeoutInterval = force ? 25 : 10
+        request.timeoutInterval = force ? DisplaySnapshotBridge.refreshTimeout : 10
 
         do {
             let (data, response) = try await session.data(for: request)

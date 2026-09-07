@@ -100,6 +100,51 @@ class DeepSeekRegressionTests(unittest.TestCase):
             manager._expire_locked(time.monotonic())
             self.assertEqual(manager._values_locked()["deepseek"]["error_code"], "timeout")
 
+    def test_sequential_failures_replace_all_diagnostics(self):
+        for previous, message, next_failure in (
+                ("http_401", "HTTP 401", "timeout"),
+                ("http_500", "HTTP 500", "exception"),
+                ("dns_error", "DNS lookup failed", "timeout")):
+            with self.subTest(previous=previous, next_failure=next_failure):
+                good = {"status": "Online", "balances": [BALANCE], "usage": [{"currency": "CNY", "used_today": "0.1"}]}
+                results = iter([good, deepseek.failure(previous, message)])
+                manager = CollectorManager({"deepseek": (lambda force=False: next(results), 300, 1, {})})
+                live, _ = manager.snapshot(force=True, wait_seconds=1)
+                failed, _ = manager.snapshot(force=True, wait_seconds=1)
+                self.assertEqual(failed["deepseek"]["error_code"], previous)
+                slot = manager._slots["deepseek"]
+                if next_failure == "timeout":
+                    with manager._condition:
+                        slot.worker_alive = slot.running = True
+                        slot.started_monotonic = time.monotonic() - 2
+                        manager._expire_locked(time.monotonic())
+                    values, metadata = manager.snapshot()
+                    expected = ("timeout", "Request timed out", "timeout")
+                else:
+                    # Exhausted iterator raises an unexpected StopIteration.
+                    values, metadata = manager.snapshot(force=True, wait_seconds=1)
+                    expected = ("connection_error", "Connection error", "error")
+                value = values["deepseek"]
+                self.assertEqual(value["error_code"], expected[0])
+                self.assertEqual(value["status"], expected[1])
+                self.assertEqual(value["error_message"], expected[1])
+                self.assertEqual(value["balances"], [BALANCE])
+                self.assertEqual(value["usage"], good["usage"])
+                self.assertEqual(value["last_success"], live["deepseek"]["last_success"])
+                self.assertTrue(value["stale"])
+                self.assertEqual(metadata["deepseek"]["state"], expected[2])
+
+    def test_no_balance_is_a_fresh_success(self):
+        result = self.collect({"is_available": False, "balance_infos": [{**BALANCE, "total_balance": "0.00"}]})
+        self.assertEqual(result["status"], "No balance")
+        self.assertFalse(result["stale"])
+        self.assertGreater(result["last_success"], 0)
+
+    def test_timeout_contract_includes_keychain_and_http_margin(self):
+        self.assertGreater(deepseek.COLLECTOR_TIMEOUT_SECONDS,
+                           deepseek.KEYCHAIN_TIMEOUT_SECONDS + deepseek.HTTP_TIMEOUT_SECONDS)
+        self.assertGreater(server.FORCE_WAIT_SECONDS, 2 * deepseek.COLLECTOR_TIMEOUT_SECONDS)
+
     def test_server_restart_restores_persisted_deepseek(self):
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(server, "DATA_PATH", Path(directory) / "status.json"), \

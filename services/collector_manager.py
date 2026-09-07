@@ -62,14 +62,11 @@ class CollectorManager:
                 ):
                     self._start_worker_locked(name, slot, force)
                     started.add(name)
-                elif force and slot.worker_alive and slot.running and not slot.pending_force:
-                    # A force snapshot must still produce at least one
-                    # force=True collection. If the running worker is a
-                    # normal (non-force) run, defer the force request and
-                    # wait for the follow-up run.
-                    slot.pending_force = True
+                elif force and slot.running:
+                    # All force callers wait for the same active/follow-up run.
                     if not slot.running_force:
-                        started.add(name)
+                        slot.pending_force = True
+                    started.add(name)
             deadline = time.monotonic() + max(0.0, wait_seconds)
             while started and any(self._slots[name].running for name in started):
                 remaining = deadline - time.monotonic()
@@ -106,27 +103,17 @@ class CollectorManager:
     def _start_pending_force_locked(
         self, name: str, slot: CollectorSlot, generation: int, force: bool
     ) -> None:
-        """Honor a deferred force request after a worker finishes.
-
-        A normal run that finished while a force request was pending is
-        followed immediately by one force=True run. A force run satisfies
-        every request that arrived during it (merged), so it is never
-        followed by another worker. A stale worker (timeout or superseded
-        generation) only acts when no newer worker owns the slot.
-        """
-        if not slot.pending_force:
-            return
-        if generation != slot.generation:
-            if slot.running or slot.worker_alive:
-                return
-            slot.pending_force = False
-            self._start_worker_locked(name, slot, force=True)
-            return
-        if force:
-            slot.pending_force = False
+        """Only the owning generation may hand off to a pending force."""
+        if generation != slot.generation or not slot.pending_force:
             return
         slot.pending_force = False
-        self._start_worker_locked(name, slot, force=True)
+        if not force:
+            self._start_worker_locked(name, slot, force=True)
+
+    @staticmethod
+    def _retain_deepseek_balance(slot: CollectorSlot, diagnostic: dict) -> dict:
+        return {**diagnostic, "balances": slot.value.get("balances", []),
+                "usage": slot.value.get("usage", []), "last_success": slot.last_success or None}
 
     def _run(self, name: str, slot: CollectorSlot, generation: int, force: bool) -> None:
         started = time.monotonic()
@@ -136,38 +123,36 @@ class CollectorManager:
                 raise TypeError("collector did not return an object")
         except Exception as error:  # collectors are an isolation boundary
             with self._condition:
+                if generation != slot.generation:
+                    return
                 slot.duration_ms = round((time.monotonic() - started) * 1000)
-                if generation == slot.generation:
-                    slot.worker_alive = False
-                    slot.error = "connection_error" if name == "deepseek" else f"{type(error).__name__}: {error}"[:160]
-                    slot.running = False
-                    slot.timed_out = False
-                    slot.consecutive_failures += 1
-                elif not slot.running:
-                    # Stale worker winding down after a timeout with no newer
-                    # worker: release ownership so a later refresh can start.
-                    slot.worker_alive = False
+                slot.worker_alive = False
+                slot.error = "connection_error" if name == "deepseek" else f"{type(error).__name__}: {error}"[:160]
+                if name == "deepseek":
+                    slot.value = self._retain_deepseek_balance(slot, failure("connection_error", "Connection error"))
+                    slot.snapshot_stale = True
+                slot.running = False
+                slot.timed_out = False
+                slot.consecutive_failures += 1
                 self._start_pending_force_locked(name, slot, generation, force)
                 self._condition.notify_all()
             return
         with self._condition:
+            if generation != slot.generation:
+                return
             slot.duration_ms = round((time.monotonic() - started) * 1000)
-            if generation == slot.generation:
-                slot.worker_alive = False
-                if name == "deepseek" and value.get("error_code"):
-                    value = {**slot.value, **value, "balances": slot.value.get("balances", []),
-                             "usage": slot.value.get("usage", []), "last_success": slot.last_success or None}
-                    slot.consecutive_failures += 1
-                slot.value = value
-                slot.snapshot_stale = bool(value.get("stale"))
-                slot.error = value.get("error_code")
-                slot.running = False
-                slot.timed_out = False
-                if not slot.snapshot_stale:
-                    slot.last_success = time.time()
-                    slot.consecutive_failures = 0
-            elif not slot.running:
-                slot.worker_alive = False
+            slot.worker_alive = False
+            if name == "deepseek" and value.get("error_code"):
+                value = self._retain_deepseek_balance(slot, value)
+                slot.consecutive_failures += 1
+            slot.value = value
+            slot.snapshot_stale = bool(value.get("stale"))
+            slot.error = value.get("error_code")
+            slot.running = False
+            slot.timed_out = False
+            if not slot.snapshot_stale:
+                slot.last_success = time.time()
+                slot.consecutive_failures = 0
             self._start_pending_force_locked(name, slot, generation, force)
             self._condition.notify_all()
 
@@ -180,7 +165,7 @@ class CollectorManager:
         return min(active) if active else 0.25
 
     def _expire_locked(self, now: float) -> None:
-        for slot in self._slots.values():
+        for name, slot in self._slots.items():
             if not slot.worker_alive or not slot.running:
                 continue
             if now - slot.started_monotonic < slot.timeout:
@@ -190,6 +175,14 @@ class CollectorManager:
             slot.error = f"Timeout after {slot.timeout:.1f}s"
             slot.consecutive_failures += 1
             slot.generation += 1
+            slot.worker_alive = False
+            if name == "deepseek":
+                slot.value = self._retain_deepseek_balance(slot, failure("timeout", "Request timed out"))
+                slot.snapshot_stale = True
+            # The expired thread may never return; hand off here, not in _run.
+            if slot.pending_force:
+                slot.pending_force = False
+                self._start_worker_locked(name, slot, force=True)
 
     def _values_locked(self) -> dict:
         values = {}
@@ -201,12 +194,6 @@ class CollectorManager:
             if name == "workbuddy" and slot.value.get("balance_updated_epoch") is not None:
                 value = _with_stale_state(slot.value) or value
             if name == "deepseek":
-                if slot.error:
-                    code = "timeout" if slot.timed_out else value.get("error_code", "connection_error")
-                    diagnostic = failure(code, "Request timed out" if slot.timed_out else "Connection error")
-                    value = {**value, **diagnostic, "balances": value.get("balances", []),
-                             "error_message": value.get("error_message", diagnostic["error_message"]),
-                             "status": value.get("status") if value.get("error_code") else diagnostic["status"]}
                 value["last_success"] = slot.last_success or None
                 value["age"] = max(0, round(time.time() - slot.last_success)) if slot.last_success else None
                 value["stale"] = bool(value.get("stale") or slot.error or not slot.last_success

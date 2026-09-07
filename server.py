@@ -18,7 +18,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from collectors.deepseek import collect as collect_deepseek
+from collectors.deepseek import collect as collect_deepseek, COLLECTOR_TIMEOUT_SECONDS as DEEPSEEK_COLLECTOR_TIMEOUT
 from collectors.system import collect as collect_system
 from collectors.workbuddy import collect as collect_workbuddy, initial_status
 from services.codex_monitor import monitor
@@ -33,6 +33,8 @@ DATA_ROOT = Path(os.environ.get("EINK_DATA_DIR", ROOT / "data")).expanduser()
 DATA_PATH = DATA_ROOT / "status.json"
 WEB_ROOT = Path(os.environ.get("EINK_WEB_ROOT", ROOT / "web")).expanduser()
 COLLECTOR_WAIT_SECONDS = max(0, min(5, float(os.environ.get("COLLECTOR_WAIT_SECONDS", "3.2"))))
+# A force may wait for a normal run to time out, then for its force successor.
+FORCE_WAIT_SECONDS = 2 * max(DEFAULT_COLLECTOR_TIMEOUT, DEEPSEEK_COLLECTOR_TIMEOUT) + 1.0
 SERVER_STARTED_AT = time.time()
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 DEFAULT_STATUS = {
@@ -118,7 +120,7 @@ def collector_manager() -> CollectorManager:
             "deepseek": (
                 collect_deepseek_value,
                 300.0,
-                DEFAULT_COLLECTOR_TIMEOUT,
+                DEEPSEEK_COLLECTOR_TIMEOUT,
                 {**fallback.get("deepseek", {"status": "Loading", "balances": []}), "stale": True},
             ),
             "workbuddy": (
@@ -139,7 +141,7 @@ def collector_manager() -> CollectorManager:
 
 def load_status(force: bool = False) -> dict:
     global _display_revision, _display_snapshot
-    values, metadata = collector_manager().snapshot(force=force, wait_seconds=18.0 if force else COLLECTOR_WAIT_SECONDS)
+    values, metadata = collector_manager().snapshot(force=force, wait_seconds=FORCE_WAIT_SECONDS if force else COLLECTOR_WAIT_SECONDS)
     data = persisted_status()
     previous_deepseek = {k: v for k, v in data.get("deepseek", {}).items() if k != "age"}
     current_deepseek = {k: v for k, v in values.get("deepseek", {}).items() if k != "age"}

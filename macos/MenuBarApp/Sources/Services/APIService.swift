@@ -69,7 +69,9 @@ class APIService: ObservableObject {
 
     private let baseURL: String
     private var refreshTask: Task<Void, Never>?
-    private var fetchInFlight = false
+    private var fetchTask: Task<Void, Never>?
+    private var runningForce = false
+    private var pendingForce = false
     private let session: URLSession
 
     convenience init() {
@@ -79,19 +81,34 @@ class APIService: ObservableObject {
     init(baseURL: String, session: URLSession? = nil) {
         self.baseURL = baseURL
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 25
-        config.timeoutIntervalForResource = 30
+        config.timeoutIntervalForRequest = DisplaySnapshotBridge.refreshTimeout
+        config.timeoutIntervalForResource = DisplaySnapshotBridge.refreshTimeout + 5
         self.session = session ?? URLSession(configuration: config)
     }
 
     func fetchStatus(force: Bool = false) async {
-        while fetchInFlight {
-            guard force, !Task.isCancelled else { return }
-            try? await Task.sleep(nanoseconds: 50_000_000)
+        if let task = fetchTask {
+            if force && !runningForce { pendingForce = true }
+            await task.value
+            return
         }
-        fetchInFlight = true
+        runningForce = force
+        let task = Task { @MainActor in
+            await self.performFetch(force: force)
+            if self.pendingForce {
+                self.pendingForce = false
+                self.runningForce = true
+                await self.performFetch(force: true)
+            }
+            self.fetchTask = nil
+            self.runningForce = false
+        }
+        fetchTask = task
+        await task.value
+    }
+
+    private func performFetch(force: Bool) async {
         defer {
-            fetchInFlight = false
             if case .ready = state {} else if let snapshot = displaySnapshot {
                 displaySnapshot = snapshot.evaluated(offline: true)
                 state = .stale
@@ -121,13 +138,14 @@ class APIService: ObservableObject {
             let decoded = try decoder.decode(StatusResponse.self, from: data)
             let payload = try decoder.decode(WidgetStatusPayload.self, from: data)
             let snapshot = WidgetDisplaySnapshot(payload: payload, fetchedAt: .now)
-            displaySnapshot = snapshot
-            await DisplaySnapshotBridge.publish(snapshot, revision: payload.display_revision, baseURL: baseURL, session: session)
+            // Commit the entire response on MainActor before any network suspension.
             status = decoded
+            displaySnapshot = snapshot
             lastRefresh = Date()
             state = .ready
             errorMessage = nil
 
+            await DisplaySnapshotBridge.publish(snapshot, revision: payload.display_revision, baseURL: baseURL, session: session)
             WidgetCenter.shared.reloadAllTimelines()
         } catch let decodingError as DecodingError {
             let detail = decodingError.failureReason ?? decodingError.localizedDescription

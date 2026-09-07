@@ -126,6 +126,82 @@ class ForceRefreshTests(unittest.TestCase):
         values, _ = manager.snapshot(wait_seconds=0)
         self.assertEqual(values["p"]["call"], 2)
 
+    def test_pending_force_starts_at_watchdog_without_old_worker_returning(self):
+        old_started, force_started, old_release, force_release = (threading.Event() for _ in range(4))
+        calls, results = [], []
+
+        def collect(force=False):
+            calls.append(force)
+            (force_started if force else old_started).set()
+            # No timeout: the old worker cannot finish until test cleanup.
+            (force_release if force else old_release).wait()
+            return {"value": "new" if force else "old"}
+
+        manager = CollectorManager({"p": (collect, 60, 1, {"value": "initial"})})
+        manager.snapshot(wait_seconds=0)
+        self.assertTrue(old_started.wait(1))
+        waiter = threading.Thread(target=lambda: results.append(manager.snapshot(force=True, wait_seconds=4)))
+        waiter.start()
+        try:
+            self._wait_until(lambda: manager._slots["p"].pending_force)
+            self.assertTrue(force_started.wait(2), "watchdog must start force before old thread returns")
+            self.assertTrue(waiter.is_alive(), "caller must wait for the force result")
+            self.assertFalse(old_release.is_set())
+            force_release.set()
+            waiter.join(2)
+            self.assertFalse(waiter.is_alive())
+            self.assertEqual(results[0][0]["p"], {"value": "new"})
+            self.assertEqual(results[0][1]["p"]["state"], "ready")
+            before = manager._slots["p"].duration_ms
+            old_release.set()
+            self._wait_until(lambda: not any(t.name == "collect-p" for t in threading.enumerate()))
+            self.assertEqual(manager.snapshot()[0]["p"], {"value": "new"})
+            self.assertEqual(manager._slots["p"].duration_ms, before)
+            self.assertEqual(calls, [False, True])
+        finally:
+            old_release.set()
+            force_release.set()
+            waiter.join(2)
+
+    def test_concurrent_force_callers_wait_for_one_worker(self):
+        started, release, second_entered = (threading.Event() for _ in range(3))
+        calls, results = [], []
+
+        def collect(force=False):
+            calls.append(force)
+            started.set()
+            release.wait()
+            return {"value": "new"}
+
+        manager = CollectorManager({"p": (collect, 60, 3, {"value": "old"})})
+        first = threading.Thread(target=lambda: results.append(manager.snapshot(force=True, wait_seconds=4)))
+
+        def second_call():
+            second_entered.set()
+            results.append(manager.snapshot(force=True, wait_seconds=4))
+
+        second = threading.Thread(target=second_call)
+        first.start()
+        try:
+            self.assertTrue(started.wait(1))
+            second.start()
+            self.assertTrue(second_entered.wait(1))
+            second.join(0.1)
+            self.assertTrue(second.is_alive(), "second force must not return the old snapshot")
+            release.set()
+            first.join(2)
+            second.join(2)
+            self.assertEqual(calls, [True])
+            self.assertEqual(len(results), 2)
+            for values, metadata in results:
+                self.assertEqual(values["p"], {"value": "new"})
+                self.assertEqual(metadata["p"]["state"], "ready")
+        finally:
+            release.set()
+            first.join(2)
+            if second.ident is not None:
+                second.join(2)
+
     def test_collectors_refresh_independently(self):
         started = {name: threading.Event() for name in ("first", "second")}
         release = threading.Event()

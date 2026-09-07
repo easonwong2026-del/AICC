@@ -111,6 +111,7 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
     var workbuddyStale: Bool = false
     var deepseekStale: Bool = false
     var deepseekError: String? = nil
+    var deepseekAccountStatus: String? = nil
     static let liveLifetime: TimeInterval = 5 * 60
     static let cacheLifetime: TimeInterval = 24 * 60 * 60
     var age: TimeInterval { age(at: .now) }
@@ -121,10 +122,10 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
     }
     var codexState: String { codexWeeklyNumber == "—" ? "unavailable" : (stale || codexStale ? "stale" : "live") }
     var workbuddyState: String { workbuddyPoints == nil ? "unavailable" : (stale || workbuddyStale ? "stale" : "live") }
-    var deepseekState: String { deepseekBalanceText == "—" ? "unavailable" : (stale || deepseekStale || !deepseekIsOnline ? "stale" : "live") }
+    var deepseekState: String { deepseekBalanceText == "—" ? "unavailable" : (stale || deepseekStale ? "stale" : "live") }
     var deepseekStatusText: String {
-        if deepseekState == "live" { return "Online" }
-        if deepseekState == "unavailable" { return deepseekError ?? "Unavailable" }
+        if deepseekState == "live" { return deepseekAccountStatus ?? "Online" }
+        if deepseekState == "unavailable" { return deepseekError ?? deepseekAccountStatus ?? "Unavailable" }
         return "缓存 / \(deepseekError ?? "stale")"
     }
 
@@ -195,7 +196,7 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         case deepseekCurrency
         case deepseekIsOnline
         case fetchedAt
-        case stale, age, codexStale, workbuddyStale, deepseekStale, deepseekError
+        case stale, age, codexStale, workbuddyStale, deepseekStale, deepseekError, deepseekAccountStatus
 
         // Legacy 2.7.0 keys
         case codex
@@ -241,6 +242,7 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         codexStale = (try? container.decode(Bool.self, forKey: .codexStale)) ?? false
         workbuddyStale = (try? container.decode(Bool.self, forKey: .workbuddyStale)) ?? false
         deepseekStale = (try? container.decode(Bool.self, forKey: .deepseekStale)) ?? false
+        deepseekAccountStatus = try? container.decode(String.self, forKey: .deepseekAccountStatus)
         deepseekError = try? container.decode(String.self, forKey: .deepseekError)
 
         if let num = try? container.decodeIfPresent(String.self, forKey: .codexWeeklyNumber) {
@@ -256,6 +258,7 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
             self.deepseekBalanceText = (try? container.decodeIfPresent(String.self, forKey: .deepseekBalanceText)) ?? "—"
             self.deepseekCurrency = (try? container.decodeIfPresent(String.self, forKey: .deepseekCurrency)) ?? "CNY"
             self.deepseekIsOnline = (try? container.decodeIfPresent(Bool.self, forKey: .deepseekIsOnline)) ?? false
+            if deepseekAccountStatus == nil && !deepseekIsOnline { deepseekStale = true }
             self.fetchedAt = (try? container.decodeIfPresent(Date.self, forKey: .fetchedAt)) ?? .distantPast
             self.stale = (try? container.decodeIfPresent(Bool.self, forKey: .stale)) ?? true
             return
@@ -322,6 +325,7 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         try container.encode(workbuddyStale, forKey: .workbuddyStale)
         try container.encode(deepseekStale, forKey: .deepseekStale)
         try container.encodeIfPresent(deepseekError, forKey: .deepseekError)
+        try container.encodeIfPresent(deepseekAccountStatus, forKey: .deepseekAccountStatus)
     }
 
     init(payload: WidgetStatusPayload, fetchedAt: Date) {
@@ -354,7 +358,9 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
 
         // 3. DeepSeek
         let (dsBalance, dsCurrency) = Self.formatDeepSeekBalance(payload.deepseek)
-        let dsOnline = payload.deepseek?.status?.trimmingCharacters(in: .whitespacesAndNewlines) == "Online"
+        let dsStatus = payload.deepseek?.status?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let dsOnline = dsStatus == "Online"
+        let dsFresh = dsOnline || dsStatus == "No balance"
 
         self.init(
             codexWeeklyNumber: weeklyNum,
@@ -376,9 +382,10 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         codexStale = payload.codex?.stale == true || failureStates.contains(payload.collection?.codex?.state ?? "")
         workbuddyStale = payload.workbuddy?.balance_stale == true || payload.workbuddy?.balance_state == "Cached"
             || failureStates.contains(payload.collection?.workbuddy?.state ?? "")
-        deepseekStale = payload.deepseek?.stale == true || !dsOnline
+        deepseekStale = payload.deepseek?.stale == true || (!dsFresh && dsStatus != "Not configured")
             || failureStates.contains(payload.collection?.deepseek?.state ?? "")
         deepseekError = payload.deepseek?.error_code
+        deepseekAccountStatus = dsStatus
     }
 
     var staleCopy: WidgetDisplaySnapshot {
@@ -431,6 +438,8 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
 // Both clients publish the same normalized presentation to the loopback backend.
 // No App Group entitlement or second business-data source is required.
 enum DisplaySnapshotBridge {
+    // Backend force budget is 31s (normal + force watchdogs); leave transport margin.
+    static let refreshTimeout: TimeInterval = 40
     static func publish(_ snapshot: WidgetDisplaySnapshot, revision: String?, baseURL: String,
                         session: URLSession) async {
         guard let revision, let url = URL(string: baseURL + "/api/display-snapshot") else { return }

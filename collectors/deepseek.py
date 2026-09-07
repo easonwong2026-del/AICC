@@ -20,6 +20,11 @@ try:
 except ImportError:  # pragma: no cover - only available on Windows
     winreg = None
 
+HTTP_TIMEOUT_SECONDS = 8.0
+KEYCHAIN_TIMEOUT_SECONDS = 5.0
+# Allow key lookup + HTTP timeout + cleanup before the manager watchdog expires.
+COLLECTOR_TIMEOUT_SECONDS = KEYCHAIN_TIMEOUT_SECONDS + HTTP_TIMEOUT_SECONDS + 2.0
+
 BALANCE_URL = "https://api.deepseek.com/user/balance"
 
 
@@ -39,7 +44,7 @@ def load_api_key() -> str:
             return subprocess.check_output(
                 ["security", "find-generic-password", "-a", os.environ.get("USER", ""),
                  "-s", "ai-eink-dashboard.deepseek", "-w"],
-                text=True, timeout=5, stderr=subprocess.DEVNULL,
+                text=True, timeout=KEYCHAIN_TIMEOUT_SECONDS, stderr=subprocess.DEVNULL,
             ).strip()
         except (OSError, subprocess.SubprocessError):
             pass
@@ -102,7 +107,7 @@ def network_failure(error: Exception) -> dict:
 def open_balance(request: Request):
     # Re-read environment/system proxies each attempt; urllib's global opener
     # otherwise retains an obsolete VPN proxy until the server restarts.
-    return build_opener(ProxyHandler(getproxies())).open(request, timeout=8)
+    return build_opener(ProxyHandler(getproxies())).open(request, timeout=HTTP_TIMEOUT_SECONDS)
 
 
 def collect(history_path: Path | None = None) -> dict:
