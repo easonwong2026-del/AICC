@@ -30,8 +30,12 @@ struct AICCWidgetProvider: TimelineProvider {
             let entry = AICCWidgetEntry(date: now, snapshot: snapshot)
             completion(
                 Timeline(
-                    entries: [entry],
-                    policy: .after(now.addingTimeInterval(15 * 60))
+                    entries: [entry,
+                        AICCWidgetEntry(date: max(now.addingTimeInterval(1), snapshot.fetchedAt.addingTimeInterval(WidgetDisplaySnapshot.liveLifetime)),
+                                        snapshot: snapshot.staleCopy),
+                        AICCWidgetEntry(date: max(now.addingTimeInterval(2), snapshot.fetchedAt.addingTimeInterval(WidgetDisplaySnapshot.cacheLifetime)),
+                                        snapshot: .placeholder)],
+                    policy: .after(now.addingTimeInterval(5 * 60))
                 )
             )
         }
@@ -140,7 +144,7 @@ struct AICCWidgetView: View {
                 Circle()
                     .fill(codexAvailable ? Color.green : Color.secondary)
                     .frame(width: 4.5, height: 4.5)
-                Text(entry.snapshot.codexTitle)
+                Text(entry.snapshot.codexTitle + (entry.snapshot.codexState == "stale" ? " · 缓存" : ""))
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(codexAvailable ? Color.green : .secondary)
                 Spacer(minLength: 0)
@@ -224,11 +228,11 @@ struct AICCWidgetView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 4.5) {
                 Circle()
-                    .fill(entry.snapshot.workbuddyIsOnline ? Color.purple : Color.secondary)
+                    .fill((entry.snapshot.workbuddyState == "live") ? Color.purple : Color.secondary)
                     .frame(width: 4.5, height: 4.5)
-                Text("WorkBuddy")
+                Text(entry.snapshot.workbuddyState == "stale" ? "WorkBuddy · 缓存" : "WorkBuddy")
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(entry.snapshot.workbuddyIsOnline ? Color.purple : .secondary)
+                    .foregroundStyle((entry.snapshot.workbuddyState == "live") ? Color.purple : .secondary)
                 Spacer(minLength: 16)
             }
 
@@ -254,11 +258,11 @@ struct AICCWidgetView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 4.5) {
                 Circle()
-                    .fill(entry.snapshot.deepseekIsOnline ? Color.cyan : Color.secondary)
+                    .fill((entry.snapshot.deepseekState == "live") ? Color.cyan : Color.secondary)
                     .frame(width: 4.5, height: 4.5)
                 Text("DeepSeek")
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(entry.snapshot.deepseekIsOnline ? Color.cyan : .secondary)
+                    .foregroundStyle((entry.snapshot.deepseekState == "live") ? Color.cyan : .secondary)
                 Spacer(minLength: 0)
             }
 
@@ -275,6 +279,10 @@ struct AICCWidgetView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            Text(entry.snapshot.deepseekStatusText)
+                .font(.system(size: 8.5))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
         }
     }
 
@@ -282,7 +290,7 @@ struct AICCWidgetView: View {
 
     private var smallCodexCard: some View {
         VStack(alignment: .leading, spacing: 2.5) {
-            Text(entry.snapshot.codexTitle)
+            Text(entry.snapshot.codexTitle + (entry.snapshot.codexState == "stale" ? " · 缓存" : ""))
                 .font(.system(size: 9.5, weight: .medium))
                 .foregroundStyle(.secondary)
 
@@ -339,11 +347,11 @@ struct AICCWidgetView: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 3) {
                 Circle()
-                    .fill(entry.snapshot.workbuddyIsOnline ? Color.purple : Color.secondary)
+                    .fill((entry.snapshot.workbuddyState == "live") ? Color.purple : Color.secondary)
                     .frame(width: 3.5, height: 3.5)
-                Text("WorkBuddy")
+                Text(entry.snapshot.workbuddyState == "stale" ? "WorkBuddy · 缓存" : "WorkBuddy")
                     .font(.system(size: 8.5, weight: .medium))
-                    .foregroundStyle(entry.snapshot.workbuddyIsOnline ? Color.purple : .secondary)
+                    .foregroundStyle((entry.snapshot.workbuddyState == "live") ? Color.purple : .secondary)
             }
 
             HStack(alignment: .lastTextBaseline, spacing: 2) {

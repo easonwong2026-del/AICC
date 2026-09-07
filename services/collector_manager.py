@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 
 from collectors.workbuddy import _with_stale_state
+from collectors.deepseek import failure
 
 
 DEFAULT_COLLECTOR_INTERVAL = 120.0
@@ -36,7 +37,7 @@ class CollectorSlot:
         self.started_monotonic = 0.0
         self.generation = 0
         self.last_attempt = 0.0
-        self.last_success = 0.0
+        self.last_success = float(self.value.get("last_success") or 0)
         self.error: str | None = None
         self.timed_out = False
         self.duration_ms: int | None = None
@@ -138,7 +139,7 @@ class CollectorManager:
                 slot.duration_ms = round((time.monotonic() - started) * 1000)
                 if generation == slot.generation:
                     slot.worker_alive = False
-                    slot.error = f"{type(error).__name__}: {error}"[:160]
+                    slot.error = "connection_error" if name == "deepseek" else f"{type(error).__name__}: {error}"[:160]
                     slot.running = False
                     slot.timed_out = False
                     slot.consecutive_failures += 1
@@ -153,9 +154,13 @@ class CollectorManager:
             slot.duration_ms = round((time.monotonic() - started) * 1000)
             if generation == slot.generation:
                 slot.worker_alive = False
+                if name == "deepseek" and value.get("error_code"):
+                    value = {**slot.value, **value, "balances": slot.value.get("balances", []),
+                             "usage": slot.value.get("usage", []), "last_success": slot.last_success or None}
+                    slot.consecutive_failures += 1
                 slot.value = value
                 slot.snapshot_stale = bool(value.get("stale"))
-                slot.error = None
+                slot.error = value.get("error_code")
                 slot.running = False
                 slot.timed_out = False
                 if not slot.snapshot_stale:
@@ -195,6 +200,17 @@ class CollectorManager:
             value = slot.value.copy()
             if name == "workbuddy" and slot.value.get("balance_updated_epoch") is not None:
                 value = _with_stale_state(slot.value) or value
+            if name == "deepseek":
+                if slot.error:
+                    code = "timeout" if slot.timed_out else value.get("error_code", "connection_error")
+                    diagnostic = failure(code, "Request timed out" if slot.timed_out else "Connection error")
+                    value = {**value, **diagnostic, "balances": value.get("balances", []),
+                             "error_message": value.get("error_message", diagnostic["error_message"]),
+                             "status": value.get("status") if value.get("error_code") else diagnostic["status"]}
+                value["last_success"] = slot.last_success or None
+                value["age"] = max(0, round(time.time() - slot.last_success)) if slot.last_success else None
+                value["stale"] = bool(value.get("stale") or slot.error or not slot.last_success
+                                      or time.time() - slot.last_success > slot.interval * 2)
             values[name] = value
         return values
 

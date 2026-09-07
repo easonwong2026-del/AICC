@@ -3,6 +3,7 @@ import SwiftUI
 struct DeepSeekCard: View {
     @EnvironmentObject private var settings: AppSettings
     let data: DeepSeekData
+    let snapshot: WidgetDisplaySnapshot
 
     var body: some View {
         CompactCard(
@@ -17,36 +18,22 @@ struct DeepSeekCard: View {
     }
 
     private var formattedBalance: String {
-        guard let balances = data.balances, !balances.isEmpty else {
-            return settings.localized("Temporarily unavailable")
-        }
-        let cny = balances.first(where: { $0.currency == "CNY" }) ?? balances[0]
-        guard let total = Double(cny.total_balance ?? "") else { return "--" }
-        return String(format: "%.2f", total)
+        snapshot.deepseekState == "unavailable" ? settings.localized("Temporarily unavailable") : snapshot.deepseekBalanceText
     }
 
     private var balanceUnit: String? {
-        guard let balances = data.balances, !balances.isEmpty else { return nil }
-        return (balances.first(where: { $0.currency == "CNY" }) ?? balances[0]).currency
+        snapshot.deepseekState == "unavailable" ? nil : snapshot.deepseekCurrency
     }
 
     private var consumptionText: String {
-        guard let usage = data.usage, !usage.isEmpty else {
-            return data.status == "Online"
-                ? settings.localized("Online")
-                : settings.localized(data.status ?? "--")
-        }
-        let cnyUsed = usage.first(where: { $0.currency == "CNY" })?.used_today
-        if let used = cnyUsed, let value = Double(used), value > 0 {
-            return String(format: settings.localized("Today %@"), "¥\(String(format: "%.2f", value))")
-        }
-        return settings.localized("Online")
+        guard snapshot.deepseekState == "live",
+              let used = data.usage?.first(where: { $0.currency == snapshot.deepseekCurrency })?.used_today,
+              let value = Double(used), value > 0 else { return snapshot.deepseekStatusText }
+        return snapshot.deepseekStatusText + " · " + String(format: settings.localized("Today %@"),
+                                                           "¥\(String(format: "%.2f", value))")
     }
 
     private var state: CardState {
-        if data.status == "Online" { return .online }
-        if data.status == "Not configured" { return .unavailable }
-        if data.balances?.isEmpty == false { return .stale }
-        return .unavailable
+        snapshot.deepseekState == "live" ? .online : (snapshot.deepseekState == "stale" ? .stale : .unavailable)
     }
 }

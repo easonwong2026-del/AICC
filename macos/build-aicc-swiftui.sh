@@ -121,6 +121,7 @@ xcrun swiftc \
 
 echo "=== Building Widget extension ==="
 WIDGET_FILES=(
+  "$SOURCE_DIR/Models/WidgetDisplaySnapshot.swift"
   "$WIDGET_SOURCE_DIR/WidgetStatus.swift"
   "$WIDGET_SOURCE_DIR/AICCWidget.swift"
   "$WIDGET_SOURCE_DIR/RefreshWidgetIntent.swift"

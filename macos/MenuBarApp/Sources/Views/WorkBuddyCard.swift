@@ -3,6 +3,7 @@ import SwiftUI
 struct WorkBuddyCard: View {
     @EnvironmentObject private var settings: AppSettings
     let data: WorkBuddyData
+    let snapshot: WidgetDisplaySnapshot
 
     var body: some View {
         CompactCard(
@@ -11,24 +12,18 @@ struct WorkBuddyCard: View {
             value: formattedPoints,
             subtitle: statusSubtitle,
             state: state,
-            unit: data.points == nil ? nil : settings.localized("Points"),
+            unit: snapshot.workbuddyPoints == nil ? nil : settings.localized("Points"),
             valueFontSize: DashboardTypography.primaryFontSize(number: formattedPoints, compact: true)
         )
     }
 
     private var formattedPoints: String {
-        guard let points = data.points else {
-            return settings.localized("Temporarily unavailable")
-        }
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        formatter.usesGroupingSeparator = true
-        formatter.maximumFractionDigits = 2
-        formatter.minimumFractionDigits = 0
-        return formatter.string(from: NSNumber(value: points)) ?? String(points)
+        snapshot.workbuddyPoints == nil ? settings.localized("Temporarily unavailable") : snapshot.workbuddyPointsText
     }
 
     private var statusSubtitle: String {
+        if snapshot.workbuddyState == "unavailable" { return settings.localized("Unavailable") }
+        if snapshot.workbuddyState == "stale" { return "缓存 / stale" }
         let statusKey = data.balance_state ?? (data.points == nil ? "Unavailable" : "Connected")
         let status = settings.localized(statusKey)
         if data.points == nil {
@@ -59,9 +54,6 @@ struct WorkBuddyCard: View {
     }
 
     private var state: CardState {
-        if data.balance_stale == true || data.balance_state == "Cached" { return .stale }
-        if data.balance_state == "Connected" { return .online }
-        if data.points == nil { return .unavailable }
-        return .online
+        snapshot.workbuddyState == "live" ? .online : (snapshot.workbuddyState == "stale" ? .stale : .unavailable)
     }
 }

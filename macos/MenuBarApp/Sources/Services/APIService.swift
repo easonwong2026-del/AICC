@@ -61,6 +61,8 @@ class APIService: ObservableObject {
     static let shared = APIService()
 
     @Published var status: StatusResponse?
+    @Published var displaySnapshot: WidgetDisplaySnapshot?
+    var currentDisplaySnapshot: WidgetDisplaySnapshot? { displaySnapshot?.evaluated() }
     @Published var state: DataSourceState = .loading
     @Published var lastRefresh: Date?
     @Published var errorMessage: String?
@@ -69,7 +71,6 @@ class APIService: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     private var fetchInFlight = false
     private let session: URLSession
-    private var lastWidgetSignature: WidgetDisplaySignature?
 
     convenience init() {
         self.init(baseURL: "http://127.0.0.1:8765")
@@ -78,15 +79,25 @@ class APIService: ObservableObject {
     init(baseURL: String, session: URLSession? = nil) {
         self.baseURL = baseURL
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 5
-        config.timeoutIntervalForResource = 10
+        config.timeoutIntervalForRequest = 25
+        config.timeoutIntervalForResource = 30
         self.session = session ?? URLSession(configuration: config)
     }
 
     func fetchStatus(force: Bool = false) async {
-        guard !fetchInFlight else { return }
+        while fetchInFlight {
+            guard force, !Task.isCancelled else { return }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
         fetchInFlight = true
-        defer { fetchInFlight = false }
+        defer {
+            fetchInFlight = false
+            if case .ready = state {} else if let snapshot = displaySnapshot {
+                displaySnapshot = snapshot.evaluated(offline: true)
+                state = .stale
+                WidgetCenter.shared.reloadAllTimelines()
+            }
+        }
 
         let path = force ? "/api/refresh" : "/api/status"
         let method = force ? "POST" : "GET"
@@ -108,20 +119,16 @@ class APIService: ObservableObject {
             }
             let decoder = JSONDecoder()
             let decoded = try decoder.decode(StatusResponse.self, from: data)
+            let payload = try decoder.decode(WidgetStatusPayload.self, from: data)
+            let snapshot = WidgetDisplaySnapshot(payload: payload, fetchedAt: .now)
+            displaySnapshot = snapshot
+            await DisplaySnapshotBridge.publish(snapshot, revision: payload.display_revision, baseURL: baseURL, session: session)
             status = decoded
             lastRefresh = Date()
             state = .ready
             errorMessage = nil
 
-            let newSignature = WidgetDisplaySignature(from: decoded)
-            if WidgetDisplaySignature.shouldReloadWidget(
-                previous: lastWidgetSignature,
-                current: newSignature,
-                force: force
-            ) {
-                lastWidgetSignature = newSignature
-                WidgetCenter.shared.reloadAllTimelines()
-            }
+            WidgetCenter.shared.reloadAllTimelines()
         } catch let decodingError as DecodingError {
             let detail = decodingError.failureReason ?? decodingError.localizedDescription
             state = .error(detail)
@@ -174,13 +181,13 @@ class APIService: ObservableObject {
     }
 
     var allServicesOk: Bool {
-        guard let s = status else { return false }
-        let codexOk = s.codex?.five_hour?.remaining != nil || s.codex?.weekly?.remaining != nil
-        let wbOk = s.workbuddy?.points != nil
+        guard let s = status, let snapshot = currentDisplaySnapshot else { return false }
+        let codexOk = snapshot.codexState == "live"
+        let wbOk = snapshot.workbuddyState == "live"
         let systemOk = s.system?.status == "Online"
         // DeepSeek might not be configured — treat that as a healthy optional source.
         let dsStatus = s.deepseek?.status
-        let dsOk = dsStatus == nil || dsStatus == "Online" || dsStatus == "Not configured"
+        let dsOk = dsStatus == nil || snapshot.deepseekState == "live" || dsStatus == "Not configured"
         return codexOk && wbOk && dsOk && systemOk
     }
 }
