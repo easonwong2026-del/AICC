@@ -2,6 +2,12 @@
 
 [English](CHANGELOG.en.md)
 
+## Unreleased
+
+- **Google 额度重构（周额度为主、5小时为辅）**：后端新增 `collectors/google.py`，从 OpenCodex 统一抓取并计算 `Gem (Weekly)` 与 `Gem` 额度窗口，转换为剩余百分比与独立重置时间；
+- **菜单栏与桌面小组件同步展示**：菜单栏 Google 卡片与 Small / Medium 桌面小组件全面接入 Google 额度，支持主次进度条排版与自适应紧凑布局；
+- **数据流与快照收拢**：移除 OpenCodexController 中冗余的私有额度轮询链路，由本地服务端收集器与 `WidgetDisplaySnapshot` 统一向菜单栏与小组件共享数据，支持离线缓存与故障安全降级。
+
 ## 2.7.1 - 2026-08-29
 
 - **macOS Widget 重设计**：中尺寸 Widget 改为适合横向尺寸的左右布局；Codex 每周额度成为主视觉指标，居中展示大字号百分比与真实进度条、重置时间和 5 小时额度；WorkBuddy 积分与 DeepSeek 余额作为右侧次级指标对称排布。

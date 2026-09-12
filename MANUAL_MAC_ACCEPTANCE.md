@@ -99,3 +99,14 @@ evidence.
 - [ ] FAIL
 - [ ] BLOCKED
 - Evidence and notes:
+
+### Google quota windows
+
+- [ ] Dashboard and Small/Medium widgets show Google weekly remaining as the primary percentage and 5-hour remaining as secondary.
+- [ ] A depleted 5-hour window is red even when the weekly balance is high; a missing weekly window is explicitly labeled as 5-hour data.
+- [ ] Google data refreshes with the Dashboard closed. Both refresh buttons update the same windows and their matching reset times.
+- [ ] A stopped/unavailable OpenCodex preserves cached values with a cache label and does not start the proxy. Google source data older than 24 hours is hidden.
+- [ ] Verify English/Chinese and light/dark layouts, including 100%, no data, cached data, and the existing Google visibility setting.
+
+Automated window/cache checks: `scripts/smoke-test-widget.sh`,
+`scripts/smoke-test-display-snapshot.sh`, and `python3 -m unittest discover -s tests -p test_google_quota.py`.

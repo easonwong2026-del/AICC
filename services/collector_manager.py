@@ -198,6 +198,14 @@ class CollectorManager:
                 value["age"] = max(0, round(time.time() - slot.last_success)) if slot.last_success else None
                 value["stale"] = bool(value.get("stale") or slot.error or not slot.last_success
                                       or time.time() - slot.last_success > slot.interval * 2)
+            if name == "google":
+                source_time = value.get("updated_epoch")
+                value["stale"] = bool(value.get("stale") or slot.error or not source_time
+                                      or time.time() - source_time >= slot.interval)
+                value["error"] = slot.error.split(": ", 1)[-1] if slot.error else None
+                if source_time and time.time() - source_time >= 24 * 60 * 60:
+                    value.pop("weekly", None)
+                    value.pop("five_hour", None)
             values[name] = value
         return values
 

@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from collectors.deepseek import collect as collect_deepseek, COLLECTOR_TIMEOUT_SECONDS as DEEPSEEK_COLLECTOR_TIMEOUT
+from collectors.google import collect as collect_google
 from collectors.system import collect as collect_system
 from collectors.workbuddy import collect as collect_workbuddy, initial_status
 from services.codex_monitor import monitor
@@ -111,6 +112,7 @@ def collector_manager() -> CollectorManager:
             return collect_system()
 
         _collector_manager = CollectorManager({
+            "google": (collect_google, 300.0, 10.0, {**fallback.get("google", {}), "stale": True}),
             "codex": (
                 collect_codex,
                 DEFAULT_COLLECTOR_INTERVAL,
@@ -143,11 +145,12 @@ def load_status(force: bool = False) -> dict:
     global _display_revision, _display_snapshot
     values, metadata = collector_manager().snapshot(force=force, wait_seconds=FORCE_WAIT_SECONDS if force else COLLECTOR_WAIT_SECONDS)
     data = persisted_status()
+    previous_google = data.get("google")
     previous_deepseek = {k: v for k, v in data.get("deepseek", {}).items() if k != "age"}
     current_deepseek = {k: v for k, v in values.get("deepseek", {}).items() if k != "age"}
     data.update(values)
     # Persist balance changes and manual refreshes, not every age tick.
-    if force or previous_deepseek != current_deepseek:
+    if force or previous_deepseek != current_deepseek or data.get("google") != previous_google:
         save_status(data)
     data["fetched_at"] = time.time()
     data["collection"] = metadata
@@ -155,10 +158,11 @@ def load_status(force: bool = False) -> dict:
     # The loopback backend is the shared store for ad-hoc signed app/widget.
     # Invalidate presentation on any source change; stale publishes are rejected.
     source = {
+        "google": values.get("google", {}),
         "codex": {k: values.get("codex", {}).get(k) for k in ("weekly", "five_hour", "stale")},
         "workbuddy": {k: values.get("workbuddy", {}).get(k) for k in ("points", "balance_stale", "balance_state")},
         "deepseek": {k: values.get("deepseek", {}).get(k) for k in ("balances", "stale", "status", "error_code")},
-        "states": {k: metadata.get(k, {}).get("state") for k in ("codex", "workbuddy", "deepseek")},
+        "states": {k: metadata.get(k, {}).get("state") for k in ("codex", "google", "workbuddy", "deepseek")},
     }
     revision = hashlib.sha256(json.dumps(source, sort_keys=True).encode()).hexdigest()
     with _display_lock:

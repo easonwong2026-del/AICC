@@ -2,87 +2,73 @@ import SwiftUI
 
 struct GoogleQuotaCard: View {
     @EnvironmentObject private var settings: AppSettings
-
-    let quota: GoogleQuota?
-    let state: OCXGoogleQuotaState
+    let snapshot: WidgetDisplaySnapshot
 
     var body: some View {
-        VStack(spacing: 8) {
-            HStack {
-                Text(settings.localized("Google"))
+        let quota = snapshot.google
+        VStack(spacing: 6) {
+            HStack(alignment: .lastTextBaseline) {
+                Text(settings.localized(quota?.title ?? "Google"))
                     .font(.system(size: DashboardTypography.metricLabel, weight: .medium))
-                Spacer()
-                if state == .stale {
+                    .foregroundColor(.secondary)
+                if snapshot.googleState == "stale" {
                     Text(settings.localized("Cached"))
                         .font(.system(size: DashboardTypography.timestamp))
                         .foregroundColor(.orange)
                 }
+                Spacer()
+                Text(quota?.number ?? "—")
+                    .font(.system(size: 34, weight: .bold).monospacedDigit())
+                    .foregroundColor(color(quota?.primary?.remaining))
+                if quota?.primary != nil {
+                    Text("%")
+                        .font(.system(size: DashboardTypography.unit, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
             }
-
-            if let quota {
-                quotaRow(label: "Gem", window: quota.gem)
+            if let remaining = quota?.primary?.remaining {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.primary.opacity(0.1))
+                        Capsule().fill(color(remaining)).frame(width: geo.size.width * remaining / 100)
+                    }
+                }
+                .frame(height: 6)
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    if let reset = quota?.reset {
+                        Text(String(format: settings.localized("Reset %@"), reset))
+                            .font(.system(size: DashboardTypography.timestamp))
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                    if let secondary = quota?.secondary?.remaining {
+                        Text(settings.localized("5 Hour"))
+                            .font(.system(size: DashboardTypography.metricLabel))
+                            .foregroundColor(.secondary)
+                        Text(String(format: "%.0f%%", secondary))
+                            .font(.system(size: DashboardTypography.secondaryMetric, weight: .semibold))
+                            .foregroundColor(color(secondary))
+                    }
+                }
+                if quota?.isWeekly == false {
+                    Text(settings.localized("Weekly quota unavailable"))
+                        .font(.system(size: DashboardTypography.timestamp))
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             } else {
-                Text(settings.localized(emptyMessage))
+                Text(settings.localized(quota?.error ?? "No data"))
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
     }
 
-    private func quotaRow(label: String, window: OCXProviderQuotaWindow?) -> some View {
-        VStack(spacing: 4) {
-            HStack(alignment: .lastTextBaseline) {
-                Text(settings.localized(label))
-                    .font(.system(size: DashboardTypography.metricLabel))
-                    .foregroundColor(.secondary)
-                Spacer()
-                if let remaining = window?.remainingPercent {
-                    Text(String(format: "%.0f%%", remaining))
-                        .font(.system(size: DashboardTypography.secondaryMetric, weight: .semibold))
-                        .foregroundColor(progressColor(remaining))
-                } else {
-                    Text("—")
-                        .font(.system(size: DashboardTypography.secondaryMetric, weight: .semibold))
-                        .foregroundColor(.secondary)
-                }
-            }
-
-            if let remaining = window?.remainingPercent {
-                progressBar(remaining)
-            }
-
-        }
-    }
-
-    private func progressBar(_ value: Double) -> some View {
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(Color.primary.opacity(0.1))
-                    .frame(height: 6)
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(progressColor(value))
-                    .frame(width: geo.size.width * CGFloat(min(max(value, 0), 100) / 100), height: 6)
-            }
-        }
-        .frame(height: 6)
-    }
-
-    private var emptyMessage: String {
-        switch state {
-        case .loading: return "Checking..."
-        case .stopped: return "OpenCodex is not running"
-        case .notInstalled: return "OpenCodex is not installed"
-        case .unavailable: return "Temporarily unavailable"
-        default: return "No data"
-        }
-    }
-
-    private func progressColor(_ value: Double) -> Color {
-        if value > 70 { return .green }
-        if value >= 30 { return .yellow }
-        return .red
+    private func color(_ value: Double?) -> Color {
+        guard let value else { return .secondary }
+        return value > 70 ? .green : (value >= 30 ? .yellow : .red)
     }
 }
