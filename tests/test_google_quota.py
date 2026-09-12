@@ -43,10 +43,12 @@ class GoogleQuotaTests(unittest.TestCase):
 
     def test_command_force_and_errors_never_start_proxy(self):
         body = json.dumps(report([{"label": "Gem", "percent": 1}]))
-        with patch.object(google, "resolve_executable", return_value="/tmp/path with spaces/ocx"), patch.object(google.subprocess, "run") as run:
+        with patch.object(google, "resolve_executable", return_value="/tmp/path with spaces/ocx"), \
+                patch.object(google.subprocess, "run") as run:
             run.return_value = subprocess.CompletedProcess([], 0, stdout=body)
             google.collect(force=True)
-            self.assertEqual(run.call_args.args[0], ["/tmp/path with spaces/ocx", "provider", "quota", "--refresh", "--json"])
+            self.assertEqual(run.call_args.args[0],
+                             ["/tmp/path with spaces/ocx", "provider", "quota", "--refresh", "--json"])
             google.collect()
             self.assertNotIn("--refresh", run.call_args.args[0])
             run.return_value = subprocess.CompletedProcess([], 1, stdout="", stderr="Proxy is not running")
@@ -61,7 +63,9 @@ class GoogleQuotaTests(unittest.TestCase):
             executable = Path(directory) / "ocx"
             executable.touch()
             executable.chmod(0o700)
-            with patch.object(google.sys, "platform", "darwin"), patch.dict(google.os.environ, {"AICC_OCX_PATH": ""}), patch.object(google.subprocess, "run") as run:
+            with patch.object(google.sys, "platform", "darwin"), \
+                    patch.dict(google.os.environ, {"AICC_OCX_PATH": ""}), \
+                    patch.object(google.subprocess, "run") as run:
                 run.return_value.stdout = str(executable) + "\n"
                 self.assertEqual(google.resolve_executable(), str(executable))
 
@@ -85,10 +89,14 @@ class GoogleQuotaTests(unittest.TestCase):
     def test_google_only_changes_invalidate_display_revision(self):
         class Manager:
             remaining = 80
+
             def snapshot(self, **kwargs):
                 return {"google": {"weekly": {"remaining": self.remaining}}}, {}
+
         manager = Manager()
-        with tempfile.TemporaryDirectory() as directory, patch.object(server, "DATA_PATH", Path(directory) / "status.json"), patch.object(server, "collector_manager", return_value=manager):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(server, "DATA_PATH", Path(directory) / "status.json"), \
+                patch.object(server, "collector_manager", return_value=manager):
             first = server.load_status()
             manager.remaining = 75
             second = server.load_status()
@@ -98,3 +106,4 @@ class GoogleQuotaTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
