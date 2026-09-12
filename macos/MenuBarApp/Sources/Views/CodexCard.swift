@@ -3,18 +3,24 @@ import SwiftUI
 struct CodexCard: View {
     @EnvironmentObject private var settings: AppSettings
     let codex: CodexData
+    let snapshot: WidgetDisplaySnapshot
 
     var body: some View {
         VStack(spacing: 8) {
-            if let weekly = codex.weekly, let remaining = weekly.remaining {
+            if let weekly = codex.weekly, let remaining = snapshot.codexWeeklyRemaining {
                 weeklySection(weekly: weekly, remaining: remaining)
-            } else if let fiveHour = codex.five_hour, let remaining = fiveHour.remaining {
+            } else if let fiveHour = codex.five_hour, let remaining = snapshot.codexFiveHourRemaining {
                 fiveHourOnlySection(fiveHour: fiveHour, remaining: remaining)
             } else {
                 placeholderContent
             }
         }
         .frame(maxWidth: .infinity)
+        .overlay(alignment: .topLeading) {
+            if snapshot.codexState == "stale" {
+                Text("缓存").font(.system(size: 9)).foregroundColor(.orange).offset(y: -9)
+            }
+        }
     }
 
     private func weeklySection(weekly: RateWindow, remaining: Double) -> some View {
@@ -30,13 +36,13 @@ struct CodexCard: View {
             progressBar(remaining, height: 6)
 
             HStack(spacing: 10) {
-                if let reset = weekly.reset, !reset.isEmpty {
+                if let reset = snapshot.codexWeeklyReset, !reset.isEmpty {
                     Text(resetText(reset))
                         .font(.system(size: DashboardTypography.timestamp))
                         .foregroundColor(.secondary)
                 }
                 Spacer()
-                if let fiveHour = codex.five_hour, let fiveRem = fiveHour.remaining {
+                if let fiveRem = snapshot.codexSecondaryFiveHourRemaining {
                     HStack(alignment: .lastTextBaseline, spacing: 3) {
                         Text("5 Hour")
                             .font(.system(size: DashboardTypography.metricLabel))
@@ -63,7 +69,7 @@ struct CodexCard: View {
                 quotaNumber(remaining, unit: "%", baseSize: 34)
             }
             progressBar(remaining, height: 6)
-            if let reset = fiveHour.reset, !reset.isEmpty {
+            if let reset = snapshot.codexWeeklyReset, !reset.isEmpty {
                 Text(resetText(reset))
                     .font(.system(size: DashboardTypography.timestamp))
                     .foregroundColor(.secondary)

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import mimetypes
 import os
 import socket
@@ -17,7 +18,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from collectors.deepseek import collect as collect_deepseek
+from collectors.deepseek import collect as collect_deepseek, COLLECTOR_TIMEOUT_SECONDS as DEEPSEEK_COLLECTOR_TIMEOUT
 from collectors.system import collect as collect_system
 from collectors.workbuddy import collect as collect_workbuddy, initial_status
 from services.codex_monitor import monitor
@@ -32,6 +33,8 @@ DATA_ROOT = Path(os.environ.get("EINK_DATA_DIR", ROOT / "data")).expanduser()
 DATA_PATH = DATA_ROOT / "status.json"
 WEB_ROOT = Path(os.environ.get("EINK_WEB_ROOT", ROOT / "web")).expanduser()
 COLLECTOR_WAIT_SECONDS = max(0, min(5, float(os.environ.get("COLLECTOR_WAIT_SECONDS", "3.2"))))
+# A force may wait for a normal run to time out, then for its force successor.
+FORCE_WAIT_SECONDS = 2 * max(DEFAULT_COLLECTOR_TIMEOUT, DEEPSEEK_COLLECTOR_TIMEOUT) + 1.0
 SERVER_STARTED_AT = time.time()
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 DEFAULT_STATUS = {
@@ -46,6 +49,9 @@ DISCOVERY_MAGIC = b"AI_EINK_DISCOVER"
 _collector_manager: CollectorManager | None = None
 _rate_lock = threading.Lock()
 _status_write_lock = threading.Lock()
+_display_lock = threading.Lock()
+_display_revision = ""
+_display_snapshot: dict | None = None
 _rate_windows: dict[tuple[str, str], deque[float]] = {}
 
 
@@ -114,8 +120,8 @@ def collector_manager() -> CollectorManager:
             "deepseek": (
                 collect_deepseek_value,
                 300.0,
-                DEFAULT_COLLECTOR_TIMEOUT,
-                {"status": "Loading", "balances": []},
+                DEEPSEEK_COLLECTOR_TIMEOUT,
+                {**fallback.get("deepseek", {"status": "Loading", "balances": []}), "stale": True},
             ),
             "workbuddy": (
                 collect_workbuddy_value,
@@ -134,11 +140,33 @@ def collector_manager() -> CollectorManager:
 
 
 def load_status(force: bool = False) -> dict:
-    values, metadata = collector_manager().snapshot(force=force, wait_seconds=COLLECTOR_WAIT_SECONDS)
+    global _display_revision, _display_snapshot
+    values, metadata = collector_manager().snapshot(force=force, wait_seconds=FORCE_WAIT_SECONDS if force else COLLECTOR_WAIT_SECONDS)
     data = persisted_status()
+    previous_deepseek = {k: v for k, v in data.get("deepseek", {}).items() if k != "age"}
+    current_deepseek = {k: v for k, v in values.get("deepseek", {}).items() if k != "age"}
     data.update(values)
+    # Persist balance changes and manual refreshes, not every age tick.
+    if force or previous_deepseek != current_deepseek:
+        save_status(data)
+    data["fetched_at"] = time.time()
     data["collection"] = metadata
     data["updated_at"] = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+    # The loopback backend is the shared store for ad-hoc signed app/widget.
+    # Invalidate presentation on any source change; stale publishes are rejected.
+    source = {
+        "codex": {k: values.get("codex", {}).get(k) for k in ("weekly", "five_hour", "stale")},
+        "workbuddy": {k: values.get("workbuddy", {}).get(k) for k in ("points", "balance_stale", "balance_state")},
+        "deepseek": {k: values.get("deepseek", {}).get(k) for k in ("balances", "stale", "status", "error_code")},
+        "states": {k: metadata.get(k, {}).get("state") for k in ("codex", "workbuddy", "deepseek")},
+    }
+    revision = hashlib.sha256(json.dumps(source, sort_keys=True).encode()).hexdigest()
+    with _display_lock:
+        if revision != _display_revision:
+            _display_revision, _display_snapshot = revision, None
+        data["display_revision"] = revision
+        if _display_snapshot is not None:
+            data["display_snapshot"] = {**_display_snapshot, "fetchedAt": data["fetched_at"] - 978307200, "age": 0}
     return data
 
 
@@ -254,6 +282,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if not self.is_local_request():
             self.send_json({"error": "Write operations are local-only"}, HTTPStatus.FORBIDDEN)
             return
+        if path == "/api/display-snapshot":
+            return self.store_display_snapshot()
         if path == "/api/workbuddy/reconnect":
             payload, status = _workbuddy_reconnect()
             return self.send_json(payload, status)
@@ -261,6 +291,27 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.send_json(load_status(force=True))
             return
         self.send_error(HTTPStatus.NOT_FOUND)
+
+    def store_display_snapshot(self) -> None:
+        global _display_snapshot
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 16384:
+                raise ValueError("invalid length")
+            payload = json.loads(self.rfile.read(length))
+            snapshot = payload["snapshot"]
+            if (not isinstance(snapshot, dict) or snapshot.get("stale") is not False
+                    or not isinstance(snapshot.get("fetchedAt"), (int, float))
+                    or not all(isinstance(snapshot.get(key), str) for key in (
+                        "codexWeeklyNumber", "workbuddyPointsText", "deepseekBalanceText", "deepseekCurrency"))):
+                raise ValueError("invalid snapshot")
+        except (ValueError, KeyError, TypeError):
+            return self.send_json({"error": "Invalid display snapshot"}, HTTPStatus.BAD_REQUEST)
+        with _display_lock:
+            if payload.get("revision") != _display_revision:
+                return self.send_json({"error": "Source changed"}, HTTPStatus.CONFLICT)
+            _display_snapshot = snapshot
+        self.send_json({"ok": True})
 
     def send_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

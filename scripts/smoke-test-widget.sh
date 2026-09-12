@@ -63,6 +63,7 @@ xcrun swiftc \
   -sdk "$SDK_PATH" \
   -target arm64-apple-macosx14.0 \
   -module-cache-path "$TEMP_ROOT/module-cache" \
+  "$ROOT/macos/MenuBarApp/Sources/Models/WidgetDisplaySnapshot.swift" \
   "$ROOT/macos/Widget/WidgetStatus.swift" \
   "$ROOT/macos/Widget/WidgetStatusSmokeMain.swift" \
   -o "$TEMP_ROOT/aicc-widget-status-smoke"

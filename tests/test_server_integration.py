@@ -15,13 +15,14 @@ class FakeManager:
     def __init__(self):
         self.invalidated = []
         self.snapshots = []
+        self.points = 12
 
     def snapshot(self, **kwargs):
         self.snapshots.append(kwargs)
         values = {
             "codex": {"available": True, "state": "Connected"},
             "deepseek": {"status": "Online", "balances": []},
-            "workbuddy": {"points": 12, "balance_state": "Connected"},
+            "workbuddy": {"points": self.points, "balance_state": "Connected"},
             "system": {"status": "Online"},
         }
         metadata = {name: {"state": "ready", "last_success": "now"} for name in values}
@@ -51,6 +52,34 @@ class ServerIntegrationTests(unittest.TestCase):
         server.DATA_PATH = self.original_data_path
         server._collector_manager = self.original_manager
         self.temporary.cleanup()
+
+    def test_shared_display_snapshot_rejects_obsolete_source(self):
+        with urlopen(self.base + "/api/status") as response:
+            status = json.load(response)
+        snapshot = {"codexWeeklyNumber": "—", "workbuddyPointsText": "12",
+                    "deepseekBalanceText": "—", "deepseekCurrency": "CNY",
+                    "fetchedAt": 100, "stale": False}
+        payload = {"revision": status["display_revision"], "snapshot": snapshot}
+        request = Request(self.base + "/api/display-snapshot", data=json.dumps(payload).encode(), method="POST")
+        with urlopen(request) as response:
+            self.assertTrue(json.load(response)["ok"])
+        with urlopen(self.base + "/api/status") as response:
+            shared = json.load(response)["display_snapshot"]
+        self.assertEqual(shared["workbuddyPointsText"], "12")
+        self.assertGreater(shared["fetchedAt"], 100)
+        server._collector_manager.points = 5947
+        with urlopen(self.base + "/api/status") as response:
+            refreshed = json.load(response)
+        self.assertNotIn("display_snapshot", refreshed)
+        self.assertNotEqual(refreshed["display_revision"], payload["revision"])
+        request.data = json.dumps(payload).encode()
+        with self.assertRaises(HTTPError) as failure:
+            urlopen(request)
+        self.assertEqual(failure.exception.code, 409)
+        request.data = b"[]"
+        with self.assertRaises(HTTPError) as failure:
+            urlopen(request)
+        self.assertEqual(failure.exception.code, 400)
 
     def test_first_run_status_has_no_seeded_codex_quota(self):
         status = server.persisted_status()

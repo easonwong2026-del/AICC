@@ -5,16 +5,25 @@ from __future__ import annotations
 import json
 import os
 import platform
+import socket
+import ssl
+import time
+import math
 import subprocess
 from datetime import datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request, ProxyHandler, build_opener, getproxies
 
 try:
     import winreg
 except ImportError:  # pragma: no cover - only available on Windows
     winreg = None
+
+HTTP_TIMEOUT_SECONDS = 8.0
+KEYCHAIN_TIMEOUT_SECONDS = 5.0
+# Allow key lookup + HTTP timeout + cleanup before the manager watchdog expires.
+COLLECTOR_TIMEOUT_SECONDS = KEYCHAIN_TIMEOUT_SECONDS + HTTP_TIMEOUT_SECONDS + 2.0
 
 BALANCE_URL = "https://api.deepseek.com/user/balance"
 
@@ -35,7 +44,7 @@ def load_api_key() -> str:
             return subprocess.check_output(
                 ["security", "find-generic-password", "-a", os.environ.get("USER", ""),
                  "-s", "ai-eink-dashboard.deepseek", "-w"],
-                text=True, timeout=5, stderr=subprocess.DEVNULL,
+                text=True, timeout=KEYCHAIN_TIMEOUT_SECONDS, stderr=subprocess.DEVNULL,
             ).strip()
         except (OSError, subprocess.SubprocessError):
             pass
@@ -78,19 +87,56 @@ def update_usage(history_path: Path, balances: list[dict]) -> list[dict]:
     return result
 
 
+def failure(code: str, message: str) -> dict:
+    """Only fixed diagnostics: never include exception text, headers or keys."""
+    return {"status": message, "error_code": code, "error_message": message,
+            "balances": [], "stale": True, "source": "DeepSeek API"}
+
+
+def network_failure(error: Exception) -> dict:
+    reason = error.reason if isinstance(error, URLError) else error
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return failure("timeout", "Request timed out")
+    if isinstance(reason, socket.gaierror):
+        return failure("dns_error", "DNS lookup failed")
+    if isinstance(reason, (ssl.SSLError, ssl.CertificateError)):
+        return failure("tls_error", "TLS connection failed")
+    return failure("connection_error", "Connection error")
+
+
+def open_balance(request: Request):
+    # Re-read environment/system proxies each attempt; urllib's global opener
+    # otherwise retains an obsolete VPN proxy until the server restarts.
+    return build_opener(ProxyHandler(getproxies())).open(request, timeout=HTTP_TIMEOUT_SECONDS)
+
+
 def collect(history_path: Path | None = None) -> dict:
     api_key = load_api_key()
     if not api_key:
         return {"status": "Not configured", "balances": [], "source": "Environment variable"}
     request = Request(BALANCE_URL, headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"})
     try:
-        with urlopen(request, timeout=8) as response:
+        with open_balance(request) as response:
             payload = json.loads(response.read().decode("utf-8"))
-        balances = payload.get("balance_infos", []) if isinstance(payload, dict) else []
-        safe_balances = [{"currency": item.get("currency", ""), "total_balance": item.get("total_balance", ""), "granted_balance": item.get("granted_balance", ""), "topped_up_balance": item.get("topped_up_balance", "")} for item in balances if isinstance(item, dict)]  # noqa: E501
+        if not isinstance(payload, dict) or not isinstance(payload.get("is_available"), bool):
+            raise ValueError("invalid response")
+        balances = payload.get("balance_infos")
+        if not isinstance(balances, list) or not balances:
+            raise ValueError("invalid balances")
+        safe_balances = []
+        for item in balances:
+            if (not isinstance(item, dict) or not isinstance(item.get("currency"), str)
+                    or not item["currency"] or not math.isfinite(float(item.get("total_balance")))):
+                raise ValueError("invalid balance")
+            safe_balances.append({name: str(item.get(name, "")) for name in (
+                "currency", "total_balance", "granted_balance", "topped_up_balance")})
         usage = update_usage(history_path, safe_balances) if history_path else []
-        return {"status": "Online" if payload.get("is_available") else "No balance", "balances": safe_balances, "usage": usage, "source": "Observed balance"}  # noqa: E501
+        return {"status": "Online" if payload["is_available"] else "No balance",
+                "balances": safe_balances, "usage": usage, "source": "Observed balance",
+                "last_success": time.time(), "stale": False}
     except HTTPError as error:
-        return {"status": f"API error {error.code}", "balances": [], "source": "DeepSeek API"}
-    except (URLError, TimeoutError, ValueError):
-        return {"status": "Connection error", "balances": [], "source": "DeepSeek API"}
+        return failure(f"http_{error.code}", f"HTTP {error.code}")
+    except (URLError, TimeoutError, ssl.SSLError, ConnectionError) as error:
+        return network_failure(error)
+    except (ValueError, TypeError, UnicodeError):
+        return failure("invalid_response", "Invalid response")

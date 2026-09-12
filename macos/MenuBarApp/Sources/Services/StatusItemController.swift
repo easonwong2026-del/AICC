@@ -217,6 +217,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     }
 
     private func showDashboardPopover(from button: NSStatusBarButton) {
+        Task { await api.fetchStatus() }
         if popover == nil { makePopover() }
         guard let popover else { return }
         if !popover.isShown {

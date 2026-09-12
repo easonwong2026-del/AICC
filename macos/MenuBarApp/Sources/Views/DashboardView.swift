@@ -8,7 +8,9 @@ struct DashboardRootView: View {
 
     var body: some View {
         ScrollView(.vertical) {
-            DashboardView(openSettings: openSettings)
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                DashboardView(openSettings: openSettings, now: context.date)
+            }
         }
         .frame(width: 350)
         .frame(maxHeight: 640)
@@ -27,7 +29,11 @@ struct DashboardView: View {
     @EnvironmentObject var ocx: OpenCodexController
     @EnvironmentObject var settings: AppSettings
 
-    init(openSettings: @escaping () -> Void = {}) {
+    let now: Date
+    private var snapshot: WidgetDisplaySnapshot { api.displaySnapshot?.evaluated(at: now) ?? .placeholder }
+
+    init(openSettings: @escaping () -> Void = {}, now: Date = .now) {
+        self.now = now
         self.openSettings = openSettings
     }
 
@@ -93,7 +99,7 @@ struct DashboardView: View {
     }
 
     private var statusSummaryText: some View {
-        let s = api.state
+        let s = snapshot.stale && api.displaySnapshot != nil ? DataSourceState.stale : api.state
         switch s {
         case .ready where api.allServicesOk: return Text("All services online").foregroundColor(.green)
         case .ready: return Text("Some services unavailable").foregroundColor(.orange)
@@ -109,7 +115,7 @@ struct DashboardView: View {
     private var codexSection: some View {
         VStack(spacing: 8) {
             if let codex = api.status?.codex {
-                CodexCard(codex: codex)
+                CodexCard(codex: codex, snapshot: snapshot)
             } else {
                 placeholderCard(title: "Codex", icon: "chart.bar.fill")
             }
@@ -124,14 +130,14 @@ struct DashboardView: View {
         HStack(spacing: 10) {
             if settings.menuBarShowWorkBuddy {
                 if let wb = api.status?.workbuddy {
-                    WorkBuddyCard(data: wb)
+                    WorkBuddyCard(data: wb, snapshot: snapshot)
                 } else {
                     placeholderCard(title: "WorkBuddy", icon: "wand.and.stars")
                 }
             }
             if settings.menuBarShowDeepSeek {
                 if let ds = api.status?.deepseek {
-                    DeepSeekCard(data: ds)
+                    DeepSeekCard(data: ds, snapshot: snapshot)
                 } else {
                     placeholderCard(title: "DeepSeek", icon: "brain.head.profile")
                 }

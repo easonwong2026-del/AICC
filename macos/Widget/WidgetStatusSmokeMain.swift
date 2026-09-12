@@ -10,7 +10,7 @@ struct WidgetStatusSmokeMain {
         guard condition() else { throw Failure.assertion(message) }
     }
 
-    static func main() throws {
+    static func main() async throws {
         let fullPayload = try decode(
             """
             {
@@ -29,7 +29,7 @@ struct WidgetStatusSmokeMain {
             }
             """
         )
-        let fetchedAt = Date(timeIntervalSince1970: 1000)
+        let fetchedAt = Date.now
         let snapshot = WidgetDisplaySnapshot(payload: fullPayload, fetchedAt: fetchedAt)
 
         // MARK: - 1. Codex Tests
@@ -159,6 +159,30 @@ struct WidgetStatusSmokeMain {
         try require(refStale.stale, "Cached snapshot is stale")
         try require(WidgetStatusStore.cachedOrPlaceholder() == refStale, "last successful snapshot fallback")
 
+        try require(refStale.deepseekState == "stale" && !refStale.deepseekIsOnline, "offline balance cannot be online")
+        try require(snapshot.evaluated(at: fetchedAt.addingTimeInterval(300)).stale, "five minute expiry")
+        try require(snapshot.evaluated(at: fetchedAt.addingTimeInterval(86400)) == .placeholder, "24h expiry hides old values")
+        try require(snapshot.age(at: fetchedAt.addingTimeInterval(60)) == 60, "snapshot age")
+        let failedBalance = WidgetDisplaySnapshot(payload: try decode(#"{"deepseek":{"status":"Connection error","error_code":"connection_error","stale":true,"balances":[{"currency":"CNY","total_balance":"58.39"}]}}"#), fetchedAt: fetchedAt)
+        try require(failedBalance.deepseekBalanceText == "58.39", "last known good remains visible")
+        try require(failedBalance.deepseekState == "stale", "failed balance is stale")
+        try require(failedBalance.deepseekStatusText.contains("connection_error"), "safe error shown")
+        let neverSucceeded = WidgetDisplaySnapshot(payload: try decode(#"{"deepseek":{"status":"Connection error","stale":true,"balances":[]}}"#), fetchedAt: fetchedAt)
+        try require(neverSucceeded.deepseekState == "unavailable", "no success means unavailable")
+        for (status, balance, expectedState, expectedText) in [
+            ("Online", "58.39", "live", "Online"),
+            ("No balance", "0.00", "live", "No balance"),
+            ("Not configured", "", "unavailable", "Not configured")
+        ] {
+            let balances = balance.isEmpty ? [] : [["currency": "CNY", "total_balance": balance]]
+            let json = try JSONSerialization.data(withJSONObject: ["deepseek": ["status": status, "balances": balances, "stale": false]])
+            let value = WidgetDisplaySnapshot(payload: try JSONDecoder().decode(WidgetStatusPayload.self, from: json), fetchedAt: .now)
+            try require(value.deepseekState == expectedState, "freshness: \(status)")
+            try require(value.deepseekStatusText == expectedText, "account status: \(status)")
+            try require(!value.deepseekStale, "fresh/not configured is not cache")
+            let roundTrip = try JSONDecoder().decode(WidgetDisplaySnapshot.self, from: JSONEncoder().encode(value))
+            try require(roundTrip == value, "shared cache preserves account status")
+        }
         print("AICC Widget status smoke tests passed.")
     }
 

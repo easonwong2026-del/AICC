@@ -29,6 +29,7 @@ let package = Package(
             ],
             sources: [
                 "Models/StatusData.swift",
+                "Models/WidgetDisplaySnapshot.swift",
                 "Models/DashboardTypography.swift",
                 "Models/SettingsData.swift",
                 "Models/SettingsPresentationModel.swift",
