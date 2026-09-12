@@ -61,7 +61,6 @@ let package = Package(
                 "LegacyLaunchAgentMigrationTests.swift",
                 "UpdateServiceTests.swift",
                 "APIServiceTests.swift",
-                "OpenCodexQuotaTests.swift",
             ]
         ),
     ]

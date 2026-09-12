@@ -39,6 +39,8 @@ final class SnapshotProtocol: URLProtocol {
             result = [
                 "fetched_at": Self.fetched,
                 "display_revision": "\(Self.generation)",
+                "google": ["weekly": ["remaining": fresh ? 30 : 70, "reset": "2026-09-18 14:12"],
+                           "five_hour": ["remaining": fresh ? 0 : 87], "updated_epoch": Self.fetched],
                 "codex": ["weekly": ["remaining": fresh ? 10 : 48, "reset": "2026-09-07 12:02"],
                           "five_hour": ["remaining": fresh ? 88 : 97]],
                 "workbuddy": ["points": fresh ? 5947.0 : 5852.96],
@@ -92,6 +94,7 @@ struct DisplaySnapshotRegressionMain {
         let dashboard = api.displaySnapshot!
         let widget = await WidgetStatusLoader.snapshot(session: session)
         assert(dashboard == widget, "Dashboard and Widget must consume identical normalized snapshots")
+        assert(widget.google?.number == "30" && widget.google?.secondary?.remaining == 0)
         assert(widget.codexWeeklyNumber == "10" && widget.codexFiveHourRemaining == 88)
         assert(widget.workbuddyPointsText == "5,947" && widget.workbuddyPoints == 5947)
         assert(widget.codexWeeklyReset == "2026-09-07 12:02")
@@ -112,6 +115,7 @@ struct DisplaySnapshotRegressionMain {
         await api.fetchStatus()
         let offlineWidget = await WidgetStatusLoader.snapshot(session: session)
         assert(api.displaySnapshot == offlineWidget)
+        assert(offlineWidget.googleState == "stale" && offlineWidget.google?.number == "30")
         assert(offlineWidget.deepseekState == "stale" && offlineWidget.codexState == "stale")
         assert(!offlineWidget.deepseekIsOnline && offlineWidget.deepseekBalanceText == "58.39")
         WidgetStatusStore.remove()

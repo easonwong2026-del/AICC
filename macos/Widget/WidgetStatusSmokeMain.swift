@@ -32,6 +32,42 @@ struct WidgetStatusSmokeMain {
         let fetchedAt = Date.now
         let snapshot = WidgetDisplaySnapshot(payload: fullPayload, fetchedAt: fetchedAt)
 
+        // Google uses source time, independent windows and backward-compatible snapshots.
+        let googleSource = Date(timeIntervalSince1970: 1788000000)
+        let googlePayload = try decode(#"{"google":{"weekly":{"remaining":12,"reset":"2026-09-18 08:00"},"five_hour":{"remaining":0,"reset":"2026-09-12 13:00"},"updated_epoch":1788000000}}"#)
+        let google = WidgetDisplaySnapshot(payload: googlePayload, fetchedAt: googleSource)
+        try require(google.google?.number == "12", "Google primary is weekly")
+        try require(google.google?.secondary?.remaining == 0, "5h zero remains visible")
+        try require(google.google?.reset == "2026-09-18 08:00", "Weekly reset stays paired")
+        try require(google.google?.five_hour?.reset == "2026-09-12 13:00", "5h keeps its own reset")
+        try require(google.googleState == "live", "Fresh Google source")
+        let roundTrip = try JSONDecoder().decode(WidgetDisplaySnapshot.self, from: JSONEncoder().encode(google))
+        try require(roundTrip == google, "Google survives widget cache round trip")
+        for weekly in ["null", #"{"remaining":-1,"reset":"wrong"}"#, #"{"reset":"wrong"}"#] {
+            let payload = try decode("{\"google\":{\"weekly\":\(weekly),\"five_hour\":{\"remaining\":80,\"reset\":\"13:00\"},\"updated_epoch\":1788000000}}")
+            let fallback = WidgetDisplaySnapshot(payload: payload, fetchedAt: googleSource)
+            try require(fallback.google?.title == "Google 5h", "Explicit 5h fallback")
+            try require(fallback.google?.reset == "13:00", "Fallback reset must be from 5h")
+            try require(fallback.google?.secondary == nil, "No duplicated secondary 5h")
+        }
+        let missing = WidgetDisplaySnapshot(payload: try decode(#"{"google":{}}"#), fetchedAt: googleSource)
+        try require(missing.google?.number == "—" && missing.googleState == "unavailable", "Missing is not zero")
+        let weeklyOnly = WidgetDisplaySnapshot(payload: try decode(#"{"google":{"weekly":{"remaining":0}}}"#), fetchedAt: googleSource)
+        try require(weeklyOnly.google?.number == "0" && weeklyOnly.google?.secondary == nil, "Weekly only zero")
+        try require(weeklyOnly.googleState == "stale", "Unknown upstream timestamp is not fresh")
+        try require(google.evaluated(at: googleSource.addingTimeInterval(300)).googleState == "stale", "Google expires to stale")
+        try require(google.evaluated(at: googleSource, offline: true).googleState == "stale", "Offline Google cache")
+        var old = try JSONSerialization.jsonObject(with: JSONEncoder().encode(google)) as! [String: Any]
+        old["fetchedAt"] = googleSource.addingTimeInterval(86400).timeIntervalSinceReferenceDate
+        let recentlyFetched = try JSONDecoder().decode(WidgetDisplaySnapshot.self, from: JSONSerialization.data(withJSONObject: old))
+        try require(recentlyFetched.evaluated(at: googleSource.addingTimeInterval(86400)).google == nil, "Fresh transport cannot extend Google source lifetime")
+        old.removeValue(forKey: "google")
+        let oldDecoded = try JSONDecoder().decode(WidgetDisplaySnapshot.self, from: JSONSerialization.data(withJSONObject: old))
+        try require(oldDecoded.google == nil, "Old caches decode without Google")
+        let mixed: [String: Any] = ["display_snapshot": old, "google": ["weekly": ["remaining": 77], "updated_epoch": googleSource.timeIntervalSince1970]]
+        let mixedPayload = try JSONDecoder().decode(WidgetStatusPayload.self, from: JSONSerialization.data(withJSONObject: mixed))
+        try require(WidgetDisplaySnapshot(payload: mixedPayload, fetchedAt: googleSource).google?.number == "77", "Old shared snapshot cannot erase new Google payload")
+
         // MARK: - 1. Codex Tests
         try require(snapshot.codexTitle == "Codex 每周额度", "Codex title when weekly is present: \(snapshot.codexTitle)")
         try require(snapshot.codexWeeklyNumber == "83", "Codex weekly number: \(snapshot.codexWeeklyNumber)")

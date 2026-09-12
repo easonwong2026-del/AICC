@@ -5,13 +5,14 @@ struct WidgetStatusPayload: Decodable {
     let display_snapshot: WidgetDisplaySnapshot?
     let fetched_at: Double?
     let collection: WidgetCollection?
+    let google: GoogleDisplayQuota?
     let codex: WidgetCodexData?
     let workbuddy: WidgetWorkBuddyData?
     let deepseek: WidgetDeepSeekData?
 
     enum CodingKeys: String, CodingKey {
         case fetched_at, collection, display_revision, display_snapshot
-        case codex
+        case codex, google
         case workbuddy
         case deepseek
     }
@@ -40,7 +41,7 @@ struct WidgetCodexData: Decodable {
     }
 }
 
-struct WidgetRateWindow: Decodable {
+struct WidgetRateWindow: Codable, Equatable {
     let remaining: Double?
     let reset: String?
     let label: String?
@@ -88,7 +89,46 @@ struct WidgetDeepSeekBalance: Decodable {
     }
 }
 
+// The same optional quota object survives payload decoding and widget caching.
+struct GoogleDisplayQuota: Codable, Equatable {
+    let weekly: WidgetRateWindow?
+    let five_hour: WidgetRateWindow?
+    let updated_epoch: Double?
+    var stale: Bool?
+    let error: String?
+
+    private func valid(_ window: WidgetRateWindow?) -> WidgetRateWindow? {
+        guard let value = window?.remaining, value.isFinite, (0...100).contains(value) else { return nil }
+        return window
+    }
+    var primary: WidgetRateWindow? { valid(weekly) ?? valid(five_hour) }
+    var isWeekly: Bool { valid(weekly) != nil }
+    var secondary: WidgetRateWindow? { isWeekly ? valid(five_hour) : nil }
+    var title: String { isWeekly ? "Google Weekly" : (primary != nil ? "Google 5h" : "Google") }
+    var number: String { primary?.remaining.map { String(format: "%.0f", $0) } ?? "—" }
+    var reset: String? {
+        guard let text = primary?.reset?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty, text != "--" else { return nil }
+        return text
+    }
+    func evaluated(at now: Date) -> Self? {
+        guard let updated_epoch, updated_epoch.isFinite else {
+            var copy = self
+            copy.stale = true
+            return copy
+        }
+        let age = max(0, now.timeIntervalSince1970 - updated_epoch)
+        if age >= WidgetDisplaySnapshot.cacheLifetime { return nil }
+        var copy = self
+        copy.stale = stale == true || age >= WidgetDisplaySnapshot.liveLifetime
+        return copy
+    }
+}
+
 struct WidgetDisplaySnapshot: Codable, Equatable {
+    var google: GoogleDisplayQuota? = nil
+    var googleState: String { google?.primary == nil ? "unavailable" : (stale || google?.stale == true ? "stale" : "live") }
+
     // Codex properties
     let codexWeeklyNumber: String
     let codexWeeklyRemaining: Double?
@@ -118,7 +158,9 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
     func age(at now: Date) -> TimeInterval { max(0, now.timeIntervalSince(fetchedAt)) }
     func evaluated(at now: Date = .now, offline: Bool = false) -> Self {
         if age(at: now) >= Self.cacheLifetime { return .placeholder }
-        return offline || age(at: now) >= Self.liveLifetime ? staleCopy : self
+        var copy = offline || age(at: now) >= Self.liveLifetime ? staleCopy : self
+        copy.google = google?.evaluated(at: now)
+        return copy
     }
     var codexState: String { codexWeeklyNumber == "—" ? "unavailable" : (stale || codexStale ? "stale" : "live") }
     var workbuddyState: String { workbuddyPoints == nil ? "unavailable" : (stale || workbuddyStale ? "stale" : "live") }
@@ -183,6 +225,7 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
     )
 
     private enum CodingKeys: String, CodingKey {
+        case google
         case codexWeeklyNumber
         case codexWeeklyRemaining
         case codexFiveHourRemaining
@@ -239,6 +282,7 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        google = try? container.decode(GoogleDisplayQuota.self, forKey: .google)
         codexStale = (try? container.decode(Bool.self, forKey: .codexStale)) ?? false
         workbuddyStale = (try? container.decode(Bool.self, forKey: .workbuddyStale)) ?? false
         deepseekStale = (try? container.decode(Bool.self, forKey: .deepseekStale)) ?? false
@@ -306,6 +350,7 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(google, forKey: .google)
         try container.encode(codexWeeklyNumber, forKey: .codexWeeklyNumber)
         try container.encodeIfPresent(codexWeeklyRemaining, forKey: .codexWeeklyRemaining)
         try container.encodeIfPresent(codexFiveHourRemaining, forKey: .codexFiveHourRemaining)
@@ -331,6 +376,8 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
     init(payload: WidgetStatusPayload, fetchedAt: Date) {
         if let shared = payload.display_snapshot {
             self = shared
+            // Old clients may publish snapshots without the new optional field.
+            google = (payload.google ?? shared.google)?.evaluated(at: fetchedAt)
             return
         }
         // 1. Codex Weekly & 5-hour
@@ -378,6 +425,7 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
             fetchedAt: payload.fetched_at.map(Date.init(timeIntervalSince1970:)) ?? fetchedAt,
             stale: false
         )
+        google = payload.google?.evaluated(at: fetchedAt)
         let failureStates = ["error", "timeout", "stale", "pending", "refreshing"]
         codexStale = payload.codex?.stale == true || failureStates.contains(payload.collection?.codex?.state ?? "")
         workbuddyStale = payload.workbuddy?.balance_stale == true || payload.workbuddy?.balance_state == "Cached"

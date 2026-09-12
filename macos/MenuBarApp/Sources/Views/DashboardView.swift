@@ -150,7 +150,7 @@ struct DashboardView: View {
     // MARK: - Google quota
 
     private var googleQuotaSection: some View {
-        GoogleQuotaCard(quota: ocx.googleQuota, state: ocx.googleQuotaState)
+        GoogleQuotaCard(snapshot: snapshot)
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
     }
@@ -185,6 +185,7 @@ struct DashboardView: View {
                         Task {
                             if newValue { await ocx.ensure() }
                             else { await ocx.stop() }
+                            await api.fetchStatus(force: true)
                         }
                     },
                     actionLabel: nil,
@@ -252,9 +253,7 @@ struct DashboardView: View {
 
     private func refreshAll() {
         Task { @MainActor in
-            async let statusRefresh = api.fetchStatus(force: true)
-            async let quotaRefresh = ocx.refreshProviderQuota(force: true)
-            _ = await (statusRefresh, quotaRefresh)
+            await api.fetchStatus(force: true)
         }
     }
 

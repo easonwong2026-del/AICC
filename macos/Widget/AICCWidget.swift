@@ -28,21 +28,24 @@ struct AICCWidgetProvider: TimelineProvider {
             let now = Date.now
             let snapshot = await WidgetStatusLoader.snapshot()
             let entry = AICCWidgetEntry(date: now, snapshot: snapshot)
-            completion(
-                Timeline(
-                    entries: [entry,
-                        AICCWidgetEntry(date: max(now.addingTimeInterval(1), snapshot.fetchedAt.addingTimeInterval(WidgetDisplaySnapshot.liveLifetime)),
-                                        snapshot: snapshot.staleCopy),
-                        AICCWidgetEntry(date: max(now.addingTimeInterval(2), snapshot.fetchedAt.addingTimeInterval(WidgetDisplaySnapshot.cacheLifetime)),
-                                        snapshot: .placeholder)],
-                    policy: .after(now.addingTimeInterval(5 * 60))
-                )
-            )
+            var dates = [snapshot.fetchedAt.addingTimeInterval(WidgetDisplaySnapshot.liveLifetime),
+                         snapshot.fetchedAt.addingTimeInterval(WidgetDisplaySnapshot.cacheLifetime)]
+            if let epoch = snapshot.google?.updated_epoch {
+                let source = Date(timeIntervalSince1970: epoch)
+                dates += [source.addingTimeInterval(WidgetDisplaySnapshot.liveLifetime),
+                          source.addingTimeInterval(WidgetDisplaySnapshot.cacheLifetime)]
+            }
+            let future = Array(Set(dates.filter { $0 > now })).sorted()
+            let entries = [entry] + future.map { date in
+                AICCWidgetEntry(date: date, snapshot: snapshot.evaluated(at: date))
+            }
+            completion(Timeline(entries: entries, policy: .after(now.addingTimeInterval(5 * 60))))
         }
     }
 }
 
 struct AICCWidgetView: View {
+    @Environment(\.locale) private var locale
     @Environment(\.widgetFamily) private var family
     var familyOverride: WidgetFamily? = nil
 
@@ -59,330 +62,145 @@ struct AICCWidgetView: View {
         .containerBackground(.fill.tertiary, for: .widget)
     }
 
-    // MARK: - Medium Widget (Flattened Large-Typography Layout)
+    private func label(_ chinese: String, _ english: String) -> String {
+        locale.identifier.hasPrefix("zh") ? chinese : english
+    }
+
+    private var refreshButton: some View {
+        Button(intent: RefreshWidgetIntent()) {
+            Image(systemName: "arrow.clockwise")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Refresh Widget")
+    }
 
     private var mediumContent: some View {
-        ZStack(alignment: .topTrailing) {
-            GeometryReader { geo in
-                let gap: CGFloat = 16
-                let leftWidth = (geo.size.width - gap) * 0.58
-                let rightWidth = (geo.size.width - gap) * 0.42
-
-                HStack(alignment: .top, spacing: gap) {
-                    codexMainView
-                        .frame(width: leftWidth, height: geo.size.height)
-
-                    VStack(alignment: .leading, spacing: 0) {
-                        workbuddyView
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-
-                        Divider()
-                            .overlay(Color.primary.opacity(0.12))
-                            .padding(.vertical, 5)
-
-                        deepseekView
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                    }
-                    .frame(width: rightWidth, height: geo.size.height)
-                }
+        VStack(spacing: 6) {
+            HStack {
+                Text("AICC").font(.system(size: 11, weight: .bold))
+                Spacer()
+                refreshButton
             }
-
-            Button(intent: RefreshWidgetIntent()) {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(.secondary)
+            HStack(alignment: .top, spacing: 16) {
+                quotaView(google: false, compact: false)
+                quotaView(google: true, compact: false)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Refresh Widget")
+            Spacer(minLength: 0)
+            Divider()
+            balances(compact: false)
         }
-        .padding(.horizontal, 15)
-        .padding(.vertical, 13)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
     }
-
-    // MARK: - Small Widget (Unchanged)
 
     private var smallContent: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            smallHeader
-
-            smallCodexCard
-
-            smallWorkBuddyCard
-
+        VStack(spacing: 5) {
+            HStack {
+                Text("AICC").font(.system(size: 11, weight: .bold))
+                Spacer()
+                refreshButton
+            }
+            quotaView(google: false, compact: true)
+            quotaView(google: true, compact: true)
             Spacer(minLength: 0)
+            balances(compact: true)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(10)
     }
 
-    // MARK: - Small Header (Unchanged)
-
-    private var smallHeader: some View {
-        HStack(alignment: .center) {
-            Text("AICC")
-                .font(.system(size: 12.5, weight: .bold))
-                .foregroundStyle(.primary)
-
-            Spacer(minLength: 8)
-
-            Button(intent: RefreshWidgetIntent()) {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Refresh Widget")
-        }
-    }
-
-    // MARK: - Medium Left Component (Codex Main View)
-
-    private var codexMainView: some View {
-        let codexAvailable = entry.snapshot.codexWeeklyNumber != "—"
-        return VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 4.5) {
-                Circle()
-                    .fill(codexAvailable ? Color.green : Color.secondary)
-                    .frame(width: 4.5, height: 4.5)
-                Text(entry.snapshot.codexTitle + (entry.snapshot.codexState == "stale" ? " · 缓存" : ""))
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(codexAvailable ? Color.green : .secondary)
-                Spacer(minLength: 0)
-            }
-
-            Spacer(minLength: 2)
-
-            HStack(alignment: .lastTextBaseline, spacing: 2) {
-                Spacer()
-                Text(entry.snapshot.codexWeeklyNumber)
-                    .font(.system(size: 46, weight: .bold, design: .rounded).monospacedDigit())
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-
-                if entry.snapshot.codexWeeklyNumber != "—" {
-                    Text("%")
-                        .font(.system(size: 23, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.primary)
+    private func quotaView(google: Bool, compact: Bool) -> some View {
+        let snapshot = entry.snapshot
+        let quota = snapshot.google
+        let primary = google ? quota?.primary?.remaining : (snapshot.codexWeeklyRemaining ?? snapshot.codexFiveHourRemaining)
+        let secondary = google ? quota?.secondary?.remaining : snapshot.codexSecondaryFiveHourRemaining
+        let weekly = google ? quota?.isWeekly == true : snapshot.codexWeeklyRemaining != nil
+        let state = google ? snapshot.googleState : snapshot.codexState
+        let title = (google ? "Google" : "Codex") + (primary == nil ? "" : (weekly ? label(" 周", " Weekly") : " 5h"))
+        let reset = google ? quota?.reset.map { String($0.dropFirst($0.count >= 16 ? 5 : 0)) } : snapshot.codexResetShortText?.replacingOccurrences(of: "重置于 ", with: "")
+        return VStack(alignment: .leading, spacing: compact ? 2 : 3) {
+            HStack(alignment: .lastTextBaseline, spacing: 3) {
+                Text(title).font(.system(size: compact ? 10 : 11, weight: .medium)).foregroundStyle(.secondary)
+                if state == "stale" && !compact {
+                    Text(label("缓存", "Cached")).font(.system(size: 8)).foregroundStyle(.orange)
                 }
-                Spacer()
-            }
-
-            Spacer(minLength: 4)
-
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color.primary.opacity(0.12))
-                        .frame(height: 6)
-
-                    Capsule()
-                        .fill(
-                            LinearGradient(
-                                colors: [Color.green, Color.mint],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .frame(
-                            width: max(0, min(geo.size.width * CGFloat(entry.snapshot.codexWeeklyProgress), geo.size.width)),
-                            height: 6
-                        )
-                }
-            }
-            .frame(height: 6)
-
-            Spacer(minLength: 6)
-
-            HStack(alignment: .center, spacing: 4) {
-                if let resetText = entry.snapshot.codexResetShortText {
-                    Text(resetText)
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                Spacer(minLength: 2)
-
-                if let fiveRem = entry.snapshot.codexSecondaryFiveHourRemaining {
-                    HStack(spacing: 1.5) {
-                        Text("5小时")
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.secondary)
-                        Text(String(format: " %.0f%%", fiveRem))
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .foregroundStyle(.green)
-                    }
-                    .lineLimit(1)
+                if compact {
+                    Spacer(minLength: 0)
+                    quotaNumber(primary, size: 19)
                 }
             }
             .lineLimit(1)
-            .minimumScaleFactor(0.8)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-    }
-
-    // MARK: - Medium Right Top Component (WorkBuddy View)
-
-    private var workbuddyView: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 4.5) {
-                Circle()
-                    .fill((entry.snapshot.workbuddyState == "live") ? Color.purple : Color.secondary)
-                    .frame(width: 4.5, height: 4.5)
-                Text(entry.snapshot.workbuddyState == "stale" ? "WorkBuddy · 缓存" : "WorkBuddy")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle((entry.snapshot.workbuddyState == "live") ? Color.purple : .secondary)
-                Spacer(minLength: 16)
+            if !compact { quotaNumber(primary, size: 32) }
+            if let primary {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.primary.opacity(0.1))
+                        Capsule().fill(quotaColor(primary)).frame(width: geo.size.width * min(max(primary, 0), 100) / 100)
+                    }
+                }
+                .frame(height: compact ? 3 : 5)
             }
-
-            HStack(alignment: .lastTextBaseline, spacing: 2.5) {
-                Text(entry.snapshot.workbuddyPointsText)
-                    .font(.system(size: 24, weight: .bold).monospacedDigit())
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-
-                if entry.snapshot.workbuddyPointsText != "—" {
-                    Text("积分")
-                        .font(.system(size: 10.5, weight: .medium))
+            HStack(spacing: 2) {
+                if !compact, let reset {
+                    Text(reset).foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                }
+                if let secondary {
+                    Text("5h").foregroundStyle(.secondary)
+                    Text(String(format: "%.0f%%", secondary)).foregroundStyle(quotaColor(secondary))
+                } else if google && (!weekly || primary == nil) {
+                    Text(primary == nil ? label("暂无数据", "No data") : label("周额度暂无数据", "Weekly unavailable"))
                         .foregroundStyle(.secondary)
                 }
-            }
-        }
-    }
-
-    // MARK: - Medium Right Bottom Component (DeepSeek View)
-
-    private var deepseekView: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 4.5) {
-                Circle()
-                    .fill((entry.snapshot.deepseekState == "live") ? Color.cyan : Color.secondary)
-                    .frame(width: 4.5, height: 4.5)
-                Text("DeepSeek")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle((entry.snapshot.deepseekState == "live") ? Color.cyan : .secondary)
-                Spacer(minLength: 0)
-            }
-
-            HStack(alignment: .lastTextBaseline, spacing: 2.5) {
-                Text(entry.snapshot.deepseekBalanceText)
-                    .font(.system(size: 24, weight: .bold).monospacedDigit())
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-
-                if entry.snapshot.deepseekBalanceText != "—" && !entry.snapshot.deepseekCurrency.isEmpty {
-                    Text(entry.snapshot.deepseekCurrency)
-                        .font(.system(size: 10.5, weight: .medium))
-                        .foregroundStyle(.secondary)
+                if compact && state == "stale" {
+                    Spacer(minLength: 0)
+                    Text(label("缓存", "Cached")).foregroundStyle(.orange)
                 }
             }
-            Text(entry.snapshot.deepseekStatusText)
-                .font(.system(size: 8.5))
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
+            .font(.system(size: compact ? 9 : 9.5))
+            .lineLimit(1)
         }
-    }
-
-    // MARK: - Small Components (Unchanged)
-
-    private var smallCodexCard: some View {
-        VStack(alignment: .leading, spacing: 2.5) {
-            Text(entry.snapshot.codexTitle + (entry.snapshot.codexState == "stale" ? " · 缓存" : ""))
-                .font(.system(size: 9.5, weight: .medium))
-                .foregroundStyle(.secondary)
-
-            HStack(alignment: .lastTextBaseline, spacing: 2) {
-                Text(entry.snapshot.codexWeeklyNumber)
-                    .font(.system(size: 24, weight: .bold, design: .rounded).monospacedDigit())
-                    .foregroundStyle(.primary)
-
-                if entry.snapshot.codexWeeklyNumber != "—" {
-                    Text("%")
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.primary)
-                }
-            }
-
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color.primary.opacity(0.12))
-                        .frame(height: 4.5)
-
-                    Capsule()
-                        .fill(
-                            LinearGradient(
-                                colors: [Color.green, Color.mint],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .frame(
-                            width: max(0, min(geo.size.width * CGFloat(entry.snapshot.codexWeeklyProgress), geo.size.width)),
-                            height: 4.5
-                        )
-                }
-            }
-            .frame(height: 4.5)
-        }
-        .padding(6.5)
-        .background(
-            RoundedRectangle(cornerRadius: 7)
-                .fill(Color.primary.opacity(0.04))
-                .background(
-                    RoundedRectangle(cornerRadius: 7)
-                        .fill(Color.green.opacity(0.05))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 7)
-                        .strokeBorder(Color.green.opacity(0.12), lineWidth: 0.8)
-                )
-        )
-    }
-
-    private var smallWorkBuddyCard: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 3) {
-                Circle()
-                    .fill((entry.snapshot.workbuddyState == "live") ? Color.purple : Color.secondary)
-                    .frame(width: 3.5, height: 3.5)
-                Text(entry.snapshot.workbuddyState == "stale" ? "WorkBuddy · 缓存" : "WorkBuddy")
-                    .font(.system(size: 8.5, weight: .medium))
-                    .foregroundStyle((entry.snapshot.workbuddyState == "live") ? Color.purple : .secondary)
-            }
-
-            HStack(alignment: .lastTextBaseline, spacing: 2) {
-                Text(entry.snapshot.workbuddyPointsText)
-                    .font(.system(size: 13, weight: .bold).monospacedDigit())
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-
-                if entry.snapshot.workbuddyPointsText != "—" {
-                    Text("积分")
-                        .font(.system(size: 7.5, weight: .medium))
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .padding(.horizontal, 6.5)
-        .padding(.vertical, 4.5)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 7)
-                .fill(Color.primary.opacity(0.04))
-                .background(
-                    RoundedRectangle(cornerRadius: 7)
-                        .fill(Color.purple.opacity(0.05))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 7)
-                        .strokeBorder(Color.purple.opacity(0.12), lineWidth: 0.8)
-                )
-        )
+        .accessibilityElement(children: .combine)
+    }
+
+    private func quotaNumber(_ value: Double?, size: CGFloat) -> some View {
+        HStack(alignment: .lastTextBaseline, spacing: 1) {
+            Text(value.map { String(format: "%.0f", $0) } ?? "—")
+                .font(.system(size: size, weight: .bold, design: .rounded).monospacedDigit())
+            if value != nil { Text("%").font(.system(size: size / 2, weight: .medium)) }
+        }
+        .foregroundStyle(quotaColor(value))
+        .lineLimit(1)
+    }
+
+    private func quotaColor(_ value: Double?) -> Color {
+        guard let value else { return .secondary }
+        return value > 70 ? .green : (value >= 30 ? .yellow : .red)
+    }
+
+    private func balances(compact: Bool) -> some View {
+        let snapshot = entry.snapshot
+        return HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("WorkBuddy" + (snapshot.workbuddyState == "stale" ? label(" · 缓存", " · Cached") : ""))
+                    .foregroundStyle(.secondary)
+                Text(snapshot.workbuddyPointsText + (compact ? "" : label(" 积分", " pts")))
+                    .fontWeight(.semibold)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("DeepSeek" + (snapshot.deepseekState == "stale" ? label(" · 缓存", " · Cached") : ""))
+                    .foregroundStyle(.secondary)
+                Text(snapshot.deepseekBalanceText + " " + snapshot.deepseekCurrency)
+                    .fontWeight(.semibold)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .font(.system(size: compact ? 8.5 : 11))
+        .lineLimit(1)
+        .minimumScaleFactor(0.85)
     }
 }
 

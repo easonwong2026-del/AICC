@@ -4,6 +4,12 @@
 
 This file summarizes the current and recent public releases. The Chinese changelog contains the older detailed history.
 
+## Unreleased
+
+- **Google quota restructuring (weekly primary, 5h secondary)**: Added `collectors/google.py` to ingest and calculate `Gem (Weekly)` and `Gem` limit buckets from OpenCodex, mapping them to remaining percentages and distinct reset times.
+- **Synchronized Menu Bar and Widget presentation**: Redesigned `GoogleQuotaCard` and native macOS Small/Medium widgets to display Google quota with primary weekly bars and secondary 5-hour indicators.
+- **Consolidated data pipeline and snapshot sharing**: Retired redundant private quota polling inside `OpenCodexController`; unified status delivery through the background collector and `WidgetDisplaySnapshot` for consistent offline caching and stale fallbacks.
+
 ## 2.7.1 - 2026-08-29
 
 - **macOS Widget redesign**: Redesigned the Medium Widget into a balanced horizontal split layout. Codex weekly quota serves as the primary metric with centered large typography, real progress, reset time, and 5-hour quota; WorkBuddy points and DeepSeek balance are cleanly displayed on the right.
