@@ -84,7 +84,8 @@ App 运行需要 macOS 14 或更高版本、Apple Silicon，以及可执行的 P
 
 - 系统要求：macOS 14+、Apple Silicon；先安装并启动 AICC App。
 - 添加方式：桌面右键 → 编辑 Widget → 搜索 “AICC”，选择小尺寸或中尺寸并添加。
-- 小尺寸垂直并排显示 Codex 与 Google 额度（大字号周百分比、进度条、5h 辅助）以及 WorkBuddy/DeepSeek；中尺寸上方水平并排展示 Codex 与 Google 额度双卡片，下方展示 WorkBuddy（积分）和 DeepSeek（余额）。
+- 自定义指标：桌面右键 Widget → 编辑“AICC” → 选择需要展示的指标（Small 支持配置 2 个主要指标，Medium 支持 4 个槽位独立配置）。
+- 默认布局：Small 默认展示 Codex 与 Google；Medium 默认左上 Codex、右上 Google、左下 WorkBuddy、右下 DeepSeek；支持重复指标自动规整与缺失数据安全降级。
 - Widget 通过 `http://127.0.0.1:8765/api/status` 读取状态，正式端口固定为 `8765`，不会调用刷新接口或自行启动 Server。
 - 点击右上角刷新按钮可手动刷新 Widget 时间线；AICC App 启动及状态变化时也会通知 Widget 更新。
 - Server 暂时不可达时保留最近一次成功数据并标记为 stale；首次安装没有缓存时显示占位符 `—`。

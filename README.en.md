@@ -87,7 +87,8 @@ Manifest format:
 
 - Requirements: macOS 14+, Apple Silicon, with the AICC App installed and running.
 - Add it from the desktop: right-click → Edit Widgets → search for “AICC”, then choose Small or Medium.
-- Small vertically stacks compact Codex and Google quota cards (large weekly numbers, progress bars, and 5h secondary indicators) alongside WorkBuddy and DeepSeek; Medium displays side-by-side Codex and Google quota cards on the upper deck with WorkBuddy (points) and DeepSeek (balance) below.
+- Customize metrics: right-click desktop Widget → Edit "AICC" → select displayed metrics (Small configures 2 primary metrics; Medium configures 4 slots independently).
+- Default layout: Small defaults to Codex + Google; Medium defaults to Top Left: Codex, Top Right: Google, Bottom Left: WorkBuddy, Bottom Right: DeepSeek; includes automatic duplicate metric normalization and safe fallbacks.
 - The Widget reads `http://127.0.0.1:8765/api/status`. The production port is fixed at `8765`; the Widget does not call the refresh endpoint or start the server.
 - Use the refresh button in the Widget to reload its timeline. The AICC App also notifies WidgetKit on launch and when displayed data changes.
 - If the server is temporarily unavailable, the Widget keeps the last successful snapshot as stale data; a first install without a cache shows `—` placeholders.

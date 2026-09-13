@@ -2,6 +2,12 @@
 
 [English](CHANGELOG.en.md)
 
+## Unreleased (Target: 2.9.0)
+
+- **桌面 Widget 独立实例自定义 (Per-widget Customization)**：全面升级 macOS Widget 为 `AppIntentConfiguration` 与 `AppIntentTimelineProvider` 原生配置体系，继续保持 `com.aieink.dashboard.menubar.widget` 唯一标识，兼容 2.8.0 已有 Widget 无缝升级；支持用户在桌面右键 Widget → 编辑“AICC”选择每个实例展示的指标（Small 支持 2 项指标，Medium 支持 4 项槽位指标）。
+- **统一轻量展示层与自适应卡片**：建立 `WidgetMetricOption` 与 `MetricCardView` 统一展示层抽象，提供配额卡片（Codex / Google）与余额卡片（WorkBuddy / DeepSeek）自适应布局；支持确定性防重复规范化机制与优雅 fallback，默认配置 100% 保持 2.8.0 原有视觉体验。
+- **完整国际化与测试覆盖**：新增主要指标/次要指标/左上/右上/左下/右下及各项品牌本地化资源；新增 AppIntent 配置编码恢复、重复正规化、缺失/陈旧/离线降级等测试，以及全覆盖自动化视觉回归。
+
 ## 2.8.0 - 2026-09-13
 
 - **Google 额度支持与重构**：新增 `collectors/google.py`，统一解析 OpenCodex 的 `Gem (Weekly)` 与 `Gem` 额度窗口；采用 Weekly 周额度作为主视觉指标（大字号百分比与进度条），5 小时额度作为次级辅助指标，两窗口配对各自独立的重置时间；当 5 小时耗尽时以红色醒目提示，无周额度时明确降级提示“Google 5小时额度”。

@@ -170,3 +170,18 @@
 "Google 5h" = "Google 5小时额度";
 
 "Weekly quota unavailable" = "周额度暂不可用";
+
+/* Widget Configuration */
+"Primary Metric" = "主要指标";
+"Secondary Metric" = "次要指标";
+"Top Left" = "左上";
+"Top Right" = "右上";
+"Bottom Left" = "左下";
+"Bottom Right" = "右下";
+"Metric" = "指标";
+"主要指标" = "主要指标";
+"次要指标" = "次要指标";
+"左上" = "左上";
+"右上" = "右上";
+"左下" = "左下";
+"右下" = "右下";

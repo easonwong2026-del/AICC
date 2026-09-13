@@ -123,6 +123,8 @@ echo "=== Building Widget extension ==="
 WIDGET_FILES=(
   "$SOURCE_DIR/Models/WidgetDisplaySnapshot.swift"
   "$WIDGET_SOURCE_DIR/WidgetStatus.swift"
+  "$WIDGET_SOURCE_DIR/WidgetConfiguration.swift"
+  "$WIDGET_SOURCE_DIR/AICCWidgetViews.swift"
   "$WIDGET_SOURCE_DIR/AICCWidget.swift"
   "$WIDGET_SOURCE_DIR/RefreshWidgetIntent.swift"
 )
@@ -139,6 +141,10 @@ fi
 cp "$WIDGET_SOURCE_DIR/Info.plist" "$WIDGET_INFO"
 plutil -replace CFBundleShortVersionString -string "$VERSION" "$WIDGET_INFO"
 plutil -replace CFBundleVersion -string "$BUILD_VERSION" "$WIDGET_INFO"
+mkdir -p "$WIDGET_APP_DIR/Contents/Resources"
+if [ -d "$ROOT/macos/MenuBarApp/Resources" ]; then
+  cp -R "$ROOT/macos/MenuBarApp/Resources/." "$WIDGET_APP_DIR/Contents/Resources/"
+fi
 xcrun swiftc \
   -parse-as-library \
   -application-extension \
