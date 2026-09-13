@@ -2,12 +2,14 @@
 
 [English](CHANGELOG.en.md)
 
-## Unreleased
+## 2.8.0 - 2026-09-13
 
-- **Google 额度重构（周额度为主、5小时为辅）**：后端新增 `collectors/google.py`，从 OpenCodex 统一抓取并计算 `Gem (Weekly)` 与 `Gem` 额度窗口，转换为剩余百分比与独立重置时间；
-- **菜单栏与桌面小组件同步展示**：菜单栏 Google 卡片与 Small / Medium 桌面小组件全面接入 Google 额度，支持主次进度条排版与自适应紧凑布局；
-- **数据流与快照收拢**：移除 OpenCodexController 中冗余的私有额度轮询链路，由本地服务端收集器与 `WidgetDisplaySnapshot` 统一向菜单栏与小组件共享数据，支持离线缓存与故障安全降级。
-
+- **Google 额度支持与重构**：新增 `collectors/google.py`，统一解析 OpenCodex 的 `Gem (Weekly)` 与 `Gem` 额度窗口；采用 Weekly 周额度作为主视觉指标（大字号百分比与进度条），5 小时额度作为次级辅助指标，两窗口配对各自独立的重置时间；当 5 小时耗尽时以红色醒目提示，无周额度时明确降级提示“Google 5小时额度”。
+- **桌面小组件全面集成 Google 额度**：macOS Small 与 Medium 双尺寸 Widget 原生支持 Google 额度展示，与 Codex 保持一致的信息层级与设计语言；优化排版间距与紧凑排版，彻底避免“缓存/Cached”标签挤压截断标题。
+- **数据流与快照一致性保证**：统一通过后端 `server.py` 与 `services/collector_manager.py` 供给数据并纳入 `display_revision` 版本控制；移除 `OpenCodexController` 中冗余的私有额度轮询链路，Menu bar 与 Widget 严格共享 `WidgetDisplaySnapshot`，支持离线缓存与故障安全降级。
+- **DeepSeek 稳定性与容错增强**：支持保留 last-known-good 余额；在网络波动、超时、DNS/TLS 解析异常或 API 临时返回错误时不再直接清空已有余额，而是安全标记为 stale/cached 状态，待网络恢复后无缝恢复 fresh/live。
+- **并发强制刷新与生命周期隔离**：重构 `CollectorManager` 刷新调度，合并并发传入的多次 force refresh 请求，避免突发多次拉取；引入 generation 周期隔离，确保超时后的新 force generation 能够正确接管，避免迟到的过期结果污染最新状态。
+- **版本**：AICC 2.8.0，macOS Build 11；Android/Poke4S 保持稳定的 `1.2.5-pencil-home` / versionCode 11。
 ## 2.7.1 - 2026-08-29
 
 - **macOS Widget 重设计**：中尺寸 Widget 改为适合横向尺寸的左右布局；Codex 每周额度成为主视觉指标，居中展示大字号百分比与真实进度条、重置时间和 5 小时额度；WorkBuddy 积分与 DeepSeek 余额作为右侧次级指标对称排布。

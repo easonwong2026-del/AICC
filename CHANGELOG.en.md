@@ -4,12 +4,14 @@
 
 This file summarizes the current and recent public releases. The Chinese changelog contains the older detailed history.
 
-## Unreleased
+## 2.8.0 - 2026-09-13
 
-- **Google quota restructuring (weekly primary, 5h secondary)**: Added `collectors/google.py` to ingest and calculate `Gem (Weekly)` and `Gem` limit buckets from OpenCodex, mapping them to remaining percentages and distinct reset times.
-- **Synchronized Menu Bar and Widget presentation**: Redesigned `GoogleQuotaCard` and native macOS Small/Medium widgets to display Google quota with primary weekly bars and secondary 5-hour indicators.
-- **Consolidated data pipeline and snapshot sharing**: Retired redundant private quota polling inside `OpenCodexController`; unified status delivery through the background collector and `WidgetDisplaySnapshot` for consistent offline caching and stale fallbacks.
-
+- **Google quota restructuring (weekly primary, 5h secondary)**: Added `collectors/google.py` to ingest and calculate `Gem (Weekly)` and `Gem` limit buckets from OpenCodex. Weekly quota serves as the primary visual metric with large percentage typography and progress bars, paired with secondary 5-hour indicators and independent reset timestamps. A depleted 5h burst window highlights in red, and missing weekly buckets fall back explicitly to labeled 5h views.
+- **Full Widget integration for Google quota**: Native macOS Small and Medium widgets now display Google quota alongside Codex with matching visual hierarchy and layout standards. Fine-tuned spacing prevents status badges (such as `Cached`) from clipping labels.
+- **Snapshot and data consistency**: Unified all presentation feeds through the backend `server.py` and `services/collector_manager.py` under `display_revision` hashing; retired redundant private polling in `OpenCodexController`. Both Menu Bar and desktop Widgets consume identical `WidgetDisplaySnapshot` states with robust offline and stale fallbacks.
+- **DeepSeek balance reliability**: Retains last-known-good balances during transient network drops, timeouts, TLS/DNS failures, or API glitches instead of clearing balances to zero; automatically resumes live reporting upon recovery.
+- **Refresh concurrency and generation isolation**: Coalesces concurrent forced refresh requests into single worker passes; enforces generation boundaries so that new forced attempts take over after timeouts and late-arriving responses never corrupt active state.
+- **Version**: AICC 2.8.0, macOS Build 11. Android/Poke4S remains on `1.2.5-pencil-home` (versionCode 11).
 ## 2.7.1 - 2026-08-29
 
 - **macOS Widget redesign**: Redesigned the Medium Widget into a balanced horizontal split layout. Codex weekly quota serves as the primary metric with centered large typography, real progress, reset time, and 5-hour quota; WorkBuddy points and DeepSeek balance are cleanly displayed on the right.
