@@ -16,6 +16,7 @@ struct AICCWidgetEntry: TimelineEntry {
 
 enum MetricCardLayout: Sendable {
     case compact
+    case grid
     case spacious
     case compactRow
 }
@@ -83,11 +84,60 @@ struct QuotaCardView: View {
         switch layout {
         case .compact:
             compactBody
+        case .grid:
+            gridBody
         case .spacious:
             spaciousBody
         case .compactRow:
             compactRowBody
         }
+    }
+
+    private var gridBody: some View {
+        let data = quotaData
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                Text(data.title)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                Spacer(minLength: 0)
+                if data.state == "stale" {
+                    Text(isChinese ? "缓存" : "Cached").font(.system(size: 8)).foregroundStyle(.orange)
+                }
+            }
+
+            quotaNumber(data.primary, size: 20)
+
+            if let primary = data.primary {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.primary.opacity(0.1))
+                        Capsule().fill(quotaColor(primary)).frame(width: geo.size.width * min(max(primary, 0), 100) / 100)
+                    }
+                }
+                .frame(height: 3)
+            } else {
+                Capsule().fill(Color.primary.opacity(0.1)).frame(height: 3)
+            }
+
+            HStack(spacing: 3) {
+                if let secondary = data.secondary {
+                    Text("5h").foregroundStyle(.secondary)
+                    Text(String(format: "%.0f%%", secondary)).foregroundStyle(quotaColor(secondary))
+                } else if isGoogle && (!data.isWeekly || data.primary == nil) {
+                    Text(data.primary == nil ? (isChinese ? "暂无数据" : "No data") : (isChinese ? "周额度暂无数据" : "Weekly unavailable"))
+                        .foregroundStyle(.secondary)
+                } else if let reset = data.reset {
+                    Text(reset).foregroundStyle(.secondary)
+                }
+            }
+            .font(.system(size: 9))
+            .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .accessibilityElement(children: .combine)
     }
 
     private var compactBody: some View {
@@ -135,80 +185,11 @@ struct QuotaCardView: View {
     }
 
     private var spaciousBody: some View {
-        let data = quotaData
-        return VStack(alignment: .leading, spacing: 3) {
-            HStack(alignment: .lastTextBaseline, spacing: 3) {
-                Text(data.title)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                if data.state == "stale" {
-                    Text(isChinese ? "缓存" : "Cached").font(.system(size: 8)).foregroundStyle(.orange)
-                }
-            }
-            .lineLimit(1)
-
-            quotaNumber(data.primary, size: 32)
-
-            if let primary = data.primary {
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Color.primary.opacity(0.1))
-                        Capsule().fill(quotaColor(primary)).frame(width: geo.size.width * min(max(primary, 0), 100) / 100)
-                    }
-                }
-                .frame(height: 5)
-            }
-
-            HStack(spacing: 2) {
-                if let reset = data.reset {
-                    Text(reset).foregroundStyle(.secondary)
-                    Spacer(minLength: 0)
-                }
-                if let secondary = data.secondary {
-                    Text("5h").foregroundStyle(.secondary)
-                    Text(String(format: "%.0f%%", secondary)).foregroundStyle(quotaColor(secondary))
-                } else if isGoogle && (!data.isWeekly || data.primary == nil) {
-                    Text(data.primary == nil ? (isChinese ? "暂无数据" : "No data") : (isChinese ? "周额度暂无数据" : "Weekly unavailable"))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .font(.system(size: 9.5))
-            .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
+        gridBody
     }
 
     private var compactRowBody: some View {
-        let data = quotaData
-        return VStack(alignment: .leading, spacing: 1) {
-            HStack(alignment: .lastTextBaseline, spacing: 3) {
-                Text(data.title)
-                    .foregroundStyle(.secondary)
-                if data.state == "stale" {
-                    Text(isChinese ? " · 缓存" : " · Cached").foregroundStyle(.orange)
-                }
-                Spacer(minLength: 0)
-                quotaNumber(data.primary, size: 14)
-            }
-            HStack(spacing: 2) {
-                if let secondary = data.secondary {
-                    Text("5h").foregroundStyle(.secondary)
-                    Text(String(format: "%.0f%%", secondary)).foregroundStyle(quotaColor(secondary))
-                } else if let reset = data.reset {
-                    Text(reset).foregroundStyle(.secondary)
-                } else if isGoogle && (!data.isWeekly || data.primary == nil) {
-                    Text(data.primary == nil ? (isChinese ? "暂无数据" : "No data") : (isChinese ? "周额度暂无数据" : "Weekly unavailable"))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .font(.system(size: 9))
-            .foregroundStyle(.secondary)
-        }
-        .font(.system(size: 11))
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .lineLimit(1)
-        .accessibilityElement(children: .combine)
+        gridBody
     }
 }
 
@@ -240,6 +221,8 @@ struct BalanceCardView: View {
         switch layout {
         case .compact:
             compactBody
+        case .grid:
+            gridBody
         case .spacious:
             spaciousBody
         case .compactRow:
@@ -247,49 +230,36 @@ struct BalanceCardView: View {
         }
     }
 
-    private var compactRowBody: some View {
+    private var gridBody: some View {
         let data = balanceData
-        return VStack(alignment: .leading, spacing: 1) {
-            Text(data.title + (data.state == "stale" ? (isChinese ? " · 缓存" : " · Cached") : ""))
-                .foregroundStyle(.secondary)
-            Text(data.valueText + " " + data.unit)
-                .fontWeight(.semibold)
-        }
-        .font(.system(size: 11))
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .lineLimit(1)
-        .minimumScaleFactor(0.85)
-        .accessibilityElement(children: .combine)
-    }
-
-    private var spaciousBody: some View {
-        let data = balanceData
-        return VStack(alignment: .leading, spacing: 3) {
-            HStack(alignment: .lastTextBaseline, spacing: 3) {
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
                 Text(data.title)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                Spacer(minLength: 0)
                 if data.state == "stale" {
                     Text(isChinese ? "缓存" : "Cached").font(.system(size: 8)).foregroundStyle(.orange)
                 }
             }
-            .lineLimit(1)
 
             Text(data.valueText)
-                .font(.system(size: 26, weight: .bold, design: .rounded).monospacedDigit())
+                .font(.system(size: 20, weight: .bold, design: .rounded).monospacedDigit())
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
 
             Capsule()
                 .fill(Color.primary.opacity(0.08))
-                .frame(height: 5)
+                .frame(height: 3)
 
             Text(data.unit)
-                .font(.system(size: 9.5))
+                .font(.system(size: 9))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .accessibilityElement(children: .combine)
     }
 
@@ -326,6 +296,14 @@ struct BalanceCardView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
     }
+
+    private var spaciousBody: some View {
+        gridBody
+    }
+
+    private var compactRowBody: some View {
+        gridBody
+    }
 }
 
 struct AICCWidgetView: View {
@@ -357,7 +335,7 @@ struct AICCWidgetView: View {
     private var refreshButton: some View {
         Button(intent: RefreshWidgetIntent()) {
             Image(systemName: "arrow.clockwise")
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: 10.5, weight: .semibold))
                 .foregroundStyle(.secondary)
         }
         .buttonStyle(.plain)
@@ -366,22 +344,25 @@ struct AICCWidgetView: View {
 
     private var mediumContent: some View {
         let metrics = entry.configuration.resolvedMetrics(for: .systemMedium)
-        return VStack(spacing: 6) {
+        return VStack(spacing: 5) {
             HStack {
                 Text("AICC").font(.system(size: 11, weight: .bold))
                 Spacer()
                 refreshButton
             }
-            HStack(alignment: .top, spacing: 16) {
-                MetricCardView(metric: metrics[0], snapshot: entry.snapshot, layout: .spacious, isChinese: isChinese)
-                MetricCardView(metric: metrics[1], snapshot: entry.snapshot, layout: .spacious, isChinese: isChinese)
+            HStack(spacing: 12) {
+                MetricCardView(metric: metrics[0], snapshot: entry.snapshot, layout: .grid, isChinese: isChinese)
+                Divider()
+                MetricCardView(metric: metrics[1], snapshot: entry.snapshot, layout: .grid, isChinese: isChinese)
             }
-            Spacer(minLength: 0)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
-            HStack(alignment: .top, spacing: 16) {
-                MetricCardView(metric: metrics[2], snapshot: entry.snapshot, layout: .compactRow, isChinese: isChinese)
-                MetricCardView(metric: metrics[3], snapshot: entry.snapshot, layout: .compactRow, isChinese: isChinese)
+            HStack(spacing: 12) {
+                MetricCardView(metric: metrics[2], snapshot: entry.snapshot, layout: .grid, isChinese: isChinese)
+                Divider()
+                MetricCardView(metric: metrics[3], snapshot: entry.snapshot, layout: .grid, isChinese: isChinese)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -396,10 +377,11 @@ struct AICCWidgetView: View {
                 refreshButton
             }
             MetricCardView(metric: metrics[0], snapshot: entry.snapshot, layout: .compact, isChinese: isChinese)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Divider()
             MetricCardView(metric: metrics[1], snapshot: entry.snapshot, layout: .compact, isChinese: isChinese)
-            Spacer(minLength: 0)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .padding(10)
+        .padding(11)
     }
 }
-

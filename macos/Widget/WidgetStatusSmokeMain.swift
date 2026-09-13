@@ -226,8 +226,15 @@ struct WidgetStatusSmokeMain {
         try require(defaultIntent.topRight == .google, "Default topRight is Google")
         try require(defaultIntent.bottomLeft == .workbuddy, "Default bottomLeft is WorkBuddy")
         try require(defaultIntent.bottomRight == .deepseek, "Default bottomRight is DeepSeek")
-        try require(defaultIntent.primaryMetric == nil, "Default primaryMetric is nil (falls back to topLeft)")
-        try require(defaultIntent.secondaryMetric == nil, "Default secondaryMetric is nil (falls back to topRight)")
+        try require(defaultIntent.primaryMetric == .codex, "Default primaryMetric is Codex")
+        try require(defaultIntent.secondaryMetric == .google, "Default secondaryMetric is Google")
+
+        // Strict family parameter isolation: Small does not read medium slots, Medium does not read small slots
+        let isolatedSmall = AICCWidgetConfigurationIntent(topLeft: .workbuddy, topRight: .deepseek, bottomLeft: .google, bottomRight: .codex)
+        try require(isolatedSmall.resolvedMetrics(for: .systemSmall) == [.codex, .google], "Small ignores medium slots")
+
+        let isolatedMedium = AICCWidgetConfigurationIntent(primary: .workbuddy, secondary: .deepseek)
+        try require(isolatedMedium.resolvedMetrics(for: .systemMedium) == [.codex, .google, .workbuddy, .deepseek], "Medium ignores small slots")
 
         let defaultSmall = defaultIntent.resolvedMetrics(for: .systemSmall)
         try require(defaultSmall == [.codex, .google], "Default Small metrics must be Codex + Google: \(defaultSmall)")
