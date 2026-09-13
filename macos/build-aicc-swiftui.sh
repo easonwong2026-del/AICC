@@ -162,6 +162,25 @@ xcrun swiftc \
   "${WIDGET_FILES[@]}" \
   -o "$WIDGET_MACOS_DIR/AICCWidget"
 
+echo "=== Extracting App Intents metadata ==="
+METADATA_DIR="$WIDGET_APP_DIR/Contents/Resources/Metadata.appintents"
+mkdir -p "$METADATA_DIR"
+APPINTENTS_PROCESSOR=""
+if xcrun --find appintentsmetadataprocessor >/dev/null 2>&1; then
+  APPINTENTS_PROCESSOR="$(xcrun --find appintentsmetadataprocessor)"
+fi
+if [ -n "$APPINTENTS_PROCESSOR" ] && [ -x "$APPINTENTS_PROCESSOR" ]; then
+  echo "Using appintentsmetadataprocessor: $APPINTENTS_PROCESSOR"
+  "$APPINTENTS_PROCESSOR" --output "$WIDGET_APP_DIR/Contents/Resources" --module-name AICCWidget --bundle-identifier "com.aieink.dashboard.menubar.widget" --sdk-root "$SDK_PATH" --binary-file "$WIDGET_MACOS_DIR/AICCWidget" --compile-time-extraction || {
+    echo "appintentsmetadataprocessor failed, falling back to generator"
+    python3 "$ROOT/scripts/generate-widget-appintents.py" "$METADATA_DIR"
+  }
+else
+  echo "appintentsmetadataprocessor not in toolchain, generating metadata..."
+  python3 "$ROOT/scripts/generate-widget-appintents.py" "$METADATA_DIR"
+fi
+bash "$ROOT/scripts/validate-widget-appintents.sh" "$APP_DIR"
+
 echo "=== Signing ==="
 if [[ "$SIGNING_IDENTITY" == "-" ]]; then
   codesign --force --sign - --entitlements "$WIDGET_ENTITLEMENTS" "$WIDGET_APP_DIR"
@@ -188,3 +207,6 @@ codesign --verify --deep --strict "$APP_DIR"
 echo "=== Done ==="
 echo "$APP_DIR"
 echo "$WIDGET_APP_DIR"
+
+# Post-build validation
+bash "$ROOT/scripts/validate-widget-appintents.sh" "$APP_DIR"

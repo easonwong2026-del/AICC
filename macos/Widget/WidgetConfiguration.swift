@@ -55,11 +55,11 @@ public struct AICCWidgetConfigurationIntent: WidgetConfigurationIntent, Codable,
     public static var title: LocalizedStringResource = "AICC Widget Configuration"
     public static var description = IntentDescription("Customize displayed metrics in AICC widget")
 
-    @Parameter(title: "Primary Metric", default: nil)
-    public var primaryMetric: WidgetMetricOption?
+    @Parameter(title: "Primary Metric", default: .codex)
+    public var primaryMetric: WidgetMetricOption
 
-    @Parameter(title: "Secondary Metric", default: nil)
-    public var secondaryMetric: WidgetMetricOption?
+    @Parameter(title: "Secondary Metric", default: .google)
+    public var secondaryMetric: WidgetMetricOption
 
     @Parameter(title: "Top Left", default: .codex)
     public var topLeft: WidgetMetricOption
@@ -73,9 +73,28 @@ public struct AICCWidgetConfigurationIntent: WidgetConfigurationIntent, Codable,
     @Parameter(title: "Bottom Right", default: .deepseek)
     public var bottomRight: WidgetMetricOption
 
+    public static var parameterSummary: some ParameterSummary {
+        Switch(.widgetFamily) {
+            Case(.systemSmall) {
+                Summary {
+                    \AICCWidgetConfigurationIntent.$primaryMetric
+                    \AICCWidgetConfigurationIntent.$secondaryMetric
+                }
+            }
+            DefaultCase {
+                Summary {
+                    \AICCWidgetConfigurationIntent.$topLeft
+                    \AICCWidgetConfigurationIntent.$topRight
+                    \AICCWidgetConfigurationIntent.$bottomLeft
+                    \AICCWidgetConfigurationIntent.$bottomRight
+                }
+            }
+        }
+    }
+
     public init() {
-        self.primaryMetric = nil
-        self.secondaryMetric = nil
+        self.primaryMetric = .codex
+        self.secondaryMetric = .google
         self.topLeft = .codex
         self.topRight = .google
         self.bottomLeft = .workbuddy
@@ -85,8 +104,8 @@ public struct AICCWidgetConfigurationIntent: WidgetConfigurationIntent, Codable,
     public init(primary: WidgetMetricOption, secondary: WidgetMetricOption) {
         self.primaryMetric = primary
         self.secondaryMetric = secondary
-        self.topLeft = primary
-        self.topRight = secondary
+        self.topLeft = .codex
+        self.topRight = .google
         self.bottomLeft = .workbuddy
         self.bottomRight = .deepseek
     }
@@ -95,8 +114,8 @@ public struct AICCWidgetConfigurationIntent: WidgetConfigurationIntent, Codable,
                 topRight: WidgetMetricOption = .google,
                 bottomLeft: WidgetMetricOption = .workbuddy,
                 bottomRight: WidgetMetricOption = .deepseek) {
-        self.primaryMetric = nil
-        self.secondaryMetric = nil
+        self.primaryMetric = .codex
+        self.secondaryMetric = .google
         self.topLeft = topLeft
         self.topRight = topRight
         self.bottomLeft = bottomLeft
@@ -114,8 +133,8 @@ public struct AICCWidgetConfigurationIntent: WidgetConfigurationIntent, Codable,
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.primaryMetric = try container.decodeIfPresent(WidgetMetricOption.self, forKey: .primaryMetric)
-        self.secondaryMetric = try container.decodeIfPresent(WidgetMetricOption.self, forKey: .secondaryMetric)
+        self.primaryMetric = try container.decodeIfPresent(WidgetMetricOption.self, forKey: .primaryMetric) ?? .codex
+        self.secondaryMetric = try container.decodeIfPresent(WidgetMetricOption.self, forKey: .secondaryMetric) ?? .google
         self.topLeft = try container.decodeIfPresent(WidgetMetricOption.self, forKey: .topLeft) ?? .codex
         self.topRight = try container.decodeIfPresent(WidgetMetricOption.self, forKey: .topRight) ?? .google
         self.bottomLeft = try container.decodeIfPresent(WidgetMetricOption.self, forKey: .bottomLeft) ?? .workbuddy
@@ -124,8 +143,8 @@ public struct AICCWidgetConfigurationIntent: WidgetConfigurationIntent, Codable,
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encodeIfPresent(primaryMetric, forKey: .primaryMetric)
-        try container.encodeIfPresent(secondaryMetric, forKey: .secondaryMetric)
+        try container.encode(primaryMetric, forKey: .primaryMetric)
+        try container.encode(secondaryMetric, forKey: .secondaryMetric)
         try container.encode(topLeft, forKey: .topLeft)
         try container.encode(topRight, forKey: .topRight)
         try container.encode(bottomLeft, forKey: .bottomLeft)
@@ -166,13 +185,9 @@ public struct AICCWidgetConfigurationIntent: WidgetConfigurationIntent, Codable,
 
     public func resolvedMetrics(for family: WidgetFamily) -> [WidgetMetricOption] {
         if family == .systemSmall {
-            let p = primaryMetric ?? topLeft
-            let s = secondaryMetric ?? topRight
-            return Self.normalize([p, s], targetCount: 2)
+            return Self.normalize([primaryMetric, secondaryMetric], targetCount: 2)
         } else {
-            let tl = primaryMetric ?? topLeft
-            let tr = secondaryMetric ?? topRight
-            return Self.normalize([tl, tr, bottomLeft, bottomRight], targetCount: 4)
+            return Self.normalize([topLeft, topRight, bottomLeft, bottomRight], targetCount: 4)
         }
     }
 }
