@@ -3,9 +3,10 @@ import json
 import os
 import sys
 
+
 def generate_metadata(output_dir):
     os.makedirs(output_dir, exist_ok=True)
-    
+
     version_data = {
         "version": "3.0",
         "toolsVersion": "17E6107"
@@ -13,7 +14,7 @@ def generate_metadata(output_dir):
     with open(os.path.join(output_dir, "version.json"), "w") as f:
         json.dump(version_data, f, indent=2)
         f.write(chr(10))
-        
+
     enum_metric_option = {
         "assistantDefinedSchemas": [],
         "availabilityAnnotations": {
@@ -281,6 +282,7 @@ def generate_metadata(output_dir):
         f.write(chr(10))
 
     print(f"Generated App Intents metadata at {output_dir}")
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
