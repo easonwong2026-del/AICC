@@ -4,9 +4,9 @@
 
 AICC is a local AI status center for macOS. It displays Codex, WorkBuddy, DeepSeek, and system status, with support for Poke4S e-ink devices. The server uses only the Python standard library.
 
-The current macOS version is AICC 2.7.1 (Build 10); Android/Poke4S use an independent version line.
+The current macOS version is AICC 2.8.0 (Build 11); Android/Poke4S use an independent version line.
 
-The macOS menu-bar app uses fixed Codex, WorkBuddy, DeepSeek, System, and OpenCodex status cards. It reads `/api/status` and the fixed operation endpoints only. The Python server uses four fixed collectors for Codex, WorkBuddy, DeepSeek, and system status.
+The macOS menu-bar app uses fixed Codex, Google, WorkBuddy, DeepSeek, System, and OpenCodex status cards. It reads `/api/status` and the fixed operation endpoints only. The Python server provides Codex, Google, WorkBuddy, DeepSeek, and system status through dedicated collectors.
 
 ## Access
 
@@ -87,7 +87,7 @@ Manifest format:
 
 - Requirements: macOS 14+, Apple Silicon, with the AICC App installed and running.
 - Add it from the desktop: right-click → Edit Widgets → search for “AICC”, then choose Small or Medium.
-- Small shows Codex and WorkBuddy; Medium uses a split horizontal layout showing Codex (weekly quota, progress, reset time, 5-hour quota) alongside WorkBuddy (points) and DeepSeek (balance).
+- Small vertically stacks compact Codex and Google quota cards (large weekly numbers, progress bars, and 5h secondary indicators) alongside WorkBuddy and DeepSeek; Medium displays side-by-side Codex and Google quota cards on the upper deck with WorkBuddy (points) and DeepSeek (balance) below.
 - The Widget reads `http://127.0.0.1:8765/api/status`. The production port is fixed at `8765`; the Widget does not call the refresh endpoint or start the server.
 - Use the refresh button in the Widget to reload its timeline. The AICC App also notifies WidgetKit on launch and when displayed data changes.
 - If the server is temporarily unavailable, the Widget keeps the last successful snapshot as stale data; a first install without a cache shows `—` placeholders.
@@ -100,6 +100,8 @@ Manifest format:
 - DeepSeek: reads the key from the environment or macOS Keychain and never writes it to the project directory.
 - System: uses built-in macOS tools for memory and CPU information.
 
+- Google: fetches Google Antigravity quota from OpenCodex, mapping both Weekly and 5-hour limit buckets with distinct reset times.
+
 Collectors run independently. A timeout in one service does not block the whole dashboard, concurrent requests share an in-flight collection, and caches are written only when data changes or the save interval expires.
 
 LAN devices can read the dashboard. Refresh, write, and WorkBuddy reconnect endpoints are restricted to the Mac itself.
@@ -108,7 +110,7 @@ LAN devices can read the dashboard. Refresh, write, and WorkBuddy reconnect endp
 
 Open the kiosk page and tap “Enter e-ink mode”. The page refreshes every five minutes and keeps the last successful data.
 
-The current Android source version is `1.2.5-pencil-home` (versionCode 11) and is unchanged in macOS 2.7.1. Do not use an old or nonexistent APK path from the repository; download the latest APK from [GitHub Releases](https://github.com/easonwong2026-del/AICC/releases). The published 1.2.5 APK is currently attached to the [v2.5.0 release](https://github.com/easonwong2026-del/AICC/releases/tag/v2.5.0), with a direct [APK download](https://github.com/easonwong2026-del/AICC/releases/download/v2.5.0/Poke4S-AI-Dashboard-v1.2.5-pencil-home.apk).
+The current Android source version is `1.2.5-pencil-home` (versionCode 11) and is unchanged in macOS 2.8.0. Do not use an old or nonexistent APK path from the repository; download the latest APK from [GitHub Releases](https://github.com/easonwong2026-del/AICC/releases). The published 1.2.5 APK is currently attached to the [v2.5.0 release](https://github.com/easonwong2026-del/AICC/releases/tag/v2.5.0), with a direct [APK download](https://github.com/easonwong2026-del/AICC/releases/download/v2.5.0/Poke4S-AI-Dashboard-v1.2.5-pencil-home.apk).
 
 The Android source is in `android/poke-dashboard/` and is independently buildable with the Gradle wrapper. It is not a runtime dependency of the Mac server. Release builds enable code and resource shrinking.
 

@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>AICCReleasePageURL</key>
+	<string>https://github.com/easonwong2026-del/AICC/releases</string>
+	<key>AICCUpdateManifestURL</key>
+	<string>https://raw.githubusercontent.com/easonwong2026-del/AICC/main/updates/aicc-update.json</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
@@ -19,11 +23,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleVersion</key>
-	<string>10</string>
-	<key>AICCReleasePageURL</key>
-	<string>https://github.com/easonwong2026-del/AICC/releases</string>
-	<key>AICCUpdateManifestURL</key>
-	<string>https://raw.githubusercontent.com/easonwong2026-del/AICC/main/updates/aicc-update.json</string>
+	<string>11</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>

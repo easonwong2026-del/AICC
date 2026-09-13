@@ -4,9 +4,9 @@
 
 面向 macOS 的 AI 状态中心，显示 Codex、WorkBuddy、DeepSeek 和系统状态。支持 Poke4S 墨水屏显示。服务只依赖 Python 标准库。
 
-当前 macOS 版本为 AICC 2.7.1（Build 10）；Android/Poke4S 使用独立版本体系。
+当前 macOS 版本为 AICC 2.8.0（Build 11）；Android/Poke4S 使用独立版本体系。
 
-macOS 菜单栏使用固定的 Codex、WorkBuddy、DeepSeek、System 和 OpenCodex 状态卡片，只读取 `/api/status` 及固定操作接口。Python 服务端通过四个固定采集器提供 Codex、WorkBuddy、DeepSeek 和系统状态。
+macOS 菜单栏使用固定的 Codex、Google、WorkBuddy、DeepSeek、System 和 OpenCodex 状态卡片，只读取 `/api/status` 及固定操作接口。Python 服务端通过固定采集器提供 Codex、WorkBuddy、DeepSeek 和系统状态。
 
 ## 使用地址
 
@@ -84,7 +84,7 @@ App 运行需要 macOS 14 或更高版本、Apple Silicon，以及可执行的 P
 
 - 系统要求：macOS 14+、Apple Silicon；先安装并启动 AICC App。
 - 添加方式：桌面右键 → 编辑 Widget → 搜索 “AICC”，选择小尺寸或中尺寸并添加。
-- 小尺寸显示 Codex 和 WorkBuddy；中尺寸采用左右分栏布局显示 Codex（每周额度、进度、重置时间、5小时额度）以及 WorkBuddy（积分）和 DeepSeek（余额）。
+- 小尺寸垂直并排显示 Codex 与 Google 额度（大字号周百分比、进度条、5h 辅助）以及 WorkBuddy/DeepSeek；中尺寸上方水平并排展示 Codex 与 Google 额度双卡片，下方展示 WorkBuddy（积分）和 DeepSeek（余额）。
 - Widget 通过 `http://127.0.0.1:8765/api/status` 读取状态，正式端口固定为 `8765`，不会调用刷新接口或自行启动 Server。
 - 点击右上角刷新按钮可手动刷新 Widget 时间线；AICC App 启动及状态变化时也会通知 Widget 更新。
 - Server 暂时不可达时保留最近一次成功数据并标记为 stale；首次安装没有缓存时显示占位符 `—`。
@@ -105,7 +105,9 @@ App 运行需要 macOS 14 或更高版本、Apple Silicon，以及可执行的 P
 - DeepSeek：密钥只从环境变量或 macOS 钥匙串读取，不写入项目目录。
 - 系统：使用 macOS 自带命令读取内存；没有第三方运行依赖。
 
-四个采集器并行且互相隔离。某个服务超时不会拖死整个面板；并发请求会共用正在执行的采集任务。缓存仅在数据变化或超过保存周期时写盘。
+- Google：通过 OpenCodex 采集器读取 Google Antigravity 额度，解析 Weekly 与 5h 双窗口并保持独立重置时间。
+
+各采集器并行且互相隔离。某个服务超时不会拖死整个面板；并发请求会共用正在执行的采集任务。缓存仅在数据变化或超过保存周期时写盘。
 
 局域网设备只能读取面板。刷新、修改和 WorkBuddy 重连接口只允许 Mac 本机调用。
 
@@ -113,7 +115,7 @@ App 运行需要 macOS 14 或更高版本、Apple Silicon，以及可执行的 P
 
 网页模式打开 kiosk 地址后，点一次"进入墨水屏模式"。页面每 5 分钟取数，并保留最近成功数据。
 
-Android/Poke4S 当前源码版本为 `1.2.5-pencil-home`（versionCode 11），本次 macOS 2.7.1 保持不变。
+Android/Poke4S 当前源码版本为 `1.2.5-pencil-home`（versionCode 11），本次 macOS 2.8.0 保持不变。
 不要使用仓库内不存在或过时的 APK 路径；请从 [GitHub Releases](https://github.com/easonwong2026-del/AICC/releases)
 下载最新 Android APK。目前已发布的 1.2.5 APK 位于 [v2.5.0 Release assets](https://github.com/easonwong2026-del/AICC/releases/tag/v2.5.0)，也可直接[下载 APK](https://github.com/easonwong2026-del/AICC/releases/download/v2.5.0/Poke4S-AI-Dashboard-v1.2.5-pencil-home.apk)。
 它保留 Poke4S 的 AI COMMAND 风格、长按设置、自动发现、缓存减写、R8 和低内存 Canvas 渲染，并兼容现有服务器字段。
