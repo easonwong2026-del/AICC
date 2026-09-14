@@ -17,6 +17,7 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
+import uuid
 
 from collectors.deepseek import collect as collect_deepseek, COLLECTOR_TIMEOUT_SECONDS as DEEPSEEK_COLLECTOR_TIMEOUT
 from collectors.google import collect as collect_google
@@ -37,6 +38,7 @@ COLLECTOR_WAIT_SECONDS = max(0, min(5, float(os.environ.get("COLLECTOR_WAIT_SECO
 # A force may wait for a normal run to time out, then for its force successor.
 FORCE_WAIT_SECONDS = 2 * max(DEFAULT_COLLECTOR_TIMEOUT, DEEPSEEK_COLLECTOR_TIMEOUT) + 1.0
 SERVER_STARTED_AT = time.time()
+SERVER_INSTANCE_ID = os.environ.get('AICC_SERVER_INSTANCE_ID') or str(uuid.uuid4())
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 DEFAULT_STATUS = {
     "workbuddy": {
@@ -97,7 +99,7 @@ def collector_manager() -> CollectorManager:
         fallback = persisted_status()
 
         def collect_codex(force: bool = False) -> dict:
-            return monitor.status()
+            return monitor.status(force=force)
 
         def collect_deepseek_value(force: bool = False) -> dict:
             return collect_deepseek(DATA_ROOT / "deepseek_history.json")
@@ -242,11 +244,54 @@ def build_version() -> str | None:
 
 
 def live_health_payload() -> dict:
-    payload = {"ok": True, "status": "live", "version": version()}
+    payload = {
+        "ok": True,
+        "status": "live",
+        "version": version(),
+        "pid": os.getpid(),
+        "ppid": os.getppid(),
+        "started_at": SERVER_STARTED_AT,
+        "server_instance_id": SERVER_INSTANCE_ID,
+    }
     build = build_version()
     if build:
         payload["build"] = build
     return payload
+
+
+def ready_health_payload() -> tuple[dict, HTTPStatus]:
+    try:
+        manager = collector_manager()
+        pipe = manager.pipeline_health()
+        if not pipe.get("ready", False):
+            return {
+                "ok": False,
+                "status": "stuck_pipeline",
+                "version": version(),
+                "uptime_seconds": round(max(0, time.time() - SERVER_STARTED_AT)),
+                "stuck_workers": pipe.get("stuck_workers", []),
+                "pid": os.getpid(),
+                "ppid": os.getppid(),
+                "server_instance_id": SERVER_INSTANCE_ID,
+            }, HTTPStatus.SERVICE_UNAVAILABLE
+        return {
+            "ok": True,
+            "status": "ready",
+            "version": version(),
+            "uptime_seconds": round(max(0, time.time() - SERVER_STARTED_AT)),
+            "pid": os.getpid(),
+            "ppid": os.getppid(),
+            "server_instance_id": SERVER_INSTANCE_ID,
+        }, HTTPStatus.OK
+    except Exception as err:
+        return {
+            "ok": False,
+            "status": "not_ready",
+            "error": str(err),
+            "pid": os.getpid(),
+            "ppid": os.getppid(),
+            "server_instance_id": SERVER_INSTANCE_ID,
+        }, HTTPStatus.SERVICE_UNAVAILABLE
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
@@ -264,8 +309,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if path == "/api/health/live":
             return self.send_json(live_health_payload())
         if path == "/api/health/ready":
-            payload = health_payload()
-            status = HTTPStatus.OK if payload["status"] != "unhealthy" else HTTPStatus.SERVICE_UNAVAILABLE
+            payload, status = ready_health_payload()
             return self.send_json(payload, status)
         if path == "/api/status":
             return self.send_json(load_status())
@@ -291,6 +335,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if path == "/api/workbuddy/reconnect":
             payload, status = _workbuddy_reconnect()
             return self.send_json(payload, status)
+        if path == "/api/shutdown":
+            self.send_json({"ok": True, "message": "Server shutting down", "pid": os.getpid()})
+            threading.Thread(target=lambda: (time.sleep(0.3), os._exit(0)), daemon=True).start()
+            return
         if path == "/api/refresh":
             self.send_json(load_status(force=True))
             return
@@ -500,10 +548,39 @@ def health_payload() -> dict:
         "uptime_seconds": round(max(0, time.time() - SERVER_STARTED_AT)),
         "cache": cache,
         "providers": provider_items,
+        "worker_telemetry": {
+            "codex": monitor.health(),
+        },
+        "pid": os.getpid(),
+        "ppid": os.getppid(),
+        "started_at": SERVER_STARTED_AT,
+        "server_instance_id": SERVER_INSTANCE_ID,
     }
 
 
+def _start_parent_watchdog() -> None:
+    parent_pid_str = os.environ.get("AICC_PARENT_PID")
+    if not parent_pid_str:
+        return
+    try:
+        parent_pid = int(parent_pid_str)
+    except ValueError:
+        return
+
+    def watchdog() -> None:
+        while True:
+            time.sleep(3)
+            try:
+                os.kill(parent_pid, 0)
+            except OSError:
+                print(f"Parent process {parent_pid} exited. Server shutting down.")
+                os._exit(0)
+
+    threading.Thread(target=watchdog, name="parent-watchdog", daemon=True).start()
+
+
 def main() -> None:
+    _start_parent_watchdog()
     port = int(os.environ.get("EINK_PORT", "8765"))
     server = DashboardServer((os.environ.get("EINK_HOST", "0.0.0.0"), port), DashboardHandler)
     start_discovery(port)

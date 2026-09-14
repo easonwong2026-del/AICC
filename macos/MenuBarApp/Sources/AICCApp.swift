@@ -82,16 +82,14 @@ final class ServerManager: ObservableObject {
 
         let identity = await checkServerIdentity()
         if identity.alive {
-            if identity.compatible {
+            if identity.compatible && !identity.isOrphan {
                 isServerRunning = true
                 ownership = .external
                 healthState = .healthy
                 return true
             } else {
-                isServerRunning = false
-                ownership = .external
-                healthState = .degraded
-                return false
+                // Stale, incompatible, or orphaned server! Reclaim port.
+                await reclaimPort(pid: identity.pid)
             }
         }
 
@@ -118,6 +116,11 @@ final class ServerManager: ObservableObject {
         if !hostBuild.isEmpty {
             env["AICC_BUILD"] = hostBuild
         }
+        env["AICC_PARENT_PID"] = "\(ProcessInfo.processInfo.processIdentifier)"
+        env.removeValue(forKey: "CODEX_SANDBOX_NETWORK_DISABLED")
+        env.removeValue(forKey: "CODEX_SESSION_ID")
+        env.removeValue(forKey: "CODEX_THREAD_ID")
+        env.removeValue(forKey: "CODEX_PERMISSION_PROFILE")
         if root.path.contains(".app/Contents/Resources/Server") {
             let dataDirectory = URL(fileURLWithPath: NSHomeDirectory())
                 .appendingPathComponent("Library/Application Support/AICC-Dashboard/data", isDirectory: true)
@@ -226,11 +229,13 @@ final class ServerManager: ObservableObject {
         let status: String?
         let version: String?
         let build: String?
+        let pid: Int?
+        let ppid: Int?
     }
 
-    private func checkServerIdentity() async -> (alive: Bool, compatible: Bool) {
+    private func checkServerIdentity() async -> (alive: Bool, compatible: Bool, isOrphan: Bool, pid: Int?) {
         guard let url = URL(string: "http://127.0.0.1:\(Self.productPort)/api/health/live") else {
-            return (false, false)
+            return (false, false, false, nil)
         }
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
@@ -238,11 +243,11 @@ final class ServerManager: ObservableObject {
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                return (false, false)
+                return (false, false, false, nil)
             }
             guard let health = try? JSONDecoder().decode(LiveHealthResponse.self, from: data),
                   health.ok == true else {
-                return (true, false)
+                return (true, false, false, nil)
             }
             let currentVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -251,17 +256,64 @@ final class ServerManager: ObservableObject {
 
             let versionMatch = currentVersion == nil || currentVersion?.isEmpty == true || health.version == currentVersion
             let buildMatch = currentBuild != nil && !currentBuild!.isEmpty && health.build == currentBuild
+            let isOrphan = health.ppid == 1
 
-            return (true, versionMatch && buildMatch)
+            return (true, versionMatch && buildMatch, isOrphan, health.pid)
         } catch {
-            return (false, false)
+            return (false, false, false, nil)
+        }
+    }
+
+    private func reclaimPort(pid: Int?) async {
+        if let url = URL(string: "http://127.0.0.1:\(Self.productPort)/api/shutdown") {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 1.0
+            _ = try? await URLSession.shared.data(for: request)
+        }
+        if let pid, pid > 1 {
+            kill(pid_t(pid), SIGTERM)
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            if kill(pid_t(pid), 0) == 0 {
+                kill(pid_t(pid), SIGKILL)
+            }
+        }
+        try? await Task.sleep(nanoseconds: 500_000_000)
+    }
+
+    private struct ReadyHealthResponse: Decodable {
+        let ok: Bool?
+        let status: String?
+    }
+
+    private func checkServerReadiness() async -> Bool {
+        guard let url = URL(string: "http://127.0.0.1:\(Self.productPort)/api/health/ready") else {
+            return false
+        }
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 1.5
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                return false
+            }
+            guard let ready = try? JSONDecoder().decode(ReadyHealthResponse.self, from: data) else {
+                return false
+            }
+            return ready.ok == true
+        } catch {
+            return false
         }
     }
 
     private func waitForServerAlive() async -> Bool {
-        for _ in 0..<10 {
+        for _ in 0..<12 {
             let identity = await checkServerIdentity()
-            if identity.alive && identity.compatible { return true }
+            if identity.alive && identity.compatible {
+                let ready = await checkServerReadiness()
+                if ready { return true }
+            }
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
         return false
@@ -270,17 +322,28 @@ final class ServerManager: ObservableObject {
     private func superviseOnce() async {
         guard stopReason == .none || stopReason == .recovery else { return }
         let identity = await checkServerIdentity()
-        if identity.alive && identity.compatible {
-            isServerRunning = true
-            healthState = .healthy
-            restartFailures = 0
-            nextRetryDelay = 1_000_000_000
-            return
+        if identity.alive && identity.compatible && !identity.isOrphan {
+            let isReady = await checkServerReadiness()
+            if isReady {
+                isServerRunning = true
+                healthState = .healthy
+                restartFailures = 0
+                nextRetryDelay = 1_000_000_000
+                return
+            } else {
+                isServerRunning = false
+                healthState = .degraded
+                await reclaimPort(pid: identity.pid)
+                _ = await startServer()
+                return
+            }
         }
 
-        if identity.alive && !identity.compatible {
+        if identity.alive && (!identity.compatible || identity.isOrphan) {
             isServerRunning = false
             healthState = .degraded
+            await reclaimPort(pid: identity.pid)
+            _ = await startServer()
             return
         }
 
@@ -328,6 +391,9 @@ final class ServerManager: ObservableObject {
             let deadline = Date().addingTimeInterval(1.5)
             while process.isRunning && Date() < deadline {
                 RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            }
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
             }
         }
         serverProcess = nil
