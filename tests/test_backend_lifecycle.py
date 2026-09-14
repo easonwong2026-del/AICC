@@ -113,6 +113,35 @@ class BackendLifecycleTests(unittest.TestCase):
         monitor._request_limits.assert_called_once()
         self.assertEqual(result["state"], "Connected")
 
+    def test_restart_launch_marks_worker_started_and_coalesces_next_start(self):
+        monitor = CodexMonitor.__new__(CodexMonitor)
+        monitor._lock = threading.Lock()
+        monitor._fresh_event = threading.Event()
+        monitor._restarting = True
+        monitor._started = False
+        monitor._process = None
+        monitor._last_access = time.monotonic()
+        monitor._idle_seconds = 600
+        monitor._restart_attempts = 0
+        monitor._status = {"state": "Reconnecting"}
+        monitor._send = MagicMock(return_value=1)
+
+        fake_proc = MagicMock()
+        fake_proc.pid = 9001
+        fake_proc.poll.return_value = None
+
+        with patch.object(monitor, "_resolve_cli", return_value=("codex", "test")), \
+             patch("services.codex_monitor.subprocess.Popen", return_value=fake_proc) as popen, \
+             patch("services.codex_monitor.threading.Thread"):
+            with patch("services.codex_monitor.time.sleep", return_value=None):
+                monitor._restart_after_delay()
+
+            self.assertTrue(monitor._started)
+            self.assertIs(monitor._process, fake_proc)
+            monitor.start()
+
+        popen.assert_called_once()
+
     def test_codex_worker_death_detected_and_schedules_restart(self):
         monitor = CodexMonitor.__new__(CodexMonitor)
         monitor._lock = threading.Lock()

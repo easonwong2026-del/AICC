@@ -99,7 +99,6 @@ class CodexMonitor:
             self._last_access = time.monotonic()
             if self._started or self._restarting:
                 return
-            self._started = True
             self._fresh_event.clear()
             self._launch_locked()
 
@@ -113,6 +112,7 @@ class CodexMonitor:
             self._stop_process(process)
 
     def _launch_locked(self) -> None:
+        self._started = False
         self._fresh_event.clear()
         executable, source = self._resolve_cli()
         if not executable:
@@ -132,7 +132,10 @@ class CodexMonitor:
                 text=True, encoding="utf-8", bufsize=1, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 env=child_env,
             )
+            self._started = True
         except OSError as error:
+            self._process = None
+            self._started = False
             self._status.update(state=f"Unable to start Codex: {error.strerror or error}")
             self._fresh_event.set()
             self._schedule_restart()
