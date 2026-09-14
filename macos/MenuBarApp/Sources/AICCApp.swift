@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import AppKit
 import WidgetKit
@@ -89,7 +90,7 @@ final class ServerManager: ObservableObject {
                 return true
             } else {
                 // Stale, incompatible, or orphaned server! Reclaim port.
-                await reclaimPort(pid: identity.pid)
+                await reclaimPort(pid: identity.pid, trusted: identity.trusted)
             }
         }
 
@@ -231,11 +232,22 @@ final class ServerManager: ObservableObject {
         let build: String?
         let pid: Int?
         let ppid: Int?
+        let serverInstanceID: String?
+
+        enum CodingKeys: String, CodingKey {
+            case ok
+            case status
+            case version
+            case build
+            case pid
+            case ppid
+            case serverInstanceID = "server_instance_id"
+        }
     }
 
-    private func checkServerIdentity() async -> (alive: Bool, compatible: Bool, isOrphan: Bool, pid: Int?) {
+    private func checkServerIdentity() async -> (alive: Bool, compatible: Bool, trusted: Bool, isOrphan: Bool, pid: Int?) {
         guard let url = URL(string: "http://127.0.0.1:\(Self.productPort)/api/health/live") else {
-            return (false, false, false, nil)
+            return (false, false, false, false, nil)
         }
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
@@ -243,11 +255,11 @@ final class ServerManager: ObservableObject {
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                return (false, false, false, nil)
+                return (false, false, false, false, nil)
             }
             guard let health = try? JSONDecoder().decode(LiveHealthResponse.self, from: data),
                   health.ok == true else {
-                return (true, false, false, nil)
+                return (true, false, false, false, nil)
             }
             let currentVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -256,15 +268,18 @@ final class ServerManager: ObservableObject {
 
             let versionMatch = currentVersion == nil || currentVersion?.isEmpty == true || health.version == currentVersion
             let buildMatch = currentBuild != nil && !currentBuild!.isEmpty && health.build == currentBuild
-            let isOrphan = health.ppid == 1
+            let trusted = health.pid ?? 0 > 1
+                && health.serverInstanceID.flatMap(UUID.init(uuidString:)) != nil
+            let isOrphan = trusted && health.ppid == 1
 
-            return (true, versionMatch && buildMatch, isOrphan, health.pid)
+            return (true, trusted && versionMatch && buildMatch, trusted, isOrphan, health.pid)
         } catch {
-            return (false, false, false, nil)
+            return (false, false, false, false, nil)
         }
     }
 
-    private func reclaimPort(pid: Int?) async {
+    private func reclaimPort(pid: Int?, trusted: Bool) async {
+        guard trusted else { return }
         if let url = URL(string: "http://127.0.0.1:\(Self.productPort)/api/shutdown") {
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
@@ -333,7 +348,7 @@ final class ServerManager: ObservableObject {
             } else {
                 isServerRunning = false
                 healthState = .degraded
-                await reclaimPort(pid: identity.pid)
+                await reclaimPort(pid: identity.pid, trusted: identity.trusted)
                 _ = await startServer()
                 return
             }
@@ -342,7 +357,7 @@ final class ServerManager: ObservableObject {
         if identity.alive && (!identity.compatible || identity.isOrphan) {
             isServerRunning = false
             healthState = .degraded
-            await reclaimPort(pid: identity.pid)
+            await reclaimPort(pid: identity.pid, trusted: identity.trusted)
             _ = await startServer()
             return
         }

@@ -574,6 +574,7 @@ def _start_parent_watchdog() -> None:
                 os.kill(parent_pid, 0)
             except OSError:
                 print(f"Parent process {parent_pid} exited. Server shutting down.")
+                monitor.stop()
                 os._exit(0)
 
     threading.Thread(target=watchdog, name="parent-watchdog", daemon=True).start()

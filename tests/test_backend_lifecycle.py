@@ -125,14 +125,26 @@ class BackendLifecycleTests(unittest.TestCase):
         monitor._started = True
 
         # Process dies and stdout closes
-        monitor._read_stdout(fake_proc)
+        with patch.object(CodexMonitor, "_stop_process") as mock_stop:
+            monitor._read_stdout(fake_proc)
 
         # Must detect death, reset started state, and schedule restart
         self.assertIsNone(monitor._process)
         self.assertFalse(monitor._started)
         self.assertEqual(monitor._status.get("state"), "Reconnecting")
         monitor._schedule_restart.assert_called_once()
+        mock_stop.assert_called_once_with(fake_proc)
         self.assertTrue(monitor._fresh_event.is_set())
+
+    def test_stop_process_terminates_when_stdin_close_fails(self):
+        process = MagicMock()
+        process.stdin.close.side_effect = BrokenPipeError()
+        process.wait.return_value = None
+
+        CodexMonitor._stop_process(process)
+
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=2)
 
     def test_shutdown_endpoint_handles_local_request(self):
         class DummyHandler:

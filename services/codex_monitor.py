@@ -97,11 +97,20 @@ class CodexMonitor:
     def start(self) -> None:
         with self._lock:
             self._last_access = time.monotonic()
-            if self._started:
+            if self._started or self._restarting:
                 return
             self._started = True
             self._fresh_event.clear()
             self._launch_locked()
+
+    def stop(self) -> None:
+        with self._lock:
+            process = self._process
+            self._process = None
+            self._started = False
+            self._last_access = time.monotonic() - self._idle_seconds
+        if process:
+            self._stop_process(process)
 
     def _launch_locked(self) -> None:
         self._fresh_event.clear()
@@ -295,12 +304,28 @@ class CodexMonitor:
         try:
             if process.stdin:
                 process.stdin.close()
-            process.terminate()
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
         except OSError:
             pass
+        try:
+            process.terminate()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+                process.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        except OSError:
+            pass
+        if process.poll() is None:
+            try:
+                process.kill()
+                process.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         for stream in (process.stdout, process.stderr):
             try:
                 if stream:
@@ -402,6 +427,7 @@ class CodexMonitor:
                     if self._status.get("state") in ("Connecting", "Connected"):
                         self._status.update(state="Reconnecting", stale=True)
                     self._schedule_restart()
+            self._stop_process(process)
             self._fresh_event.set()
 
     def _apply_limits(self, payload: Any) -> None:

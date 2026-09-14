@@ -31,6 +31,9 @@ class FakeManager:
     def invalidate(self, *names):
         self.invalidated.extend(names)
 
+    def pipeline_health(self):
+        return {"ready": True, "stuck_workers": []}
+
 
 class ServerIntegrationTests(unittest.TestCase):
     def setUp(self):
@@ -158,7 +161,7 @@ class ServerIntegrationTests(unittest.TestCase):
 
         with urlopen(self.base + "/api/health/ready", timeout=2) as response:
             ready = json.load(response)
-        self.assertIn(ready["status"], {"healthy", "degraded"})
+        self.assertEqual(ready["status"], "ready")
         self.assertEqual(server._collector_manager.invalidated, [])
 
     def test_live_health_payload_server_identity(self):
