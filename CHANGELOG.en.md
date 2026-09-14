@@ -4,6 +4,12 @@
 
 This file summarizes the current and recent public releases. The Chinese changelog contains the older detailed history.
 
+## Unreleased (Target: 2.9.0)
+
+- **Per-widget metric customization**: Upgraded macOS widgets to native `AppIntentConfiguration` and `AppIntentTimelineProvider` while preserving the exact `com.aieink.dashboard.menubar.widget` kind for seamless upgrade compatibility from 2.8.0; users can right-click any desktop widget → Edit "AICC" to customize displayed metrics (2 primary metrics for Small, 4 independent slots for Medium).
+- **Unified presentation layer and adaptive cards**: Introduced `WidgetMetricOption` and `MetricCardView` to route between Quota cards (Codex / Google) and Balance cards (WorkBuddy / DeepSeek) across compact and spacious layouts; includes deterministic duplicate normalization and robust fallback handling while preserving the default 2.8.0 layout.
+- **Full localization and test coverage**: Added localized resources for Chinese and English configuration labels; added tests for intent persistence/decoding, duplicate normalization, offline/stale/missing data handling, and automated visual regression across 112 environmental variations.
+
 ## 2.8.0 - 2026-09-13
 
 - **Google quota restructuring (weekly primary, 5h secondary)**: Added `collectors/google.py` to ingest and calculate `Gem (Weekly)` and `Gem` limit buckets from OpenCodex. Weekly quota serves as the primary visual metric with large percentage typography and progress bars, paired with secondary 5-hour indicators and independent reset timestamps. A depleted 5h burst window highlights in red, and missing weekly buckets fall back explicitly to labeled 5h views.

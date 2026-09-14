@@ -87,7 +87,7 @@ echo ""
 echo "--- /api/health/ready ---"
 READY=$(curl -sf "$BASE_URL/api/health/ready") || { echo "FAIL: /api/health/ready"; exit 1; }
 echo "$READY"
-echo "$READY" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('status') in ('healthy','degraded')" || {
+echo "$READY" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('status') == 'ready'" || {
   echo "FAIL: /api/health/ready status unexpected" >&2; exit 1; }
 
 echo ""

@@ -219,6 +219,83 @@ struct WidgetStatusSmokeMain {
             let roundTrip = try JSONDecoder().decode(WidgetDisplaySnapshot.self, from: JSONEncoder().encode(value))
             try require(roundTrip == value, "shared cache preserves account status")
         }
+        // MARK: - 7. Widget Configuration & Per-Widget Customization Tests
+        // 7.1 Intent Defaults
+        let defaultIntent = AICCWidgetConfigurationIntent()
+        try require(defaultIntent.topLeft == .codex, "Default topLeft is Codex")
+        try require(defaultIntent.topRight == .google, "Default topRight is Google")
+        try require(defaultIntent.bottomLeft == .workbuddy, "Default bottomLeft is WorkBuddy")
+        try require(defaultIntent.bottomRight == .deepseek, "Default bottomRight is DeepSeek")
+        try require(defaultIntent.primaryMetric == .codex, "Default primaryMetric is Codex")
+        try require(defaultIntent.secondaryMetric == .google, "Default secondaryMetric is Google")
+
+        // Strict family parameter isolation: Small does not read medium slots, Medium does not read small slots
+        let isolatedSmall = AICCWidgetConfigurationIntent(topLeft: .workbuddy, topRight: .deepseek, bottomLeft: .google, bottomRight: .codex)
+        try require(isolatedSmall.resolvedMetrics(for: .systemSmall) == [.codex, .google], "Small ignores medium slots")
+
+        let isolatedMedium = AICCWidgetConfigurationIntent(primary: .workbuddy, secondary: .deepseek)
+        try require(isolatedMedium.resolvedMetrics(for: .systemMedium) == [.codex, .google, .workbuddy, .deepseek], "Medium ignores small slots")
+
+        let defaultSmall = defaultIntent.resolvedMetrics(for: .systemSmall)
+        try require(defaultSmall == [.codex, .google], "Default Small metrics must be Codex + Google: \(defaultSmall)")
+
+        let defaultMedium = defaultIntent.resolvedMetrics(for: .systemMedium)
+        try require(defaultMedium == [.codex, .google, .workbuddy, .deepseek], "Default Medium metrics must be Codex, Google, WorkBuddy, DeepSeek: \(defaultMedium)")
+
+        // 7.2 Custom Intent for Small & Medium
+        let customSmall = AICCWidgetConfigurationIntent(primary: .workbuddy, secondary: .deepseek)
+        try require(customSmall.resolvedMetrics(for: .systemSmall) == [.workbuddy, .deepseek], "Custom Small metrics: \(customSmall.resolvedMetrics(for: .systemSmall))")
+
+        let customMedium1 = AICCWidgetConfigurationIntent(topLeft: .workbuddy, topRight: .deepseek, bottomLeft: .codex, bottomRight: .google)
+        try require(customMedium1.resolvedMetrics(for: .systemMedium) == [.workbuddy, .deepseek, .codex, .google], "Custom Medium 1 metrics: \(customMedium1.resolvedMetrics(for: .systemMedium))")
+
+        let customMedium2 = AICCWidgetConfigurationIntent(topLeft: .codex, topRight: .workbuddy, bottomLeft: .google, bottomRight: .deepseek)
+        try require(customMedium2.resolvedMetrics(for: .systemMedium) == [.codex, .workbuddy, .google, .deepseek], "Custom Medium 2 metrics: \(customMedium2.resolvedMetrics(for: .systemMedium))")
+
+        // 7.3 Duplicate Selection Normalization (Crash-safe & Deterministic)
+        let dupSmall1 = AICCWidgetConfigurationIntent(primary: .codex, secondary: .codex).resolvedMetrics(for: .systemSmall)
+        try require(dupSmall1 == [.codex, .google], "Duplicate Codex+Codex normalized to Codex+Google: \(dupSmall1)")
+
+        let dupSmall2 = AICCWidgetConfigurationIntent(primary: .google, secondary: .google).resolvedMetrics(for: .systemSmall)
+        try require(dupSmall2 == [.google, .codex], "Duplicate Google+Google normalized to Google+Codex: \(dupSmall2)")
+
+        let dupSmall3 = AICCWidgetConfigurationIntent(primary: .workbuddy, secondary: .workbuddy).resolvedMetrics(for: .systemSmall)
+        try require(dupSmall3 == [.workbuddy, .codex], "Duplicate WorkBuddy+WorkBuddy normalized to WorkBuddy+Codex: \(dupSmall3)")
+
+        let dupSmall4 = AICCWidgetConfigurationIntent(primary: .deepseek, secondary: .deepseek).resolvedMetrics(for: .systemSmall)
+        try require(dupSmall4 == [.deepseek, .codex], "Duplicate DeepSeek+DeepSeek normalized to DeepSeek+Codex: \(dupSmall4)")
+
+        let dupMed1 = AICCWidgetConfigurationIntent.normalize([.codex, .codex, .google, .google], targetCount: 4)
+        try require(dupMed1 == [.codex, .google, .workbuddy, .deepseek], "Duplicate Codex/Codex/Google/Google normalized: \(dupMed1)")
+
+        let dupMed2 = AICCWidgetConfigurationIntent.normalize([.google, .google, .google, .google], targetCount: 4)
+        try require(dupMed2 == [.google, .codex, .workbuddy, .deepseek], "Duplicate 4x Google normalized: \(dupMed2)")
+
+        let dupMed3 = AICCWidgetConfigurationIntent.normalize([.workbuddy, .workbuddy, .deepseek, .deepseek], targetCount: 4)
+        try require(dupMed3 == [.workbuddy, .codex, .deepseek, .google], "Duplicate WorkBuddy/WorkBuddy/DeepSeek/DeepSeek normalized: \(dupMed3)")
+
+        // 7.4 Config Persistence / Codable Round Trip
+        let intentToEncode = AICCWidgetConfigurationIntent(primary: .workbuddy, secondary: .deepseek)
+        let encodedData = try JSONEncoder().encode(intentToEncode)
+        let decodedIntent = try JSONDecoder().decode(AICCWidgetConfigurationIntent.self, from: encodedData)
+        try require(decodedIntent == intentToEncode, "Intent survives JSON roundtrip")
+        try require(decodedIntent.resolvedMetrics(for: .systemSmall) == [.workbuddy, .deepseek], "Decoded intent resolves correctly")
+
+        let fullIntent = AICCWidgetConfigurationIntent(topLeft: .deepseek, topRight: .google, bottomLeft: .workbuddy, bottomRight: .codex)
+        let fullData = try JSONEncoder().encode(fullIntent)
+        let fullDecoded = try JSONDecoder().decode(AICCWidgetConfigurationIntent.self, from: fullData)
+        try require(fullDecoded == fullIntent, "Full 4-slot intent survives JSON roundtrip")
+
+        // 7.5 Metric Enum Contract
+        try require(WidgetMetricOption.codex.rawValue == "codex", "Stable identifier codex")
+        try require(WidgetMetricOption.google.rawValue == "google", "Stable identifier google")
+        try require(WidgetMetricOption.workbuddy.rawValue == "workbuddy", "Stable identifier workbuddy")
+        try require(WidgetMetricOption.deepseek.rawValue == "deepseek", "Stable identifier deepseek")
+        try require(WidgetMetricOption.allCases.count == 4, "Exactly 4 metrics in first version")
+        try require(WidgetMetricOption.codex.isQuota, "Codex is quota")
+        try require(WidgetMetricOption.google.isQuota, "Google is quota")
+        try require(!WidgetMetricOption.workbuddy.isQuota, "WorkBuddy is balance")
+        try require(!WidgetMetricOption.deepseek.isQuota, "DeepSeek is balance")
         print("AICC Widget status smoke tests passed.")
     }
 

@@ -162,3 +162,18 @@
 "Google 5h" = "Google 5h";
 
 "Weekly quota unavailable" = "Weekly quota unavailable";
+
+/* Widget Configuration */
+"Primary Metric" = "Primary Metric";
+"Secondary Metric" = "Secondary Metric";
+"Top Left" = "Top Left";
+"Top Right" = "Top Right";
+"Bottom Left" = "Bottom Left";
+"Bottom Right" = "Bottom Right";
+"Metric" = "Metric";
+"主要指标" = "Primary Metric";
+"次要指标" = "Secondary Metric";
+"左上" = "Top Left";
+"右上" = "Top Right";
+"左下" = "Bottom Left";
+"右下" = "Bottom Right";

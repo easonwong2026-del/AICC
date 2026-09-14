@@ -123,6 +123,8 @@ echo "=== Building Widget extension ==="
 WIDGET_FILES=(
   "$SOURCE_DIR/Models/WidgetDisplaySnapshot.swift"
   "$WIDGET_SOURCE_DIR/WidgetStatus.swift"
+  "$WIDGET_SOURCE_DIR/WidgetConfiguration.swift"
+  "$WIDGET_SOURCE_DIR/AICCWidgetViews.swift"
   "$WIDGET_SOURCE_DIR/AICCWidget.swift"
   "$WIDGET_SOURCE_DIR/RefreshWidgetIntent.swift"
 )
@@ -139,6 +141,10 @@ fi
 cp "$WIDGET_SOURCE_DIR/Info.plist" "$WIDGET_INFO"
 plutil -replace CFBundleShortVersionString -string "$VERSION" "$WIDGET_INFO"
 plutil -replace CFBundleVersion -string "$BUILD_VERSION" "$WIDGET_INFO"
+mkdir -p "$WIDGET_APP_DIR/Contents/Resources"
+if [ -d "$ROOT/macos/MenuBarApp/Resources" ]; then
+  cp -R "$ROOT/macos/MenuBarApp/Resources/." "$WIDGET_APP_DIR/Contents/Resources/"
+fi
 xcrun swiftc \
   -parse-as-library \
   -application-extension \
@@ -155,6 +161,25 @@ xcrun swiftc \
   -Xlinker _NSExtensionMain \
   "${WIDGET_FILES[@]}" \
   -o "$WIDGET_MACOS_DIR/AICCWidget"
+
+echo "=== Extracting App Intents metadata ==="
+METADATA_DIR="$WIDGET_APP_DIR/Contents/Resources/Metadata.appintents"
+mkdir -p "$METADATA_DIR"
+APPINTENTS_PROCESSOR=""
+if xcrun --find appintentsmetadataprocessor >/dev/null 2>&1; then
+  APPINTENTS_PROCESSOR="$(xcrun --find appintentsmetadataprocessor)"
+fi
+if [ -n "$APPINTENTS_PROCESSOR" ] && [ -x "$APPINTENTS_PROCESSOR" ]; then
+  echo "Using appintentsmetadataprocessor: $APPINTENTS_PROCESSOR"
+  "$APPINTENTS_PROCESSOR" --output "$WIDGET_APP_DIR/Contents/Resources" --module-name AICCWidget --bundle-identifier "com.aieink.dashboard.menubar.widget" --sdk-root "$SDK_PATH" --binary-file "$WIDGET_MACOS_DIR/AICCWidget" --compile-time-extraction || {
+    echo "appintentsmetadataprocessor failed, falling back to generator"
+    python3 "$ROOT/scripts/generate-widget-appintents.py" "$METADATA_DIR"
+  }
+else
+  echo "appintentsmetadataprocessor not in toolchain, generating metadata..."
+  python3 "$ROOT/scripts/generate-widget-appintents.py" "$METADATA_DIR"
+fi
+bash "$ROOT/scripts/validate-widget-appintents.sh" "$APP_DIR"
 
 echo "=== Signing ==="
 if [[ "$SIGNING_IDENTITY" == "-" ]]; then
@@ -182,3 +207,6 @@ codesign --verify --deep --strict "$APP_DIR"
 echo "=== Done ==="
 echo "$APP_DIR"
 echo "$WIDGET_APP_DIR"
+
+# Post-build validation
+bash "$ROOT/scripts/validate-widget-appintents.sh" "$APP_DIR"

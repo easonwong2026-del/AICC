@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 DATA_ROOT = Path(os.environ.get("EINK_DATA_DIR", Path(__file__).resolve().parents[1] / "data")).expanduser()
 
@@ -29,21 +29,39 @@ class CodexMonitor:
         self._initialize_request_id: int | None = None
         self._rate_limit_request_id: int | None = None
         self._last_request = 0.0
+        self._last_request_epoch = 0.0
         self._last_access = 0.0
         self._last_success_epoch = 0.0
         self._refresh_seconds = max(30, min(300, int(os.environ.get("CODEX_REFRESH_SECONDS", "60"))))
-        self._idle_seconds = max(30, min(600, int(os.environ.get("CODEX_IDLE_SECONDS", "30"))))
+        self._idle_seconds = max(180, min(1800, int(os.environ.get("CODEX_IDLE_SECONDS", "600"))))
+        self._connecting_started_at: float | None = None
+        self._connecting_timeout: float = 15.0
         self._fresh_event = threading.Event()
         self._status: dict[str, Any] = {"available": False, "state": "Not started", "source": "Codex app-server"}
         self._cache_path = DATA_ROOT / "codex_last_success.json"
         self._load_cache()
 
-    def status(self) -> dict[str, Any]:
-        self.start()
+    def status(self, force: bool = False) -> dict[str, Any]:
         with self._lock:
-            wait_for_first_result = self._status.get("state") == "Connecting"
-        if wait_for_first_result:
-            self._fresh_event.wait(timeout=3)
+            self._last_access = time.monotonic()
+            proc = getattr(self, "_process", None)
+            started = getattr(self, "_started", False)
+            is_alive = proc is not None and proc.poll() is None
+            if not is_alive and started:
+                self._started = False
+                self._process = None
+                started = False
+
+        if not is_alive or not started:
+            self.start()
+            self._fresh_event.wait(timeout=6.0)
+        elif force:
+            self._fresh_event.clear()
+            self._request_limits()
+            self._fresh_event.wait(timeout=6.0)
+        elif self._status.get("state") in ("Connecting", "Reconnecting"):
+            self._fresh_event.wait(timeout=6.0)
+
         with self._lock:
             result = self._status.copy()
             if self._last_success_epoch:
@@ -53,16 +71,48 @@ class CodexMonitor:
                 result["stale"] = result.get("state") != "Connected"
             return result
 
+    def health(self) -> dict[str, Any]:
+        with self._lock:
+            alive = self._process is not None and self._process.poll() is None
+            return {
+                "state": self._status.get("state"),
+                "process_pid": self._process.pid if self._process else None,
+                "process_alive": alive,
+                "started": self._started,
+                "restarting": self._restarting,
+                "last_success_at": self._status.get("updated_at"),
+                "last_request_at": (
+                    datetime.fromtimestamp(self._last_request, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                    if self._last_request else None
+                ),
+                "age_seconds": max(0, round(time.time() - self._last_success_epoch)) if self._last_success_epoch else None,
+                "stale": (
+                    self._status.get("state") != "Connected"
+                    or (time.time() - self._last_success_epoch > 180 if self._last_success_epoch else True)
+                ),
+                "consecutive_failures": self._restart_attempts,
+                "last_error": self._status.get("detail") if self._status.get("state") != "Connected" else None,
+            }
+
     def start(self) -> None:
         with self._lock:
             self._last_access = time.monotonic()
-            if self._started:
+            if self._started or self._restarting:
                 return
-            self._started = True
             self._fresh_event.clear()
             self._launch_locked()
 
+    def stop(self) -> None:
+        with self._lock:
+            process = self._process
+            self._process = None
+            self._started = False
+            self._last_access = time.monotonic() - self._idle_seconds
+        if process:
+            self._stop_process(process)
+
     def _launch_locked(self) -> None:
+        self._started = False
         self._fresh_event.clear()
         executable, source = self._resolve_cli()
         if not executable:
@@ -73,19 +123,28 @@ class CodexMonitor:
             self._fresh_event.set()
             self._schedule_restart()
             return
+        child_env = os.environ.copy()
+        for var in ["CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_SESSION_ID", "CODEX_THREAD_ID", "CODEX_PERMISSION_PROFILE"]:
+            child_env.pop(var, None)
         try:
             self._process = subprocess.Popen(
                 [executable, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True, encoding="utf-8", bufsize=1, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                env=child_env,
             )
+            self._started = True
         except OSError as error:
+            self._process = None
+            self._started = False
             self._status.update(state=f"Unable to start Codex: {error.strerror or error}")
             self._fresh_event.set()
             self._schedule_restart()
             return
+        self._connecting_started_at = time.monotonic()
         self._status.update(state="Connecting", source=source)
         self._rate_limit_request_id = None
         self._last_request = 0.0
+        self._last_request_epoch = 0.0
         process = self._process
         # app-server can answer immediately. Send initialize before starting
         # the reader so its response cannot race with request-id assignment.
@@ -207,6 +266,18 @@ class CodexMonitor:
     def _refresh_loop(self, process: subprocess.Popen[str]) -> None:
         while process is self._process:
             time.sleep(5)
+            conn_start = getattr(self, "_connecting_started_at", None)
+            conn_timeout = getattr(self, "_connecting_timeout", 15.0)
+            if conn_start and time.monotonic() - conn_start > conn_timeout:
+                with self._lock:
+                    self._connecting_started_at = None
+                    self._status.update(state="Connecting timed out", stale=True)
+                    self._process = None
+                    self._started = False
+                    self._schedule_restart()
+                self._stop_process(process)
+                self._fresh_event.set()
+                return
             if time.monotonic() - self._last_access >= self._idle_seconds:
                 with self._lock:
                     if process is not self._process:
@@ -223,8 +294,10 @@ class CodexMonitor:
                 with self._lock:
                     if process is self._process:
                         self._process = None
+                        self._started = False
                         self._status.update(state="Reconnecting", stale=True)
                         self._schedule_restart()
+                self._fresh_event.set()
                 return
             if time.monotonic() - self._last_request >= self._refresh_seconds:
                 self._request_limits()
@@ -234,12 +307,28 @@ class CodexMonitor:
         try:
             if process.stdin:
                 process.stdin.close()
-            process.terminate()
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
         except OSError:
             pass
+        try:
+            process.terminate()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+                process.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        except OSError:
+            pass
+        if process.poll() is None:
+            try:
+                process.kill()
+                process.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         for stream in (process.stdout, process.stderr):
             try:
                 if stream:
@@ -255,7 +344,7 @@ class CodexMonitor:
 
     def _restart_after_delay(self) -> None:
         self._restart_attempts += 1
-        time.sleep(min(60, 5 * self._restart_attempts))
+        time.sleep(min(30, 2 * self._restart_attempts))
         with self._lock:
             self._restarting = False
             if time.monotonic() - self._last_access >= self._idle_seconds:
@@ -267,6 +356,7 @@ class CodexMonitor:
 
     def _request_limits(self) -> None:
         self._last_request = time.monotonic()
+        self._last_request_epoch = time.time()
         request_id = self._send("account/rateLimits/read", None)
         if request_id is not None:
             self._rate_limit_request_id = request_id
@@ -297,34 +387,51 @@ class CodexMonitor:
         return request_id
 
     def _read_stdout(self, process: subprocess.Popen[str]) -> None:
-        assert process.stdout
-        for line in process.stdout:
-            try:
-                message = json.loads(line)
-            except ValueError:
-                continue
-            if "error" in message:
-                error = message["error"]
-                detail = error.get("message", "Unknown app-server error") if isinstance(error, dict) else "Unknown app-server error"
-                if "authentication required" in str(detail).lower():
-                    detail = "ChatGPT login required"
-                with self._lock:
-                    has_cache = bool(
-                        self._status.get("five_hour") or self._status.get("weekly")
-                        or self._status.get("limit_buckets")
-                    )
-                    self._status.update(state=str(detail), available=has_cache, stale=True, detail="Open ChatGPT and sign in; the dashboard will reconnect automatically.")  # noqa: E501
-                self._fresh_event.set()
-                continue
-            if message.get("method") == "account/rateLimits/updated":
-                self._apply_limits(message.get("params", {}))
-            elif "result" in message:
-                if message.get("id") == self._initialize_request_id:
-                    self._send("initialized", notification=True)
-                    self._request_limits()
-                elif message.get("id") == self._rate_limit_request_id:
-                    self._rate_limit_request_id = None
-                    self._apply_limits(message["result"])
+        try:
+            assert process.stdout
+            for line in process.stdout:
+                try:
+                    message = json.loads(line)
+                except ValueError:
+                    continue
+                if "error" in message:
+                    error = message["error"]
+                    detail = error.get("message", "Unknown app-server error") if isinstance(error, dict) else "Unknown app-server error"
+                    if "authentication required" in str(detail).lower():
+                        detail = "ChatGPT login required"
+                    with self._lock:
+                        has_cache = bool(
+                            self._status.get("five_hour") or self._status.get("weekly")
+                            or self._status.get("limit_buckets")
+                        )
+                        self._status.update(state=str(detail), available=has_cache, stale=True, detail="Open ChatGPT and sign in; the dashboard will reconnect automatically.")  # noqa: E501
+                    self._fresh_event.set()
+                    continue
+                if message.get("method") == "account/rateLimits/updated":
+                    try:
+                        self._apply_limits(message.get("params", {}))
+                    except Exception:
+                        self._fresh_event.set()
+                elif "result" in message:
+                    if message.get("id") == self._initialize_request_id:
+                        self._send("initialized", notification=True)
+                        self._request_limits()
+                    elif message.get("id") == self._rate_limit_request_id:
+                        self._rate_limit_request_id = None
+                        try:
+                            self._apply_limits(message["result"])
+                        except Exception:
+                            self._fresh_event.set()
+        finally:
+            with self._lock:
+                if process is self._process:
+                    self._process = None
+                    self._started = False
+                    if self._status.get("state") in ("Connecting", "Connected"):
+                        self._status.update(state="Reconnecting", stale=True)
+                    self._schedule_restart()
+            self._stop_process(process)
+            self._fresh_event.set()
 
     def _apply_limits(self, payload: Any) -> None:
         windows = self._find_windows(payload)
@@ -350,6 +457,7 @@ class CodexMonitor:
                 limit_buckets = self._status.get("limit_buckets", [])
             if not reset_credits_present:
                 reset_credits = self._status.get("reset_credits", self._normalise_reset_credits(None))
+            self._connecting_started_at = None
             self._status = {
                 "available": True,
                 "state": "Connected",

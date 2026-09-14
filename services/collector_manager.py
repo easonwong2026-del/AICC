@@ -1,6 +1,7 @@
 """Run independent collectors concurrently while serving their last snapshots."""
 
 from __future__ import annotations
+from typing import Any
 
 import threading
 import time
@@ -50,6 +51,19 @@ class CollectorManager:
         self._slots = {}
         for name, (collect, interval, timeout, initial) in definitions.items():
             self._slots[name] = CollectorSlot(collect, interval, timeout, initial)
+
+    def pipeline_health(self) -> dict[str, Any]:
+        now = time.monotonic()
+        stuck_workers: list[str] = []
+        with self._condition:
+            for name, slot in self._slots.items():
+                if slot.running and (now - slot.started_monotonic > slot.timeout + 15.0):
+                    stuck_workers.append(name)
+        return {
+            "ready": len(stuck_workers) == 0,
+            "stuck_workers": stuck_workers,
+            "slots_count": len(self._slots),
+        }
 
     def snapshot(self, *, force: bool = False, wait_seconds: float = 0.0) -> tuple[dict, dict]:
         started: set[str] = set()
