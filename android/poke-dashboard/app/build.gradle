@@ -10,8 +10,8 @@ android {
         applicationId "com.aieink.pokedashboard"
         minSdk 23
         targetSdk 35
-        versionCode 11
-        versionName "1.2.5-pencil-home"
+        versionCode 12
+        versionName "1.2.6-pencil-home"
     }
 
     buildTypes {
@@ -26,4 +26,13 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
+}
+
+dependencies {
+    testImplementation "junit:junit:4.13.2"
+    testImplementation "org.json:json:20240303"
 }

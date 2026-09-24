@@ -10,6 +10,13 @@ This file summarizes the current and recent public releases. The Chinese changel
 - **Unified presentation layer and adaptive cards**: Introduced `WidgetMetricOption` and `MetricCardView` to route between Quota cards (Codex / Google) and Balance cards (WorkBuddy / DeepSeek) across compact and spacious layouts; includes deterministic duplicate normalization and robust fallback handling while preserving the default 2.8.0 layout.
 - **Full localization and test coverage**: Added localized resources for Chinese and English configuration labels; added tests for intent persistence/decoding, duplicate normalization, offline/stale/missing data handling, and automated visual regression across 112 environmental variations.
 
+## Android 1.2.6 - Unreleased
+
+- Poke4S repeats broadcasts, validates every discovered AICC server, migrates a changed LAN address, and offers a chooser when multiple healthy servers respond.
+- Discovery replies retain legacy fields and add protocol, stable host ID, instance ID, hostname, platform, and version. Existing clients remain compatible.
+- Offline cache stays visibly marked OFFLINE and Google quota remains available. BOOX firmware rejects app-initiated display wakeups, so continuously visible live quotas require always-on mode.
+- Android versionCode 12 and versionName `1.2.6-pencil-home`; macOS version unchanged.
+
 ## 2.8.0 - 2026-09-13
 
 - **Google quota restructuring (weekly primary, 5h secondary)**: Added `collectors/google.py` to ingest and calculate `Gem (Weekly)` and `Gem` limit buckets from OpenCodex. Weekly quota serves as the primary visual metric with large percentage typography and progress bars, paired with secondary 5-hour indicators and independent reset timestamps. A depleted 5h burst window highlights in red, and missing weekly buckets fall back explicitly to labeled 5h views.

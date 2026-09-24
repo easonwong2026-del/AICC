@@ -164,6 +164,17 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(ready["status"], "ready")
         self.assertEqual(server._collector_manager.invalidated, [])
 
+    def test_discovery_identity_survives_restart_and_keeps_legacy_fields(self):
+        first = server.discovery_payload(8765)
+        self.assertEqual(first["name"], "AICC Dashboard")
+        self.assertEqual(first["port"], 8765)
+        self.assertEqual(first["protocol"], "aicc")
+        self.assertEqual(first["host_id"], server.live_health_payload()["host_id"])
+        with patch.object(server, "SERVER_INSTANCE_ID", "next-process"):
+            second = server.discovery_payload(8765)
+        self.assertEqual(second["host_id"], first["host_id"])
+        self.assertNotEqual(second["server_instance_id"], first["server_instance_id"])
+
     def test_live_health_payload_server_identity(self):
         # 1. Default (no AICC_BUILD env var)
         with patch.dict(os.environ, {}, clear=False):

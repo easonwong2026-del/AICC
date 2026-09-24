@@ -111,7 +111,7 @@ LAN devices can read the dashboard. Refresh, write, and WorkBuddy reconnect endp
 
 Open the kiosk page and tap “Enter e-ink mode”. The page refreshes every five minutes and keeps the last successful data.
 
-The current Android source version is `1.2.5-pencil-home` (versionCode 11) and is unchanged in macOS 2.8.0. Do not use an old or nonexistent APK path from the repository; download the latest APK from [GitHub Releases](https://github.com/easonwong2026-del/AICC/releases). The published 1.2.5 APK is currently attached to the [v2.5.0 release](https://github.com/easonwong2026-del/AICC/releases/tag/v2.5.0), with a direct [APK download](https://github.com/easonwong2026-del/AICC/releases/download/v2.5.0/Poke4S-AI-Dashboard-v1.2.5-pencil-home.apk).
+The current Android source version is `1.2.6-pencil-home` (versionCode 12), independent of macOS releases. It discovers and validates multiple servers, migrates a changed LAN address, and offers a server chooser. BOOX transparent screensaver keeps a static image while asleep; use the dashboard's always-on mode when the displayed quota must stay current. The latest published APK is still 1.2.5 at [v2.5.0](https://github.com/easonwong2026-del/AICC/releases/tag/v2.5.0); the new source build has not been published.
 
 The Android source is in `android/poke-dashboard/` and is independently buildable with the Gradle wrapper. It is not a runtime dependency of the Mac server. Release builds enable code and resource shrinking.
 
