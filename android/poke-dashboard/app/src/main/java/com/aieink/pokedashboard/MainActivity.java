@@ -17,6 +17,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.text.InputType;
 import android.view.View;
 import android.view.Gravity;
@@ -30,12 +31,11 @@ import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.net.HttpURLConnection;
 import java.net.URL;
-import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -43,11 +43,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class MainActivity extends Activity {
     private static final String PREFS = "dashboard";
     private static final String KEY_URL = "base_url";
+    private static final String KEY_HOST_ID = "host_id";
     private static final String KEY_CACHE = "last_status";
     private static final String KEY_KEEP_AWAKE = "keep_awake";
     private static final String KEY_SHOW_BATTERY = "show_battery";
     private static final String KEY_V11_INITIALIZED = "v11_initialized";
-    private static final String DEFAULT_URL = "http://192.168.0.2:8765";
+    private static final String TAG = "AICC Discovery";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService network = Executors.newSingleThreadExecutor();
@@ -56,6 +57,7 @@ public final class MainActivity extends Activity {
     private SharedPreferences preferences;
     private int refreshCount;
     private boolean resumed;
+    private boolean choicePromptShown;
     private volatile boolean destroyed;
 
     private final Runnable immersiveRetry = this::enterImmersiveMode;
@@ -172,64 +174,100 @@ public final class MainActivity extends Activity {
     private void fetchStatus() {
         if (!fetching.compareAndSet(false, true)) return;
         network.execute(() -> {
-            String raw = null;
-            String base = normaliseBaseUrl(preferences.getString(KEY_URL, DEFAULT_URL));
-            try {
-                raw = request(base + "/api/status");
-            } catch (Exception firstFailure) {
-                String discovered = DiscoveryClient.discover();
-                if (discovered != null) {
-                    try {
-                        raw = request(discovered + "/api/status");
-                        base = discovered;
-                        preferences.edit().putString(KEY_URL, discovered).apply();
-                    } catch (Exception ignored) { }
-                }
+            String saved = normaliseBaseUrl(preferences.getString(KEY_URL, null));
+            String preferredHostId = preferences.getString(KEY_HOST_ID, null);
+            DiscoveryClient.Candidate selected = saved == null ? null
+                    : DiscoveryClient.probe(new DiscoveryClient.Candidate(saved));
+            if (selected != null && preferredHostId != null
+                    && !preferredHostId.equals(selected.hostId)) {
+                Log.w(TAG, "Saved address belongs to a different server: " + saved);
+                selected = null;
             }
-            final String response = raw;
+            List<DiscoveryClient.Candidate> found = new ArrayList<>();
+            if (selected == null) {
+                found = DiscoveryClient.findServers();
+                selected = DiscoveryClient.choose(found, preferredHostId);
+            }
+            final DiscoveryClient.Candidate result = selected;
+            final List<DiscoveryClient.Candidate> alternatives = found;
             fetching.set(false);
             if (destroyed) return;
             handler.post(() -> {
                 if (destroyed) return;
-                if (response != null) {
-                    try {
-                        DashboardData data = DashboardData.parse(response);
-                        if (!response.equals(preferences.getString(KEY_CACHE, null))) {
-                            preferences.edit().putString(KEY_CACHE, response).apply();
-                        }
-                        if (resumed) {
-                            dashboard.setData(data);
-                            refreshCount++;
-                            if (refreshCount % 12 == 0) dashboard.flashRefresh();
-                        }
-                    } catch (Exception ignored) {
-                        if (resumed) dashboard.setOffline(true);
-                    }
+                if (result != null) {
+                    selectServer(result, null);
                 } else {
                     if (resumed) dashboard.setOffline(true);
+                    if (resumed && alternatives.size() > 1 && !choicePromptShown) {
+                        choicePromptShown = true;
+                        showServerChoices(alternatives, null);
+                    }
                 }
             });
         });
     }
 
-    private String request(String endpoint) throws Exception {
-        HttpURLConnection connection = (HttpURLConnection) new URL(endpoint).openConnection();
-        connection.setConnectTimeout(5000);
-        connection.setReadTimeout(7000);
-        connection.setUseCaches(false);
-        connection.setRequestProperty("Accept", "application/json");
-        try {
-            if (connection.getResponseCode() != 200) throw new IllegalStateException("HTTP " + connection.getResponseCode());
-            StringBuilder body = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-                    connection.getInputStream(), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) body.append(line);
-            }
-            return body.toString();
-        } finally {
-            connection.disconnect();
+    private void selectServer(DiscoveryClient.Candidate candidate, EditText urlField) {
+        String previous = preferences.getString(KEY_URL, null);
+        String hostId = candidate.hostId == null || candidate.hostId.isEmpty() ? null : candidate.hostId;
+        if (!candidate.url.equals(previous)
+                || !java.util.Objects.equals(hostId, preferences.getString(KEY_HOST_ID, null))) {
+            SharedPreferences.Editor editor = preferences.edit().putString(KEY_URL, candidate.url);
+            if (hostId == null) editor.remove(KEY_HOST_ID);
+            else editor.putString(KEY_HOST_ID, hostId);
+            editor.apply();
         }
+        if (previous != null && !previous.equals(candidate.url)) {
+            Log.i(TAG, "Saved base URL migrated: " + previous + " -> " + candidate.url);
+        }
+        Log.i(TAG, "Candidate selected: " + candidate.url);
+        if (urlField != null) urlField.setText(candidate.url);
+        if (!candidate.statusBody.equals(preferences.getString(KEY_CACHE, null))) {
+            preferences.edit().putString(KEY_CACHE, candidate.statusBody).apply();
+        }
+        if (resumed) {
+            dashboard.setData(candidate.data);
+            refreshCount++;
+            if (refreshCount % 12 == 0) dashboard.flashRefresh();
+        }
+        choicePromptShown = false;
+    }
+
+    private void forceDiscovery(EditText urlField) {
+        if (!fetching.compareAndSet(false, true)) {
+            Toast.makeText(this, "正在同步，请稍后重试", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        network.execute(() -> {
+            List<DiscoveryClient.Candidate> found = DiscoveryClient.findServers();
+            fetching.set(false);
+            if (destroyed) return;
+            handler.post(() -> {
+                if (destroyed) return;
+                if (found.isEmpty()) {
+                    Toast.makeText(this, "未找到可用的 AICC 服务器", Toast.LENGTH_SHORT).show();
+                } else if (found.size() == 1) {
+                    selectServer(found.get(0), urlField);
+                } else {
+                    showServerChoices(found, urlField);
+                }
+            });
+        });
+    }
+
+    private void showServerChoices(List<DiscoveryClient.Candidate> servers, EditText urlField) {
+        String[] labels = new String[servers.size()];
+        for (int index = 0; index < servers.size(); index++) {
+            DiscoveryClient.Candidate server = servers.get(index);
+            String name = server.hostname == null || server.hostname.isEmpty() ? server.name : server.hostname;
+            labels[index] = name + (server.platform == null || server.platform.isEmpty() ? "" : " · " + server.platform)
+                    + "\n" + server.url + (server.stale ? " · 部分额度为缓存" : "");
+        }
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("选择 AICC 服务器")
+                .setItems(labels, (dialog, index) -> selectServer(servers.get(index), urlField))
+                .setNegativeButton("取消", null)
+                .show();
     }
 
     private void loadCache() {
@@ -262,12 +300,18 @@ public final class MainActivity extends Activity {
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(4), 0, dp(4), 0);
 
-        TextView hint = settingText("电脑地址（支持自动发现）", 16, muted, false);
+        TextView hint = settingText("电脑地址（可手工输入）", 16, muted, false);
         EditText url = new EditText(this);
         styleInput(url, 17, ink);
         url.setSingleLine(true);
         url.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        url.setText(preferences.getString(KEY_URL, DEFAULT_URL));
+        url.setText(preferences.getString(KEY_URL, ""));
+        Button chooseServer = settingButton("选择服务器");
+        chooseServer.setOnClickListener(view -> forceDiscovery(url));
+        LinearLayout addressHeader = new LinearLayout(this);
+        addressHeader.setOrientation(LinearLayout.HORIZONTAL);
+        addressHeader.addView(hint, new LinearLayout.LayoutParams(0, dp(38), 1f));
+        addressHeader.addView(chooseServer, new LinearLayout.LayoutParams(dp(120), dp(38)));
 
         TextView intervalHint = settingText("刷新间隔（分钟）", 16, muted, false);
         EditText interval = new EditText(this);
@@ -296,7 +340,7 @@ public final class MainActivity extends Activity {
         styleChoice(autoStart, "开机后尝试自动启动", 17, false);
         autoStart.setChecked(preferences.getBoolean("auto_start", true));
 
-        content.addView(hint);
+        content.addView(addressHeader);
         content.addView(url, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(42)));
         content.addView(settingDivider());
@@ -320,23 +364,35 @@ public final class MainActivity extends Activity {
         Button cancel = settingButton("取消");
         cancel.setOnClickListener(view -> dialog.dismiss());
         Button discover = settingButton("自动发现");
-        discover.setOnClickListener(view -> {
-                    preferences.edit().remove(KEY_URL).apply();
-                    fetchStatus();
-        });
+        discover.setOnClickListener(view -> forceDiscovery(url));
         Button save = settingButton("保存");
         save.setOnClickListener(view -> {
+                    String base = normaliseBaseUrl(url.getText().toString());
+                    if (base != null) {
+                        try {
+                            URL parsed = new URL(base);
+                            if ((!"http".equals(parsed.getProtocol()) && !"https".equals(parsed.getProtocol()))
+                                    || parsed.getHost().isEmpty()) throw new IllegalArgumentException();
+                        } catch (Exception error) {
+                            Toast.makeText(this, "服务器地址无效", Toast.LENGTH_SHORT).show();
+                            return;
+                        }
+                    }
                     int minutes = 5;
                     try { minutes = Integer.parseInt(interval.getText().toString()); }
                     catch (NumberFormatException ignored) { }
                     minutes = Math.max(1, Math.min(60, minutes));
-                    preferences.edit()
-                            .putString(KEY_URL, normaliseBaseUrl(url.getText().toString()))
+                    SharedPreferences.Editor editor = preferences.edit()
                             .putInt("refresh_minutes", minutes)
                             .putBoolean(KEY_KEEP_AWAKE, alwaysOnMode.isChecked())
                             .putBoolean(KEY_SHOW_BATTERY, showBattery.isChecked())
-                            .putBoolean("auto_start", autoStart.isChecked())
-                            .apply();
+                            .putBoolean("auto_start", autoStart.isChecked());
+                    if (base == null) editor.remove(KEY_URL).remove(KEY_HOST_ID);
+                    else {
+                        if (!base.equals(preferences.getString(KEY_URL, null))) editor.remove(KEY_HOST_ID);
+                        editor.putString(KEY_URL, base);
+                    }
+                    editor.apply();
                     applyDisplayMode();
                     updateBattery(registerReceiver(null,
                             new IntentFilter(Intent.ACTION_BATTERY_CHANGED)));
@@ -439,10 +495,10 @@ public final class MainActivity extends Activity {
 
     private String normaliseBaseUrl(String value) {
         String result = value == null ? "" : value.trim();
-        if (result.isEmpty()) result = DEFAULT_URL;
+        if (result.isEmpty()) return null;
         while (result.endsWith("/")) result = result.substring(0, result.length() - 1);
         if (result.endsWith("/api/status")) result = result.substring(0, result.length() - 11);
-        return result;
+        return result.isEmpty() ? null : result;
     }
 
     private void applyDisplayMode() {

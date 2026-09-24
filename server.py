@@ -7,17 +7,18 @@ import json
 import hashlib
 import mimetypes
 import os
+import platform
 import socket
 import subprocess
 import threading
 import time
+import uuid
 from collections import deque
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
-import uuid
 
 from collectors.deepseek import collect as collect_deepseek, COLLECTOR_TIMEOUT_SECONDS as DEEPSEEK_COLLECTOR_TIMEOUT
 from collectors.google import collect as collect_google
@@ -243,6 +244,39 @@ def build_version() -> str | None:
     return None
 
 
+def host_id() -> str | None:
+    """Stable across server restarts and app upgrades in the same data directory."""
+    path = DATA_PATH.parent / "host_id"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with path.open("x", encoding="utf-8") as output:
+                output.write(uuid.uuid4().hex + "\n")
+        except FileExistsError:
+            pass
+        value = path.read_text(encoding="utf-8").strip()
+        if not value:
+            value = uuid.uuid4().hex
+            path.write_text(value + "\n", encoding="utf-8")
+        return value
+    except OSError:
+        return None
+
+
+def server_identity() -> dict:
+    identity = {
+        "protocol": "aicc",
+        "version": version(),
+        "server_instance_id": SERVER_INSTANCE_ID,
+        "hostname": socket.gethostname(),
+        "platform": "macOS" if platform.system() == "Darwin" else platform.system(),
+    }
+    stable_id = host_id()
+    if stable_id:
+        identity["host_id"] = stable_id
+    return identity
+
+
 def live_health_payload() -> dict:
     payload = {
         "ok": True,
@@ -252,6 +286,7 @@ def live_health_payload() -> dict:
         "ppid": os.getppid(),
         "started_at": SERVER_STARTED_AT,
         "server_instance_id": SERVER_INSTANCE_ID,
+        **server_identity(),
     }
     build = build_version()
     if build:
@@ -292,6 +327,10 @@ def ready_health_payload() -> tuple[dict, HTTPStatus]:
             "ppid": os.getppid(),
             "server_instance_id": SERVER_INSTANCE_ID,
         }, HTTPStatus.SERVICE_UNAVAILABLE
+
+
+def discovery_payload(http_port: int) -> dict:
+    return {"name": "AICC Dashboard", "port": http_port, **server_identity()}
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
@@ -406,8 +445,10 @@ def start_discovery(http_port: int) -> None:
                     request, address = channel.recvfrom(512)
                     if request.strip() != DISCOVERY_MAGIC:
                         continue
-                    payload = json.dumps({"name": "AICC Dashboard", "port": http_port}).encode("utf-8")
+                    payload = json.dumps(discovery_payload(http_port)).encode("utf-8")
                     channel.sendto(payload, address)
+                    if os.environ.get("EINK_ACCESS_LOG") == "1":
+                        print(f"[AICC Discovery] replied to {address[0]} port={http_port}")
         except OSError as error:
             print(f"Discovery disabled: {error}")
 

@@ -116,9 +116,11 @@ App 运行需要 macOS 14 或更高版本、Apple Silicon，以及可执行的 P
 
 网页模式打开 kiosk 地址后，点一次"进入墨水屏模式"。页面每 5 分钟取数，并保留最近成功数据。
 
-Android/Poke4S 当前源码版本为 `1.2.5-pencil-home`（versionCode 11），本次 macOS 2.8.0 保持不变。
+Android/Poke4S 当前源码版本为 `1.2.6-pencil-home`（versionCode 12），与 macOS 版本独立。
+新版在保存地址失效时重复广播、验证所有发现的服务器并自动迁移 IP；多台服务器时可在设置中选择。
+BOOX 透明屏保在休眠时保留静态画面；需要屏幕持续显示最新额度时，请在设备设置中选择“桌面常亮”。
 不要使用仓库内不存在或过时的 APK 路径；请从 [GitHub Releases](https://github.com/easonwong2026-del/AICC/releases)
-下载最新 Android APK。目前已发布的 1.2.5 APK 位于 [v2.5.0 Release assets](https://github.com/easonwong2026-del/AICC/releases/tag/v2.5.0)，也可直接[下载 APK](https://github.com/easonwong2026-del/AICC/releases/download/v2.5.0/Poke4S-AI-Dashboard-v1.2.5-pencil-home.apk)。
+下载已发布的 Android APK。目前已发布的 1.2.5 APK 位于 [v2.5.0 Release assets](https://github.com/easonwong2026-del/AICC/releases/tag/v2.5.0)，也可直接[下载 APK](https://github.com/easonwong2026-del/AICC/releases/download/v2.5.0/Poke4S-AI-Dashboard-v1.2.5-pencil-home.apk)。
 它保留 Poke4S 的 AI COMMAND 风格、长按设置、自动发现、缓存减写、R8 和低内存 Canvas 渲染，并兼容现有服务器字段。
 
 `android/poke-dashboard/` 是可重复构建的源码和 Gradle wrapper，不属于 Mac 后台运行时。客户端不使用 AndroidX、图片库或第三方运行依赖；release 构建启用代码与资源瘦身。

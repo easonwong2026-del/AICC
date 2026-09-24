@@ -32,13 +32,14 @@ final class DashboardView extends View {
 
     DashboardView(Context context) {
         super(context);
+        data.offline = true;
         setBackgroundColor(PAPER);
         setClickable(true);
         setLongClickable(true);
         setContentDescription("AI COMMAND 仪表盘，长按打开设置");
     }
 
-    void setData(DashboardData value) { data = value; data.offline = false; invalidate(); }
+    void setData(DashboardData value) { data = value; invalidate(); }
     void setOffline(boolean offline) { data.offline = offline; invalidate(); }
     void setDeviceBattery(int percent, boolean charging, boolean visible) {
         batteryPercent = percent;
@@ -77,8 +78,7 @@ final class DashboardView extends View {
         text(canvas, "AI", 57, 51, 20, PAPER, true, Paint.Align.CENTER);
         text(canvas, "COMMAND", 100, 52, 28, INK, true, Paint.Align.LEFT);
         String state = data.offline ? "OFFLINE" : "SYNC";
-        if (data.failedCollectors > 0) state = "CHECK";
-        else if (data.refreshingCollectors > 0) state = "SYNC";
+        if (!data.offline && data.failedCollectors > 0) state = "CHECK";
         if (showDeviceBattery && batteryPercent >= 0) {
             state = batteryPercent + "%" + (batteryCharging ? " +" : "") + "  " + state;
         }
