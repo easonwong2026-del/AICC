@@ -4,18 +4,21 @@
 
 This file summarizes the current and recent public releases. The Chinese changelog contains the older detailed history.
 
-## Unreleased (Target: 2.9.0)
+## 2.9.0 - 2026-09-28
+
+### macOS
 
 - **Per-widget metric customization**: Upgraded macOS widgets to native `AppIntentConfiguration` and `AppIntentTimelineProvider` while preserving the exact `com.aieink.dashboard.menubar.widget` kind for seamless upgrade compatibility from 2.8.0; users can right-click any desktop widget → Edit "AICC" to customize displayed metrics (2 primary metrics for Small, 4 independent slots for Medium).
 - **Unified presentation layer and adaptive cards**: Introduced `WidgetMetricOption` and `MetricCardView` to route between Quota cards (Codex / Google) and Balance cards (WorkBuddy / DeepSeek) across compact and spacious layouts; includes deterministic duplicate normalization and robust fallback handling while preserving the default 2.8.0 layout.
 - **Full localization and test coverage**: Added localized resources for Chinese and English configuration labels; added tests for intent persistence/decoding, duplicate normalization, offline/stale/missing data handling, and automated visual regression across 112 environmental variations.
+- **Backend lifecycle hardening**: Recovers from unexpected Codex worker exits, improves connecting timeout and readiness/health handling, and fixes bundled server lifecycle issues.
 
-## Android 1.2.6 - Unreleased
+### Android / Poke4S
 
 - Poke4S repeats broadcasts, validates every discovered AICC server, migrates a changed LAN address, and offers a chooser when multiple healthy servers respond.
 - Discovery replies retain legacy fields and add protocol, stable host ID, instance ID, hostname, platform, and version. Existing clients remain compatible.
 - Offline cache stays visibly marked OFFLINE and Google quota remains available. BOOX firmware rejects app-initiated display wakeups, so continuously visible live quotas require always-on mode.
-- Android versionCode 12 and versionName `1.2.6-pencil-home`; macOS version unchanged.
+- **Version**: AICC 2.9.0, macOS Build 12; Android versionCode 12 and versionName `1.2.6-pencil-home`.
 
 ## 2.8.0 - 2026-09-13
 

@@ -2,18 +2,21 @@
 
 [English](CHANGELOG.en.md)
 
-## Unreleased (Target: 2.9.0)
+## 2.9.0 - 2026-09-28
+
+### macOS
 
 - **桌面 Widget 独立实例自定义 (Per-widget Customization)**：全面升级 macOS Widget 为 `AppIntentConfiguration` 与 `AppIntentTimelineProvider` 原生配置体系，继续保持 `com.aieink.dashboard.menubar.widget` 唯一标识，兼容 2.8.0 已有 Widget 无缝升级；支持用户在桌面右键 Widget → 编辑“AICC”选择每个实例展示的指标（Small 支持 2 项指标，Medium 支持 4 项槽位指标）。
 - **统一轻量展示层与自适应卡片**：建立 `WidgetMetricOption` 与 `MetricCardView` 统一展示层抽象，提供配额卡片（Codex / Google）与余额卡片（WorkBuddy / DeepSeek）自适应布局；支持确定性防重复规范化机制与优雅 fallback，默认配置 100% 保持 2.8.0 原有视觉体验。
 - **完整国际化与测试覆盖**：新增主要指标/次要指标/左上/右上/左下/右下及各项品牌本地化资源；新增 AppIntent 配置编码恢复、重复正规化、缺失/陈旧/离线降级等测试，以及全覆盖自动化视觉回归。
+- **后端生命周期加固**：Codex worker 异常退出后自动恢复；连接超时与健康、就绪状态处理更稳健，并修复内置服务的生命周期问题。
 
-## Android 1.2.6 - 未发布
+### Android / Poke4S
 
 - Poke4S 多次广播并收集全部发现回复，对每个候选验证 AICC 健康与状态接口；旧地址失效时自动迁移到已验证的新地址，多台健康服务器时提供选择。
 - 服务端发现回复保留旧字段，并增加协议、稳定主机 ID、实例 ID、主机名、平台和版本；旧客户端继续可用。
 - 离线缓存始终明确显示 OFFLINE；保留 Google 额度卡片。BOOX 固件拒绝应用主动亮屏，透明屏保仍为静态画面，持续显示最新额度需使用常亮模式。
-- Android `versionCode` 12、`versionName` `1.2.6-pencil-home`；macOS 版本不变。
+- **版本**：AICC 2.9.0，macOS Build 12；Android `versionCode` 12、`versionName` `1.2.6-pencil-home`。
 
 ## 2.8.0 - 2026-09-13
 
