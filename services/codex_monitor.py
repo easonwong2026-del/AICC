@@ -39,6 +39,11 @@ class CodexMonitor:
         self._fresh_event = threading.Event()
         self._status: dict[str, Any] = {"available": False, "state": "Not started", "source": "Codex app-server"}
         self._cache_path = DATA_ROOT / "codex_last_success.json"
+        try:
+            if json.loads(self._cache_path.read_text(encoding="utf-8")).get("schema_version") == 2:
+                self._cache_path = DATA_ROOT / "codex_app_server_last_success.json"
+        except (OSError, ValueError, AttributeError):
+            pass
         self._load_cache()
 
     def status(self, force: bool = False) -> dict[str, Any]:
@@ -357,14 +362,14 @@ class CodexMonitor:
     def _request_limits(self) -> None:
         self._last_request = time.monotonic()
         self._last_request_epoch = time.time()
-        request_id = self._send("account/rateLimits/read", None)
-        if request_id is not None:
-            self._rate_limit_request_id = request_id
+        self._send("account/rateLimits/read", None, rate_limits=True)
 
-    def _send(self, method: str, params: Any = None, notification: bool = False) -> int | None:
+    def _send(self, method: str, params: Any = None, notification: bool = False, rate_limits: bool = False) -> int | None:
         failed = False
         request_id = None
         with self._io_lock:
+            if rate_limits and self._rate_limit_request_id is not None:
+                return self._rate_limit_request_id
             process = self._process
             if not process or not process.stdin:
                 return None
@@ -375,11 +380,15 @@ class CodexMonitor:
                 if not notification:
                     self._request_id += 1
                     payload["id"] = self._request_id
+                if rate_limits:
+                    self._rate_limit_request_id = payload["id"]
                 process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
                 process.stdin.flush()
                 request_id = payload.get("id")
             except OSError:
                 failed = True
+                if rate_limits:
+                    self._rate_limit_request_id = None
         if failed:
             with self._lock:
                 self._status.update(state="Codex app-server connection lost")
@@ -488,6 +497,8 @@ class CodexMonitor:
             snapshot.get("five_hour") or snapshot.get("weekly") or snapshot.get("limit_buckets")
             or (isinstance(reset_credits, dict) and reset_credits.get("provided"))
         ):
+            return
+        if snapshot.get("schema_version") == 2:
             return
         self._last_success_epoch = float(snapshot.pop("updated_epoch", 0) or 0)
         snapshot.setdefault("limit_buckets", [])

@@ -7,7 +7,9 @@ struct CodexCard: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            if let weekly = codex.weekly, let remaining = snapshot.codexWeeklyRemaining {
+            if let accounts = codex.accounts {
+                poolSection(accounts)
+            } else if let weekly = codex.weekly, let remaining = snapshot.codexWeeklyRemaining {
                 weeklySection(weekly: weekly, remaining: remaining)
             } else if let fiveHour = codex.five_hour, let remaining = snapshot.codexFiveHourRemaining {
                 fiveHourOnlySection(fiveHour: fiveHour, remaining: remaining)
@@ -17,10 +19,58 @@ struct CodexCard: View {
         }
         .frame(maxWidth: .infinity)
         .overlay(alignment: .topLeading) {
-            if snapshot.codexState == "stale" {
+            if codex.stale == true || snapshot.codexState == "stale" {
                 Text("缓存").font(.system(size: 9)).foregroundColor(.orange).offset(y: -9)
             }
         }
+    }
+
+    private func poolSection(_ accounts: [CodexAccount]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Codex").font(.system(size: DashboardTypography.metricLabel, weight: .medium))
+                .foregroundColor(.secondary)
+            if accounts.isEmpty {
+                Text("No OpenCodex accounts").foregroundColor(.secondary)
+            }
+            ForEach(accounts.indices, id: \.self) { index in
+                let account = accounts[index]
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(account.label.flatMap { $0.isEmpty ? nil : $0 }
+                             ?? String((account.id ?? "Account").prefix(6)) + "…")
+                            .lineLimit(1)
+                        if account.active == true {
+                            Text("Active").font(.system(size: 9)).foregroundColor(.green)
+                        }
+                        if account.needs_reauth == true {
+                            Text("Reauth needed").font(.system(size: 9)).foregroundColor(.orange)
+                        }
+                        Spacer()
+                    }
+                    HStack {
+                        Text("5h")
+                        Spacer()
+                        Text(quotaText(account.five_hour))
+                    }
+                    HStack {
+                        Text("Weekly")
+                        Spacer()
+                        Text(quotaText(account.weekly))
+                    }
+                    .foregroundColor(.secondary)
+                }
+                .font(.system(size: 11))
+            }
+            if codex.selection_mode == "auto" {
+                Text("Auto selection · active account varies by request")
+                    .font(.system(size: 9)).foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private func quotaText(_ window: RateWindow?) -> String {
+        guard let remaining = window?.remaining, remaining.isFinite else { return "—" }
+        return String(format: "%.0f%%", remaining)
     }
 
     private func weeklySection(weekly: RateWindow, remaining: Double) -> some View {

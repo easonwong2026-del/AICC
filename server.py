@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 
 from collectors.deepseek import collect as collect_deepseek, COLLECTOR_TIMEOUT_SECONDS as DEEPSEEK_COLLECTOR_TIMEOUT
 from collectors.google import collect as collect_google
+from collectors import codex as ocx_codex
 from collectors.system import collect as collect_system
 from collectors.workbuddy import collect as collect_workbuddy, initial_status
 from services.codex_monitor import monitor
@@ -37,7 +38,7 @@ DATA_PATH = DATA_ROOT / "status.json"
 WEB_ROOT = Path(os.environ.get("EINK_WEB_ROOT", ROOT / "web")).expanduser()
 COLLECTOR_WAIT_SECONDS = max(0, min(5, float(os.environ.get("COLLECTOR_WAIT_SECONDS", "3.2"))))
 # A force may wait for a normal run to time out, then for its force successor.
-FORCE_WAIT_SECONDS = 2 * max(DEFAULT_COLLECTOR_TIMEOUT, DEEPSEEK_COLLECTOR_TIMEOUT) + 1.0
+FORCE_WAIT_SECONDS = 2 * max(66.0, DEEPSEEK_COLLECTOR_TIMEOUT) + 1.0
 SERVER_STARTED_AT = time.time()
 SERVER_INSTANCE_ID = os.environ.get('AICC_SERVER_INSTANCE_ID') or str(uuid.uuid4())
 mimetypes.add_type("application/manifest+json", ".webmanifest")
@@ -98,9 +99,15 @@ def collector_manager() -> CollectorManager:
     global _collector_manager
     if _collector_manager is None:
         fallback = persisted_status()
+        source = os.environ.get("AICC_CODEX_SOURCE", "auto").lower()
+        use_ocx = source == "opencodex" or (source == "auto" and ocx_codex.resolve_executable() is not None)
+        if source not in ("auto", "opencodex", "app-server"):
+            raise ValueError("Invalid AICC_CODEX_SOURCE")
+        codex_initial = (ocx_codex.load_cache() or {"available": False, "state": "Loading",
+                         "source": "OpenCodex", "accounts": [], "stale": True}) if use_ocx else fallback.get("codex", {})
 
         def collect_codex(force: bool = False) -> dict:
-            return monitor.status(force=force)
+            return ocx_codex.collect(force=force) if use_ocx else monitor.status(force=force)
 
         def collect_deepseek_value(force: bool = False) -> dict:
             return collect_deepseek(DATA_ROOT / "deepseek_history.json")
@@ -119,8 +126,8 @@ def collector_manager() -> CollectorManager:
             "codex": (
                 collect_codex,
                 DEFAULT_COLLECTOR_INTERVAL,
-                DEFAULT_COLLECTOR_TIMEOUT,
-                fallback.get("codex", {}),
+                66.0 if use_ocx else DEFAULT_COLLECTOR_TIMEOUT,
+                codex_initial,
             ),
             "deepseek": (
                 collect_deepseek_value,
@@ -149,11 +156,12 @@ def load_status(force: bool = False) -> dict:
     values, metadata = collector_manager().snapshot(force=force, wait_seconds=FORCE_WAIT_SECONDS if force else COLLECTOR_WAIT_SECONDS)
     data = persisted_status()
     previous_google = data.get("google")
+    previous_codex = data.get("codex")
     previous_deepseek = {k: v for k, v in data.get("deepseek", {}).items() if k != "age"}
     current_deepseek = {k: v for k, v in values.get("deepseek", {}).items() if k != "age"}
     data.update(values)
     # Persist balance changes and manual refreshes, not every age tick.
-    if force or previous_deepseek != current_deepseek or data.get("google") != previous_google:
+    if force or previous_deepseek != current_deepseek or data.get("google") != previous_google or data.get("codex") != previous_codex:
         save_status(data)
     data["fetched_at"] = time.time()
     data["collection"] = metadata
@@ -162,7 +170,7 @@ def load_status(force: bool = False) -> dict:
     # Invalidate presentation on any source change; stale publishes are rejected.
     source = {
         "google": values.get("google", {}),
-        "codex": {k: values.get("codex", {}).get(k) for k in ("weekly", "five_hour", "stale")},
+        "codex": {k: values.get("codex", {}).get(k) for k in ("weekly", "five_hour", "accounts", "active_account_id", "stale")},
         "workbuddy": {k: values.get("workbuddy", {}).get(k) for k in ("points", "balance_stale", "balance_state")},
         "deepseek": {k: values.get("deepseek", {}).get(k) for k in ("balances", "stale", "status", "error_code")},
         "states": {k: metadata.get(k, {}).get("state") for k in ("codex", "google", "workbuddy", "deepseek")},
@@ -590,7 +598,7 @@ def health_payload() -> dict:
         "cache": cache,
         "providers": provider_items,
         "worker_telemetry": {
-            "codex": monitor.health(),
+            "codex": metadata.get("codex", {}) if values.get("codex", {}).get("source") == "OpenCodex" else monitor.health(),
         },
         "pid": os.getpid(),
         "ppid": os.getppid(),
@@ -626,7 +634,7 @@ def main() -> None:
     port = int(os.environ.get("EINK_PORT", "8765"))
     server = DashboardServer((os.environ.get("EINK_HOST", "0.0.0.0"), port), DashboardHandler)
     start_discovery(port)
-    collector_manager().snapshot(force=True, wait_seconds=0)
+    collector_manager().snapshot(force=False, wait_seconds=0)
     threading.Thread(target=_periodic_save, args=(120,), daemon=True).start()
     threading.Thread(target=_workbuddy_monitor_loop, args=(60,), daemon=True).start()
     print(f"AICC Dashboard: http://localhost:{port}")

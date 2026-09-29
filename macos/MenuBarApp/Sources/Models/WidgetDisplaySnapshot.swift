@@ -486,8 +486,8 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
 // Both clients publish the same normalized presentation to the loopback backend.
 // No App Group entitlement or second business-data source is required.
 enum DisplaySnapshotBridge {
-    // Backend force budget is 31s (normal + force watchdogs); leave transport margin.
-    static let refreshTimeout: TimeInterval = 40
+    // A normal probe followed by force can each take 65s; leave transport margin.
+    static let refreshTimeout: TimeInterval = 140
     static func publish(_ snapshot: WidgetDisplaySnapshot, revision: String?, baseURL: String,
                         session: URLSession) async {
         guard let revision, let url = URL(string: baseURL + "/api/display-snapshot") else { return }

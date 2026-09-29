@@ -214,6 +214,28 @@ class ServerIntegrationTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
         self.assertTrue(server._collector_manager.snapshots[-1]["force"])
 
+    def test_refresh_returns_pool_and_active_legacy_summary_without_forcing_get(self):
+        class PoolManager(FakeManager):
+            def snapshot(self, **kwargs):
+                self.snapshots.append(kwargs)
+                remaining = 73 if kwargs.get("force") else 60
+                account = {"id": "masked-1", "active": True, "weekly": {"remaining": remaining},
+                           "five_hour": {"remaining": 88}}
+                return {"codex": {"source": "OpenCodex", "accounts": [account], "active_account_id": "masked-1",
+                                  "weekly": account["weekly"], "five_hour": account["five_hour"], "stale": False}}, \
+                       {"codex": {"state": "ready"}}
+
+        server._collector_manager = PoolManager()
+        with urlopen(self.base + "/api/status") as response:
+            old = json.load(response)
+        self.assertEqual(old["codex"]["weekly"]["remaining"], 60)
+        self.assertFalse(server._collector_manager.snapshots[-1].get("force", False))
+        with urlopen(Request(self.base + "/api/refresh", method="POST")) as response:
+            refreshed = json.load(response)
+        self.assertEqual(refreshed["codex"]["accounts"][0]["weekly"]["remaining"], 73)
+        self.assertEqual(refreshed["codex"]["weekly"]["remaining"], 73)
+        self.assertTrue(server._collector_manager.snapshots[-1]["force"])
+
     def test_dynamic_provider_routes_are_removed(self):
         routes = (
             ("/api/providers", "GET"),

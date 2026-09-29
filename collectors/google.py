@@ -72,13 +72,18 @@ def resolve_executable():
     return next((p for p in candidates if p and os.path.isfile(p) and os.access(p, os.X_OK)), None)
 
 
+def ocx_env(executable):
+    env = os.environ.copy()
+    env["PATH"] = os.pathsep.join([str(Path(executable).parent), "/opt/homebrew/bin", "/usr/local/bin",
+                                  str(Path.home() / ".npm-global/bin"), env.get("PATH", os.defpath)])
+    return env
+
+
 def collect(force=False):
     executable = resolve_executable()
     if not executable:
         raise ValueError("OpenCodex is not installed")
-    env = os.environ.copy()
-    env["PATH"] = os.pathsep.join([str(Path(executable).parent), "/opt/homebrew/bin", "/usr/local/bin",
-                                  str(Path.home() / ".npm-global/bin"), env.get("PATH", os.defpath)])
+    env = ocx_env(executable)
     try:
         response = subprocess.run([executable, "provider", "quota", *(["--refresh"] if force else []), "--json"],
                                   capture_output=True, text=True, timeout=8, env=env)

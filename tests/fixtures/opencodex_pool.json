@@ -1,0 +1,6 @@
+{
+  "accounts": [
+    {"provider": "openai", "type": "codex", "id": "acct-1", "label": "Team", "email": "t***@e***.com", "plan": "team", "active": true, "needsReauth": false, "priority": 0, "quota": {"weeklyPercent": 5, "weeklyResetAt": 1791279754, "shortPercent": 29, "shortResetAt": 1790692954, "shortWindowSeconds": 18000}, "quotaRefresh": {"status": "ok"}},
+    {"provider": "openai", "type": "codex", "id": "acct-2", "label": "Plus", "email": "p***@e***.com", "plan": "plus", "active": false, "needsReauth": false, "priority": 0, "quota": {"weeklyPercent": 41, "weeklyResetAt": 1791050029, "shortPercent": 0, "shortResetAt": 1790680581, "shortWindowSeconds": 18000}}
+  ]
+}

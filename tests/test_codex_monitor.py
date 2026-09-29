@@ -1,6 +1,8 @@
 import tempfile
 import threading
 import unittest
+import json
+from unittest.mock import MagicMock
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8,6 +10,60 @@ from services.codex_monitor import CodexMonitor
 
 
 class CodexMonitorTests(unittest.TestCase):
+    def test_concurrent_rate_limit_calls_share_pending_request(self):
+        monitor = CodexMonitor.__new__(CodexMonitor)
+        monitor._io_lock = threading.Lock()
+        monitor._request_id = 0
+        monitor._rate_limit_request_id = None
+        monitor._process = MagicMock()
+        monitor._request_limits()
+        monitor._request_limits()
+        self.assertEqual(monitor._process.stdin.write.call_count, 1)
+        self.assertEqual(monitor._rate_limit_request_id, 1)
+
+    def test_immediate_rate_limit_response_is_registered_before_write(self):
+        monitor = CodexMonitor.__new__(CodexMonitor)
+        monitor._lock = threading.Lock()
+        monitor._io_lock = threading.Lock()
+        monitor._request_id = 0
+        monitor._rate_limit_request_id = None
+        monitor._initialize_request_id = None
+        monitor._fresh_event = threading.Event()
+        monitor._status = {"state": "Connected"}
+        monitor._started = True
+        written = threading.Event()
+        applied = threading.Event()
+        payload = {}
+
+        class Stdin:
+            def write(self, line):
+                payload.update(json.loads(line))
+            def flush(self):
+                written.set()
+                applied.wait(1)
+
+        class Process:
+            stdin = Stdin()
+            @property
+            def stdout(self):
+                def lines():
+                    if written.wait(1):
+                        yield json.dumps({"id": payload["id"], "result": {"primary": {"usedPercent": 1}}})
+                return lines()
+
+        process = Process()
+        monitor._process = process
+        def apply(result):
+            applied.set()
+        with patch.object(monitor, "_apply_limits", side_effect=apply), \
+                patch.object(monitor, "_schedule_restart"), patch.object(monitor, "_stop_process"):
+            reader = threading.Thread(target=monitor._read_stdout, args=(process,))
+            reader.start()
+            monitor._request_limits()
+            reader.join(2)
+        self.assertTrue(applied.is_set())
+        self.assertFalse(reader.is_alive())
+
     def test_missing_reset_credits_is_not_reported_as_zero(self):
         result = CodexMonitor._normalise_reset_credits(None)
         self.assertFalse(result["provided"])
@@ -170,6 +226,16 @@ class CodexMonitorTests(unittest.TestCase):
             monitor._load_cache()
         self.assertEqual(monitor._status["limit_buckets"], [])
         self.assertFalse(monitor._status["reset_credits"]["provided"])
+
+    def test_legacy_mode_does_not_overwrite_pool_cache(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("services.codex_monitor.DATA_ROOT", Path(directory)):
+            pool = Path(directory) / "codex_last_success.json"
+            pool.write_text('{"schema_version":2,"source":"OpenCodex","accounts":[]}', encoding="utf-8")
+            monitor = CodexMonitor()
+            self.assertEqual(monitor._cache_path.name, "codex_app_server_last_success.json")
+            monitor._save_cache({"weekly": {"remaining": 50}, "updated_epoch": 100})
+            self.assertEqual(json.loads(pool.read_text())["schema_version"], 2)
 
     def test_connecting_without_cache_is_reported_stale(self):
         monitor = CodexMonitor.__new__(CodexMonitor)

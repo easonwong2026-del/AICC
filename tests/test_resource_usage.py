@@ -65,14 +65,15 @@ class ResourceUsageTests(unittest.TestCase):
         self.assertEqual(metadata["codex"]["state"], "stale")
         self.assertIsNone(metadata["codex"]["last_success"])
 
-    def test_only_latest_rate_limit_request_is_retained(self):
+    def test_rate_limit_request_marks_send_for_early_registration(self):
         monitor = CodexMonitor.__new__(CodexMonitor)
         monitor._last_request = 0.0
         monitor._rate_limit_request_id = None
-        monitor._send = Mock(side_effect=[10, 11])
+        monitor._send = Mock(return_value=10)
         monitor._request_limits()
         monitor._request_limits()
-        self.assertEqual(monitor._rate_limit_request_id, 11)
+        self.assertEqual(monitor._send.call_count, 2)
+        self.assertTrue(all(call.kwargs.get("rate_limits") for call in monitor._send.call_args_list))
 
     def test_idle_monitor_releases_child_process(self):
         process = Mock()

@@ -18,6 +18,21 @@ struct CodexData: Codable {
     let state: String?
     let stale: Bool?
     let available: Bool?
+    let accounts: [CodexAccount]?
+    let active_account_id: String?
+    let selection_mode: String?
+}
+
+struct CodexAccount: Codable {
+    let id: String?
+    let label: String?
+    let email: String?
+    let plan: String?
+    let active: Bool?
+    let needs_reauth: Bool?
+    let stale: Bool?
+    let five_hour: RateWindow?
+    let weekly: RateWindow?
 }
 
 struct RateWindow: Codable {

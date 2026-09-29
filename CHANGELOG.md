@@ -2,6 +2,11 @@
 
 [English](CHANGELOG.en.md)
 
+## 未发布
+
+- Codex 额度改由 OpenCodex Account Pool 提供，支持任意数量账号、独立额度和手动强制刷新；保留活动账号的旧版 Widget 字段，缓存失败时明确标记 stale。
+- 修复旧 `codex app-server` 额度请求 ID 登记竞态，并合并同时发生的请求。
+
 ## 2.9.0 - 2026-09-28
 
 ### macOS

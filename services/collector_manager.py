@@ -9,6 +9,7 @@ from datetime import datetime
 
 from collectors.workbuddy import _with_stale_state
 from collectors.deepseek import failure
+from collectors.codex import mark_stale
 
 
 DEFAULT_COLLECTOR_INTERVAL = 120.0
@@ -81,6 +82,9 @@ class CollectorManager:
                     if not slot.running_force:
                         slot.pending_force = True
                     started.add(name)
+                elif slot.running and not slot.last_success:
+                    # Startup may have launched the first run before the first GET.
+                    started.add(name)
             deadline = time.monotonic() + max(0.0, wait_seconds)
             while started and any(self._slots[name].running for name in started):
                 remaining = deadline - time.monotonic()
@@ -145,6 +149,10 @@ class CollectorManager:
                 if name == "deepseek":
                     slot.value = self._retain_deepseek_balance(slot, failure("connection_error", "Connection error"))
                     slot.snapshot_stale = True
+                if name == "codex" and slot.value.get("source") == "OpenCodex":
+                    slot.value = mark_stale(slot.value, str(error) if isinstance(error, ValueError) else "Temporarily unavailable")
+                    slot.value["error"] = str(error) if isinstance(error, ValueError) else "Temporarily unavailable"
+                    slot.snapshot_stale = True
                 slot.running = False
                 slot.timed_out = False
                 slot.consecutive_failures += 1
@@ -192,6 +200,10 @@ class CollectorManager:
             slot.worker_alive = False
             if name == "deepseek":
                 slot.value = self._retain_deepseek_balance(slot, failure("timeout", "Request timed out"))
+                slot.snapshot_stale = True
+            if name == "codex" and slot.value.get("source") == "OpenCodex":
+                slot.value = mark_stale(slot.value, "Temporarily unavailable")
+                slot.value["error"] = "Temporarily unavailable"
                 slot.snapshot_stale = True
             # The expired thread may never return; hand off here, not in _run.
             if slot.pending_force:
