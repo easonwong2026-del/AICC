@@ -50,9 +50,11 @@ def parse_pool(document, current):
         short_reset = "shortResetAt" if "shortResetAt" in quota else "fiveHourResetAt"
         account = {"id": row.get("id") if isinstance(row.get("id"), str) else None,
                    "label": row.get("label") if isinstance(row.get("label"), str) else None,
-                   "email": row.get("email") if isinstance(row.get("email"), str) and any(marker in row["email"] for marker in ("*", "•")) else None,
+                   "email": (row.get("email") if isinstance(row.get("email"), str)
+                             and any(marker in row["email"] for marker in ("*", "•")) else None),
                    "plan": row.get("plan") if isinstance(row.get("plan"), str) else None,
-                   "priority": row.get("priority") if isinstance(row.get("priority"), int) and not isinstance(row.get("priority"), bool) else None,
+                   "priority": (row.get("priority") if isinstance(row.get("priority"), int)
+                                and not isinstance(row.get("priority"), bool) else None),
                    "active": bool(active_id and row.get("id") == active_id),
                    "needs_reauth": row.get("needsReauth") is True,
                    "stale": False,
@@ -76,7 +78,8 @@ def load_cache(path=CACHE_PATH):
         snapshot = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(snapshot, dict) or snapshot.get("schema_version") != 2 or snapshot.get("source") != "OpenCodex" or not isinstance(snapshot.get("accounts"), list):
+    if (not isinstance(snapshot, dict) or snapshot.get("schema_version") != 2
+            or snapshot.get("source") != "OpenCodex" or not isinstance(snapshot.get("accounts"), list)):
         return None
     return mark_stale(snapshot, "Cached")
 

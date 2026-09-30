@@ -38,12 +38,14 @@ class CodexMonitorTests(unittest.TestCase):
         class Stdin:
             def write(self, line):
                 payload.update(json.loads(line))
+
             def flush(self):
                 written.set()
                 applied.wait(1)
 
         class Process:
             stdin = Stdin()
+
             @property
             def stdout(self):
                 def lines():
@@ -53,6 +55,7 @@ class CodexMonitorTests(unittest.TestCase):
 
         process = Process()
         monitor._process = process
+
         def apply(result):
             applied.set()
         with patch.object(monitor, "_apply_limits", side_effect=apply), \
