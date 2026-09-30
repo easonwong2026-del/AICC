@@ -171,7 +171,8 @@ def load_status(force: bool = False) -> dict:
     # Invalidate presentation on any source change; stale publishes are rejected.
     source = {
         "google": values.get("google", {}),
-        "codex": {k: values.get("codex", {}).get(k) for k in ("weekly", "five_hour", "accounts", "active_account_id", "selection_mode", "source", "stale")},
+        "codex": {k: values.get("codex", {}).get(k) for k in (
+            "weekly", "five_hour", "accounts", "active_account_id", "selection_mode", "source", "stale")},
         "workbuddy": {k: values.get("workbuddy", {}).get(k) for k in ("points", "balance_stale", "balance_state")},
         "deepseek": {k: values.get("deepseek", {}).get(k) for k in ("balances", "stale", "status", "error_code")},
         "states": {k: metadata.get(k, {}).get("state") for k in ("codex", "google", "workbuddy", "deepseek")},

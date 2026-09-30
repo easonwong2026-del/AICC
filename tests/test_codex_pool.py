@@ -121,6 +121,7 @@ class CodexPoolTests(unittest.TestCase):
         entered = threading.Event()
         release = threading.Event()
         commands = []
+
         def command(_executable, args, _env):
             commands.append(args)
             if args[0] == "refresh":
@@ -146,6 +147,7 @@ class CodexPoolTests(unittest.TestCase):
 
     def test_manager_failure_is_stale_and_next_success_clears_it(self):
         calls = 0
+
         def collect(force=False):
             nonlocal calls
             calls += 1

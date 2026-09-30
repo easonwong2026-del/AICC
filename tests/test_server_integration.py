@@ -93,6 +93,7 @@ class ServerIntegrationTests(unittest.TestCase):
         snapshot = {"codexWeeklyNumber": "—", "workbuddyPointsText": "12",
                     "deepseekBalanceText": "—", "deepseekCurrency": "CNY",
                     "fetchedAt": 100, "stale": False, "codexAccountDisplayMode": "one"}
+
         def publish(revision, mode=None):
             payload = {"revision": revision, "snapshot": snapshot}
             if mode is not None:
