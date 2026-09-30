@@ -65,12 +65,48 @@ struct WidgetVisualSmokeMain {
         """
         let overflowSnapshot = WidgetDisplaySnapshot(payload: try JSONDecoder().decode(WidgetStatusPayload.self, from: Data(overflowPayloadJSON.utf8)), fetchedAt: fetchedAt)
 
-        let snapshots: [(name: String, snapshot: WidgetDisplaySnapshot)] = [
+        // Pool presentations also exercise real small/medium slot dimensions.
+        let poolJSON = """
+        {"codex":{"source":"OpenCodex","selection_mode":"pinned","active_account_id":"plus",
+          "accounts":[
+            {"id":"team","label":"team","active":false,"weekly":{"remaining":84,"reset":"2026-10-06 17:42"},"five_hour":{"remaining":100}},
+            {"id":"plus","label":"plus","active":true,"weekly":{"remaining":43,"reset":"2026-10-04 01:53"},"five_hour":{"remaining":97}}
+          ]},"workbuddy":{"points":4393},"deepseek":{"status":"Online","balances":[{"currency":"CNY","total_balance":"58.25"}]},
+          "google":{"weekly":{"remaining":51},"five_hour":{"remaining":91},"updated_epoch":1788000000}}
+        """
+        var pinnedTwo = WidgetDisplaySnapshot(payload: try JSONDecoder().decode(WidgetStatusPayload.self, from: Data(poolJSON.utf8)), fetchedAt: fetchedAt)
+        pinnedTwo.codexAccountDisplayMode = .two
+        var pinnedOne = pinnedTwo
+        pinnedOne.codexAccountDisplayMode = .one
+        var autoTwo = pinnedTwo
+        autoTwo.codexSelectionMode = "auto"
+        autoTwo.codexActiveAccountID = nil
+        var autoOne = autoTwo
+        autoOne.codexAccountDisplayMode = .one
+        var reauth = pinnedTwo
+        reauth.codexAccounts = pinnedTwo.codexAccounts?.map {
+            WidgetCodexAccount(id: $0.id, label: $0.label, plan: $0.plan, active: $0.active,
+                needsReauth: true, stale: true, fiveHour: $0.fiveHour, weekly: $0.weekly)
+        }
+
+        var snapshots: [(name: String, snapshot: WidgetDisplaySnapshot)] = [
+
             ("live", liveSnapshot),
             ("stale", staleSnapshot),
             ("nodata", noDataSnapshot),
-            ("overflow", overflowSnapshot)
+            ("overflow", overflowSnapshot),
+            ("pinned_one", pinnedOne), ("pinned_two", pinnedTwo),
+            ("auto_one", autoOne), ("auto_two", autoTwo), ("reauth", reauth)
         ]
+
+        if let input = CommandLine.arguments.dropFirst().first {
+            let payload = try JSONDecoder().decode(WidgetStatusPayload.self, from: Data(contentsOf: URL(fileURLWithPath: input)))
+            var real = WidgetDisplaySnapshot(payload: payload, fetchedAt: .now)
+            real.codexAccountDisplayMode = .two
+            snapshots.append(("real_pinned_two", real))
+            real.codexAccountDisplayMode = .one
+            snapshots.append(("real_pinned_one", real))
+        }
 
         let smallConfigs: [(name: String, intent: AICCWidgetConfigurationIntent)] = [
             ("codex_google", AICCWidgetConfigurationIntent(primary: .codex, secondary: .google)),

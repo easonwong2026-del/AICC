@@ -10,10 +10,11 @@ struct DeepSeekCard: View {
             title: "DeepSeek",
             icon: "brain.head.profile",
             value: formattedBalance,
-            subtitle: consumptionText,
+            subtitle: settings.localized(snapshot.deepseekCompactStatusText),
             state: state,
             unit: balanceUnit,
-            valueFontSize: DashboardTypography.primaryFontSize(number: formattedBalance, compact: true)
+            valueFontSize: DashboardTypography.secondaryMetric,
+            valueWeight: .semibold
         )
     }
 
@@ -23,14 +24,6 @@ struct DeepSeekCard: View {
 
     private var balanceUnit: String? {
         snapshot.deepseekState == "unavailable" ? nil : snapshot.deepseekCurrency
-    }
-
-    private var consumptionText: String {
-        guard snapshot.deepseekState == "live",
-              let used = data.usage?.first(where: { $0.currency == snapshot.deepseekCurrency })?.used_today,
-              let value = Double(used), value > 0 else { return snapshot.deepseekStatusText }
-        return snapshot.deepseekStatusText + " · " + String(format: settings.localized("Today %@"),
-                                                           "¥\(String(format: "%.2f", value))")
     }
 
     private var state: CardState {

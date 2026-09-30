@@ -39,5 +39,5 @@ xcrun swiftc \
   "$ROOT/macos/Widget/WidgetVisualSmokeMain.swift" \
   -o "$TEMP_ROOT/aicc-widget-visual-smoke"
 
-"$TEMP_ROOT/aicc-widget-visual-smoke"
+"$TEMP_ROOT/aicc-widget-visual-smoke" "$@"
 

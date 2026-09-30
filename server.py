@@ -57,6 +57,7 @@ _status_write_lock = threading.Lock()
 _display_lock = threading.Lock()
 _display_revision = ""
 _display_snapshot: dict | None = None
+_codex_account_display_mode = "automatic"
 _rate_windows: dict[tuple[str, str], deque[float]] = {}
 
 
@@ -170,7 +171,7 @@ def load_status(force: bool = False) -> dict:
     # Invalidate presentation on any source change; stale publishes are rejected.
     source = {
         "google": values.get("google", {}),
-        "codex": {k: values.get("codex", {}).get(k) for k in ("weekly", "five_hour", "accounts", "active_account_id", "stale")},
+        "codex": {k: values.get("codex", {}).get(k) for k in ("weekly", "five_hour", "accounts", "active_account_id", "selection_mode", "source", "stale")},
         "workbuddy": {k: values.get("workbuddy", {}).get(k) for k in ("points", "balance_stale", "balance_state")},
         "deepseek": {k: values.get("deepseek", {}).get(k) for k in ("balances", "stale", "status", "error_code")},
         "states": {k: metadata.get(k, {}).get("state") for k in ("codex", "google", "workbuddy", "deepseek")},
@@ -179,6 +180,7 @@ def load_status(force: bool = False) -> dict:
     with _display_lock:
         if revision != _display_revision:
             _display_revision, _display_snapshot = revision, None
+        data["codex_account_display_mode"] = _codex_account_display_mode
         data["display_revision"] = revision
         if _display_snapshot is not None:
             data["display_snapshot"] = {**_display_snapshot, "fetchedAt": data["fetched_at"] - 978307200, "age": 0}
@@ -392,13 +394,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def store_display_snapshot(self) -> None:
-        global _display_snapshot
+        global _display_snapshot, _codex_account_display_mode
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if not 0 < length <= 16384:
                 raise ValueError("invalid length")
             payload = json.loads(self.rfile.read(length))
             snapshot = payload["snapshot"]
+            mode = payload.get("codexAccountDisplayMode")
+            if mode is not None and mode not in ("automatic", "one", "two", "all"):
+                raise ValueError("invalid display mode")
             if (not isinstance(snapshot, dict) or snapshot.get("stale") is not False
                     or not isinstance(snapshot.get("fetchedAt"), (int, float))
                     or not all(isinstance(snapshot.get(key), str) for key in (
@@ -409,7 +414,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         with _display_lock:
             if payload.get("revision") != _display_revision:
                 return self.send_json({"error": "Source changed"}, HTTPStatus.CONFLICT)
-            _display_snapshot = snapshot
+            if mode is not None:
+                _codex_account_display_mode = mode
+            # Keep the host preference across source revisions and Widget publishes.
+            _display_snapshot = {**snapshot, "codexAccountDisplayMode": _codex_account_display_mode}
         self.send_json({"ok": True})
 
     def send_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:

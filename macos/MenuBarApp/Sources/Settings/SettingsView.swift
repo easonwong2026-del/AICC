@@ -383,6 +383,11 @@ private struct MenuBarSettingsView: View {
             Section("Menu bar status") {
                 Toggle("Show Codex status", isOn: $settings.menuBarShowCodexStatus)
                 Toggle("Show Codex balance", isOn: $settings.menuBarShowCodexBalance)
+                Picker(settings.localized("Show accounts"), selection: $settings.codexAccountDisplayMode) {
+                    ForEach(CodexAccountDisplayMode.allCases) { mode in
+                        Text(mode.displayName(localize: settings.localized)).tag(mode.rawValue)
+                    }
+                }
             }
 
             Section("Menu bar items") {

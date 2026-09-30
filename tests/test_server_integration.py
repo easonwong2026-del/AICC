@@ -43,6 +43,9 @@ class ServerIntegrationTests(unittest.TestCase):
         server.DATA_PATH = Path(self.temporary.name) / "status.json"
         server._collector_manager = FakeManager()
         server._rate_windows.clear()
+        self.original_display = (server._display_revision, server._display_snapshot, server._codex_account_display_mode)
+        server._display_revision, server._display_snapshot = "", None
+        server._codex_account_display_mode = "automatic"
         self.httpd = server.DashboardServer(("127.0.0.1", 0), server.DashboardHandler)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
@@ -52,6 +55,7 @@ class ServerIntegrationTests(unittest.TestCase):
         self.httpd.shutdown()
         self.httpd.server_close()
         self.thread.join(timeout=2)
+        server._display_revision, server._display_snapshot, server._codex_account_display_mode = self.original_display
         server.DATA_PATH = self.original_data_path
         server._collector_manager = self.original_manager
         self.temporary.cleanup()
@@ -82,6 +86,33 @@ class ServerIntegrationTests(unittest.TestCase):
         request.data = b"[]"
         with self.assertRaises(HTTPError) as failure:
             urlopen(request)
+        self.assertEqual(failure.exception.code, 400)
+
+    def test_host_display_preference_survives_revision_and_widget_publish(self):
+        status = server.load_status()
+        snapshot = {"codexWeeklyNumber": "—", "workbuddyPointsText": "12",
+                    "deepseekBalanceText": "—", "deepseekCurrency": "CNY",
+                    "fetchedAt": 100, "stale": False, "codexAccountDisplayMode": "one"}
+        def publish(revision, mode=None):
+            payload = {"revision": revision, "snapshot": snapshot}
+            if mode is not None:
+                payload["codexAccountDisplayMode"] = mode
+            request = Request(self.base + "/api/display-snapshot", data=json.dumps(payload).encode(), method="POST")
+            with urlopen(request) as response:
+                self.assertTrue(json.load(response)["ok"])
+        publish(status["display_revision"], "one")
+        server._collector_manager.points = 30
+        fresh = server.load_status()
+        self.assertNotIn("display_snapshot", fresh)
+        self.assertEqual(fresh["codex_account_display_mode"], "one")
+        snapshot["codexAccountDisplayMode"] = "automatic"
+        publish(fresh["display_revision"])
+        self.assertEqual(server.load_status()["display_snapshot"]["codexAccountDisplayMode"], "one")
+        for mode in ("two", "automatic", "all"):
+            publish(fresh["display_revision"], mode)
+            self.assertEqual(server.load_status()["codex_account_display_mode"], mode)
+        with self.assertRaises(HTTPError) as failure:
+            publish(fresh["display_revision"], "invalid")
         self.assertEqual(failure.exception.code, 400)
 
     def test_first_run_status_has_no_seeded_codex_quota(self):

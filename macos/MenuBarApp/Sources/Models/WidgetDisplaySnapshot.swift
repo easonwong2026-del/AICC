@@ -1,6 +1,7 @@
 import Foundation
 
 struct WidgetStatusPayload: Decodable {
+    let codex_account_display_mode: CodexAccountDisplayMode?
     let display_revision: String?
     let display_snapshot: WidgetDisplaySnapshot?
     let fetched_at: Double?
@@ -11,7 +12,7 @@ struct WidgetStatusPayload: Decodable {
     let deepseek: WidgetDeepSeekData?
 
     enum CodingKeys: String, CodingKey {
-        case fetched_at, collection, display_revision, display_snapshot
+        case fetched_at, collection, display_revision, display_snapshot, codex_account_display_mode
         case codex, google
         case workbuddy
         case deepseek
@@ -30,14 +31,111 @@ struct WidgetCollector: Decodable {
 
 struct WidgetCodexData: Decodable {
     let stale: Bool?
+    let source: String?
+    let selectionMode: String?
+    let activeAccountID: String?
+    let accounts: [WidgetCodexAccount]?
 
     let fiveHour: WidgetRateWindow?
     let weekly: WidgetRateWindow?
 
     enum CodingKeys: String, CodingKey {
+        case stale, source
+        case selectionMode = "selection_mode"
+        case activeAccountID = "active_account_id"
+        case accounts
+        case fiveHour = "five_hour"
+        case weekly
+    }
+}
+
+struct WidgetCodexAccount: Codable, Equatable {
+    let id: String?
+    let label: String?
+    let plan: String?
+    let active: Bool?
+    let needsReauth: Bool?
+    let stale: Bool?
+    let fiveHour: WidgetRateWindow?
+    let weekly: WidgetRateWindow?
+
+    enum CodingKeys: String, CodingKey {
+        case id, label, plan, active
+        case needsReauth = "needs_reauth"
         case stale
         case fiveHour = "five_hour"
         case weekly
+    }
+
+    var safeDisplayName: String {
+        if let label = label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty {
+            return label
+        }
+        if let id = id?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty, id != "__main__" {
+            return id.count > 12 ? String(id.prefix(8)) + "…" : id
+        }
+        return "Account"
+    }
+}
+
+enum CodexAccountDisplayMode: String, CaseIterable, Identifiable, Codable {
+    case automatic = "automatic"
+    case one = "one"
+    case two = "two"
+    case all = "all"
+
+    var id: String { rawValue }
+
+    func displayName(localize: (String) -> String) -> String {
+        switch self {
+        case .automatic: return localize("Automatic")
+        case .one: return localize("1 Account")
+        case .two: return localize("2 Accounts")
+        case .all: return localize("All Accounts")
+        }
+    }
+
+    var limit: Int? {
+        switch self {
+        case .automatic: return 2
+        case .one: return 1
+        case .two: return 2
+        case .all: return nil
+        }
+    }
+}
+
+enum CodexAccountResolver {
+    static func resolve<T>(
+        accounts: [T],
+        selectionMode: String?,
+        activeAccountID: String?,
+        displayMode: CodexAccountDisplayMode,
+        idProvider: (T) -> String?,
+        activeProvider: (T) -> Bool?
+    ) -> [T] {
+        guard !accounts.isEmpty else { return [] }
+
+        var ordered: [T] = accounts
+        let isPinned = selectionMode == "pinned" || (selectionMode == nil && activeAccountID != nil)
+
+        if isPinned, let activeID = activeAccountID {
+            if let idx = ordered.firstIndex(where: { idProvider($0) == activeID }) {
+                let activeItem = ordered.remove(at: idx)
+                ordered.insert(activeItem, at: 0)
+            }
+        } else if isPinned {
+            if let idx = ordered.firstIndex(where: { activeProvider($0) == true }) {
+                let activeItem = ordered.remove(at: idx)
+                ordered.insert(activeItem, at: 0)
+            }
+        }
+        // OpenCodex auto: selectionMode == "auto" && activeAccountID == nil -> strict original order preserved.
+
+        if let limit = displayMode.limit {
+            return Array(ordered.prefix(limit))
+        }
+        return ordered
     }
 }
 
@@ -136,6 +234,11 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
     let codexWeeklyReset: String?
     let codexResetText: String?
     let codexWeeklyProgress: Double
+    var codexAccounts: [WidgetCodexAccount]? = nil
+    var codexActiveAccountID: String? = nil
+    var codexSelectionMode: String? = nil
+    var codexSource: String? = nil
+    var codexAccountDisplayMode: CodexAccountDisplayMode = .automatic
 
     // WorkBuddy properties
     let workbuddyPoints: Double?
@@ -171,12 +274,42 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         return "缓存 / \(deepseekError ?? "stale")"
     }
 
+    var resolvedCodexAccounts: [WidgetCodexAccount]? {
+        codexAccounts.map {
+            CodexAccountResolver.resolve(accounts: $0, selectionMode: codexSelectionMode,
+                activeAccountID: codexActiveAccountID, displayMode: codexAccountDisplayMode,
+                idProvider: { $0.id }, activeProvider: { $0.active })
+        }
+    }
+
+    var workbuddyCompactStatusText: String {
+        workbuddyState == "live" ? "" : (workbuddyState == "stale" ? "Cached" : "Unavailable")
+    }
+
+    var deepseekCompactStatusText: String {
+        if deepseekState == "stale" { return deepseekError ?? "Cached" }
+        if deepseekState == "unavailable" { return deepseekStatusText }
+        return deepseekAccountStatus == "Online" ? "" : (deepseekAccountStatus ?? "")
+    }
+
     // Metadata
     let fetchedAt: Date
     var stale: Bool
 
     // Helper presentation accessors
     var codexTitle: String {
+        if let accounts = codexAccounts, !accounts.isEmpty {
+            if codexSelectionMode == "auto" && codexActiveAccountID == nil {
+                return "Codex Auto"
+            }
+            if let activeID = codexActiveAccountID,
+               let activeAccount = accounts.first(where: { $0.id == activeID }) {
+                return "Codex · \(activeAccount.safeDisplayName)"
+            }
+            if let activeAccount = accounts.first(where: { $0.active == true }) {
+                return "Codex · \(activeAccount.safeDisplayName)"
+            }
+        }
         if codexWeeklyRemaining != nil {
             return "Codex 每周额度"
         } else if codexFiveHourRemaining != nil {
@@ -192,6 +325,11 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
             return codexFiveHourRemaining
         }
         return nil
+    }
+
+    var isCodexAutoPool: Bool {
+        guard let accounts = codexAccounts, !accounts.isEmpty else { return false }
+        return codexSelectionMode == "auto" && codexActiveAccountID == nil
     }
 
     var codexResetShortText: String? {
@@ -232,6 +370,10 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         case codexWeeklyReset
         case codexResetText
         case codexWeeklyProgress
+        case codexAccounts
+        case codexActiveAccountID
+        case codexSelectionMode
+        case codexSource, codexAccountDisplayMode
         case workbuddyPoints
         case workbuddyPointsText
         case workbuddyIsOnline
@@ -282,6 +424,7 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        codexAccountDisplayMode = (try? container.decode(CodexAccountDisplayMode.self, forKey: .codexAccountDisplayMode)) ?? .automatic
         google = try? container.decode(GoogleDisplayQuota.self, forKey: .google)
         codexStale = (try? container.decode(Bool.self, forKey: .codexStale)) ?? false
         workbuddyStale = (try? container.decode(Bool.self, forKey: .workbuddyStale)) ?? false
@@ -296,6 +439,10 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
             self.codexWeeklyReset = try? container.decodeIfPresent(String.self, forKey: .codexWeeklyReset)
             self.codexResetText = try? container.decodeIfPresent(String.self, forKey: .codexResetText)
             self.codexWeeklyProgress = (try? container.decodeIfPresent(Double.self, forKey: .codexWeeklyProgress)) ?? 0.0
+            self.codexAccounts = try? container.decodeIfPresent([WidgetCodexAccount].self, forKey: .codexAccounts)
+            self.codexActiveAccountID = try? container.decodeIfPresent(String.self, forKey: .codexActiveAccountID)
+            self.codexSelectionMode = try? container.decodeIfPresent(String.self, forKey: .codexSelectionMode)
+            self.codexSource = try? container.decodeIfPresent(String.self, forKey: .codexSource)
             self.workbuddyPoints = try? container.decodeIfPresent(Double.self, forKey: .workbuddyPoints)
             self.workbuddyPointsText = (try? container.decodeIfPresent(String.self, forKey: .workbuddyPointsText)) ?? "—"
             self.workbuddyIsOnline = (try? container.decodeIfPresent(Bool.self, forKey: .workbuddyIsOnline)) ?? false
@@ -357,6 +504,11 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         try container.encodeIfPresent(codexWeeklyReset, forKey: .codexWeeklyReset)
         try container.encodeIfPresent(codexResetText, forKey: .codexResetText)
         try container.encode(codexWeeklyProgress, forKey: .codexWeeklyProgress)
+        try container.encodeIfPresent(codexAccounts, forKey: .codexAccounts)
+        try container.encodeIfPresent(codexActiveAccountID, forKey: .codexActiveAccountID)
+        try container.encodeIfPresent(codexSelectionMode, forKey: .codexSelectionMode)
+        try container.encodeIfPresent(codexSource, forKey: .codexSource)
+        try container.encode(codexAccountDisplayMode, forKey: .codexAccountDisplayMode)
         try container.encodeIfPresent(workbuddyPoints, forKey: .workbuddyPoints)
         try container.encode(workbuddyPointsText, forKey: .workbuddyPointsText)
         try container.encode(workbuddyIsOnline, forKey: .workbuddyIsOnline)
@@ -376,13 +528,25 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
     init(payload: WidgetStatusPayload, fetchedAt: Date) {
         if let shared = payload.display_snapshot {
             self = shared
+            codexAccountDisplayMode = payload.codex_account_display_mode ?? shared.codexAccountDisplayMode
             // Old clients may publish snapshots without the new optional field.
             google = (payload.google ?? shared.google)?.evaluated(at: fetchedAt)
             return
         }
+        // 1. Codex Pool & Active Account
+        let accounts = payload.codex?.accounts
+        let activeID = payload.codex?.activeAccountID
+        let selectionMode = payload.codex?.selectionMode
+        let source = payload.codex?.source
+
+        let activeAccount = accounts?.first(where: {
+            if let activeID { return $0.id == activeID }
+            return $0.active == true
+        })
+
         // 1. Codex Weekly & 5-hour
-        let weeklyRem = payload.codex?.weekly?.remaining
-        let fiveHourRem = payload.codex?.fiveHour?.remaining
+        let weeklyRem = activeAccount?.weekly?.remaining ?? payload.codex?.weekly?.remaining
+        let fiveHourRem = activeAccount?.fiveHour?.remaining ?? payload.codex?.fiveHour?.remaining
         let chosenRem = weeklyRem ?? fiveHourRem
 
         let weeklyNum: String
@@ -395,7 +559,7 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
             progress = 0.0
         }
 
-        let rawReset = payload.codex?.weekly?.reset ?? payload.codex?.fiveHour?.reset
+        let rawReset = activeAccount?.weekly?.reset ?? activeAccount?.fiveHour?.reset ?? payload.codex?.weekly?.reset ?? payload.codex?.fiveHour?.reset
         let resetText = Self.formatReset(rawReset)
 
         // 2. WorkBuddy
@@ -425,9 +589,16 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
             fetchedAt: payload.fetched_at.map(Date.init(timeIntervalSince1970:)) ?? fetchedAt,
             stale: false
         )
+        codexAccountDisplayMode = payload.codex_account_display_mode ?? .automatic
+        codexAccounts = accounts
+        codexActiveAccountID = activeID
+        codexSelectionMode = selectionMode
+        codexSource = source
         google = payload.google?.evaluated(at: fetchedAt)
         let failureStates = ["error", "timeout", "stale", "pending", "refreshing"]
-        codexStale = payload.codex?.stale == true || failureStates.contains(payload.collection?.codex?.state ?? "")
+        let activeAccountStale = activeAccount?.stale == true
+        let poolStale = payload.codex?.stale == true || failureStates.contains(payload.collection?.codex?.state ?? "")
+        codexStale = poolStale || activeAccountStale
         workbuddyStale = payload.workbuddy?.balance_stale == true || payload.workbuddy?.balance_state == "Cached"
             || failureStates.contains(payload.collection?.workbuddy?.state ?? "")
         deepseekStale = payload.deepseek?.stale == true || (!dsFresh && dsStatus != "Not configured")
@@ -439,6 +610,13 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
     var staleCopy: WidgetDisplaySnapshot {
         var copy = self
         copy.stale = true
+        copy.codexStale = true
+        if let accounts = copy.codexAccounts {
+            copy.codexAccounts = accounts.map {
+                WidgetCodexAccount(id: $0.id, label: $0.label, plan: $0.plan, active: $0.active,
+                                   needsReauth: $0.needsReauth, stale: true, fiveHour: $0.fiveHour, weekly: $0.weekly)
+            }
+        }
         copy.workbuddyIsOnline = false
         copy.deepseekIsOnline = false
         return copy
@@ -489,17 +667,18 @@ enum DisplaySnapshotBridge {
     // A normal probe followed by force can each take 65s; leave transport margin.
     static let refreshTimeout: TimeInterval = 140
     static func publish(_ snapshot: WidgetDisplaySnapshot, revision: String?, baseURL: String,
-                        session: URLSession) async {
+                        session: URLSession, codexAccountDisplayMode: CodexAccountDisplayMode? = nil) async {
         guard let revision, let url = URL(string: baseURL + "/api/display-snapshot") else { return }
         struct Publication: Encodable {
             let revision: String
             let snapshot: WidgetDisplaySnapshot
+            let codexAccountDisplayMode: CodexAccountDisplayMode?
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 3
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONEncoder().encode(Publication(revision: revision, snapshot: snapshot))
+        request.httpBody = try? JSONEncoder().encode(Publication(revision: revision, snapshot: snapshot, codexAccountDisplayMode: codexAccountDisplayMode))
         _ = try? await session.data(for: request)
     }
 }

@@ -177,3 +177,19 @@
 "右上" = "Top Right";
 "左下" = "Bottom Left";
 "右下" = "Bottom Right";
+
+"%d accounts" = "%d accounts";
+"Automatic" = "Automatic";
+"Dashboard" = "Dashboard";
+"Open →" = "Open →";
+"AICC status at a glance" = "AICC status at a glance";
+"AICC Widget Configuration" = "AICC Widget Configuration";
+"Customize displayed metrics in AICC widget" = "Customize displayed metrics in AICC widget";
+"Refresh Widget" = "Refresh Widget";
+
+"%d account" = "%d account";
+"Show accounts" = "Show accounts";
+"1 Account" = "1";
+"2 Accounts" = "2";
+"All Accounts" = "All";
+"No OpenCodex accounts" = "No OpenCodex accounts";

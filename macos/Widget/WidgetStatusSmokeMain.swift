@@ -296,6 +296,189 @@ struct WidgetStatusSmokeMain {
         try require(WidgetMetricOption.google.isQuota, "Google is quota")
         try require(!WidgetMetricOption.workbuddy.isQuota, "WorkBuddy is balance")
         try require(!WidgetMetricOption.deepseek.isQuota, "DeepSeek is balance")
+
+        // MARK: - 8. Codex Pool & Multi-Account Tests
+        // 8.1 Pinned Mode: matches active account exactly
+        let poolPinnedJSON = """
+        {
+          "codex": {
+            "source": "OpenCodex",
+            "selection_mode": "pinned",
+            "active_account_id": "acct-plus",
+            "accounts": [
+              {
+                "id": "acct-team",
+                "label": "team",
+                "plan": "team",
+                "active": false,
+                "stale": false,
+                "five_hour": { "remaining": 0, "reset": "2026-09-29 22:42" },
+                "weekly": { "remaining": 84, "reset": "2026-10-06 17:42" }
+              },
+              {
+                "id": "acct-plus",
+                "label": "plus",
+                "plan": "plus",
+                "active": true,
+                "stale": false,
+                "five_hour": { "remaining": 18, "reset": "2026-09-30 00:16" },
+                "weekly": { "remaining": 46, "reset": "2026-10-04 01:53" }
+              }
+            ],
+            "weekly": { "remaining": 84 },
+            "five_hour": { "remaining": 0 }
+          }
+        }
+        """
+        let pinnedSnapshot = WidgetDisplaySnapshot(payload: try decode(poolPinnedJSON), fetchedAt: fetchedAt)
+        try require(pinnedSnapshot.codexTitle == "Codex · plus", "Pinned mode title reflects active account: \(pinnedSnapshot.codexTitle)")
+        try require(pinnedSnapshot.codexWeeklyNumber == "46", "Pinned mode weekly matches plus account (46), not team: \(pinnedSnapshot.codexWeeklyNumber)")
+        try require(pinnedSnapshot.codexWeeklyRemaining == 46, "Pinned mode weekly remaining is 46")
+        try require(pinnedSnapshot.codexFiveHourRemaining == 18, "Pinned mode 5h remaining is 18")
+        try require(pinnedSnapshot.codexAccounts?.count == 2, "Pinned mode has 2 accounts")
+        try require(pinnedSnapshot.codexActiveAccountID == "acct-plus", "Active account ID preserved")
+        try require(pinnedSnapshot.codexSelectionMode == "pinned", "Selection mode preserved")
+        try require(!pinnedSnapshot.isCodexAutoPool, "Pinned mode is not auto pool")
+
+        // 8.2 Auto Mode: pool overview, does not invent active account
+        let poolAutoJSON = """
+        {
+          "codex": {
+            "source": "OpenCodex",
+            "selection_mode": "auto",
+            "active_account_id": null,
+            "accounts": [
+              {
+                "id": "acct-team",
+                "label": "team",
+                "plan": "team",
+                "active": false,
+                "stale": false,
+                "five_hour": { "remaining": 0, "reset": "2026-09-29 22:42" },
+                "weekly": { "remaining": 84, "reset": "2026-10-06 17:42" }
+              },
+              {
+                "id": "acct-plus",
+                "label": "plus",
+                "plan": "plus",
+                "active": false,
+                "stale": false,
+                "five_hour": { "remaining": 18, "reset": "2026-09-30 00:16" },
+                "weekly": { "remaining": 46, "reset": "2026-10-04 01:53" }
+              }
+            ]
+          }
+        }
+        """
+        let autoSnapshot = WidgetDisplaySnapshot(payload: try decode(poolAutoJSON), fetchedAt: fetchedAt)
+        try require(autoSnapshot.codexTitle == "Codex Auto", "Auto mode title: \(autoSnapshot.codexTitle)")
+        try require(autoSnapshot.isCodexAutoPool, "Auto mode identifies as auto pool")
+        try require(autoSnapshot.codexWeeklyNumber == "—", "Auto mode without active account has — primary number")
+        try require(autoSnapshot.codexWeeklyRemaining == nil, "Auto mode does not pick arbitrary active account")
+        try require(autoSnapshot.codexAccounts?.count == 2, "Auto mode preserves all accounts")
+        try require(autoSnapshot.codexAccounts?[0].safeDisplayName == "team", "Account 0 name")
+        try require(autoSnapshot.codexAccounts?[1].safeDisplayName == "plus", "Account 1 name")
+
+        // 8.3 Stale Account Propagation
+        let staleAcctJSON = """
+        {
+          "codex": {
+            "source": "OpenCodex",
+            "selection_mode": "pinned",
+            "active_account_id": "acct-1",
+            "stale": false,
+            "accounts": [
+              {
+                "id": "acct-1",
+                "label": "one",
+                "active": true,
+                "stale": true,
+                "weekly": { "remaining": 50 }
+              }
+            ]
+          }
+        }
+        """
+        let staleAcctSnapshot = WidgetDisplaySnapshot(payload: try decode(staleAcctJSON), fetchedAt: fetchedAt)
+        try require(staleAcctSnapshot.codexState == "stale", "Active account stale propagates to codexState")
+
+        // 8.4 Roundtrip persistence of pool fields
+        let poolEncoded = try JSONEncoder().encode(pinnedSnapshot)
+        let poolDecoded = try JSONDecoder().decode(WidgetDisplaySnapshot.self, from: poolEncoded)
+        try require(poolDecoded.codexAccounts == pinnedSnapshot.codexAccounts, "codexAccounts survives JSON roundtrip")
+        try require(poolDecoded.codexActiveAccountID == pinnedSnapshot.codexActiveAccountID, "codexActiveAccountID survives JSON roundtrip")
+        try require(poolDecoded.codexSelectionMode == pinnedSnapshot.codexSelectionMode, "codexSelectionMode survives JSON roundtrip")
+        try require(poolDecoded.codexSource == pinnedSnapshot.codexSource, "codexSource survives JSON roundtrip")
+
+        // 8.5 Old snapshot without accounts decodes gracefully (backward compatibility)
+        var strippedPool = try JSONSerialization.jsonObject(with: poolEncoded) as! [String: Any]
+        strippedPool.removeValue(forKey: "codexAccounts")
+        strippedPool.removeValue(forKey: "codexActiveAccountID")
+        strippedPool.removeValue(forKey: "codexSelectionMode")
+        strippedPool.removeValue(forKey: "codexSource")
+        let strippedDecoded = try JSONDecoder().decode(WidgetDisplaySnapshot.self, from: JSONSerialization.data(withJSONObject: strippedPool))
+        try require(strippedDecoded.codexAccounts == nil, "Stripped cache decodes nil accounts")
+        try require(strippedDecoded.codexWeeklyNumber == "46", "Stripped cache preserves legacy weeklyNumber")
+
+        // MARK: - 9. CodexAccountResolver & Display Mode Tests
+        struct SimpleAccount {
+            let id: String
+            let active: Bool
+        }
+        let a1 = SimpleAccount(id: "team", active: false)
+        let a2 = SimpleAccount(id: "plus", active: true)
+        let a3 = SimpleAccount(id: "backup", active: false)
+        let testPool = [a1, a2, a3]
+
+        // 9.1 Automatic with 1, 2, 3 accounts
+        let auto1 = CodexAccountResolver.resolve(accounts: [a1], selectionMode: "pinned", activeAccountID: "team", displayMode: .automatic, idProvider: { $0.id }, activeProvider: { $0.active })
+        try require(auto1.map { $0.id } == ["team"], "Auto mode on 1 account returns 1")
+
+        let auto2 = CodexAccountResolver.resolve(accounts: [a1, a2], selectionMode: "pinned", activeAccountID: "plus", displayMode: .automatic, idProvider: { $0.id }, activeProvider: { $0.active })
+        try require(auto2.map { $0.id } == ["plus", "team"], "Auto mode on 2 accounts returns 2, active first")
+
+        let auto3 = CodexAccountResolver.resolve(accounts: testPool, selectionMode: "pinned", activeAccountID: "plus", displayMode: .automatic, idProvider: { $0.id }, activeProvider: { $0.active })
+        try require(auto3.map { $0.id } == ["plus", "team"], "Auto mode on 3 accounts caps at 2, active first")
+
+        // 9.2 All mode with 3 accounts
+        let all3 = CodexAccountResolver.resolve(accounts: testPool, selectionMode: "pinned", activeAccountID: "plus", displayMode: .all, idProvider: { $0.id }, activeProvider: { $0.active })
+        try require(all3.map { $0.id } == ["plus", "team", "backup"], "All mode returns all 3, active first")
+
+        // 9.3 Display mode one
+        let onePinned = CodexAccountResolver.resolve(accounts: testPool, selectionMode: "pinned", activeAccountID: "plus", displayMode: .one, idProvider: { $0.id }, activeProvider: { $0.active })
+        try require(onePinned.map { $0.id } == ["plus"], "Mode one on pinned returns active account")
+
+        // 9.4 OpenCodex auto preserves original relative order without active bias
+        let autoModeAuto = CodexAccountResolver.resolve(accounts: testPool, selectionMode: "auto", activeAccountID: nil, displayMode: .two, idProvider: { $0.id }, activeProvider: { $0.active })
+        try require(autoModeAuto.map { $0.id } == ["team", "plus"], "OpenCodex auto preserves order, no active favoritism")
+
+        // 9.5 Accounts fewer than requested display count
+        let oneWithModeTwo = CodexAccountResolver.resolve(accounts: [a1], selectionMode: "pinned", activeAccountID: "team", displayMode: .two, idProvider: { $0.id }, activeProvider: { $0.active })
+        try require(oneWithModeTwo.map { $0.id } == ["team"], "Mode two with only 1 account returns 1 without padding")
+
+        // Shared preference survives roundtrip and changes the same pool resolver.
+        var oneSnapshot = pinnedSnapshot
+        oneSnapshot.codexAccountDisplayMode = .one
+        let oneData = try JSONEncoder().encode(oneSnapshot)
+        let oneDecoded = try JSONDecoder().decode(WidgetDisplaySnapshot.self, from: oneData)
+        try require(oneDecoded.codexAccountDisplayMode == .one, "Shared display preference roundtrip")
+        try require(oneDecoded.resolvedCodexAccounts?.map { $0.id } == ["acct-plus"], "Widget one shows pinned active")
+        try require(oneDecoded.codexAccounts?.count == 2, "One presentation retains entire pool")
+        try require(oneDecoded.codexAccounts?[0].weekly?.reset == "2026-10-06 17:42", "Hidden reset remains in snapshot")
+        oneSnapshot.codexAccountDisplayMode = .two
+        try require(oneSnapshot.resolvedCodexAccounts?.map { $0.id } == ["acct-plus", "acct-team"], "Widget two uses same resolver")
+        var autoOne = autoSnapshot
+        autoOne.codexAccountDisplayMode = .one
+        try require(autoOne.resolvedCodexAccounts?.map { $0.id } == ["acct-team"], "Auto one preserves source order")
+        try require(autoOne.codexActiveAccountID == nil, "Auto never invents active")
+        var oldPreference = try JSONSerialization.jsonObject(with: oneData) as! [String: Any]
+        oldPreference.removeValue(forKey: "codexAccountDisplayMode")
+        let compatible = try JSONDecoder().decode(WidgetDisplaySnapshot.self, from: JSONSerialization.data(withJSONObject: oldPreference))
+        try require(compatible.codexAccountDisplayMode == .automatic, "Old snapshot defaults to automatic")
+        try require(snapshot.workbuddyCompactStatusText.isEmpty, "Connected WorkBuddy stays quiet")
+        try require(snapshot.deepseekCompactStatusText.isEmpty, "Online DeepSeek stays quiet")
+        try require(!snapshot.staleCopy.workbuddyCompactStatusText.isEmpty, "Stale WorkBuddy is explicit")
+        try require(!snapshot.staleCopy.deepseekCompactStatusText.isEmpty, "Stale DeepSeek is explicit")
         print("AICC Widget status smoke tests passed.")
     }
 

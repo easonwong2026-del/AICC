@@ -6,6 +6,7 @@ final class SnapshotProtocol: URLProtocol {
     static var deepseekFailed = false
     static var requests: [String] = []
     static var published: [String: Any]?
+    static var displayMode = "automatic"
     static let fetched = Date.now.timeIntervalSince1970
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -32,12 +33,15 @@ final class SnapshotProtocol: URLProtocol {
             }
             let body = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
             Self.published = body["snapshot"] as? [String: Any]
+            if let mode = body["codexAccountDisplayMode"] as? String { Self.displayMode = mode }
+            Self.published?["codexAccountDisplayMode"] = Self.displayMode
             result = ["ok": true]
         } else {
             if path == "/api/refresh" { Self.generation += 1; Self.published = nil }
             let fresh = Self.generation > 0
             result = [
                 "fetched_at": Self.fetched,
+                "codex_account_display_mode": Self.displayMode,
                 "display_revision": "\(Self.generation)",
                 "google": ["weekly": ["remaining": fresh ? 30 : 70, "reset": "2026-09-18 14:12"],
                            "five_hour": ["remaining": fresh ? 0 : 87], "updated_epoch": Self.fetched],
@@ -111,6 +115,19 @@ struct DisplaySnapshotRegressionMain {
         assert(api.displaySnapshot == providerFailure)
         assert(providerFailure.deepseekState == "stale" && providerFailure.deepseekBalanceText == "58.39")
         assert(providerFailure.deepseekStatusText == "缓存 / connection_error")
+        var preference = providerFailure
+        preference.codexAccountDisplayMode = .one
+        await DisplaySnapshotBridge.publish(preference, revision: "test", baseURL: "http://127.0.0.1:8765",
+            session: session, codexAccountDisplayMode: .one)
+        let widgetOne = await WidgetStatusLoader.snapshot(session: session)
+        assert(widgetOne.codexAccountDisplayMode == .one, "Widget must use the host preference in the shared snapshot")
+        let widgetRefreshed = await WidgetStatusLoader.snapshot(force: true, session: session)
+        assert(widgetRefreshed.codexAccountDisplayMode == .one, "Source refresh must preserve the host preference")
+        await api.fetchStatus()
+        let hostPreference = CodexAccountDisplayMode(rawValue: AppSettings.shared.codexAccountDisplayMode) ?? .automatic
+        assert(api.displaySnapshot?.codexAccountDisplayMode == hostPreference)
+        assert(SnapshotProtocol.displayMode == hostPreference.rawValue, "Host preference replaces Widget cache preference")
+        _ = await WidgetStatusLoader.snapshot(session: session)
         SnapshotProtocol.offline = true
         await api.fetchStatus()
         let offlineWidget = await WidgetStatusLoader.snapshot(session: session)

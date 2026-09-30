@@ -67,6 +67,7 @@ class APIService: ObservableObject {
     @Published var lastRefresh: Date?
     @Published var errorMessage: String?
 
+    private var displayRevision: String?
     private let baseURL: String
     private var refreshTask: Task<Void, Never>?
     private var fetchTask: Task<Void, Never>?
@@ -137,7 +138,9 @@ class APIService: ObservableObject {
             let decoder = JSONDecoder()
             let decoded = try decoder.decode(StatusResponse.self, from: data)
             let payload = try decoder.decode(WidgetStatusPayload.self, from: data)
-            let snapshot = WidgetDisplaySnapshot(payload: payload, fetchedAt: .now)
+            var snapshot = WidgetDisplaySnapshot(payload: payload, fetchedAt: .now)
+            snapshot.codexAccountDisplayMode = CodexAccountDisplayMode(rawValue: AppSettings.shared.codexAccountDisplayMode) ?? .automatic
+            displayRevision = payload.display_revision
             // Commit the entire response on MainActor before any network suspension.
             status = decoded
             displaySnapshot = snapshot
@@ -145,7 +148,8 @@ class APIService: ObservableObject {
             state = .ready
             errorMessage = nil
 
-            await DisplaySnapshotBridge.publish(snapshot, revision: payload.display_revision, baseURL: baseURL, session: session)
+            await DisplaySnapshotBridge.publish(snapshot, revision: payload.display_revision, baseURL: baseURL, session: session,
+                codexAccountDisplayMode: snapshot.codexAccountDisplayMode)
             WidgetCenter.shared.reloadAllTimelines()
         } catch let decodingError as DecodingError {
             let detail = decodingError.failureReason ?? decodingError.localizedDescription
@@ -163,6 +167,16 @@ class APIService: ObservableObject {
             state = .error(error.localizedDescription)
             errorMessage = error.localizedDescription
         }
+    }
+
+    func syncCodexDisplayPreference() async {
+        await fetchStatus()
+        guard var snapshot = displaySnapshot else { return }
+        snapshot.codexAccountDisplayMode = CodexAccountDisplayMode(rawValue: AppSettings.shared.codexAccountDisplayMode) ?? .automatic
+        displaySnapshot = snapshot
+        await DisplaySnapshotBridge.publish(snapshot, revision: displayRevision, baseURL: baseURL,
+            session: session, codexAccountDisplayMode: snapshot.codexAccountDisplayMode)
+        WidgetCenter.shared.reloadAllTimelines()
     }
 
     /// Reconnect WorkBuddy through its fixed local endpoint, then reload the

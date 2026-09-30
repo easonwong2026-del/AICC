@@ -33,6 +33,12 @@ class AppSettings: ObservableObject {
     @Published var menuBarShowGoogleQuota: Bool {
         didSet { UserDefaults.standard.set(menuBarShowGoogleQuota, forKey: "menuBarShowGoogleQuota") }
     }
+    @Published var codexAccountDisplayMode: String {
+        didSet {
+            UserDefaults.standard.set(codexAccountDisplayMode, forKey: "codexAccountDisplayMode")
+            Task { @MainActor in await APIService.shared.syncCodexDisplayPreference() }
+        }
+    }
 
     @Published var ocxCustomPath: String {
         didSet { UserDefaults.standard.set(ocxCustomPath, forKey: "ocxCustomPath") }
@@ -95,6 +101,7 @@ class AppSettings: ObservableObject {
         menuBarShowSystem = defaults.object(forKey: "menuBarShowSystem") as? Bool ?? true
         menuBarShowOpenCodex = defaults.object(forKey: "menuBarShowOpenCodex") as? Bool ?? true
         menuBarShowGoogleQuota = defaults.object(forKey: "menuBarShowGoogleQuota") as? Bool ?? true
+        codexAccountDisplayMode = defaults.string(forKey: "codexAccountDisplayMode") ?? CodexAccountDisplayMode.automatic.rawValue
         ocxCustomPath = defaults.string(forKey: "ocxCustomPath") ?? ""
         debugMode = defaults.object(forKey: "debugMode") as? Bool ?? false
     }

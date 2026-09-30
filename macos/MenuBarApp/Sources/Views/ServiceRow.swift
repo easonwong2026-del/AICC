@@ -42,12 +42,15 @@ struct CompactCard: View {
                         .foregroundColor(.secondary)
                 }
             }
-            Text(subtitle)
-                .font(.system(size: DashboardTypography.status))
-                .foregroundColor(.secondary)
-                .lineLimit(1)
+            if !subtitle.isEmpty {
+                Text(subtitle)
+                    .font(.system(size: DashboardTypography.status))
+                    .foregroundColor(state == .online ? .secondary : .orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
-        .padding(10)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 10)
@@ -59,7 +62,7 @@ struct CompactCard: View {
         switch state {
         case .online: return .green
         case .stale: return .orange
-        case .unavailable: return .secondary
+        case .unavailable: return .orange
         }
     }
 
@@ -130,12 +133,9 @@ struct DashboardActionRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Circle()
-                .fill(isEnabled ? Color.green : Color.secondary)
-                .frame(width: 6, height: 6)
-
             Text(LocalizedStringKey(label))
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
 
             Spacer()
 

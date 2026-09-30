@@ -49,7 +49,6 @@ struct DashboardView: View {
                 googleQuotaSection
             }
             if settings.menuBarShowWorkBuddy || settings.menuBarShowDeepSeek {
-                Divider().padding(.horizontal, 14)
                 miniCardsSection
             }
             if settings.menuBarShowSystem {
@@ -60,7 +59,6 @@ struct DashboardView: View {
                 Divider().padding(.horizontal, 14)
                 servicesSection
             }
-            Divider().padding(.horizontal, 14)
             footerSection
         }
         .frame(width: 350)
@@ -172,7 +170,7 @@ struct DashboardView: View {
     // MARK: - Services
 
     private var servicesSection: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 3) {
             if settings.menuBarShowOpenCodex {
                 ServiceRow(
                     label: "OpenCodex",
@@ -192,15 +190,15 @@ struct DashboardView: View {
                     action: nil
                 )
                 DashboardActionRow(
-                    label: "OpenCodex Dashboard",
-                    actionLabel: "Open Dashboard",
+                    label: "Dashboard",
+                    actionLabel: "Open →",
                     isEnabled: ocx.dashboardURL != nil,
                     action: { _ = ocx.openDashboard() }
                 )
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.vertical, 6)
     }
 
     private var ocxStatusColor: Color {
@@ -228,7 +226,8 @@ struct DashboardView: View {
             Spacer()
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.top, 2)
+        .padding(.bottom, 6)
     }
 
     // MARK: - Helpers

@@ -185,3 +185,19 @@
 "右上" = "右上";
 "左下" = "左下";
 "右下" = "右下";
+
+"%d accounts" = "%d 个账号";
+"Automatic" = "自动";
+"Dashboard" = "仪表盘";
+"Open →" = "打开 →";
+"AICC status at a glance" = "一览 AICC 服务状态";
+"AICC Widget Configuration" = "AICC 小组件配置";
+"Customize displayed metrics in AICC widget" = "自定义 AICC 小组件显示的指标";
+"Refresh Widget" = "刷新小组件";
+
+"%d account" = "%d 个账号";
+"Show accounts" = "显示账号";
+"1 Account" = "1";
+"2 Accounts" = "2";
+"All Accounts" = "全部";
+"No OpenCodex accounts" = "暂无 OpenCodex 账号";

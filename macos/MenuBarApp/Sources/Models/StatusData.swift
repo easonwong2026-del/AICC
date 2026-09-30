@@ -33,6 +33,20 @@ struct CodexAccount: Codable {
     let stale: Bool?
     let five_hour: RateWindow?
     let weekly: RateWindow?
+
+    var safeDisplayName: String {
+        if let label = label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty {
+            return label
+        }
+        if let email = email?.trimmingCharacters(in: .whitespacesAndNewlines), !email.isEmpty,
+           (email.contains("*") || email.contains("•")) {
+            return email
+        }
+        if let id = id?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty, id != "__main__" {
+            return id.count > 12 ? String(id.prefix(8)) + "…" : id
+        }
+        return "Account"
+    }
 }
 
 struct RateWindow: Codable {
