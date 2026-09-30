@@ -2,10 +2,21 @@
 
 [English](CHANGELOG.en.md)
 
-## 未发布
+## 2.10.0 - 2026-09-30
 
-- Codex 额度改由 OpenCodex Account Pool 提供，支持任意数量账号、独立额度和手动强制刷新；保留活动账号的旧版 Widget 字段，缓存失败时明确标记 stale。
-- 修复旧 `codex app-server` 额度请求 ID 登记竞态，并合并同时发生的请求。
+### macOS
+
+- **OpenCodex Account Pool**：读取完整 Codex 账号池，保留每个账号的独立 Weekly / 5h 额度、重置时间、Reauth 和缓存状态；pinned 模式优先显示活动账号，auto 模式保留源顺序且不伪造活动账号。支持 `AICC_CODEX_SOURCE=auto / opencodex / app-server`，自动模式检测到 OpenCodex 后不会因临时失败切回旧版单账号源。
+- **强制刷新与缓存恢复**：手动刷新强制更新账号池额度，并发请求共用采集任务；超时或失败保留最近成功账号池并明确标记 stale。启动时使用常规采集，旧 `codex app-server` 模式与账号池缓存隔离，并修复额度请求 ID 登记竞态和重复请求。
+- **Dashboard 信息层级**：保留 Codex 主额度视觉，支持单账号全宽、双账号双列、多账号双列 Grid；新增“自动 / 1 / 2 / 全部”显示偏好，标题显示真实池规模。紧凑多账号卡片隐藏 Reset，单账号保留完整 Weekly Reset；Google 保持 Weekly / 5h 紧凑进度条，WorkBuddy / DeepSeek 降为辅助状态卡，正常时不再显示秒级时间或重复在线文字，异常时显示明确状态。
+- **OpenCodex 控制区**：合并重复品牌文案，压缩状态、开关与仪表盘入口，保留原有启停与打开逻辑。
+- **Widget 多账号一致性**：保留 Small 两指标、Medium 四槽位的独立实例配置；使用完整账号池和统一 resolver，pinned 显示活动账号，auto 显示自动模式。通过共享 snapshot 传递显示账号偏好，刷新后保留设置，兼容旧快照；数据层保留 Reset，展示层按空间简化，Google / WorkBuddy / DeepSeek 遵循同一紧凑层级。
+- **本地化与回归**：补齐中英文账号显示及 Widget 文案；覆盖账号池、显示模式、Reauth、0%、未知值、缓存和共享偏好回归，修复 flake8 格式错误，CI 五个 job 全部验证。
+- **版本与分发**：AICC 2.10.0，macOS Build 13。沿用 v2.9.0 的 ad-hoc 签名方式，未经 Apple 公证；需要 macOS 14+、Apple Silicon 和 Python 3.10+，DMG 不含 Python 解释器。
+
+### Android / Poke4S
+
+- Android 源码与行为未变，继续使用 v2.9.0 已发布的 `AICC-Poke4S-1.2.6.apk`（`1.2.6-pencil-home` / versionCode 12），本次不重复发布 APK。
 
 ## 2.9.0 - 2026-09-28
 

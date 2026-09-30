@@ -4,6 +4,22 @@
 
 This file summarizes the current and recent public releases. The Chinese changelog contains the older detailed history.
 
+## 2.10.0 - 2026-09-30
+
+### macOS
+
+- **OpenCodex Account Pool**: Reads the complete Codex pool with independent Weekly / 5h quota, reset times, reauthentication and cache state per account. Pinned mode prioritizes the active account; auto mode preserves source order without inventing an active account. Supports `AICC_CODEX_SOURCE=auto / opencodex / app-server`; once auto detects OpenCodex, temporary failures do not silently switch to the legacy single-account source.
+- **Forced refresh and cache recovery**: Manual refresh forces pool quota collection, concurrent requests share collection work, and failures/timeouts preserve the last successful pool with explicit stale state. Startup uses normal collection. Legacy app-server and pool caches are isolated; request-ID registration races and duplicate quota requests are fixed.
+- **Dashboard information hierarchy**: Keeps Codex quota prominent with full-width single-account cards, two-column dual cards and a two-column grid for larger pools. Adds Automatic / 1 / 2 / All display preferences while showing the real pool count. Compact multi-account cards hide Reset; a single card retains full Weekly Reset. Google keeps compact Weekly / 5h progress rows; WorkBuddy and DeepSeek become auxiliary cards, with no second-by-second freshness or repeated online text in healthy states and explicit text for failures.
+- **OpenCodex controls**: Removes duplicate branding and reduces spacing around status, toggle and dashboard access while preserving control behavior.
+- **Consistent multi-account widgets**: Keeps independent Small two-metric and Medium four-slot configuration. Uses the complete pool and shared resolver for pinned/auto selection. Display preferences travel through the shared snapshot, survive refreshes and remain compatible with older snapshots. Reset data stays intact while presentation is simplified; other services follow the same compact hierarchy.
+- **Localization and regressions**: Completes English/Chinese account-display and widget text; covers pool selection, display modes, reauthentication, zero/unknown quota, cached state and shared preferences. Fixes flake8 formatting failures and validates all five CI jobs.
+- **Version and distribution**: AICC 2.10.0, macOS Build 13. Uses the same ad-hoc signing distribution as v2.9.0 and is not Apple-notarized. Requires macOS 14+, Apple Silicon and Python 3.10+; Python is not included in the DMG.
+
+### Android / Poke4S
+
+- Android source and behavior are unchanged. Continue using `AICC-Poke4S-1.2.6.apk` from v2.9.0 (`1.2.6-pencil-home` / versionCode 12); no duplicate APK is published here.
+
 ## 2.9.0 - 2026-09-28
 
 ### macOS
