@@ -4,7 +4,7 @@
 
 AICC is a local AI status center for macOS. It displays Codex, WorkBuddy, DeepSeek, and system status, with support for Poke4S e-ink devices. The server uses only the Python standard library.
 
-The current macOS version is AICC 2.8.0 (Build 11); Android/Poke4S use an independent version line.
+The current macOS version is AICC 2.10.0 (Build 13); Android/Poke4S use an independent version line.
 
 The macOS menu-bar app uses fixed Codex, Google, WorkBuddy, DeepSeek, System, and OpenCodex status cards. It reads `/api/status` and the fixed operation endpoints only. The Python server provides Codex, Google, WorkBuddy, DeepSeek, and system status through dedicated collectors.
 
@@ -89,14 +89,21 @@ Manifest format:
 - Add it from the desktop: right-click → Edit Widgets → search for “AICC”, then choose Small or Medium.
 - Customize metrics: right-click desktop Widget → Edit "AICC" → select displayed metrics (Small configures 2 primary metrics; Medium configures 4 slots independently).
 - Default layout: Small defaults to Codex + Google; Medium defaults to Top Left: Codex, Top Right: Google, Bottom Left: WorkBuddy, Bottom Right: DeepSeek; includes automatic duplicate metric normalization and safe fallbacks.
-- The Widget reads `http://127.0.0.1:8765/api/status`. The production port is fixed at `8765`; the Widget does not call the refresh endpoint or start the server.
-- Use the refresh button in the Widget to reload its timeline. The AICC App also notifies WidgetKit on launch and when displayed data changes.
+- The Widget reads `http://127.0.0.1:8765/api/status`. The production port is fixed at `8765`; it does not start the server.
+- Its refresh button uses local `POST /api/refresh` to force quota collection and reload the timeline. The AICC App also notifies WidgetKit on launch and when displayed data changes.
+- Codex uses the complete account pool and the same resolver as the menu bar. Automatic / 1 / 2 / All preferences travel through the shared snapshot; pinned prioritizes the active account and auto preserves source order without inventing Active.
 - If the server is temporarily unavailable, the Widget keeps the last successful snapshot as stale data; a first install without a cache shows `—` placeholders.
 - The AICC App starts and supervises the backend. After an App restart, it reloads Widget timelines and resumes live data.
 
+### 2.10.0 dashboard and pool
+
+- Codex remains the primary quota area: account label, Active / Reauth, Weekly percentage/progress and 5h quota. Compact multi-account cards hide Reset; a full-width single card may show it in full.
+- Google is a compact secondary quota area. WorkBuddy points and DeepSeek balance are auxiliary cards with lightweight healthy status and explicit failure text.
+- OpenCodex retains status, toggle and dashboard access with reduced duplicate text. See the changelogs for the complete changes.
+
 ## Data collection and privacy
 
-- Codex: starts `codex app-server` on demand, reads account limits, and stops the child process after 30 seconds without panel access while retaining the last successful cache.
+- Codex: reads all account quotas from OpenCodex Account Pool when OpenCodex is detected, with a forced pool refresh for manual updates and explicit stale fallback. `AICC_CODEX_SOURCE=auto` (default), `opencodex` or `app-server` selects the source. Legacy app-server is used when OpenCodex is absent or explicitly selected; an OpenCodex failure does not silently switch sources.
 - WorkBuddy: reads account balance through the local `127.0.0.1:9223` debugging bridge. AICC does not start WorkBuddy when the App is closed and does not save or transmit tokens or cookies.
 - DeepSeek: reads the key from the environment or macOS Keychain and never writes it to the project directory.
 - System: uses built-in macOS tools for memory and CPU information.
@@ -111,7 +118,7 @@ LAN devices can read the dashboard. Refresh, write, and WorkBuddy reconnect endp
 
 Open the kiosk page and tap “Enter e-ink mode”. The page refreshes every five minutes and keeps the last successful data.
 
-The current Android source version is `1.2.6-pencil-home` (versionCode 12), independent of macOS releases. It discovers and validates multiple servers, migrates a changed LAN address, and offers a server chooser. BOOX transparent screensaver keeps a static image while asleep; use the dashboard's always-on mode when the displayed quota must stay current. The latest published APK is still 1.2.5 at [v2.5.0](https://github.com/easonwong2026-del/AICC/releases/tag/v2.5.0); the new source build has not been published.
+The current Android source version is `1.2.6-pencil-home` (versionCode 12), independent of macOS releases. It discovers and validates multiple servers, migrates a changed LAN address, and offers a server chooser. BOOX transparent screensaver keeps a static image while asleep; use the dashboard's always-on mode when the displayed quota must stay current. The published 1.2.6 APK is available in [v2.9.0](https://github.com/easonwong2026-del/AICC/releases/tag/v2.9.0) or via [direct APK download](https://github.com/easonwong2026-del/AICC/releases/download/v2.9.0/AICC-Poke4S-1.2.6.apk). macOS 2.10.0 does not change the independent Android version or republish the APK.
 
 The Android source is in `android/poke-dashboard/` and is independently buildable with the Gradle wrapper. It is not a runtime dependency of the Mac server. Release builds enable code and resource shrinking.
 
