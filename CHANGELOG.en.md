@@ -4,6 +4,16 @@
 
 This file summarizes the current and recent public releases. The Chinese changelog contains the older detailed history.
 
+## 2.10.1 - 2026-10-01
+
+### macOS
+
+- **Desktop widget redesign**: Equal-sized cards, native rounded surfaces and consistent numeric hierarchy for Small and Medium widgets, in both appearances and languages.
+- **Less information**: Removes redundant branding, healthy status dots and W prefixes, and hides full secondary 5h quota. Active accounts use heavier type; manual refresh moves to the bottom right.
+- **Failures and fallback**: Keeps reduced 5h percentages and cache, unavailable and sign-in notices. Multi-account views explicitly fall back to 5h when weekly quota is missing; summaries omit raw diagnostic codes.
+- **Verification**: Visual checks cover 364 combinations and detect asymmetric tile bounds; the existing visual smoke now runs in Swift CI.
+- **Version**: AICC 2.10.1, macOS Build 14; Android is unchanged.
+
 ## 2.10.0 - 2026-09-30
 
 ### macOS

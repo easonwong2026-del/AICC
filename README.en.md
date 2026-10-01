@@ -4,7 +4,7 @@
 
 AICC is a local AI status center for macOS. It displays Codex, WorkBuddy, DeepSeek, and system status, with support for Poke4S e-ink devices. The server uses only the Python standard library.
 
-The current macOS version is AICC 2.10.0 (Build 13); Android/Poke4S use an independent version line.
+The current macOS version is AICC 2.10.1 (Build 14); Android/Poke4S use an independent version line.
 
 The macOS menu-bar app uses fixed Codex, Google, WorkBuddy, DeepSeek, System, and OpenCodex status cards. It reads `/api/status` and the fixed operation endpoints only. The Python server provides Codex, Google, WorkBuddy, DeepSeek, and system status through dedicated collectors.
 
@@ -90,10 +90,16 @@ Manifest format:
 - Customize metrics: right-click desktop Widget → Edit "AICC" → select displayed metrics (Small configures 2 primary metrics; Medium configures 4 slots independently).
 - Default layout: Small defaults to Codex + Google; Medium defaults to Top Left: Codex, Top Right: Google, Bottom Left: WorkBuddy, Bottom Right: DeepSeek; includes automatic duplicate metric normalization and safe fallbacks.
 - The Widget reads `http://127.0.0.1:8765/api/status`. The production port is fixed at `8765`; it does not start the server.
-- Its refresh button uses local `POST /api/refresh` to force quota collection and reload the timeline. The AICC App also notifies WidgetKit on launch and when displayed data changes.
+- Its bottom-right refresh button uses local `POST /api/refresh` to force quota collection and reload the timeline. The AICC App also notifies WidgetKit on launch and when displayed data changes.
 - Codex uses the complete account pool and the same resolver as the menu bar. Automatic / 1 / 2 / All preferences travel through the shared snapshot; pinned prioritizes the active account and auto preserves source order without inventing Active.
 - If the server is temporarily unavailable, the Widget keeps the last successful snapshot as stale data; a first install without a cache shows `—` placeholders.
 - The AICC App starts and supervises the backend. After an App restart, it reloads Widget timelines and resumes live data.
+
+### 2.10.1 minimal desktop widgets
+
+- Equal-sized native rounded cards with consistent typography in light/dark appearance and Chinese/English.
+- Keeps service/account names, primary quota, points and balance; removes redundant branding, healthy status dots and full secondary 5h quota.
+- Shows reduced 5h quota and explicit 5h fallback when weekly quota is missing; preserves cache, unavailable and sign-in notices.
 
 ### 2.10.0 dashboard and pool
 
@@ -118,7 +124,7 @@ LAN devices can read the dashboard. Refresh, write, and WorkBuddy reconnect endp
 
 Open the kiosk page and tap “Enter e-ink mode”. The page refreshes every five minutes and keeps the last successful data.
 
-The current Android source version is `1.2.6-pencil-home` (versionCode 12), independent of macOS releases. It discovers and validates multiple servers, migrates a changed LAN address, and offers a server chooser. BOOX transparent screensaver keeps a static image while asleep; use the dashboard's always-on mode when the displayed quota must stay current. The published 1.2.6 APK is available in [v2.9.0](https://github.com/easonwong2026-del/AICC/releases/tag/v2.9.0) or via [direct APK download](https://github.com/easonwong2026-del/AICC/releases/download/v2.9.0/AICC-Poke4S-1.2.6.apk). macOS 2.10.0 does not change the independent Android version or republish the APK.
+The current Android source version is `1.2.6-pencil-home` (versionCode 12), independent of macOS releases. It discovers and validates multiple servers, migrates a changed LAN address, and offers a server chooser. BOOX transparent screensaver keeps a static image while asleep; use the dashboard's always-on mode when the displayed quota must stay current. The published 1.2.6 APK is available in [v2.9.0](https://github.com/easonwong2026-del/AICC/releases/tag/v2.9.0) or via [direct APK download](https://github.com/easonwong2026-del/AICC/releases/download/v2.9.0/AICC-Poke4S-1.2.6.apk). macOS 2.10.1 does not change the independent Android version or republish the APK.
 
 The Android source is in `android/poke-dashboard/` and is independently buildable with the Gradle wrapper. It is not a runtime dependency of the Mac server. Release builds enable code and resource shrinking.
 

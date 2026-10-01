@@ -8,6 +8,25 @@ import AppKit
 
 @main
 struct WidgetVisualSmokeMain {
+    // Scan the empty left edge of each tile to catch intrinsic-content overflow.
+    static func verifyTileSymmetry(_ bitmap: NSBitmapImageRep, name: String) {
+        let background = bitmap.colorAt(x: 4, y: 155)!.usingColorSpace(.deviceRGB)!.redComponent
+        func tileRows(at x: Int) -> [Int] {
+            (20..<290).filter {
+                abs(bitmap.colorAt(x: x, y: $0)!.usingColorSpace(.deviceRGB)!.redComponent - background) > 0.008
+            }
+        }
+        let rows = tileRows(at: 28)
+        let split = rows.indices.dropFirst().first { rows[$0] - rows[$0 - 1] > 1 }
+        guard let split else { fatalError("Missing two tiles: \(name), rows: \(rows)") }
+        guard abs(split - (rows.count - split)) <= 1 else {
+            fatalError("Unequal tile heights: \(name), top: \(split), bottom: \(rows.count - split)")
+        }
+        if bitmap.pixelsWide == 660 && rows != tileRows(at: 340) {
+            fatalError("Unequal columns: \(name), left: \(rows), right: \(tileRows(at: 340))")
+        }
+    }
+
     @MainActor
     static func main() throws {
         let outputDir = "/private/tmp/widget_qa"
@@ -65,14 +84,14 @@ struct WidgetVisualSmokeMain {
         """
         let overflowSnapshot = WidgetDisplaySnapshot(payload: try JSONDecoder().decode(WidgetStatusPayload.self, from: Data(overflowPayloadJSON.utf8)), fetchedAt: fetchedAt)
 
-        // Pool presentations also exercise real small/medium slot dimensions.
+        // Synthetic pool data exercises actual slot dimensions without account data.
         let poolJSON = """
         {"codex":{"source":"OpenCodex","selection_mode":"pinned","active_account_id":"plus",
           "accounts":[
-            {"id":"team","label":"team","active":false,"weekly":{"remaining":84,"reset":"2026-10-06 17:42"},"five_hour":{"remaining":100}},
-            {"id":"plus","label":"plus","active":true,"weekly":{"remaining":43,"reset":"2026-10-04 01:53"},"five_hour":{"remaining":97}}
-          ]},"workbuddy":{"points":4393},"deepseek":{"status":"Online","balances":[{"currency":"CNY","total_balance":"58.25"}]},
-          "google":{"weekly":{"remaining":51},"five_hour":{"remaining":91},"updated_epoch":1788000000}}
+            {"id":"team","label":"team","active":false,"weekly":{"remaining":75,"reset":"2026-10-06 17:42"},"five_hour":{"remaining":100}},
+            {"id":"plus","label":"plus","active":true,"weekly":{"remaining":42,"reset":"2026-10-04 01:53"},"five_hour":{"remaining":100}}
+          ]},"workbuddy":{"points":5000},"deepseek":{"status":"Online","balances":[{"currency":"CNY","total_balance":"60.00"}]},
+          "google":{"weekly":{"remaining":90},"five_hour":{"remaining":100},"updated_epoch":1788000000}}
         """
         var pinnedTwo = WidgetDisplaySnapshot(payload: try JSONDecoder().decode(WidgetStatusPayload.self, from: Data(poolJSON.utf8)), fetchedAt: fetchedAt)
         pinnedTwo.codexAccountDisplayMode = .two
@@ -89,6 +108,23 @@ struct WidgetVisualSmokeMain {
                 needsReauth: true, stale: true, fiveHour: $0.fiveHour, weekly: $0.weekly)
         }
 
+        let fallbackJSON = """
+        {"google":{"five_hour":{"remaining":100},"updated_epoch":1788000000},
+         "deepseek":{"status":"Error","error_code":"SERVICE_UNAVAILABLE","balances":[{"currency":"CNY","total_balance":"98765.43"}]},
+         "workbuddy":{"points":1234567,"balance_stale":true}}
+        """
+        let fallbackSnapshot = WidgetDisplaySnapshot(payload: try JSONDecoder().decode(WidgetStatusPayload.self, from: Data(fallbackJSON.utf8)), fetchedAt: fetchedAt)
+        var poolFallback = pinnedTwo
+        poolFallback.codexAccounts = pinnedTwo.codexAccounts?.map {
+            WidgetCodexAccount(id: $0.id, label: $0.label, plan: $0.plan, active: $0.active,
+                needsReauth: false, stale: false, fiveHour: $0.fiveHour, weekly: nil)
+        }
+        var longLabels = pinnedTwo
+        longLabels.codexAccounts = pinnedTwo.codexAccounts?.map {
+            WidgetCodexAccount(id: $0.id, label: "Very long account label · 长账号名称", plan: $0.plan, active: $0.active,
+                needsReauth: false, stale: false, fiveHour: $0.fiveHour, weekly: $0.weekly)
+        }
+
         var snapshots: [(name: String, snapshot: WidgetDisplaySnapshot)] = [
 
             ("live", liveSnapshot),
@@ -96,7 +132,9 @@ struct WidgetVisualSmokeMain {
             ("nodata", noDataSnapshot),
             ("overflow", overflowSnapshot),
             ("pinned_one", pinnedOne), ("pinned_two", pinnedTwo),
-            ("auto_one", autoOne), ("auto_two", autoTwo), ("reauth", reauth)
+            ("auto_one", autoOne), ("auto_two", autoTwo), ("reauth", reauth),
+            ("pool_stale", pinnedTwo.staleCopy), ("fallback", fallbackSnapshot),
+            ("pool_5h_fallback", poolFallback), ("long_labels", longLabels)
         ]
 
         if let input = CommandLine.arguments.dropFirst().first {
@@ -144,6 +182,7 @@ struct WidgetVisualSmokeMain {
                             .environment(\.locale, loc.locale)
                             .frame(width: 155, height: 155)
                             .background(sch.scheme == .dark ? Color(red: 0.12, green: 0.12, blue: 0.14) : Color.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
 
                         let renderer = ImageRenderer(content: view)
                         renderer.scale = 2.0
@@ -155,6 +194,7 @@ struct WidgetVisualSmokeMain {
                         }
                         let filename = "\(outputDir)/small_\(cfg.name)_\(s.name)_\(sch.name)_\(loc.name).png"
                         try pngData.write(to: URL(fileURLWithPath: filename))
+                        verifyTileSymmetry(bitmap, name: filename)
                         renderedCount += 1
                     }
                 }
@@ -172,6 +212,7 @@ struct WidgetVisualSmokeMain {
                             .environment(\.locale, loc.locale)
                             .frame(width: 330, height: 155)
                             .background(sch.scheme == .dark ? Color(red: 0.12, green: 0.12, blue: 0.14) : Color.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
 
                         let renderer = ImageRenderer(content: view)
                         renderer.scale = 2.0
@@ -183,6 +224,7 @@ struct WidgetVisualSmokeMain {
                         }
                         let filename = "\(outputDir)/medium_\(cfg.name)_\(s.name)_\(sch.name)_\(loc.name).png"
                         try pngData.write(to: URL(fileURLWithPath: filename))
+                        verifyTileSymmetry(bitmap, name: filename)
                         renderedCount += 1
                     }
                 }
@@ -192,4 +234,3 @@ struct WidgetVisualSmokeMain {
         print("Visual QA successfully rendered \(renderedCount) widget snapshot PNGs to \(outputDir)")
     }
 }
-
