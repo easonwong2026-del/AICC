@@ -6,9 +6,6 @@ APP_DIR="${1:-$ROOT/dist/mac/AICC.app}"
 WIDGET_APP_DIR="$APP_DIR/Contents/PlugIns/AICCWidget.appex"
 WIDGET_BINARY="$WIDGET_APP_DIR/Contents/MacOS/AICCWidget"
 WIDGET_PLIST="$WIDGET_APP_DIR/Contents/Info.plist"
-METADATA_DIR="$WIDGET_APP_DIR/Contents/Resources/Metadata.appintents"
-ACTIONSDATA="$METADATA_DIR/extract.actionsdata"
-VERSION_JSON="$METADATA_DIR/version.json"
 
 echo "=== Validating Widget Extension & App Intents Metadata ==="
 echo "Target: $WIDGET_APP_DIR"
@@ -63,62 +60,38 @@ if [ "$EXT_POINT" != "com.apple.widgetkit-extension" ]; then
 fi
 echo "PASS: Info.plist is valid (id: $BUNDLE_ID, point: $EXT_POINT, build: $BUILD_VER)"
 
-# 4. AppIntents metadata directory and files exist
-if [ ! -d "$METADATA_DIR" ]; then
-  echo "FAIL: Metadata.appintents directory does not exist at $METADATA_DIR" >&2
-  exit 1
-fi
+# Both identities must resolve saved configurations and interactive refreshes.
+python3 - "$APP_DIR" <<'PYTHON'
+import json
+from pathlib import Path
+import subprocess
+import sys
 
-if [ ! -f "$ACTIONSDATA" ]; then
-  echo "FAIL: extract.actionsdata does not exist at $ACTIONSDATA" >&2
-  exit 1
-fi
-
-if [ ! -f "$VERSION_JSON" ]; then
-  echo "FAIL: version.json does not exist at $VERSION_JSON" >&2
-  exit 1
-fi
-echo "PASS: Metadata.appintents files exist"
-
-# 5. Metadata is non-empty
-if [ ! -s "$ACTIONSDATA" ] || [ ! -s "$VERSION_JSON" ]; then
-  echo "FAIL: Metadata files are empty" >&2
-  exit 1
-fi
-echo "PASS: Metadata files are non-empty"
-
-# 6. Metadata contains AICCWidgetConfigurationIntent with WidgetConfiguration protocol
-python3 -c "
-import json, sys
-
-with open('$ACTIONSDATA') as f:
-    data = json.load(f)
-
-actions = data.get('actions', {})
-if 'AICCWidgetConfigurationIntent' not in actions:
-    print('FAIL: AICCWidgetConfigurationIntent missing from actions', file=sys.stderr)
-    sys.exit(1)
-
-intent = actions['AICCWidgetConfigurationIntent']
-protocols = intent.get('systemProtocols', [])
-if 'com.apple.link.systemProtocol.WidgetConfiguration' not in protocols:
-    print('FAIL: WidgetConfiguration protocol missing from intent systemProtocols', file=sys.stderr)
-    sys.exit(1)
-
-params = [p.get('name') for p in intent.get('parameters', [])]
-required_params = ['primaryMetric', 'secondaryMetric', 'topLeft', 'topRight', 'bottomLeft', 'bottomRight']
-for rp in required_params:
-    if rp not in params:
-        print('FAIL: Parameter missing:', rp, file=sys.stderr)
+app = Path(sys.argv[1])
+for bundle, module in [(app, "AICC"), (app / "Contents/PlugIns/AICCWidget.appex", "AICCWidget")]:
+    metadata = bundle / "Contents/Resources/Metadata.appintents"
+    try:
+        data = json.loads((metadata / "extract.actionsdata").read_text())
+        version = json.loads((metadata / "version.json").read_text())
+        assert version, "Empty metadata version"
+        symbols = subprocess.check_output(["nm", str(bundle / "Contents/MacOS" / module)], text=True)
+        actions = data.get("actions", {})
+        intent = actions["AICCWidgetConfigurationIntent"]
+        assert "com.apple.link.systemProtocol.WidgetConfiguration" in intent.get("systemProtocols", []), "Missing WidgetConfiguration protocol"
+        parameters = {p.get("name") for p in intent.get("parameters", [])}
+        required = {"primaryMetric", "secondaryMetric", "topLeft", "topRight", "bottomLeft", "bottomRight"}
+        assert required <= parameters, "Missing configuration parameters"
+        refresh = actions["RefreshWidgetIntent"]
+        assert refresh.get("openAppWhenRun") is False, "Refresh must run in the background"
+        enum = next(e for e in data.get("enums", []) if e.get("identifier") == "WidgetMetricOption")
+        assert {c["identifier"] for c in enum["cases"]} == {"codex", "google", "workbuddy", "deepseek"}, "Missing metrics"
+        for item, name in [(intent, "AICCWidgetConfigurationIntent"), (refresh, "RefreshWidgetIntent"), (enum, "WidgetMetricOption")]:
+            assert item["fullyQualifiedTypeName"] == f"{module}.{name}", "Wrong metadata module"
+            assert "_$s" + item["mangledTypeName"] + "Mn" in symbols, f"Metadata type absent from binary: {name}"
+    except (OSError, ValueError, KeyError, StopIteration, AssertionError, subprocess.CalledProcessError) as error:
+        print(f"FAIL: {module} App Intents metadata: {error}", file=sys.stderr)
         sys.exit(1)
-
-enums = data.get('enums', [])
-enum_ids = [e.get('identifier') for e in enums]
-if 'WidgetMetricOption' not in enum_ids:
-    print('FAIL: WidgetMetricOption enum missing from metadata', file=sys.stderr)
-    sys.exit(1)
-
-print('PASS: AICCWidgetConfigurationIntent and parameters verified in App Intents metadata')
-"
+    print(f"PASS: {module} configuration, refresh and enum metadata match compiled types")
+PYTHON
 
 echo "=== All App Intents validation checks PASSED ==="

@@ -8,7 +8,7 @@ struct RefreshWidgetIntent: AppIntent {
 
     func perform() async throws -> some IntentResult {
         _ = await WidgetStatusLoader.snapshot(force: true)
-        WidgetCenter.shared.reloadTimelines(ofKind: AICCWidget.kind)
+        WidgetCenter.shared.reloadTimelines(ofKind: AICCWidgetMetadata.kind)
         return .result()
     }
 }

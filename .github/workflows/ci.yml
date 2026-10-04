@@ -139,6 +139,7 @@ jobs:
       - name: Validate App Intents metadata
         run: |
           bash scripts/validate-widget-appintents.sh
+          bash scripts/smoke-test-widget-appintents.sh
 
       - name: Validate macOS scripts
         run: |
