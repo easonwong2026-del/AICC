@@ -4,7 +4,11 @@ import os
 import sys
 
 
-def generate_metadata(output_dir):
+def generate_metadata(output_dir, module_name="AICCWidget"):
+    if module_name not in ("AICC", "AICCWidget"):
+        raise ValueError("Expected AICC or AICCWidget module")
+    prefix = f"{len(module_name)}{module_name}"
+    config_type = prefix + ("29AICCWidgetConfigurationIntentV" if module_name == "AICC" else "0A19ConfigurationIntentV")
     os.makedirs(output_dir, exist_ok=True)
 
     version_data = {
@@ -65,10 +69,10 @@ def generate_metadata(output_dir):
             "key": "Metric"
         },
         "effectiveBundleIdentifiers": [],
-        "fullyQualifiedTypeName": "AICCWidget.WidgetMetricOption",
+        "fullyQualifiedTypeName": f"{module_name}.WidgetMetricOption",
         "identifier": "WidgetMetricOption",
         "isSystem": False,
-        "mangledTypeName": "10AICCWidget18WidgetMetricOptionO",
+        "mangledTypeName": prefix + "18WidgetMetricOptionO",
         "mangledTypeNameByBundleIdentifier": {},
         "visibilityMetadata": {
             "assistantOnly": False,
@@ -164,14 +168,14 @@ def generate_metadata(output_dir):
             "searchKeywords": []
         },
         "effectiveBundleIdentifiers": [],
-        "fullyQualifiedTypeName": "AICCWidget.AICCWidgetConfigurationIntent",
+        "fullyQualifiedTypeName": f"{module_name}.AICCWidgetConfigurationIntent",
         "identifier": "AICCWidgetConfigurationIntent",
         "isAuthPolExplicit": False,
         "isDiscoverable": False,
-        "mangledTypeName": "10AICCWidget0A19ConfigurationIntentV",
+        "mangledTypeName": config_type,
         "mangledTypeNameByBundleIdentifier": {},
         "mangledTypeNameByBundleIdentifierV2": {},
-        "mangledTypeNameV2": "10AICCWidget0A19ConfigurationIntentV",
+        "mangledTypeNameV2": config_type,
         "openAppWhenRun": True,
         "outputFlags": 1,
         "parameters": [
@@ -228,14 +232,14 @@ def generate_metadata(output_dir):
             "searchKeywords": []
         },
         "effectiveBundleIdentifiers": [],
-        "fullyQualifiedTypeName": "AICCWidget.RefreshWidgetIntent",
+        "fullyQualifiedTypeName": f"{module_name}.RefreshWidgetIntent",
         "identifier": "RefreshWidgetIntent",
         "isAuthPolExplicit": False,
         "isDiscoverable": True,
-        "mangledTypeName": "10AICCWidget19RefreshWidgetIntentV",
+        "mangledTypeName": prefix + "19RefreshWidgetIntentV",
         "mangledTypeNameByBundleIdentifier": {},
         "mangledTypeNameByBundleIdentifierV2": {},
-        "mangledTypeNameV2": "10AICCWidget19RefreshWidgetIntentV",
+        "mangledTypeNameV2": prefix + "19RefreshWidgetIntentV",
         "openAppWhenRun": False,
         "outputFlags": 0,
         "parameters": [],
@@ -286,6 +290,6 @@ def generate_metadata(output_dir):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: generate-widget-appintents.py <output_metadata_dir>", file=sys.stderr)
+        print("Usage: generate-widget-appintents.py <output_metadata_dir> [AICC|AICCWidget]", file=sys.stderr)
         sys.exit(1)
-    generate_metadata(sys.argv[1])
+    generate_metadata(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "AICCWidget")

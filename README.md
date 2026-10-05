@@ -4,7 +4,7 @@
 
 面向 macOS 的 AI 状态中心，显示 Codex、WorkBuddy、DeepSeek 和系统状态。支持 Poke4S 墨水屏显示。服务只依赖 Python 标准库。
 
-当前 macOS 版本为 AICC 2.10.1（Build 14）；Android/Poke4S 使用独立版本体系。
+当前 macOS 版本为 AICC 2.10.2（Build 15）；Android/Poke4S 使用独立版本体系。
 
 macOS 菜单栏使用固定的 Codex、Google、WorkBuddy、DeepSeek、System 和 OpenCodex 状态卡片，只读取 `/api/status` 及固定操作接口。Python 服务端通过固定采集器提供 Codex、WorkBuddy、DeepSeek 和系统状态。
 
@@ -134,7 +134,7 @@ Android/Poke4S 当前源码版本为 `1.2.6-pencil-home`（versionCode 12），�
 新版在保存地址失效时重复广播、验证所有发现的服务器并自动迁移 IP；多台服务器时可在设置中选择。
 BOOX 透明屏保在休眠时保留静态画面；需要屏幕持续显示最新额度时，请在设备设置中选择“桌面常亮”。
 不要使用仓库内不存在或过时的 APK 路径；请从 [GitHub Releases](https://github.com/easonwong2026-del/AICC/releases)
-下载已发布的 Android APK。当前 1.2.6 APK 位于 [v2.9.0 Release assets](https://github.com/easonwong2026-del/AICC/releases/tag/v2.9.0)，也可直接[下载 APK](https://github.com/easonwong2026-del/AICC/releases/download/v2.9.0/AICC-Poke4S-1.2.6.apk)。本轮 macOS 2.10.1 不改变 Android 版本，也不重复发布 APK。
+下载已发布的 Android APK。当前 1.2.6 APK 位于 [v2.9.0 Release assets](https://github.com/easonwong2026-del/AICC/releases/tag/v2.9.0)，也可直接[下载 APK](https://github.com/easonwong2026-del/AICC/releases/download/v2.9.0/AICC-Poke4S-1.2.6.apk)。本轮 macOS 2.10.2 不改变 Android 版本，也不重复发布 APK。
 它保留 Poke4S 的 AI COMMAND 风格、长按设置、自动发现、缓存减写、R8 和低内存 Canvas 渲染，并兼容现有服务器字段。
 
 `android/poke-dashboard/` 是可重复构建的源码和 Gradle wrapper，不属于 Mac 后台运行时。客户端不使用 AndroidX、图片库或第三方运行依赖；release 构建启用代码与资源瘦身。

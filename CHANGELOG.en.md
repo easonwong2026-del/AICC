@@ -4,6 +4,14 @@
 
 This file summarizes the current and recent public releases. The Chinese changelog contains the older detailed history.
 
+## 2.10.2 - 2026-10-04
+
+### macOS
+
+- **Fix desktop widgets stopping synchronization**: Compile configuration and refresh intents in both the containing app and widget extension, and package App Intents metadata matching each binary's Swift types. Restoring existing configurations under the containing app identity can now resolve the intent.
+- **Build regression checks**: Validate configuration parameters, metric enums, background refresh and binary types in both bundles. Negative checks reject missing host metadata and mismatched type identifiers.
+- **Version**: AICC 2.10.2, macOS Build 15. Existing widget configurations are preserved; Android remains unchanged.
+
 ## 2.10.1 - 2026-10-01
 
 ### macOS

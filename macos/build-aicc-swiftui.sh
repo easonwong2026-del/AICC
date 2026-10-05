@@ -60,6 +60,9 @@ if [[ "$BUNDLE_SERVER" == "1" ]]; then
   mkdir -p "$BUNDLED_SERVER_DIR"
   cp "$ROOT/server.py" "$ROOT/VERSION" "$BUNDLED_SERVER_DIR/"
   cp -R "$ROOT/collectors" "$ROOT/services" "$ROOT/web" "$BUNDLED_SERVER_DIR/"
+  # CI syntax/tests may leave bytecode; distribute source only.
+  find "$BUNDLED_SERVER_DIR" -type d -name __pycache__ -prune -exec rm -rf {} +
+  find "$BUNDLED_SERVER_DIR" -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete
   mkdir -p "$BUNDLED_SERVER_DIR/macos"
   cp "$ROOT/macos/start-workbuddy-monitored.sh" "$BUNDLED_SERVER_DIR/macos/"
   chmod 755 "$BUNDLED_SERVER_DIR/macos/start-workbuddy-monitored.sh"
@@ -80,6 +83,12 @@ SWIFT_FILES=()
 while IFS= read -r -d '' file; do
   SWIFT_FILES+=("$file")
 done < <(find "$SOURCE_DIR" -name "*.swift" -print0)
+# Saved widget configurations resolve against the containing app identity.
+SWIFT_FILES+=(
+  "$WIDGET_SOURCE_DIR/WidgetConfiguration.swift"
+  "$WIDGET_SOURCE_DIR/WidgetStatus.swift"
+  "$WIDGET_SOURCE_DIR/RefreshWidgetIntent.swift"
+)
 
 echo "Swift sources: ${#SWIFT_FILES[@]} files"
 for f in "${SWIFT_FILES[@]}"; do echo "  $f"; done
@@ -107,6 +116,7 @@ echo "=== Compiling ==="
 
 xcrun swiftc \
   -parse-as-library \
+  -module-name AICC \
   -O \
   -sdk "$SDK_PATH" \
   -target arm64-apple-macosx14.0 \
@@ -114,6 +124,7 @@ xcrun swiftc \
   -framework AppKit \
   -framework Foundation \
   -framework WidgetKit \
+  -framework AppIntents \
   -module-cache-path /tmp/swift-module-cache \
   -Xlinker -rpath -Xlinker /usr/lib/swift \
   "${SWIFT_FILES[@]}" \
@@ -162,23 +173,25 @@ xcrun swiftc \
   "${WIDGET_FILES[@]}" \
   -o "$WIDGET_MACOS_DIR/AICCWidget"
 
-echo "=== Extracting App Intents metadata ==="
-METADATA_DIR="$WIDGET_APP_DIR/Contents/Resources/Metadata.appintents"
-mkdir -p "$METADATA_DIR"
+echo "=== Extracting App Intents metadata for app and widget ==="
 APPINTENTS_PROCESSOR=""
 if xcrun --find appintentsmetadataprocessor >/dev/null 2>&1; then
   APPINTENTS_PROCESSOR="$(xcrun --find appintentsmetadataprocessor)"
 fi
-if [ -n "$APPINTENTS_PROCESSOR" ] && [ -x "$APPINTENTS_PROCESSOR" ]; then
-  echo "Using appintentsmetadataprocessor: $APPINTENTS_PROCESSOR"
-  "$APPINTENTS_PROCESSOR" --output "$WIDGET_APP_DIR/Contents/Resources" --module-name AICCWidget --bundle-identifier "com.aieink.dashboard.menubar.widget" --sdk-root "$SDK_PATH" --binary-file "$WIDGET_MACOS_DIR/AICCWidget" --compile-time-extraction || {
+extract_appintents() {
+  local resources="$1" module="$2" bundle_id="$3" binary="$4"
+  mkdir -p "$resources/Metadata.appintents"
+  if [ -n "$APPINTENTS_PROCESSOR" ] && [ -x "$APPINTENTS_PROCESSOR" ]; then
+    "$APPINTENTS_PROCESSOR" --output "$resources" --module-name "$module" \
+      --bundle-identifier "$bundle_id" --sdk-root "$SDK_PATH" \
+      --binary-file "$binary" --compile-time-extraction && return
     echo "appintentsmetadataprocessor failed, falling back to generator"
-    python3 "$ROOT/scripts/generate-widget-appintents.py" "$METADATA_DIR"
-  }
-else
-  echo "appintentsmetadataprocessor not in toolchain, generating metadata..."
-  python3 "$ROOT/scripts/generate-widget-appintents.py" "$METADATA_DIR"
-fi
+  fi
+  python3 "$ROOT/scripts/generate-widget-appintents.py" "$resources/Metadata.appintents" "$module"
+}
+extract_appintents "$RESOURCES_DIR" AICC "com.aieink.dashboard.menubar" "$MACOS_DIR/$APP_NAME"
+extract_appintents "$WIDGET_APP_DIR/Contents/Resources" AICCWidget \
+  "com.aieink.dashboard.menubar.widget" "$WIDGET_MACOS_DIR/AICCWidget"
 bash "$ROOT/scripts/validate-widget-appintents.sh" "$APP_DIR"
 
 echo "=== Signing ==="
