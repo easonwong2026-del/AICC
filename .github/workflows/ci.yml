@@ -200,12 +200,7 @@ jobs:
           api-level: 35
           arch: x86_64
           disable-animations: true
-          script: |
-            if ! timeout 240 ./android/poke-dashboard/gradlew -p android/poke-dashboard -Pandroid.injected.androidTest.leaveApksInstalledAfterRun=true connectedDebugAndroidTest; then
-              adb logcat -d -t 300
-              exit 1
-            fi
-            adb pull /sdcard/Android/data/com.aieink.pokedashboard/files/visual android-visuals
+          script: bash scripts/smoke-test-android-visual.sh
       - uses: actions/upload-artifact@v4
         with:
           name: magpie-android-visuals

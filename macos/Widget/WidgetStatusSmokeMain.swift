@@ -287,7 +287,7 @@ struct WidgetStatusSmokeMain {
         let fullData = try JSONEncoder().encode(fullIntent)
         let fullDecoded = try JSONDecoder().decode(AICCWidgetConfigurationIntent.self, from: fullData)
         try require(fullDecoded == fullIntent, "Full 4-slot intent survives JSON roundtrip")
-        var independent = AICCWidgetConfigurationIntent()
+        let independent = AICCWidgetConfigurationIntent()
         independent.magpiePort = 13425
         independent.accounts = .all
         let independentData = try JSONEncoder().encode(independent)

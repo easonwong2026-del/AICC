@@ -444,6 +444,7 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
     private let serverManager = ServerManager.shared
     private var settingsWindowCoordinator: SettingsWindowCoordinator?
     private var hasStartedShutdown = false
+    private var hasPresentedSettings = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         guard singleInstance.acquire() else {
@@ -470,13 +471,19 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
         let loginLaunch = NSAppleEventManager.shared().currentAppleEvent?
             .paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
         if loginLaunch {
+            hasPresentedSettings = true
             if !AppSettings.shared.bridgeEnabled { requestQuit() }
         } else if NSApp.isActive {
-            settingsWindowCoordinator?.present()
+            presentSettings()
         }
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+        if !hasPresentedSettings { presentSettings() }
+    }
+
+    private func presentSettings() {
+        hasPresentedSettings = true
         settingsWindowCoordinator?.present()
     }
 
@@ -495,7 +502,7 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        settingsWindowCoordinator?.present()
+        presentSettings()
         return true
     }
 
