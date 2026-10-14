@@ -91,16 +91,41 @@ public final class DashboardVisualTest extends Instrumentation {
         Activity activity = monitor.waitForActivityWithTimeout(10000);
         removeMonitor(monitor);
         if (activity == null) throw new AssertionError("Settings activity did not open");
-        runOnMainSync(() -> ((android.view.ViewGroup) activity.findViewById(android.R.id.content)).getChildAt(0).performLongClick());
-        getUiAutomation().waitForIdle(500, 5000);
-        Bitmap screenshot = getUiAutomation().takeScreenshot();
-        if (screenshot == null) throw new AssertionError("Settings screenshot unavailable");
-        try (FileOutputStream output = new FileOutputStream(new File(getTargetContext().getExternalFilesDir("visual"), "pairing-settings.png"))) {
-            if (!screenshot.compress(Bitmap.CompressFormat.PNG, 100, output)) throw new AssertionError("Settings PNG failed");
-        } finally {
-            screenshot.recycle();
-            runOnMainSync(activity::finish);
+        runOnMainSync(() -> {
+            android.app.Dialog dialog = ((MainActivity) activity).showSettings();
+            android.view.View decor = dialog.getWindow().getDecorView();
+            int width = (int) (activity.getResources().getDisplayMetrics().widthPixels * .94f);
+            int height = (int) (activity.getResources().getDisplayMetrics().heightPixels * .78f);
+            decor.measure(android.view.View.MeasureSpec.makeMeasureSpec(width, android.view.View.MeasureSpec.EXACTLY),
+                    android.view.View.MeasureSpec.makeMeasureSpec(height, android.view.View.MeasureSpec.EXACTLY));
+            decor.layout(0, 0, width, height);
+            if (!dialog.isShowing() || !containsText(decor, "Magpie 墨水屏伴侣") || !containsText(decor, "配对这台电脑")) {
+                throw new AssertionError("Pairing dialog missing");
+            }
+            Bitmap screenshot = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+            screenshot.eraseColor(android.graphics.Color.WHITE);
+            decor.draw(new Canvas(screenshot));
+            try (FileOutputStream output = new FileOutputStream(new File(getTargetContext().getExternalFilesDir("visual"), "pairing-settings.png"))) {
+                if (!screenshot.compress(Bitmap.CompressFormat.PNG, 100, output)) throw new AssertionError("Settings PNG failed");
+            } catch (Exception error) { throw new AssertionError(error); }
+            finally {
+                screenshot.recycle();
+                dialog.dismiss();
+                activity.finish();
+            }
+        });
+    }
+
+    private boolean containsText(android.view.View view, String expected) {
+        if (view instanceof android.widget.TextView
+                && ((android.widget.TextView) view).getText().toString().contains(expected)) return true;
+        if (view instanceof android.view.ViewGroup) {
+            android.view.ViewGroup group = (android.view.ViewGroup) view;
+            for (int index = 0; index < group.getChildCount(); index++) {
+                if (containsText(group.getChildAt(index), expected)) return true;
+            }
         }
+        return false;
     }
 
     private void save(DashboardView view, File file) {

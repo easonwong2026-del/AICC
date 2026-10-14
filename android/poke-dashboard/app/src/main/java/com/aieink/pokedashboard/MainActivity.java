@@ -303,7 +303,7 @@ public final class MainActivity extends Activity {
         } catch (Exception ignored) { }
     }
 
-    private void showSettings() {
+    Dialog showSettings() {
         final int padding = dp(18);
         final int ink = Color.rgb(17, 17, 17);
         final int muted = Color.rgb(85, 85, 85);
@@ -484,6 +484,7 @@ public final class MainActivity extends Activity {
             dialog.getWindow().setLayout((int) (getResources().getDisplayMetrics().widthPixels * .94f),
                     (int) (getResources().getDisplayMetrics().heightPixels * .78f));
         }
+        return dialog;
     }
 
     private int dp(int value) {
