@@ -26,6 +26,7 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
     private let settings: AppSettings
     private let server: ServerManager
     private let loginAtLaunch: LaunchAtLoginService
+    private let onClose: () -> Void
 
     private var window: NSWindow?
     var hasVisibleWindow: Bool { window?.isVisible == true }
@@ -38,11 +39,13 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
     init(
         settings: AppSettings,
         server: ServerManager,
-        loginAtLaunch: LaunchAtLoginService
+        loginAtLaunch: LaunchAtLoginService,
+        onClose: @escaping () -> Void = {}
     ) {
         self.settings = settings
         self.server = server
         self.loginAtLaunch = loginAtLaunch
+        self.onClose = onClose
         super.init()
         observeSettings()
     }
@@ -121,6 +124,7 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self, weak closingWindow] in
             guard let closingWindow else { return }
             self?.recentlyClosedWindows.removeAll { $0 === closingWindow }
+            self?.onClose()
         }
     }
 }

@@ -462,7 +462,8 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
         settingsWindowCoordinator = SettingsWindowCoordinator(
             settings: AppSettings.shared,
             server: ServerManager.shared,
-            loginAtLaunch: LaunchAtLoginService.shared
+            loginAtLaunch: LaunchAtLoginService.shared,
+            onClose: { [weak self] in self?.finishBackgroundRefresh() }
         )
 
         if AppSettings.shared.bridgeEnabled { serverManager.startMonitoring() }

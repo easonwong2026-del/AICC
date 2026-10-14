@@ -357,10 +357,12 @@ struct AICCWidgetView: View {
             }
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Text((isChinese ? "周 " : "W ") + (account.weekly?.remaining.map { String(format: "%.0f%%", $0) } ?? "—"))
-                    .font(.system(size: spacious ? 24 : 17, weight: .semibold, design: .rounded).monospacedDigit())
-                Spacer(minLength: 0)
+                    .font(.system(size: spacious ? 22 : 14, weight: .semibold, design: .rounded).monospacedDigit())
+                    .lineLimit(1).fixedSize(horizontal: true, vertical: false)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 Text("5h " + (account.fiveHour?.remaining.map { String(format: "%.0f%%", $0) } ?? "—"))
-                    .font(.system(size: spacious ? 13 : 9).monospacedDigit()).foregroundStyle(.secondary)
+                    .font(.system(size: spacious ? 11 : 9).monospacedDigit()).foregroundStyle(.secondary)
+                    .lineLimit(1).fixedSize(horizontal: true, vertical: false)
             }
             .lineLimit(1).minimumScaleFactor(0.7)
             if spacious, let reset = account.weekly?.reset {

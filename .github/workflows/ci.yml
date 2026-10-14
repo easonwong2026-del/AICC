@@ -181,6 +181,7 @@ jobs:
 
   android-visual:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -200,7 +201,10 @@ jobs:
           arch: x86_64
           disable-animations: true
           script: |
-            ./android/poke-dashboard/gradlew -p android/poke-dashboard -Pandroid.injected.androidTest.leaveApksInstalledAfterRun=true connectedDebugAndroidTest
+            if ! timeout 240 ./android/poke-dashboard/gradlew -p android/poke-dashboard -Pandroid.injected.androidTest.leaveApksInstalledAfterRun=true connectedDebugAndroidTest; then
+              adb logcat -d -t 300
+              exit 1
+            fi
             adb pull /sdcard/Android/data/com.aieink.pokedashboard/files/visual android-visuals
       - uses: actions/upload-artifact@v4
         with:

@@ -86,9 +86,13 @@ public final class DashboardVisualTest extends Instrumentation {
     private void testPairingSettings() throws Exception {
         android.content.Intent intent = new android.content.Intent(getTargetContext(), MainActivity.class);
         intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
-        Activity activity = startActivitySync(intent);
+        ActivityMonitor monitor = addMonitor(MainActivity.class.getName(), null, false);
+        getTargetContext().startActivity(intent);
+        Activity activity = monitor.waitForActivityWithTimeout(10000);
+        removeMonitor(monitor);
+        if (activity == null) throw new AssertionError("Settings activity did not open");
         runOnMainSync(() -> ((android.view.ViewGroup) activity.findViewById(android.R.id.content)).getChildAt(0).performLongClick());
-        waitForIdleSync();
+        getUiAutomation().waitForIdle(500, 5000);
         Bitmap screenshot = getUiAutomation().takeScreenshot();
         if (screenshot == null) throw new AssertionError("Settings screenshot unavailable");
         try (FileOutputStream output = new FileOutputStream(new File(getTargetContext().getExternalFilesDir("visual"), "pairing-settings.png"))) {

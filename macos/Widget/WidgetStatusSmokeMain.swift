@@ -287,6 +287,15 @@ struct WidgetStatusSmokeMain {
         let fullData = try JSONEncoder().encode(fullIntent)
         let fullDecoded = try JSONDecoder().decode(AICCWidgetConfigurationIntent.self, from: fullData)
         try require(fullDecoded == fullIntent, "Full 4-slot intent survives JSON roundtrip")
+        var independent = AICCWidgetConfigurationIntent()
+        independent.magpiePort = 13425
+        independent.accounts = .all
+        let independentData = try JSONEncoder().encode(independent)
+        let independentDecoded = try JSONDecoder().decode(AICCWidgetConfigurationIntent.self, from: independentData)
+        try require(independentDecoded == independent && independentDecoded.hasDefaultMetrics,
+                    "Custom connection and account count retain Codex-focused layout and survive persistence")
+        let oldIntent = try JSONDecoder().decode(AICCWidgetConfigurationIntent.self, from: Data(#"{"primaryMetric":"codex"}"#.utf8))
+        try require(oldIntent.magpiePort == 3425 && oldIntent.accounts == .automatic, "Existing Widget configuration migrates defaults")
 
         // 7.5 Metric Enum Contract
         try require(WidgetMetricOption.codex.rawValue == "codex", "Stable identifier codex")
