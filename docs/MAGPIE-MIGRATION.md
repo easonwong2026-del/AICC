@@ -74,6 +74,7 @@ flowchart LR
 - 使用独立 `magpie_last_success.json`。故障和超时保留 Magpie 缓存，不切回另一账号来源。
   超过 5 分钟的源读数、已过重置时间、缺少读取时间或上游返回错误，都标记缓存。
   不能用本次 HTTP 收包时间冒充上游读数时间。
+  单个账号读数过期只标记该账号；整体请求失败或所有账号过期时，整体标记缓存。
 - Magpie 模式不再调用 OpenCodex Google 额度入口。WorkBuddy 自动重启修复在该模式默认关闭；
   保留已有的显式 `WORKBUDDY_AUTO_HEAL=1` 开关和手动重连能力。
 
@@ -109,6 +110,7 @@ Widget 的 +N 表示当前显示偏好范围内的溢出，不代表账号被删
 - 原生 Widget 已生成 504 张中英文、浅深色及边界状态渲染图；原有对称性检查保留，新增专用版面检查尺寸并人工看图。
 - Mac 看板采用原生 NSHostingView 截图；不用 ImageRenderer 替代 AppKit 毛玻璃背景。
 - 本机只有 Command Line Tools，SwiftPM XCTest 不可用；完整 Swift 测试与 App/Widget 打包以 PR CI 为准。
+- 本机原有 dist 中存在 2.10.1 构建，版本检查发现与源码 2.10.2 不一致；保留该既有产物，候选包由 CI 重新构建和验证。
 - 本机未配置 Android SDK；Android 单元测试、APK 构建和原生渲染验收通过 PR CI 执行。
 - CI 保留原有 test/lint/android/swift-test/macos-build 五项检查，并增加 Android 模拟器图像验收。
   App/DMG/APK 均为 CI 候选构建，版本号保持不变，不作为正式升级包发布。

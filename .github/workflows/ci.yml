@@ -210,9 +210,8 @@ jobs:
           arch: x86_64
           disable-animations: true
           script: |
-            cd android/poke-dashboard
-            ./gradlew connectedDebugAndroidTest
-            adb pull /sdcard/Android/data/com.aieink.pokedashboard/files/visual ../../android-visuals
+            ./android/poke-dashboard/gradlew -p android/poke-dashboard connectedDebugAndroidTest
+            adb pull /sdcard/Android/data/com.aieink.pokedashboard/files/visual android-visuals
       - uses: actions/upload-artifact@v4
         with:
           name: magpie-android-visuals

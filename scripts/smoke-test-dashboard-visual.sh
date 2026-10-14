@@ -5,7 +5,7 @@ TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/aicc-dashboard-visual.XXXXXX")"
 trap 'rm -rf "$TEMP_ROOT"' EXIT
 cp -R "$ROOT/macos/MenuBarApp/Resources/." "$TEMP_ROOT/"
 SWIFT_FILES=()
-while IFS= read -r file; do SWIFT_FILES+=("$file"); done < <(rg --files "$ROOT/macos/MenuBarApp/Sources/Models" "$ROOT/macos/MenuBarApp/Sources/Views" "$ROOT/macos/MenuBarApp/Sources/Helpers" -g '*.swift')
+while IFS= read -r -d '' file; do SWIFT_FILES+=("$file"); done < <(find "$ROOT/macos/MenuBarApp/Sources/Models" "$ROOT/macos/MenuBarApp/Sources/Views" "$ROOT/macos/MenuBarApp/Sources/Helpers" -name '*.swift' -print0)
 for name in APIService CacheManager OpenCodexController ProcessRunner; do
   SWIFT_FILES+=("$ROOT/macos/MenuBarApp/Sources/Services/$name.swift")
 done

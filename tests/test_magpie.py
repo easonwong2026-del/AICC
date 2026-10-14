@@ -38,10 +38,12 @@ class MagpieTests(unittest.TestCase):
         report["data"][0]["error"] = "credential-secret"
         result = magpie.parse_report(report, NOW)
         self.assertTrue(result["accounts"][0]["stale"])
+        self.assertFalse(result["accounts"][1]["stale"])
+        self.assertFalse(result["stale"])
         self.assertNotIn("credential-secret", json.dumps(result))
         self.assertTrue(magpie.parse_report(FIXTURE, NOW + 600)["stale"])
         report["data"][0].pop("readAt")
-        self.assertTrue(magpie.parse_report(report, NOW)["stale"])
+        self.assertTrue(magpie.parse_report(report, NOW)["accounts"][0]["stale"])
 
     def test_single_empty_and_bad_shape(self):
         single = {"object": "list", "data": FIXTURE["data"][:1]}

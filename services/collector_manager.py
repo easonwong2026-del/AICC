@@ -223,7 +223,7 @@ class CollectorManager:
                         account.get("stale") or account.get("read_at") is None or time.time() - account["read_at"] > 300
                     )} for account in value.get("accounts", [])
                 ]
-                value["stale"] = bool(value.get("stale") or any(account["stale"] for account in value["accounts"]))
+                value["stale"] = bool(value.get("stale") or (value["accounts"] and all(account["stale"] for account in value["accounts"])))
                 slot.snapshot_stale = value["stale"]
             if name == "workbuddy" and slot.value.get("balance_updated_epoch") is not None:
                 value = _with_stale_state(slot.value) or value

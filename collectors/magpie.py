@@ -72,7 +72,7 @@ def parse_report(document, now=None):
             if reset is not None and reset <= now:
                 account["stale"] = True
         accounts.append(account)
-    stale = any(account["stale"] for account in accounts)
+    stale = bool(accounts) and all(account["stale"] for account in accounts)
     reads = [account["read_at"] for account in accounts if account["read_at"] is not None]
     return {"schema_version": 2, "source": "Magpie", "available": bool(accounts),
             "state": "Cached" if stale else ("Connected" if accounts else "No Codex accounts"),
