@@ -44,18 +44,18 @@ struct DashboardView: View {
                 Divider().padding(.horizontal, 14)
                 codexSection
             }
-            if settings.menuBarShowGoogleQuota {
+            if settings.menuBarShowGoogleQuota || settings.menuBarShowWorkBuddy || settings.menuBarShowDeepSeek || settings.menuBarShowSystem {
                 Divider().padding(.horizontal, 14)
-                googleQuotaSection
+                DisclosureGroup(settings.localized("Other services")) {
+                    if settings.menuBarShowGoogleQuota { googleQuotaSection }
+                    if settings.menuBarShowWorkBuddy || settings.menuBarShowDeepSeek { miniCardsSection }
+                    if settings.menuBarShowSystem { systemSection }
+                }
+                .font(.system(size: 11))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
             }
-            if settings.menuBarShowWorkBuddy || settings.menuBarShowDeepSeek {
-                miniCardsSection
-            }
-            if settings.menuBarShowSystem {
-                Divider().padding(.horizontal, 14)
-                systemSection
-            }
-            if settings.menuBarShowOpenCodex {
+            if settings.menuBarShowOpenCodex && api.status?.codex?.source == "OpenCodex" {
                 Divider().padding(.horizontal, 14)
                 servicesSection
             }
@@ -99,6 +99,9 @@ struct DashboardView: View {
     private var statusSummaryText: some View {
         let s = snapshot.stale && api.displaySnapshot != nil ? DataSourceState.stale : api.state
         switch s {
+        case .ready where snapshot.codexSource == "Magpie":
+            return Text(snapshot.codexStale ? "Using cached data" : api.status?.codex?.available == true ? "Codex ready" : "No Codex accounts")
+                .foregroundColor(snapshot.codexStale ? .orange : .secondary)
         case .ready where api.allServicesOk: return Text("All services online").foregroundColor(.green)
         case .ready: return Text("Some services unavailable").foregroundColor(.orange)
         case .stale: return Text("Using cached data").foregroundColor(.secondary)

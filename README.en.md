@@ -1,5 +1,10 @@
 # AICC
 
+The feature branch adds a local Magpie Codex quota adapter and a Codex-first dashboard.
+`AICC_CODEX_SOURCE=auto` prefers an installed Magpie, otherwise Codex app-server; legacy OpenCodex requires explicit `opencodex`.
+`AICC_MAGPIE_URL` defaults to `http://127.0.0.1:3425` and accepts loopback HTTP addresses only.
+See [migration evidence, design and acceptance limits](docs/MAGPIE-MIGRATION.md).
+
 [简体中文](README.md)
 
 AICC is a local AI status center for macOS. It displays Codex, WorkBuddy, DeepSeek, and system status, with support for Poke4S e-ink devices. The server uses only the Python standard library.

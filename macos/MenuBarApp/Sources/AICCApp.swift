@@ -473,14 +473,10 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             await APIService.shared.fetchStatus()
+            if AppSettings.shared.menuBarShowOpenCodex && APIService.shared.status?.codex?.source == "OpenCodex" {
+                await OpenCodexController.shared.checkOnce()
+            }
             APIService.shared.startAutoRefresh(interval: AppSettings.shared.autoRefreshInterval)
-        }
-
-        // One low-frequency OpenCodex check at app launch. The controller
-        // owns the visible-panel refresh loop and does not poll in the
-        // background while the menu is closed.
-        Task { @MainActor in
-            await OpenCodexController.shared.checkOnce()
         }
     }
 

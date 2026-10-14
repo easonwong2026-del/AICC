@@ -282,7 +282,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     func popoverWillShow(_ notification: Notification) {
         guard !isDashboardVisible else { return }
         isDashboardVisible = true
-        ocx.panelDidAppear()
+        if settings.menuBarShowOpenCodex && api.status?.codex?.source == "OpenCodex" {
+            ocx.panelDidAppear()
+        }
     }
 
     func popoverDidClose(_ notification: Notification) {

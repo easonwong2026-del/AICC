@@ -125,6 +125,21 @@ struct WidgetVisualSmokeMain {
                 needsReauth: false, stale: false, fiveHour: $0.fiveHour, weekly: $0.weekly)
         }
 
+        var magpieOne = autoOne
+        magpieOne.codexSource = "Magpie"
+        var magpieTwo = autoTwo
+        magpieTwo.codexSource = "Magpie"
+        var magpieEmpty = noDataSnapshot
+        magpieEmpty.codexSource = "Magpie"
+        magpieEmpty.codexAccounts = []
+        var magpieMany = magpieTwo
+        magpieMany.codexAccountDisplayMode = .all
+        magpieMany.codexAccounts = (0..<7).map { index in
+            WidgetCodexAccount(id: "magpie-\(index)", label: "Codex · \(index)", plan: "team", active: false,
+                needsReauth: index == 3, stale: index == 4, fiveHour: index == 2 ? nil : magpieTwo.codexAccounts?.first?.fiveHour,
+                weekly: magpieTwo.codexAccounts?.first?.weekly)
+        }
+
         var snapshots: [(name: String, snapshot: WidgetDisplaySnapshot)] = [
 
             ("live", liveSnapshot),
@@ -134,7 +149,9 @@ struct WidgetVisualSmokeMain {
             ("pinned_one", pinnedOne), ("pinned_two", pinnedTwo),
             ("auto_one", autoOne), ("auto_two", autoTwo), ("reauth", reauth),
             ("pool_stale", pinnedTwo.staleCopy), ("fallback", fallbackSnapshot),
-            ("pool_5h_fallback", poolFallback), ("long_labels", longLabels)
+            ("pool_5h_fallback", poolFallback), ("long_labels", longLabels),
+            ("magpie_one", magpieOne), ("magpie_two", magpieTwo), ("magpie_many", magpieMany),
+            ("magpie_stale", magpieTwo.staleCopy), ("magpie_empty", magpieEmpty)
         ]
 
         if let input = CommandLine.arguments.dropFirst().first {
@@ -194,7 +211,11 @@ struct WidgetVisualSmokeMain {
                         }
                         let filename = "\(outputDir)/small_\(cfg.name)_\(s.name)_\(sch.name)_\(loc.name).png"
                         try pngData.write(to: URL(fileURLWithPath: filename))
-                        verifyTileSymmetry(bitmap, name: filename)
+                        if !(s.snapshot.codexSource == "Magpie" && cfg.intent == AICCWidgetConfigurationIntent()) {
+                            verifyTileSymmetry(bitmap, name: filename)
+                        } else {
+                            precondition(bitmap.pixelsWide == 310 && bitmap.pixelsHigh == 310)
+                        }
                         renderedCount += 1
                     }
                 }
@@ -224,7 +245,11 @@ struct WidgetVisualSmokeMain {
                         }
                         let filename = "\(outputDir)/medium_\(cfg.name)_\(s.name)_\(sch.name)_\(loc.name).png"
                         try pngData.write(to: URL(fileURLWithPath: filename))
-                        verifyTileSymmetry(bitmap, name: filename)
+                        if !(s.snapshot.codexSource == "Magpie" && cfg.intent == AICCWidgetConfigurationIntent()) {
+                            verifyTileSymmetry(bitmap, name: filename)
+                        } else {
+                            precondition(bitmap.pixelsWide == 660 && bitmap.pixelsHigh == 310)
+                        }
                         renderedCount += 1
                     }
                 }

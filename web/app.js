@@ -13,7 +13,7 @@ function showCollector(name, metadata) {
 }
 
 function showQuota(prefix, data) {
-  const valid = Number.isFinite(Number(data.remaining));
+  const valid = typeof data.remaining === "number" && Number.isFinite(data.remaining);
   const remaining = valid ? quota(data.remaining) : 0;
   $(`${prefix}-percent`).textContent = valid ? `${remaining}%` : "--";
   $(`${prefix}-bar`).style.width = `${remaining}%`;
@@ -28,8 +28,32 @@ function render(data) {
   const collection = data.collection || {};
   showQuota("five-hour", codex.five_hour || {});
   showQuota("weekly", codex.weekly || {});
+  const accounts = Array.isArray(codex.accounts) ? codex.accounts : null;
+  $("legacy-quotas").hidden = accounts !== null;
+  const pool = $("codex-accounts");
+  pool.hidden = accounts === null;
+  pool.replaceChildren();
+  if (accounts) {
+    for (const account of accounts) {
+      const card = document.createElement("article");
+      card.className = "codex-account";
+      const label = document.createElement("h3");
+      label.textContent = (account.label || "Codex") + (account.needs_reauth ? " · 需要登录" : codex.stale || account.stale ? " · 缓存" : "");
+      card.appendChild(label);
+      for (const [key, title] of [["weekly", "周剩余"], ["five_hour", "5小时剩余"]]) {
+        const window = account[key] || {};
+        const row = document.createElement("p");
+        const value = typeof window.remaining === "number" && Number.isFinite(window.remaining) ? `${quota(window.remaining)}%` : "—";
+        row.textContent = `${title}  ${value} · 重置 ${window.reset || "—"}`;
+        card.appendChild(row);
+      }
+      pool.appendChild(card);
+    }
+    if (!accounts.length) pool.textContent = "暂无 Codex 账号";
+  }
   $("codex-source").textContent = codex.source || "--";
   const resetCredits = codex.reset_credits || {};
+  $("codex-reset-credits").closest(".codex-extra").hidden = !resetCredits.provided;
   $("codex-reset-credits").textContent = resetCredits.provided
     ? `${resetCredits.available_count} 次`
     : "未提供";
@@ -42,7 +66,7 @@ function render(data) {
     : "";
   const age = Number.isFinite(Number(codex.age_seconds)) ? ` · ${codex.age_seconds}s ago` : "";
   $("codex-state").textContent = codex.available
-    ? `${codex.stale ? "Cached" : "Connected"}${age} · refreshes every ${codex.refresh_seconds || 60}s`
+    ? `${codex.stale ? "缓存" : "已连接"}${age}`
     : `Not connected · ${codex.state || "--"}`;
   const workBuddyPoints = Number(workbuddy.points);
   $("workbuddy-points").textContent = Number.isFinite(workBuddyPoints)
@@ -86,7 +110,11 @@ async function refresh() {
   } catch {
     const cached = localStorage.getItem("ai-eink:last-status");
     if (cached) {
-      try { render(JSON.parse(cached)); } catch { /* ignore invalid cache */ }
+      try {
+        const data = JSON.parse(cached);
+        if (data.codex) data.codex.stale = true;
+        render(data);
+      } catch { /* ignore invalid cache */ }
     }
     $("connection").textContent = "○";
   }

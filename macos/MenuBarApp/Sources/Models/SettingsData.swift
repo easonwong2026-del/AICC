@@ -98,8 +98,8 @@ class AppSettings: ObservableObject {
         menuBarShowCodexBalance = defaults.object(forKey: "menuBarShowCodexBalance") as? Bool ?? true
         menuBarShowWorkBuddy = defaults.object(forKey: "menuBarShowWorkBuddy") as? Bool ?? true
         menuBarShowDeepSeek = defaults.object(forKey: "menuBarShowDeepSeek") as? Bool ?? true
-        menuBarShowSystem = defaults.object(forKey: "menuBarShowSystem") as? Bool ?? true
-        menuBarShowOpenCodex = defaults.object(forKey: "menuBarShowOpenCodex") as? Bool ?? true
+        menuBarShowSystem = defaults.object(forKey: "menuBarShowSystem") as? Bool ?? false
+        menuBarShowOpenCodex = defaults.object(forKey: "menuBarShowOpenCodex") as? Bool ?? false
         menuBarShowGoogleQuota = defaults.object(forKey: "menuBarShowGoogleQuota") as? Bool ?? true
         codexAccountDisplayMode = defaults.string(forKey: "codexAccountDisplayMode") ?? CodexAccountDisplayMode.automatic.rawValue
         ocxCustomPath = defaults.string(forKey: "ocxCustomPath") ?? ""

@@ -56,6 +56,7 @@ public final class MainActivity extends Activity {
     private DashboardView dashboard;
     private SharedPreferences preferences;
     private int refreshCount;
+    private String lastRenderedStatus;
     private boolean resumed;
     private boolean choicePromptShown;
     private volatile boolean destroyed;
@@ -96,6 +97,7 @@ public final class MainActivity extends Activity {
         preferences = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         initialiseV11Preferences();
         dashboard = new DashboardView(this);
+        dashboard.setOnClickListener(view -> dashboard.nextAccountPage());
         dashboard.setOnLongClickListener(view -> {
             showSettings();
             return true;
@@ -226,9 +228,14 @@ public final class MainActivity extends Activity {
             preferences.edit().putString(KEY_CACHE, candidate.statusBody).apply();
         }
         if (resumed) {
-            dashboard.setData(candidate.data);
-            refreshCount++;
-            if (refreshCount % 12 == 0) dashboard.flashRefresh();
+            if (!candidate.data.renderKey.equals(lastRenderedStatus)) {
+                lastRenderedStatus = candidate.data.renderKey;
+                dashboard.setData(candidate.data);
+                refreshCount++;
+                if (refreshCount % 12 == 0) dashboard.flashRefresh();
+            } else {
+                dashboard.setOffline(false);
+            }
         }
         choicePromptShown = false;
     }

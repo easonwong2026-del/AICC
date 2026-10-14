@@ -6,7 +6,8 @@
 
 当前 macOS 版本为 AICC 2.10.2（Build 15）；Android/Poke4S 使用独立版本体系。
 
-macOS 菜单栏使用固定的 Codex、Google、WorkBuddy、DeepSeek、System 和 OpenCodex 状态卡片，只读取 `/api/status` 及固定操作接口。Python 服务端通过固定采集器提供 Codex、WorkBuddy、DeepSeek 和系统状态。
+macOS 菜单栏以 Codex 为主，其他服务折叠展示，只读取 `/api/status` 及固定操作接口。
+Magpie 数据源迁移、界面设计和验收边界见 [迁移方案](docs/MAGPIE-MIGRATION.md)。
 
 ## 使用地址
 
@@ -114,13 +115,14 @@ App 运行需要 macOS 14 或更高版本、Apple Silicon，以及可执行的 P
 
 ## 数据采集与内存策略
 
-- Codex：检测到 OpenCodex 时，从 Account Pool 读取全部账号额度，手动刷新会强制刷新池中额度；`AICC_CODEX_SOURCE=app-server` 可显式使用旧模式，未安装 OpenCodex 时自动回退。OpenCodex 暂不可用时显示标记为 stale 的上次成功快照。
-- Codex 数据源可用 `AICC_CODEX_SOURCE=auto`（默认）、`opencodex`（只用账号池）或 `app-server`（旧版单账号）指定；自动模式发现 `ocx` 后不会因一次请求失败切回单账号。
+- Codex：`AICC_CODEX_SOURCE=auto` 默认优先已安装的 Magpie，否则使用 Codex app-server 单账号。Magpie 每 120 秒专项刷新 Codex 并读取官方本机额度报告，按账号分别展示周/5h；故障保留同来源缓存，不切换账号源。
+- 可显式选择 `magpie`、`opencodex`（旧版账号池）或 `app-server`。`AICC_MAGPIE_URL` 默认 `http://127.0.0.1:3425`，仅允许带端口的 loopback HTTP 地址。
+- Magpie 模式的默认 Widget 专注 Codex，菜单栏其他服务折叠，墨水屏以 Codex 账号窗口为主；旧 Widget 自定义槽位保留。Google 的旧 OpenCodex 额度入口在 Magpie 模式停用，WorkBuddy 自动重启修复默认关闭。
 - WorkBuddy：优先通过 `127.0.0.1:9223` 的本机调试桥读取账户余额；当前 WorkBuddy/CodeBuddy CLI 只提供编码代理能力，不作为账户积分接口。应用关闭时绝不主动启动；发现 WorkBuddy 已运行但未开放本地桥时，AICC 会在后台自动重启它一次以启用读取通道（恢复 2.3.x 的监控行为，每个 WorkBuddy 进程只重启一次，会话自动恢复），也可在设置中手动「重连 WorkBuddy」。启用后默认每 120 秒读取一次余额，同一页面 target 也会按时间重新读取，手动刷新会强制重新读取。本机数据库中的当日用量仍可被动更新，不保存或传输令牌、Cookie 等认证信息。
 - DeepSeek：密钥只从环境变量或 macOS 钥匙串读取，不写入项目目录。
 - 系统：使用 macOS 自带命令读取内存；没有第三方运行依赖。
 
-- Google：通过 OpenCodex 采集器读取 Google Antigravity 额度，解析 Weekly 与 5h 双窗口并保持独立重置时间。
+- Google：旧数据源模式通过 OpenCodex 采集器读取 Google Antigravity 额度，解析 Weekly 与 5h 双窗口；Magpie 模式暂不采集该项。
 
 各采集器并行且互相隔离。某个服务超时不会拖死整个面板；并发请求会共用正在执行的采集任务。缓存仅在数据变化或超过保存周期时写盘。
 

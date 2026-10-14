@@ -149,7 +149,7 @@ class CollectorManager:
                 if name == "deepseek":
                     slot.value = self._retain_deepseek_balance(slot, failure("connection_error", "Connection error"))
                     slot.snapshot_stale = True
-                if name == "codex" and slot.value.get("source") == "OpenCodex":
+                if name == "codex" and slot.value.get("source") in ("OpenCodex", "Magpie"):
                     slot.value = mark_stale(slot.value, str(error) if isinstance(error, ValueError) else "Temporarily unavailable")
                     slot.value["error"] = str(error) if isinstance(error, ValueError) else "Temporarily unavailable"
                     slot.snapshot_stale = True
@@ -201,7 +201,7 @@ class CollectorManager:
             if name == "deepseek":
                 slot.value = self._retain_deepseek_balance(slot, failure("timeout", "Request timed out"))
                 slot.snapshot_stale = True
-            if name == "codex" and slot.value.get("source") == "OpenCodex":
+            if name == "codex" and slot.value.get("source") in ("OpenCodex", "Magpie"):
                 slot.value = mark_stale(slot.value, "Temporarily unavailable")
                 slot.value["error"] = "Temporarily unavailable"
                 slot.snapshot_stale = True
@@ -217,6 +217,14 @@ class CollectorManager:
             # to stay current even while its next collection is still inside
             # the interval. Other collectors retain the slot snapshot.
             value = slot.value.copy()
+            if name == "codex" and value.get("source") == "Magpie":
+                value["accounts"] = [
+                    {**account, "stale": bool(
+                        account.get("stale") or account.get("read_at") is None or time.time() - account["read_at"] > 300
+                    )} for account in value.get("accounts", [])
+                ]
+                value["stale"] = bool(value.get("stale") or any(account["stale"] for account in value["accounts"]))
+                slot.snapshot_stale = value["stale"]
             if name == "workbuddy" and slot.value.get("balance_updated_epoch") is not None:
                 value = _with_stale_state(slot.value) or value
             if name == "deepseek":

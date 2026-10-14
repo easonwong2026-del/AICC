@@ -27,3 +27,8 @@ button { justify-self: start; padding: 10px 16px; border: 1px solid #111; backgr
 .kiosk-gate small { font-size: .72rem; }
 html.eink-refresh::after { content: ""; position: fixed; inset: 0; z-index: 9999; background: #111; }
 @media (display-mode: fullscreen), (display-mode: standalone) { .dashboard { border: 0; } }
+.other-services { margin-top: 12px; }
+.other-services summary { cursor: pointer; padding: 12px 0; }
+.codex-account { padding: 12px 0; border-bottom: 1px solid currentColor; }
+.codex-account:last-child { border-bottom: 0; }
+[hidden] { display: none !important; }

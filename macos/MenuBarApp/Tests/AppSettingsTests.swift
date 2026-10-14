@@ -33,7 +33,7 @@ final class AppSettingsTests: XCTestCase {
             }
         }
 
-        XCTAssertTrue(settings.menuBarShowSystem)
+        XCTAssertFalse(settings.menuBarShowSystem)
 
         settings.menuBarShowSystem = false
         XCTAssertEqual(defaults.object(forKey: settingKey) as? Bool, false)

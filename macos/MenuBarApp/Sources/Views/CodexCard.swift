@@ -38,7 +38,7 @@ struct CodexCard: View {
 
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Codex")
+                Text(codex.source == "Magpie" ? "Codex · Magpie" : "Codex")
                     .font(.system(size: DashboardTypography.metricLabel, weight: .medium))
                     .foregroundColor(.secondary)
                 Spacer()
@@ -47,7 +47,7 @@ struct CodexCard: View {
                     .foregroundColor(.secondary)
             }
             if displayedAccounts.isEmpty {
-                Text("No OpenCodex accounts").foregroundColor(.secondary)
+                Text(settings.localized("No Codex accounts")).foregroundColor(.secondary)
             } else if displayedAccounts.count == 1 {
                 accountCard(displayedAccounts[0], showReset: true)
             } else if displayedAccounts.count == 2 {

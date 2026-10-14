@@ -26,7 +26,7 @@ class CodexPoolTests(unittest.TestCase):
                     patch.object(codex, "resolve_executable", return_value="/tmp/ocx"), \
                     patch.object(codex, "collect", side_effect=ValueError("Temporarily unavailable")) as ocx, \
                     patch.object(server.monitor, "status", return_value={"source": "Codex app-server"}) as legacy, \
-                    patch.dict(os.environ, {"AICC_CODEX_SOURCE": "auto"}):
+                    patch.dict(os.environ, {"AICC_CODEX_SOURCE": "opencodex"}):
                 server._collector_manager = None
                 manager = server.collector_manager()
                 self.assertEqual(manager._slots["codex"].value["source"], "OpenCodex")
@@ -35,6 +35,7 @@ class CodexPoolTests(unittest.TestCase):
                 ocx.assert_called_once_with(force=True)
                 legacy.assert_not_called()
             with patch.object(server, "persisted_status", return_value={}), \
+                    patch.object(server.magpie, "installed", return_value=False), \
                     patch.object(codex, "resolve_executable", return_value=None), \
                     patch.object(server.monitor, "status", return_value={"source": "Codex app-server"}) as legacy, \
                     patch.dict(os.environ, {"AICC_CODEX_SOURCE": "auto"}):

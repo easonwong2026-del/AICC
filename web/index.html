@@ -18,17 +18,21 @@
       <div class="section-head"><h2 id="codex-title">CODEX</h2><small id="codex-source">--</small></div>
       <p id="codex-state">Connecting...</p>
       <p class="collector-note" id="codex-collector"></p>
+      <div id="codex-accounts" hidden></div>
+      <div id="legacy-quotas">
       <h3>剩余用量</h3>
       <div class="quota-row"><div><strong>5小时</strong><span id="five-hour-reset">--</span></div><b id="five-hour-percent">--%</b></div>
       <div class="bar"><span id="five-hour-bar"></span></div>
       <div class="quota-row"><div><strong>1周</strong><span id="weekly-reset">--</span></div><b id="weekly-percent">--%</b></div>
       <div class="bar"><span id="weekly-bar"></span></div>
+      </div>
       <div class="codex-extra">
         <div><span>重置机会</span><strong id="codex-reset-credits">--</strong></div>
         <small id="codex-reset-expiry">--</small>
       </div>
       <p id="codex-buckets"></p>
     </section>
+    <details class="other-services"><summary>其他服务</summary>
     <section class="metric" aria-labelledby="workbuddy-title">
       <div class="section-head"><h2 id="workbuddy-title">WORKBUDDY</h2><strong id="workbuddy-state">--</strong></div>
       <div class="points"><span id="workbuddy-points">--</span><small>PTS</small></div>
@@ -56,6 +60,7 @@
       <p id="system-label">Loading...</p><p id="system-metrics">--</p><p id="gpu-metrics"></p>
       <p class="collector-note" id="system-collector"></p>
     </section>
+    </details>
     <footer>SYNC <time id="updated-at">--</time></footer>
   </main>
   <div id="kiosk-gate" class="kiosk-gate" hidden>

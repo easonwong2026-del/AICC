@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 from collectors.deepseek import collect as collect_deepseek, COLLECTOR_TIMEOUT_SECONDS as DEEPSEEK_COLLECTOR_TIMEOUT
 from collectors.google import collect as collect_google
 from collectors import codex as ocx_codex
+from collectors import magpie
 from collectors.system import collect as collect_system
 from collectors.workbuddy import collect as collect_workbuddy, initial_status
 from services.codex_monitor import monitor
@@ -101,14 +102,17 @@ def collector_manager() -> CollectorManager:
     if _collector_manager is None:
         fallback = persisted_status()
         source = os.environ.get("AICC_CODEX_SOURCE", "auto").lower()
-        use_ocx = source == "opencodex" or (source == "auto" and ocx_codex.resolve_executable() is not None)
-        if source not in ("auto", "opencodex", "app-server"):
+        use_magpie = source == "magpie" or (source == "auto" and magpie.installed())
+        use_ocx = source == "opencodex"
+        if source not in ("auto", "magpie", "opencodex", "app-server"):
             raise ValueError("Invalid AICC_CODEX_SOURCE")
-        codex_initial = (ocx_codex.load_cache() or {"available": False, "state": "Loading",
-                         "source": "OpenCodex", "accounts": [], "stale": True}) if use_ocx else fallback.get("codex", {})
+        pool = magpie if use_magpie else ocx_codex if use_ocx else None
+        pool_source = "Magpie" if use_magpie else "OpenCodex"
+        codex_initial = (pool.load_cache() or {"available": False, "state": "Loading",
+                         "source": pool_source, "accounts": [], "stale": True}) if pool else {}
 
         def collect_codex(force: bool = False) -> dict:
-            return ocx_codex.collect(force=force) if use_ocx else monitor.status(force=force)
+            return pool.collect(force=force) if pool else monitor.status(force=force)
 
         def collect_deepseek_value(force: bool = False) -> dict:
             return collect_deepseek(DATA_ROOT / "deepseek_history.json")
@@ -122,12 +126,15 @@ def collector_manager() -> CollectorManager:
         def collect_system_value(force: bool = False) -> dict:
             return collect_system()
 
+        def collect_google_value(force: bool = False) -> dict:
+            return {"available": False, "state": "Not configured", "stale": False} if use_magpie else collect_google(force=force)
+
         _collector_manager = CollectorManager({
-            "google": (collect_google, 300.0, 10.0, {**fallback.get("google", {}), "stale": True}),
+            "google": (collect_google_value, 300.0, 10.0, {} if use_magpie else {**fallback.get("google", {}), "stale": True}),
             "codex": (
                 collect_codex,
                 DEFAULT_COLLECTOR_INTERVAL,
-                66.0 if use_ocx else DEFAULT_COLLECTOR_TIMEOUT,
+                55.0 if use_magpie else 66.0 if use_ocx else DEFAULT_COLLECTOR_TIMEOUT,
                 codex_initial,
             ),
             "deepseek": (
@@ -496,7 +503,8 @@ def _workbuddy_monitor_loop(interval: int = 60) -> None:
     """
     while True:
         time.sleep(interval)
-        if os.environ.get("WORKBUDDY_AUTO_HEAL", "1") != "1":
+        default = "0" if collector_manager()._slots["codex"].value.get("source") == "Magpie" else "1"
+        if os.environ.get("WORKBUDDY_AUTO_HEAL", default) != "1":
             continue
         _run_workbuddy_monitor_once()
 
@@ -607,7 +615,7 @@ def health_payload() -> dict:
         "cache": cache,
         "providers": provider_items,
         "worker_telemetry": {
-            "codex": metadata.get("codex", {}) if values.get("codex", {}).get("source") == "OpenCodex" else monitor.health(),
+            "codex": metadata.get("codex", {}) if values.get("codex", {}).get("source") in ("OpenCodex", "Magpie") else monitor.health(),
         },
         "pid": os.getpid(),
         "ppid": os.getppid(),
