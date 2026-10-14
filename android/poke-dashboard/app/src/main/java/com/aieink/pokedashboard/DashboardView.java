@@ -113,7 +113,7 @@ final class DashboardView extends View {
             float top = 215 + index * rowHeight;
             textFit(canvas, account.label, 64, top, 420, 20, true);
             String state = account.needsReauth ? "需要登录" : account.stale || data.offline ? "缓存" : "";
-            textFitRight(canvas, state, 694, top, 150, 17);
+            if (!state.isEmpty()) textFitRight(canvas, state, 694, top, 150, 17);
             drawWindow(canvas, 64, top + 35, account.weekly, account.weeklyReset, "周剩余", rowHeight > 200);
             drawWindow(canvas, 394, top + 35, account.fiveHour, account.fiveHourReset, "5小时剩余", rowHeight > 200);
             if (index < count - 1) filledRect(canvas, 64, top + rowHeight - 30, 630, 1, INK);

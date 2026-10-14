@@ -210,7 +210,7 @@ jobs:
           arch: x86_64
           disable-animations: true
           script: |
-            ./android/poke-dashboard/gradlew -p android/poke-dashboard connectedDebugAndroidTest
+            ./android/poke-dashboard/gradlew -p android/poke-dashboard -Pandroid.injected.androidTest.leaveApksInstalledAfterRun=true connectedDebugAndroidTest
             adb pull /sdcard/Android/data/com.aieink.pokedashboard/files/visual android-visuals
       - uses: actions/upload-artifact@v4
         with:
