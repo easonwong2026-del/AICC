@@ -200,6 +200,8 @@ struct WidgetStatusSmokeMain {
         try require(refStale.deepseekState == "stale" && !refStale.deepseekIsOnline, "offline balance cannot be online")
         try require(snapshot.evaluated(at: fetchedAt.addingTimeInterval(300)).stale, "five minute expiry")
         try require(snapshot.evaluated(at: fetchedAt.addingTimeInterval(86400)) == .placeholder, "24h expiry hides old values")
+        try require(magpieCache.evaluated(at: fetchedAt.addingTimeInterval(86400)) == .magpiePlaceholder,
+                    "Magpie cache expiry retains the Codex-only empty layout instead of obsolete provider cards")
         try require(snapshot.age(at: fetchedAt.addingTimeInterval(60)) == 60, "snapshot age")
         let failedBalance = WidgetDisplaySnapshot(payload: try decode(#"{"deepseek":{"status":"Connection error","error_code":"connection_error","stale":true,"balances":[{"currency":"CNY","total_balance":"58.39"}]}}"#), fetchedAt: fetchedAt)
         try require(failedBalance.deepseekBalanceText == "58.39", "last known good remains visible")

@@ -7,12 +7,12 @@ struct AICCWidgetProvider: AppIntentTimelineProvider {
     typealias Intent = AICCWidgetConfigurationIntent
 
     func placeholder(in context: Context) -> AICCWidgetEntry {
-        AICCWidgetEntry(date: .now, snapshot: .placeholder, configuration: AICCWidgetConfigurationIntent())
+        AICCWidgetEntry(date: .now, snapshot: .magpiePlaceholder, configuration: AICCWidgetConfigurationIntent())
     }
 
     func snapshot(for configuration: AICCWidgetConfigurationIntent, in context: Context) async -> AICCWidgetEntry {
         if context.isPreview {
-            return AICCWidgetEntry(date: .now, snapshot: .placeholder, configuration: configuration)
+            return AICCWidgetEntry(date: .now, snapshot: .magpiePlaceholder, configuration: configuration)
         }
 
         var snapshot = await WidgetStatusLoader.snapshot(port: configuration.magpiePort)

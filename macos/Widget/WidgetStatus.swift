@@ -26,9 +26,7 @@ enum WidgetStatusStore {
 
     static func cachedOrPlaceholder(port: Int = 3425) -> WidgetDisplaySnapshot {
         if let cached = load(port: port) { return cached.evaluated(offline: true) }
-        var placeholder = WidgetDisplaySnapshot.placeholder
-        placeholder.codexSource = "Magpie"
-        return placeholder
+        return .magpiePlaceholder
     }
 
     static func remove(port: Int = 3425) { UserDefaults.standard.removeObject(forKey: key(port)) }

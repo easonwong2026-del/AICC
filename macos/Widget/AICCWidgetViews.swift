@@ -384,7 +384,7 @@ struct AICCWidgetView: View {
                 .minimumScaleFactor(0.7).lineLimit(1)
             if account?.needsReauth == true {
                 Text(isChinese ? "登录" : "Sign in").font(.system(size: 9)).foregroundStyle(.orange)
-            } else if entry.snapshot.stale || entry.snapshot.codexStale || account?.stale == true {
+            } else if window?.remaining != nil && (entry.snapshot.stale || entry.snapshot.codexStale || account?.stale == true) {
                 Text(isChinese ? "缓存" : "Cached").font(.system(size: 9)).foregroundStyle(.orange)
             }
             if effectiveFamily == .systemMedium, let reset = window?.reset {

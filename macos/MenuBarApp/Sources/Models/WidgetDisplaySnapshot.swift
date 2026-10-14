@@ -328,7 +328,7 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
     var age: TimeInterval { age(at: .now) }
     func age(at now: Date) -> TimeInterval { max(0, now.timeIntervalSince(fetchedAt)) }
     func evaluated(at now: Date = .now, offline: Bool = false) -> Self {
-        if age(at: now) >= Self.cacheLifetime { return .placeholder }
+        if age(at: now) >= Self.cacheLifetime { return codexSource == "Magpie" ? .magpiePlaceholder : .placeholder }
         var copy = offline || age(at: now) >= Self.liveLifetime ? staleCopy : self
         copy.google = google?.evaluated(at: now)
         copy.codexAccounts = copy.codexAccounts?.map { account in
@@ -338,6 +338,11 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
                                       fiveHour: account.fiveHour, weekly: account.weekly, readAt: read)
         }
         return copy
+    }
+    static var magpiePlaceholder: Self {
+        var snapshot = Self.placeholder
+        snapshot.codexSource = "Magpie"
+        return snapshot
     }
     var codexState: String { codexWeeklyNumber == "—" ? "unavailable" : (stale || codexStale ? "stale" : "live") }
     var workbuddyState: String { workbuddyPoints == nil ? "unavailable" : (stale || workbuddyStale ? "stale" : "live") }
