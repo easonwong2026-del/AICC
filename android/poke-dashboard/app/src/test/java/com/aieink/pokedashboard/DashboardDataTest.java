@@ -38,4 +38,14 @@ public final class DashboardDataTest {
         assertEquals(DashboardData.parse("{" + codex + ",\"fetched_at\":1}").renderKey,
                 DashboardData.parse("{" + codex + ",\"fetched_at\":2,\"system\":{\"cpu\":\"20%\"}}").renderKey);
     }
+
+    @Test public void sourceTimestampDoesNotRepaintButQuotaAndCacheStateDo() throws Exception {
+        String original = "{\"codex\":{\"source\":\"Magpie\",\"updated_at\":\"first\",\"weekly\":{\"remaining\":88}}}";
+        DashboardData first = DashboardData.parse(original);
+        DashboardData next = DashboardData.parse(original.replace("first", "next"));
+        assertEquals(first.renderKey, next.renderKey);
+        assertNotEquals(first.updatedAt, next.updatedAt);
+        assertNotEquals(first.renderKey, DashboardData.parse(original.replace("88", "87")).renderKey);
+        assertNotEquals(first.renderKey, DashboardData.parse(original.replace("\"source\"", "\"stale\":true,\"source\"")).renderKey);
+    }
 }

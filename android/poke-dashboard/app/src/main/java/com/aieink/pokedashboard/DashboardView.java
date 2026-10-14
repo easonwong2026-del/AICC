@@ -51,11 +51,13 @@ final class DashboardView extends View {
         if (data.offline != offline) { data.offline = offline; invalidate(); }
     }
     void setDeviceBattery(int percent, boolean charging, boolean visible) {
+        if (batteryPercent == percent && batteryCharging == charging && showDeviceBattery == visible) return;
         batteryPercent = percent;
         batteryCharging = charging;
         showDeviceBattery = visible;
         invalidate();
     }
+    void updateSyncTime(String updatedAt) { data.updatedAt = updatedAt; }
     void flashRefresh() {
         handler.removeCallbacks(endFlash);
         flash = true;

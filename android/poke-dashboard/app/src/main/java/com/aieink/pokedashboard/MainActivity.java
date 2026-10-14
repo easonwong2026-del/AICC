@@ -250,6 +250,7 @@ public final class MainActivity extends Activity {
                 refreshCount++;
                 if (refreshCount % 12 == 0) dashboard.flashRefresh();
             } else {
+                dashboard.updateSyncTime(candidate.data.updatedAt);
                 dashboard.setOffline(false);
             }
         }

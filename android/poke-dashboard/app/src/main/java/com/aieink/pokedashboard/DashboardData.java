@@ -62,7 +62,9 @@ final class DashboardData {
         JSONObject codex = root.optJSONObject("codex");
         if (codex != null) {
             data.updatedAt = codex.optString("updated_at", data.updatedAt);
-            data.renderKey = codex.toString() + root.optString("codex_account_display_mode", "automatic");
+            JSONObject displayed = new JSONObject(codex.toString());
+            displayed.remove("updated_at");
+            data.renderKey = displayed.toString() + root.optString("codex_account_display_mode", "automatic");
             boolean connected = codex.optBoolean("available", false);
             boolean stale = codex.optBoolean("stale", false);
             data.codexState = connected ? (stale ? "CACHED" : "CONNECTED") : codex.optString("state", "OFFLINE");
