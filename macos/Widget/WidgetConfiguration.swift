@@ -51,9 +51,24 @@ public enum WidgetMetricOption: String, CaseIterable, Codable, Sendable, AppEnum
     }
 }
 
+public enum WidgetAccountOption: String, Codable, Sendable, AppEnum {
+    case automatic, one, two, all
+    public static var typeDisplayRepresentation: TypeDisplayRepresentation { "Accounts" }
+    public static var caseDisplayRepresentations: [Self: DisplayRepresentation] {
+        [.automatic: "Automatic", .one: "1 Account", .two: "2 Accounts", .all: "All Accounts"]
+    }
+    var mode: CodexAccountDisplayMode { CodexAccountDisplayMode(rawValue: rawValue) ?? .automatic }
+}
+
 public struct AICCWidgetConfigurationIntent: WidgetConfigurationIntent, Codable, Equatable, Sendable {
     public static var title: LocalizedStringResource = "AICC Widget Configuration"
     public static var description = IntentDescription("Customize displayed metrics in AICC widget")
+
+    @Parameter(title: "Magpie Port", default: 3425)
+    public var magpiePort: Int
+
+    @Parameter(title: "Accounts", default: .automatic)
+    public var accounts: WidgetAccountOption
 
     @Parameter(title: "Primary Metric", default: .codex)
     public var primaryMetric: WidgetMetricOption
@@ -77,12 +92,16 @@ public struct AICCWidgetConfigurationIntent: WidgetConfigurationIntent, Codable,
         Switch(.widgetFamily) {
             Case(.systemSmall) {
                 Summary {
+                    \AICCWidgetConfigurationIntent.$magpiePort
+                    \AICCWidgetConfigurationIntent.$accounts
                     \AICCWidgetConfigurationIntent.$primaryMetric
                     \AICCWidgetConfigurationIntent.$secondaryMetric
                 }
             }
             DefaultCase {
                 Summary {
+                    \AICCWidgetConfigurationIntent.$magpiePort
+                    \AICCWidgetConfigurationIntent.$accounts
                     \AICCWidgetConfigurationIntent.$topLeft
                     \AICCWidgetConfigurationIntent.$topRight
                     \AICCWidgetConfigurationIntent.$bottomLeft
@@ -93,6 +112,8 @@ public struct AICCWidgetConfigurationIntent: WidgetConfigurationIntent, Codable,
     }
 
     public init() {
+        self.magpiePort = 3425
+        self.accounts = .automatic
         self.primaryMetric = .codex
         self.secondaryMetric = .google
         self.topLeft = .codex
@@ -102,6 +123,8 @@ public struct AICCWidgetConfigurationIntent: WidgetConfigurationIntent, Codable,
     }
 
     public init(primary: WidgetMetricOption, secondary: WidgetMetricOption) {
+        self.magpiePort = 3425
+        self.accounts = .automatic
         self.primaryMetric = primary
         self.secondaryMetric = secondary
         self.topLeft = .codex
@@ -114,6 +137,8 @@ public struct AICCWidgetConfigurationIntent: WidgetConfigurationIntent, Codable,
                 topRight: WidgetMetricOption = .google,
                 bottomLeft: WidgetMetricOption = .workbuddy,
                 bottomRight: WidgetMetricOption = .deepseek) {
+        self.magpiePort = 3425
+        self.accounts = .automatic
         self.primaryMetric = .codex
         self.secondaryMetric = .google
         self.topLeft = topLeft
@@ -123,6 +148,7 @@ public struct AICCWidgetConfigurationIntent: WidgetConfigurationIntent, Codable,
     }
 
     enum CodingKeys: String, CodingKey {
+        case magpiePort, accounts
         case primaryMetric
         case secondaryMetric
         case topLeft
@@ -133,6 +159,8 @@ public struct AICCWidgetConfigurationIntent: WidgetConfigurationIntent, Codable,
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.magpiePort = try container.decodeIfPresent(Int.self, forKey: .magpiePort) ?? 3425
+        self.accounts = try container.decodeIfPresent(WidgetAccountOption.self, forKey: .accounts) ?? .automatic
         self.primaryMetric = try container.decodeIfPresent(WidgetMetricOption.self, forKey: .primaryMetric) ?? .codex
         self.secondaryMetric = try container.decodeIfPresent(WidgetMetricOption.self, forKey: .secondaryMetric) ?? .google
         self.topLeft = try container.decodeIfPresent(WidgetMetricOption.self, forKey: .topLeft) ?? .codex
@@ -143,6 +171,8 @@ public struct AICCWidgetConfigurationIntent: WidgetConfigurationIntent, Codable,
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(magpiePort, forKey: .magpiePort)
+        try container.encode(accounts, forKey: .accounts)
         try container.encode(primaryMetric, forKey: .primaryMetric)
         try container.encode(secondaryMetric, forKey: .secondaryMetric)
         try container.encode(topLeft, forKey: .topLeft)
@@ -152,12 +182,18 @@ public struct AICCWidgetConfigurationIntent: WidgetConfigurationIntent, Codable,
     }
 
     public static func == (lhs: AICCWidgetConfigurationIntent, rhs: AICCWidgetConfigurationIntent) -> Bool {
+        lhs.magpiePort == rhs.magpiePort && lhs.accounts == rhs.accounts &&
         lhs.primaryMetric == rhs.primaryMetric &&
         lhs.secondaryMetric == rhs.secondaryMetric &&
         lhs.topLeft == rhs.topLeft &&
         lhs.topRight == rhs.topRight &&
         lhs.bottomLeft == rhs.bottomLeft &&
         lhs.bottomRight == rhs.bottomRight
+    }
+
+    var hasDefaultMetrics: Bool {
+        primaryMetric == .codex && secondaryMetric == .google && topLeft == .codex && topRight == .google
+            && bottomLeft == .workbuddy && bottomRight == .deepseek
     }
 
     /// Normalizes a list of metrics to ensure uniqueness and reach targetCount

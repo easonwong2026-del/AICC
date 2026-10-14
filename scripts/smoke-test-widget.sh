@@ -47,11 +47,6 @@ if ! grep -q -- '-framework WidgetKit' "$ROOT/macos/build-aicc-swiftui.sh"; then
   exit 1
 fi
 
-if ! grep -q 'WidgetCenter.shared.reloadAllTimelines()' "$ROOT/macos/MenuBarApp/Sources/Services/APIService.swift"; then
-  echo "Error: APIService does not reload widget timelines" >&2
-  exit 1
-fi
-
 if ! grep -q 'WidgetCenter.shared.reloadAllTimelines()' "$ROOT/macos/MenuBarApp/Sources/AICCApp.swift"; then
   echo "Error: AICCApp does not reload widget timelines on launch" >&2
   exit 1

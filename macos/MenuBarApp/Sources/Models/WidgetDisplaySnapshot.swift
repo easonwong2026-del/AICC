@@ -1,4 +1,71 @@
 import Foundation
+import CryptoKit
+
+enum MagpieQuotaReport {
+    static func snapshot(data: Data, now: Date = .now) throws -> WidgetDisplaySnapshot {
+        guard let document = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              document["object"] as? String == "list", let rows = document["data"] as? [[String: Any]] else {
+            throw CocoaError(.coderReadCorrupt)
+        }
+        let formatter = ISO8601DateFormatter()
+        func date(_ value: Any?) -> Date? {
+            guard let text = value as? String else { return nil }
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return formatter.date(from: text) ?? {
+                formatter.formatOptions = [.withInternetDateTime]
+                return formatter.date(from: text)
+            }()
+        }
+        let resets = DateFormatter()
+        resets.locale = Locale(identifier: "en_US_POSIX")
+        resets.dateFormat = "yyyy-MM-dd HH:mm"
+        var accounts: [WidgetCodexAccount] = []
+        var identities = Set<String>()
+        for row in rows where row["provider"] as? String == "codex" && row["kind"] as? String == "subscription" {
+            guard let user = row["user"] as? String, !user.isEmpty,
+                  let windows = row["windows"] as? [[String: Any]] else { throw CocoaError(.coderReadCorrupt) }
+            guard row["from"] == nil || row["from"] is String else { throw CocoaError(.coderReadCorrupt) }
+            let origin = row["from"] as? String ?? ""
+            let digest = SHA256.hash(data: Data((origin + "\0" + user.lowercased()).utf8))
+            let identity = digest.prefix(6).map { String(format: "%02x", $0) }.joined()
+            guard identities.insert(identity).inserted else { throw CocoaError(.coderReadCorrupt) }
+            let read = date(row["readAt"]) ?? date(row["asOf"])
+            var stale = (row["error"] != nil && !(row["error"] is NSNull))
+                || (row["asOf"] != nil && !(row["asOf"] is NSNull)) || read == nil
+            if let read { stale = stale || now.timeIntervalSince(read) >= 300 || read.timeIntervalSince(now) > 60 }
+            func window(_ name: String, minutes: Int) throws -> WidgetRateWindow {
+                let matches = windows.filter { $0["name"] as? String == name }
+                guard matches.count <= 1 else { throw CocoaError(.coderReadCorrupt) }
+                let raw = matches.first ?? [:]
+                let reset = date(raw["resetsAt"])
+                if let reset, reset <= now { stale = true }
+                let used = raw["used"] as? NSNumber
+                let valid = used != nil && CFGetTypeID(used!) != CFBooleanGetTypeID()
+                    && used!.doubleValue.isFinite && (0...100).contains(used!.doubleValue)
+                    && raw["unlimited"] as? Bool != true
+                return WidgetRateWindow(remaining: valid ? 100 - used!.doubleValue : nil,
+                                        reset: reset.map { resets.string(from: $0) }, label: nil, durationMinutes: minutes)
+            }
+            let fiveHour = try window("5 hours", minutes: 300)
+            let weekly = try window("7 days", minutes: 10080)
+            let plan = row["plan"] as? String
+            let knownPlans = ["free", "plus", "pro", "team", "business", "enterprise", "edu"]
+            accounts.append(WidgetCodexAccount(id: "magpie-" + identity, label: "Codex · " + identity.prefix(6),
+                                              plan: plan.flatMap { knownPlans.contains($0) ? $0 : nil },
+                                              active: false, needsReauth: false, stale: stale,
+                                              fiveHour: fiveHour, weekly: weekly, readAt: read?.timeIntervalSince1970))
+        }
+        let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(accounts)) as! [[String: Any]]
+        var codex: [String: Any] = ["source": "Magpie", "selection_mode": "auto", "accounts": encoded,
+                                  "stale": !accounts.isEmpty && accounts.allSatisfy { $0.stale == true }]
+        if accounts.count == 1 {
+            codex["weekly"] = encoded[0]["weekly"]
+            codex["five_hour"] = encoded[0]["five_hour"]
+        }
+        let payload = try JSONDecoder().decode(WidgetStatusPayload.self, from: JSONSerialization.data(withJSONObject: ["codex": codex]))
+        return WidgetDisplaySnapshot(payload: payload, fetchedAt: now)
+    }
+}
 
 struct WidgetStatusPayload: Decodable {
     let codex_account_display_mode: CodexAccountDisplayMode?
@@ -58,11 +125,12 @@ struct WidgetCodexAccount: Codable, Equatable {
     let stale: Bool?
     let fiveHour: WidgetRateWindow?
     let weekly: WidgetRateWindow?
+    var readAt: Double? = nil
 
     enum CodingKeys: String, CodingKey {
         case id, label, plan, active
         case needsReauth = "needs_reauth"
-        case stale
+        case stale, readAt
         case fiveHour = "five_hour"
         case weekly
     }
@@ -263,6 +331,12 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         if age(at: now) >= Self.cacheLifetime { return .placeholder }
         var copy = offline || age(at: now) >= Self.liveLifetime ? staleCopy : self
         copy.google = google?.evaluated(at: now)
+        copy.codexAccounts = copy.codexAccounts?.map { account in
+            guard let read = account.readAt, now.timeIntervalSince1970 - read >= Self.liveLifetime else { return account }
+            return WidgetCodexAccount(id: account.id, label: account.label, plan: account.plan, active: account.active,
+                                      needsReauth: account.needsReauth, stale: true,
+                                      fiveHour: account.fiveHour, weekly: account.weekly, readAt: read)
+        }
         return copy
     }
     var codexState: String { codexWeeklyNumber == "—" ? "unavailable" : (stale || codexStale ? "stale" : "live") }
@@ -614,7 +688,7 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         if let accounts = copy.codexAccounts {
             copy.codexAccounts = accounts.map {
                 WidgetCodexAccount(id: $0.id, label: $0.label, plan: $0.plan, active: $0.active,
-                                   needsReauth: $0.needsReauth, stale: true, fiveHour: $0.fiveHour, weekly: $0.weekly)
+                                   needsReauth: $0.needsReauth, stale: true, fiveHour: $0.fiveHour, weekly: $0.weekly, readAt: $0.readAt)
             }
         }
         copy.workbuddyIsOnline = false
@@ -658,27 +732,4 @@ struct WidgetDisplaySnapshot: Codable, Equatable {
         return (total, currency.isEmpty ? "CNY" : currency)
     }
 
-}
-
-
-// Both clients publish the same normalized presentation to the loopback backend.
-// No App Group entitlement or second business-data source is required.
-enum DisplaySnapshotBridge {
-    // A normal probe followed by force can each take 65s; leave transport margin.
-    static let refreshTimeout: TimeInterval = 140
-    static func publish(_ snapshot: WidgetDisplaySnapshot, revision: String?, baseURL: String,
-                        session: URLSession, codexAccountDisplayMode: CodexAccountDisplayMode? = nil) async {
-        guard let revision, let url = URL(string: baseURL + "/api/display-snapshot") else { return }
-        struct Publication: Encodable {
-            let revision: String
-            let snapshot: WidgetDisplaySnapshot
-            let codexAccountDisplayMode: CodexAccountDisplayMode?
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 3
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONEncoder().encode(Publication(revision: revision, snapshot: snapshot, codexAccountDisplayMode: codexAccountDisplayMode))
-        _ = try? await session.data(for: request)
-    }
 }

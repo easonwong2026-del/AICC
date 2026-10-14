@@ -260,6 +260,30 @@ def generate_metadata(output_dir, module_name="AICCWidget"):
         }
     }
 
+    def integer_param(name, title, default):
+        parameter = make_param(name, title, str(default))
+        parameter["valueType"] = {"integer": {}}
+        parameter["typeSpecificMetadata"][1] = {"integer": {"wrapper": default}}
+        return parameter
+
+    port = integer_param("magpiePort", "Magpie Port", 3425)
+    account_enum = dict(enum_metric_option)
+    account_enum["identifier"] = "WidgetAccountOption"
+    account_enum["fullyQualifiedTypeName"] = f"{module_name}.WidgetAccountOption"
+    account_enum["mangledTypeName"] = prefix + "19WidgetAccountOptionO"
+    account_enum["displayTypeName"] = {"alternatives": [], "key": "Accounts"}
+    account_enum["cases"] = [{"identifier": value, "displayRepresentation": {"title": {"alternatives": [], "key": title}}}
+                             for value, title in [("automatic", "Automatic"), ("one", "1 Account"),
+                                                  ("two", "2 Accounts"), ("all", "All Accounts")]]
+    account_param = make_param("accounts", "Accounts", "automatic")
+    account_param["valueType"]["linkEnumeration"]["wrapper"]["identifier"] = "WidgetAccountOption"
+    config_intent["parameters"] += [port, account_param]
+    summary = config_intent["actionConfiguration"]["whenClause"]["wrapper"]
+    for branch in ("when", "otherwise"):
+        summary[branch]["actionSummary"]["wrapper"]["otherParameterIdentifiers"] += ["magpiePort", "accounts"]
+    refresh_intent["parameters"] = [port]
+    refresh_intent["descriptionMetadata"]["descriptionText"]["key"] = "Refreshes Codex quotas through local Magpie."
+
     actionsdata = {
         "actions": {
             "AICCWidgetConfigurationIntent": config_intent,
@@ -270,7 +294,7 @@ def generate_metadata(output_dir, module_name="AICCWidget"):
         "assistantIntents": [],
         "autoShortcuts": [],
         "entities": {},
-        "enums": [enum_metric_option],
+        "enums": [enum_metric_option, account_enum],
         "generator": {
             "name": "xcode-tools",
             "version": "17E6107"

@@ -4,15 +4,11 @@ import SwiftUI
 
 struct SettingsRootView: View {
     @ObservedObject var settings: AppSettings
-    let api: APIService
-    let ocx: OpenCodexController
     let server: ServerManager
     let loginAtLaunch: LaunchAtLoginService
 
     var body: some View {
         SettingsView()
-            .environmentObject(api)
-            .environmentObject(ocx)
             .environmentObject(settings)
             .environmentObject(server)
             .environmentObject(loginAtLaunch)
@@ -27,13 +23,12 @@ struct SettingsRootView: View {
 /// accessory apps cannot reliably materialize that scene from a menu action.
 @MainActor
 final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
-    private let api: APIService
-    private let ocx: OpenCodexController
     private let settings: AppSettings
     private let server: ServerManager
     private let loginAtLaunch: LaunchAtLoginService
 
     private var window: NSWindow?
+    var hasVisibleWindow: Bool { window?.isVisible == true }
     // Keep a recently closed window alive until AppKit has finished its close
     // transaction. Releasing the SwiftUI hosting tree from windowWillClose
     // can crash macOS while NSWindowTransformAnimation is being torn down.
@@ -41,14 +36,10 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
     private var cancellables = Set<AnyCancellable>()
 
     init(
-        api: APIService,
-        ocx: OpenCodexController,
         settings: AppSettings,
         server: ServerManager,
         loginAtLaunch: LaunchAtLoginService
     ) {
-        self.api = api
-        self.ocx = ocx
         self.settings = settings
         self.server = server
         self.loginAtLaunch = loginAtLaunch
@@ -91,8 +82,6 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
     private func makeWindow() -> NSWindow {
         let rootView = SettingsRootView(
             settings: settings,
-            api: api,
-            ocx: ocx,
             server: server,
             loginAtLaunch: loginAtLaunch
         )
@@ -100,8 +89,8 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
         let settingsWindow = NSWindow(contentViewController: hostingController)
         settingsWindow.identifier = NSUserInterfaceItemIdentifier("com.aieink.dashboard.settings")
         settingsWindow.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        settingsWindow.setContentSize(NSSize(width: 640, height: 480))
-        settingsWindow.minSize = NSSize(width: 560, height: 420)
+        settingsWindow.setContentSize(NSSize(width: 580, height: 560))
+        settingsWindow.minSize = NSSize(width: 560, height: 520)
         settingsWindow.isReleasedWhenClosed = false
         settingsWindow.animationBehavior = .none
         settingsWindow.delegate = self

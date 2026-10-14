@@ -1,455 +1,187 @@
-#!/usr/bin/env python3
-"""Dependency-free local server for AICC — AI Status Center."""
+"""Read-only Magpie companion bridge. Account management belongs to Magpie."""
 
-from __future__ import annotations
-
+import hmac
 import json
-import hashlib
-import mimetypes
 import os
 import platform
+import secrets
 import socket
-import subprocess
+import sys
 import threading
 import time
 import uuid
-from collections import deque
-from datetime import datetime, timezone
-from http import HTTPStatus
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from collections import OrderedDict
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from collectors.deepseek import collect as collect_deepseek, COLLECTOR_TIMEOUT_SECONDS as DEEPSEEK_COLLECTOR_TIMEOUT
-from collectors.google import collect as collect_google
-from collectors import codex as ocx_codex
 from collectors import magpie
-from collectors.system import collect as collect_system
-from collectors.workbuddy import collect as collect_workbuddy, initial_status
-from services.codex_monitor import monitor
-from services.collector_manager import (
-    DEFAULT_COLLECTOR_INTERVAL,
-    DEFAULT_COLLECTOR_TIMEOUT,
-    CollectorManager,
-)
 
 ROOT = Path(__file__).resolve().parent
-DATA_ROOT = Path(os.environ.get("EINK_DATA_DIR", ROOT / "data")).expanduser()
-DATA_PATH = DATA_ROOT / "status.json"
-WEB_ROOT = Path(os.environ.get("EINK_WEB_ROOT", ROOT / "web")).expanduser()
-COLLECTOR_WAIT_SECONDS = max(0, min(5, float(os.environ.get("COLLECTOR_WAIT_SECONDS", "3.2"))))
-# A force may wait for a normal run to time out, then for its force successor.
-FORCE_WAIT_SECONDS = 2 * max(66.0, DEEPSEEK_COLLECTOR_TIMEOUT) + 1.0
 SERVER_STARTED_AT = time.time()
-SERVER_INSTANCE_ID = os.environ.get('AICC_SERVER_INSTANCE_ID') or str(uuid.uuid4())
-mimetypes.add_type("application/manifest+json", ".webmanifest")
-DEFAULT_STATUS = {
-    "workbuddy": {
-        "points": None,
-        "balance_state": "Unavailable",
-        "balance_stale": True,
-        "usage_source": "WorkBuddy unavailable",
-    },
-}
+SERVER_INSTANCE_ID = str(uuid.uuid4())
 DISCOVERY_MAGIC = b"AI_EINK_DISCOVER"
-_collector_manager: CollectorManager | None = None
+DATA_PATH = magpie.DATA_ROOT / "status.json"
+_lock = threading.Lock()
+_snapshot = None
+_token = secrets.token_urlsafe(32)
+_pair_code = None
+_pair_deadline = 0
+_pair_attempts = 0
+_rates = OrderedDict()
 _rate_lock = threading.Lock()
-_status_write_lock = threading.Lock()
-_display_lock = threading.Lock()
-_display_revision = ""
-_display_snapshot: dict | None = None
-_codex_account_display_mode = "automatic"
-_rate_windows: dict[tuple[str, str], deque[float]] = {}
 
 
-def allow_request(address: str, category: str, limit: int) -> bool:
-    now = time.monotonic()
-    key = (address, category)
-    with _rate_lock:
-        window = _rate_windows.setdefault(key, deque())
-        while window and now - window[0] >= 60:
-            window.popleft()
-        if len(window) >= limit:
-            return False
-        window.append(now)
-        if len(_rate_windows) > 512:
-            for stale_key in [item for item, values in _rate_windows.items() if not values or now - values[-1] >= 60]:
-                _rate_windows.pop(stale_key, None)
-        return True
+def version():
+    return (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 
 
-def persisted_status() -> dict:
-    DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if not DATA_PATH.exists():
-        save_status(DEFAULT_STATUS)
-    try:
-        status = json.loads(DATA_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return DEFAULT_STATUS.copy()
-    if (
-        isinstance(status, dict)
-        and isinstance(status.get("codex"), dict)
-        and status["codex"].get("source") == "Manual"
-    ):
-        status = status.copy()
-        status.pop("codex")
-        save_status(status)
-    return status
-
-
-def collector_manager() -> CollectorManager:
-    global _collector_manager
-    if _collector_manager is None:
-        fallback = persisted_status()
-        source = os.environ.get("AICC_CODEX_SOURCE", "auto").lower()
-        use_magpie = source == "magpie" or (source == "auto" and magpie.installed())
-        use_ocx = source == "opencodex"
-        if source not in ("auto", "magpie", "opencodex", "app-server"):
-            raise ValueError("Invalid AICC_CODEX_SOURCE")
-        pool = magpie if use_magpie else ocx_codex if use_ocx else None
-        pool_source = "Magpie" if use_magpie else "OpenCodex"
-        codex_initial = (pool.load_cache() or {"available": False, "state": "Loading",
-                         "source": pool_source, "accounts": [], "stale": True}) if pool else {}
-
-        def collect_codex(force: bool = False) -> dict:
-            return pool.collect(force=force) if pool else monitor.status(force=force)
-
-        def collect_deepseek_value(force: bool = False) -> dict:
-            return collect_deepseek(DATA_ROOT / "deepseek_history.json")
-
-        def collect_workbuddy_value(force: bool = False) -> dict:
-            return collect_workbuddy(
-                persisted_status().get("workbuddy", {}),
-                force=force,
-            )
-
-        def collect_system_value(force: bool = False) -> dict:
-            return collect_system()
-
-        def collect_google_value(force: bool = False) -> dict:
-            return {"available": False, "state": "Not configured", "stale": False} if use_magpie else collect_google(force=force)
-
-        _collector_manager = CollectorManager({
-            "google": (collect_google_value, 300.0, 10.0, {} if use_magpie else {**fallback.get("google", {}), "stale": True}),
-            "codex": (
-                collect_codex,
-                DEFAULT_COLLECTOR_INTERVAL,
-                55.0 if use_magpie else 66.0 if use_ocx else DEFAULT_COLLECTOR_TIMEOUT,
-                codex_initial,
-            ),
-            "deepseek": (
-                collect_deepseek_value,
-                300.0,
-                DEEPSEEK_COLLECTOR_TIMEOUT,
-                {**fallback.get("deepseek", {"status": "Loading", "balances": []}), "stale": True},
-            ),
-            "workbuddy": (
-                collect_workbuddy_value,
-                DEFAULT_COLLECTOR_INTERVAL,
-                DEFAULT_COLLECTOR_TIMEOUT,
-                initial_status(fallback.get("workbuddy", {})),
-            ),
-            "system": (
-                collect_system_value,
-                DEFAULT_COLLECTOR_INTERVAL,
-                DEFAULT_COLLECTOR_TIMEOUT,
-                {"status": "Loading"},
-            ),
-        })
-    return _collector_manager
-
-
-def load_status(force: bool = False) -> dict:
-    global _display_revision, _display_snapshot
-    values, metadata = collector_manager().snapshot(force=force, wait_seconds=FORCE_WAIT_SECONDS if force else COLLECTOR_WAIT_SECONDS)
-    data = persisted_status()
-    previous_google = data.get("google")
-    previous_codex = data.get("codex")
-    previous_deepseek = {k: v for k, v in data.get("deepseek", {}).items() if k != "age"}
-    current_deepseek = {k: v for k, v in values.get("deepseek", {}).items() if k != "age"}
-    data.update(values)
-    # Persist balance changes and manual refreshes, not every age tick.
-    if force or previous_deepseek != current_deepseek or data.get("google") != previous_google or data.get("codex") != previous_codex:
-        save_status(data)
-    data["fetched_at"] = time.time()
-    data["collection"] = metadata
-    data["updated_at"] = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
-    # The loopback backend is the shared store for ad-hoc signed app/widget.
-    # Invalidate presentation on any source change; stale publishes are rejected.
-    source = {
-        "google": values.get("google", {}),
-        "codex": {k: values.get("codex", {}).get(k) for k in (
-            "weekly", "five_hour", "accounts", "active_account_id", "selection_mode", "source", "stale")},
-        "workbuddy": {k: values.get("workbuddy", {}).get(k) for k in ("points", "balance_stale", "balance_state")},
-        "deepseek": {k: values.get("deepseek", {}).get(k) for k in ("balances", "stale", "status", "error_code")},
-        "states": {k: metadata.get(k, {}).get("state") for k in ("codex", "google", "workbuddy", "deepseek")},
-    }
-    revision = hashlib.sha256(json.dumps(source, sort_keys=True).encode()).hexdigest()
-    with _display_lock:
-        if revision != _display_revision:
-            _display_revision, _display_snapshot = revision, None
-        data["codex_account_display_mode"] = _codex_account_display_mode
-        data["display_revision"] = revision
-        if _display_snapshot is not None:
-            data["display_snapshot"] = {**_display_snapshot, "fetchedAt": data["fetched_at"] - 978307200, "age": 0}
-    return data
-
-
-def _workbuddy_reconnect() -> tuple[dict, HTTPStatus]:
-    """Run the bundled WorkBuddy bridge setup script and report the result."""
-    script = ROOT / "macos" / "start-workbuddy-monitored.sh"
-    if not script.is_file():
-        return (
-            {"error": "WorkBuddy reconnect is unavailable in the bundled runtime"},
-            HTTPStatus.NOT_IMPLEMENTED,
-        )
-    try:
-        completed = subprocess.run(
-            ["/bin/bash", str(script), "--ensure"],
-            capture_output=True,
-            text=True,
-            timeout=50,
-        )
-    except subprocess.TimeoutExpired:
-        collector_manager().invalidate("workbuddy")
-        return (
-            {"ok": False, "state": "failed", "error_code": "timeout",
-             "error": "WorkBuddy reconnect timed out"},
-            HTTPStatus.BAD_GATEWAY,
-        )
-    collector_manager().invalidate("workbuddy")
-    if completed.returncode == 0:
-        return {"ok": True, "state": "bridge_ready"}, HTTPStatus.OK
-    error_code = "unknown"
-    for line in reversed((completed.stderr or "").splitlines()):
-        if line.startswith("AICC_WORKBUDDY_FAIL:"):
-            error_code = line.split(":", 1)[1].strip()
-            break
-    detail = (completed.stderr or completed.stdout or "").strip().splitlines()
-    message = detail[-1] if detail else "WorkBuddy reconnect failed"
-    return (
-        {"ok": False, "state": "failed", "error_code": error_code, "error": message},
-        HTTPStatus.BAD_GATEWAY,
-    )
-
-
-def save_status(data: dict) -> bool:
-    DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with _status_write_lock:
-        try:
-            existing = json.loads(DATA_PATH.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            existing = None
-        if existing == data:
-            return False
-        temporary = DATA_PATH.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(temporary, DATA_PATH)
-        return True
-
-
-def version() -> str:
-    try:
-        return (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    except OSError:
-        return "dev"
-
-
-def build_version() -> str | None:
-    build = os.environ.get("AICC_BUILD")
-    if build:
-        return build.strip()
-    return None
-
-
-def host_id() -> str | None:
-    """Stable across server restarts and app upgrades in the same data directory."""
+def host_id():
     path = DATA_PATH.parent / "host_id"
+    path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with path.open("x", encoding="utf-8") as output:
-                output.write(uuid.uuid4().hex + "\n")
-        except FileExistsError:
-            pass
-        value = path.read_text(encoding="utf-8").strip()
-        if not value:
-            value = uuid.uuid4().hex
-            path.write_text(value + "\n", encoding="utf-8")
-        return value
-    except OSError:
-        return None
+        with path.open("x", encoding="utf-8") as output:
+            output.write(uuid.uuid4().hex)
+    except FileExistsError:
+        pass
+    return path.read_text(encoding="utf-8").strip()
 
 
-def server_identity() -> dict:
-    identity = {
-        "protocol": "aicc",
-        "version": version(),
-        "server_instance_id": SERVER_INSTANCE_ID,
-        "hostname": socket.gethostname(),
-        "platform": "macOS" if platform.system() == "Darwin" else platform.system(),
-    }
-    stable_id = host_id()
-    if stable_id:
-        identity["host_id"] = stable_id
-    return identity
+def server_identity():
+    return {"protocol": "aicc", "companion": True, "version": version(), "host_id": host_id(),
+            "server_instance_id": SERVER_INSTANCE_ID, "hostname": socket.gethostname(),
+            "platform": "macOS" if platform.system() == "Darwin" else platform.system()}
 
 
-def live_health_payload() -> dict:
-    payload = {
-        "ok": True,
-        "status": "live",
-        "version": version(),
-        "pid": os.getpid(),
-        "ppid": os.getppid(),
-        "started_at": SERVER_STARTED_AT,
-        "server_instance_id": SERVER_INSTANCE_ID,
-        **server_identity(),
-    }
-    build = build_version()
-    if build:
-        payload["build"] = build
+def live_health_payload():
+    payload = {**server_identity(), "ok": True, "status": "live", "pairing_required": True,
+               "pid": os.getpid(), "ppid": os.getppid(), "started_at": SERVER_STARTED_AT}
+    if os.environ.get("AICC_BUILD"):
+        payload["build"] = os.environ["AICC_BUILD"]
     return payload
 
 
-def ready_health_payload() -> tuple[dict, HTTPStatus]:
+def refresh_status():
+    global _snapshot
     try:
-        manager = collector_manager()
-        pipe = manager.pipeline_health()
-        if not pipe.get("ready", False):
-            return {
-                "ok": False,
-                "status": "stuck_pipeline",
-                "version": version(),
-                "uptime_seconds": round(max(0, time.time() - SERVER_STARTED_AT)),
-                "stuck_workers": pipe.get("stuck_workers", []),
-                "pid": os.getpid(),
-                "ppid": os.getppid(),
-                "server_instance_id": SERVER_INSTANCE_ID,
-            }, HTTPStatus.SERVICE_UNAVAILABLE
-        return {
-            "ok": True,
-            "status": "ready",
-            "version": version(),
-            "uptime_seconds": round(max(0, time.time() - SERVER_STARTED_AT)),
-            "pid": os.getpid(),
-            "ppid": os.getppid(),
-            "server_instance_id": SERVER_INSTANCE_ID,
-        }, HTTPStatus.OK
-    except Exception as err:
-        return {
-            "ok": False,
-            "status": "not_ready",
-            "error": str(err),
-            "pid": os.getpid(),
-            "ppid": os.getppid(),
-            "server_instance_id": SERVER_INSTANCE_ID,
-        }, HTTPStatus.SERVICE_UNAVAILABLE
+        snapshot = magpie.collect(force=True)
+    except Exception:
+        snapshot = magpie.load_cache() or {"source": "Magpie", "accounts": [], "stale": True, "available": False}
+    with _lock:
+        _snapshot = snapshot
 
 
-def discovery_payload(http_port: int) -> dict:
-    return {"name": "AICC Dashboard", "port": http_port, **server_identity()}
+def load_status():
+    with _lock:
+        snapshot = _snapshot or magpie.load_cache() or {"source": "Magpie", "accounts": [], "stale": True, "available": False}
+        snapshot = json.loads(json.dumps(snapshot))
+    now = time.time()
+    for account in snapshot.get("accounts", []):
+        read = account.get("read_at")
+        account["stale"] = bool(account.get("stale") or read is None or now - read >= 300)
+    accounts = snapshot.get("accounts", [])
+    snapshot["stale"] = not accounts or all(account["stale"] for account in accounts)
+    for account in accounts:
+        account.pop("read_at", None)
+    return {"codex": snapshot, "fetched_at": now, "codex_account_display_mode": "all"}
 
 
-class DashboardHandler(SimpleHTTPRequestHandler):
-    server_version = f"AICC/{version()}"
+def allow_request(address, kind, limit):
+    now = time.monotonic()
+    key = (address, kind)
+    with _rate_lock:
+        start, count = _rates.get(key, (now, 0))
+        if now - start >= 60:
+            start, count = now, 0
+        _rates[key] = (start, count + 1)
+        _rates.move_to_end(key)
+        while len(_rates) > 512:
+            _rates.popitem(last=False)
+        return count < limit
+
+
+class DashboardHandler(BaseHTTPRequestHandler):
+    server_version = "AICC Companion"
     sys_version = ""
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(WEB_ROOT), **kwargs)
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(10)
 
-    def do_GET(self) -> None:
-        if not allow_request(self.client_address[0], "read", 120):
-            self.send_json({"error": "Too many requests"}, HTTPStatus.TOO_MANY_REQUESTS)
-            return
+    def is_local_request(self):
+        origin = self.headers.get("Origin")
+        host = urlparse("//" + self.headers.get("Host", "")).hostname
+        return (self.client_address[0] in ("127.0.0.1", "::1")
+                and host in ("127.0.0.1", "localhost", "::1") and origin is None)
+
+    def authorized(self):
+        supplied = self.headers.get("Authorization", "")
+        return hmac.compare_digest(supplied.encode(), ("Bearer " + _token).encode())
+
+    def do_GET(self):
+        if not allow_request(self.client_address[0], "read", 60):
+            return self.send_json({"error": "Too many requests"}, 429)
         path = urlparse(self.path).path
         if path == "/api/health/live":
             return self.send_json(live_health_payload())
-        if path == "/api/health/ready":
-            payload, status = ready_health_payload()
-            return self.send_json(payload, status)
-        if path == "/api/status":
-            return self.send_json(load_status())
-        if path == "/api/codex/status":
-            values, _ = collector_manager().snapshot(wait_seconds=COLLECTOR_WAIT_SECONDS)
-            return self.send_json(values.get("codex", {}))
-        if path == "/api/health":
-            return self.send_json(health_payload())
-        if path == "/":
-            self.path = "/index.html"
-        return super().do_GET()
+        if path == "/api/health/ready" and self.is_local_request():
+            return self.send_json({"ok": True, "status": "ready"})
+        if path != "/api/status":
+            return self.send_json({"error": "Not found"}, 404)
+        if not self.authorized():
+            return self.send_json({"error": "Pair this device in AICC settings"}, 401)
+        return self.send_json(load_status())
 
-    def do_POST(self) -> None:
-        if not allow_request(self.client_address[0], "write", 20):
-            self.send_json({"error": "Too many requests"}, HTTPStatus.TOO_MANY_REQUESTS)
-            return
+    def do_POST(self):
+        global _pair_code, _pair_deadline, _pair_attempts
         path = urlparse(self.path).path
-        if not self.is_local_request():
-            self.send_json({"error": "Write operations are local-only"}, HTTPStatus.FORBIDDEN)
+        if not allow_request(self.client_address[0], "pair", 10):
+            return self.send_json({"error": "Too many requests"}, 429)
+        if path == "/api/shutdown" and self.is_local_request():
+            self.send_json({"ok": True, "pid": os.getpid()})
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
             return
-        if path == "/api/display-snapshot":
-            return self.store_display_snapshot()
-        if path == "/api/workbuddy/reconnect":
-            payload, status = _workbuddy_reconnect()
-            return self.send_json(payload, status)
-        if path == "/api/shutdown":
-            self.send_json({"ok": True, "message": "Server shutting down", "pid": os.getpid()})
-            threading.Thread(target=lambda: (time.sleep(0.3), os._exit(0)), daemon=True).start()
-            return
-        if path == "/api/refresh":
-            self.send_json(load_status(force=True))
-            return
-        self.send_error(HTTPStatus.NOT_FOUND)
-
-    def store_display_snapshot(self) -> None:
-        global _display_snapshot, _codex_account_display_mode
+        if path == "/api/pairing" and self.is_local_request():
+            with _lock:
+                _pair_code = f"{secrets.randbelow(100000000):08d}"
+                _pair_deadline = time.monotonic() + 120
+                _pair_attempts = 0
+                code = _pair_code
+            return self.send_json({"code": code, "expires_seconds": 120})
+        if path != "/api/pair":
+            return self.send_json({"error": "Read-only bridge"}, 403)
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            if not 0 < length <= 16384:
-                raise ValueError("invalid length")
-            payload = json.loads(self.rfile.read(length))
-            snapshot = payload["snapshot"]
-            mode = payload.get("codexAccountDisplayMode")
-            if mode is not None and mode not in ("automatic", "one", "two", "all"):
-                raise ValueError("invalid display mode")
-            if (not isinstance(snapshot, dict) or snapshot.get("stale") is not False
-                    or not isinstance(snapshot.get("fetchedAt"), (int, float))
-                    or not all(isinstance(snapshot.get(key), str) for key in (
-                        "codexWeeklyNumber", "workbuddyPointsText", "deepseekBalanceText", "deepseekCurrency"))):
-                raise ValueError("invalid snapshot")
-        except (ValueError, KeyError, TypeError):
-            return self.send_json({"error": "Invalid display snapshot"}, HTTPStatus.BAD_REQUEST)
-        with _display_lock:
-            if payload.get("revision") != _display_revision:
-                return self.send_json({"error": "Source changed"}, HTTPStatus.CONFLICT)
-            if mode is not None:
-                _codex_account_display_mode = mode
-            # Keep the host preference across source revisions and Widget publishes.
-            _display_snapshot = {**snapshot, "codexAccountDisplayMode": _codex_account_display_mode}
-        self.send_json({"ok": True})
+            if not 0 < length <= 256:
+                raise ValueError()
+            document = json.loads(self.rfile.read(length))
+            code = document.get("code")
+            if not isinstance(code, str) or len(code) != 8 or not code.isascii() or not code.isdigit():
+                raise ValueError()
+        except (ValueError, TypeError, AttributeError):
+            return self.send_json({"error": "Invalid pairing code"}, 400)
+        with _lock:
+            _pair_attempts += 1
+            valid = (_pair_code is not None and time.monotonic() < _pair_deadline and _pair_attempts <= 5
+                     and hmac.compare_digest(code, _pair_code))
+            if valid:
+                _pair_code = None
+        if not valid:
+            return self.send_json({"error": "Pairing code expired or incorrect"}, 403)
+        return self.send_json({"token": _token, "host_id": host_id()})
 
-    def send_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
-        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    def send_json(self, payload, status=200):
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
 
-    def end_headers(self) -> None:
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'")  # noqa: E501
-        super().end_headers()
-
-    def is_local_request(self) -> bool:
-        return self.client_address[0] in ("127.0.0.1", "::1")
-
-    def log_message(self, format: str, *args) -> None:
-        if os.environ.get("EINK_ACCESS_LOG") == "1":
-            super().log_message(format, *args)
+    def log_message(self, format, *args):
+        pass
 
 
 class DashboardServer(ThreadingHTTPServer):
@@ -457,208 +189,55 @@ class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
 
 
-def start_discovery(http_port: int) -> None:
-    discovery_port = int(os.environ.get("EINK_DISCOVERY_PORT", "8766"))
-
-    def serve() -> None:
+def start_discovery(http_port):
+    def serve():
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as channel:
                 channel.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                channel.bind(("0.0.0.0", discovery_port))
+                channel.bind(("0.0.0.0", int(os.environ.get("EINK_DISCOVERY_PORT", "8766"))))
                 while True:
                     request, address = channel.recvfrom(512)
-                    if request.strip() != DISCOVERY_MAGIC:
-                        continue
-                    payload = json.dumps(discovery_payload(http_port)).encode("utf-8")
-                    channel.sendto(payload, address)
-                    if os.environ.get("EINK_ACCESS_LOG") == "1":
-                        print(f"[AICC Discovery] replied to {address[0]} port={http_port}")
-        except OSError as error:
-            print(f"Discovery disabled: {error}")
-
-    threading.Thread(target=serve, name="eink-discovery", daemon=True).start()
+                    if request.strip() == DISCOVERY_MAGIC:
+                        payload = {"name": "AICC Companion", "port": http_port, **server_identity()}
+                        channel.sendto(json.dumps(payload).encode(), address)
+        except OSError:
+            pass
+    threading.Thread(target=serve, daemon=True).start()
 
 
-def _periodic_save(interval: int = 120) -> None:
-    """定时将收集器数据写入 status.json，供菜单栏等文件读取方使用。"""
-    while True:
-        time.sleep(interval)
-        try:
-            values, _ = collector_manager().snapshot(force=False, wait_seconds=0)
-            data = persisted_status()
-            data.update(values)
-            save_status(data)
-        except Exception as error:
-            if os.environ.get("EINK_ACCESS_LOG") == "1":
-                print(f"Periodic status save failed: {type(error).__name__}: {error}")
+def main():
+    global _token
+    if os.environ.get("AICC_TOKEN_STDIN") == "1":
+        supplied = sys.stdin.readline(256).strip()
+        if len(supplied) < 32:
+            raise SystemExit("Missing bridge credential")
+        _token = supplied
+    server = DashboardServer((os.environ.get("EINK_HOST", "0.0.0.0"), int(os.environ.get("EINK_PORT", "8765"))), DashboardHandler)
+    start_discovery(server.server_port)
 
+    def poll():
+        while True:
+            refresh_status()
+            time.sleep(300)
 
-def _workbuddy_monitor_loop(interval: int = 60) -> None:
-    """Auto-heal the WorkBuddy debugging bridge once per WorkBuddy process.
-
-    This restores the 2.3.x monitor behavior (previously a LaunchAgent) without
-    needing a LaunchAgent or Automation permission: when WorkBuddy is running
-    without the localhost bridge, the monitor restarts it once with the
-    debugging flag. WorkBuddy is never launched when it is not running.
-    """
-    while True:
-        time.sleep(interval)
-        default = "0" if collector_manager()._slots["codex"].value.get("source") == "Magpie" else "1"
-        if os.environ.get("WORKBUDDY_AUTO_HEAL", default) != "1":
-            continue
-        _run_workbuddy_monitor_once()
-
-
-def _run_workbuddy_monitor_once() -> bool:
-    script = ROOT / "macos" / "start-workbuddy-monitored.sh"
-    if not script.is_file():
-        return False
-    try:
-        completed = subprocess.run(
-            ["/bin/bash", str(script), "--monitor"],
-            capture_output=True,
-            text=True,
-            timeout=55,
-        )
-        if completed.returncode == 0 and "auto-healed" in completed.stdout:
-            collector_manager().invalidate("workbuddy")
-            collector_manager().snapshot(force=True, wait_seconds=0)
-            print("WorkBuddy bridge auto-healed; collector refreshed.")
-            return True
-    except Exception as error:
-        if os.environ.get("EINK_ACCESS_LOG") == "1":
-            print(f"WorkBuddy monitor failed: {type(error).__name__}: {error}")
-    return False
-
-
-def _cache_health() -> dict:
-    try:
-        location = DATA_PATH if DATA_PATH.exists() else DATA_ROOT
-        parent = location if location.is_dir() else location.parent
-        writable = parent.exists() and os.access(parent, os.W_OK)
-        modified = DATA_PATH.stat().st_mtime if DATA_PATH.exists() else None
-        return {
-            "writable": writable,
-            "exists": DATA_PATH.exists(),
-            "age_seconds": max(0, round(time.time() - modified)) if modified else None,
-        }
-    except OSError as error:
-        return {"writable": False, "exists": False, "error": str(error)[:160]}
-
-
-def _collector_health(values: dict, metadata: dict) -> dict:
-    result = {}
-    for name in ("codex", "workbuddy", "deepseek", "system"):
-        value = values.get(name, {})
-        item = metadata.get(name, {}).copy()
-        collection_state = item.get("state")
-        if name == "codex":
-            collector_ok = bool(value.get("available"))
-            state = value.get("state", "pending")
-        elif name == "workbuddy":
-            collector_ok = value.get("points") is not None
-            state = value.get("balance_state", "pending")
-            if value.get("balance_error_code"):
-                item["error_code"] = value["balance_error_code"]
-                item["error"] = value.get("balance_error")
-        elif name == "deepseek":
-            state = value.get("status", "pending")
-            collector_ok = state in ("Online", "Not configured")
-        else:
-            state = value.get("status", "pending")
-            collector_ok = state == "Online"
-        item.update({"provider": name, "state": state})
-        item["ok"] = (
-            bool(collector_ok)
-            and collection_state is not None
-            and collection_state not in ("error", "timeout", "stale")
-        )
-        result[name] = item
-    return result
-
-
-def health_payload() -> dict:
-    cache = _cache_health()
-    try:
-        manager = collector_manager()
-        values, metadata = manager.snapshot(wait_seconds=0)
-        provider_items = _collector_health(values, metadata)
-    except Exception as error:  # health must explain a broken scheduler without raising
-        return {
-            "ok": False,
-            "status": "unhealthy",
-            "version": version(),
-            "uptime_seconds": round(max(0, time.time() - SERVER_STARTED_AT)),
-            "cache": cache,
-            "providers": {},
-            "error": f"{type(error).__name__}: {error}"[:160],
-        }
-
-    required = {"codex", "workbuddy", "system"}
-    required_failed = any(
-        not provider_items.get(name, {}).get("ok", False)
-        for name in required
-    )
-    any_failed = any(not item.get("ok", False) for item in provider_items.values())
-    if not cache.get("writable", False):
-        state = "unhealthy"
-    elif required_failed or any_failed:
-        state = "degraded"
-    else:
-        state = "healthy"
-
-    return {
-        "ok": state == "healthy",
-        "status": state,
-        "version": version(),
-        "uptime_seconds": round(max(0, time.time() - SERVER_STARTED_AT)),
-        "cache": cache,
-        "providers": provider_items,
-        "worker_telemetry": {
-            "codex": metadata.get("codex", {}) if values.get("codex", {}).get("source") in ("OpenCodex", "Magpie") else monitor.health(),
-        },
-        "pid": os.getpid(),
-        "ppid": os.getppid(),
-        "started_at": SERVER_STARTED_AT,
-        "server_instance_id": SERVER_INSTANCE_ID,
-    }
-
-
-def _start_parent_watchdog() -> None:
-    parent_pid_str = os.environ.get("AICC_PARENT_PID")
-    if not parent_pid_str:
-        return
-    try:
-        parent_pid = int(parent_pid_str)
-    except ValueError:
-        return
-
-    def watchdog() -> None:
+    def watchdog():
+        parent = int(os.environ["AICC_PARENT_PID"])
         while True:
             time.sleep(3)
             try:
-                os.kill(parent_pid, 0)
+                os.kill(parent, 0)
             except OSError:
-                print(f"Parent process {parent_pid} exited. Server shutting down.")
-                monitor.stop()
                 os._exit(0)
 
-    threading.Thread(target=watchdog, name="parent-watchdog", daemon=True).start()
-
-
-def main() -> None:
-    _start_parent_watchdog()
-    port = int(os.environ.get("EINK_PORT", "8765"))
-    server = DashboardServer((os.environ.get("EINK_HOST", "0.0.0.0"), port), DashboardHandler)
-    start_discovery(port)
-    collector_manager().snapshot(force=False, wait_seconds=0)
-    threading.Thread(target=_periodic_save, args=(120,), daemon=True).start()
-    threading.Thread(target=_workbuddy_monitor_loop, args=(60,), daemon=True).start()
-    print(f"AICC Dashboard: http://localhost:{port}")
+    threading.Thread(target=poll, daemon=True).start()
+    if os.environ.get("AICC_PARENT_PID"):
+        threading.Thread(target=watchdog, daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nStopped.")
+        pass
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":

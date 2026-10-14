@@ -79,13 +79,17 @@ for bundle, module in [(app, "AICC"), (app / "Contents/PlugIns/AICCWidget.appex"
         intent = actions["AICCWidgetConfigurationIntent"]
         assert "com.apple.link.systemProtocol.WidgetConfiguration" in intent.get("systemProtocols", []), "Missing WidgetConfiguration protocol"
         parameters = {p.get("name") for p in intent.get("parameters", [])}
-        required = {"primaryMetric", "secondaryMetric", "topLeft", "topRight", "bottomLeft", "bottomRight"}
+        required = {"primaryMetric", "secondaryMetric", "topLeft", "topRight", "bottomLeft", "bottomRight", "magpiePort", "accounts"}
         assert required <= parameters, "Missing configuration parameters"
         refresh = actions["RefreshWidgetIntent"]
         assert refresh.get("openAppWhenRun") is False, "Refresh must run in the background"
+        assert "magpiePort" in {p.get("name") for p in refresh.get("parameters", [])}, "Refresh lost configured port"
         enum = next(e for e in data.get("enums", []) if e.get("identifier") == "WidgetMetricOption")
         assert {c["identifier"] for c in enum["cases"]} == {"codex", "google", "workbuddy", "deepseek"}, "Missing metrics"
-        for item, name in [(intent, "AICCWidgetConfigurationIntent"), (refresh, "RefreshWidgetIntent"), (enum, "WidgetMetricOption")]:
+        account_enum = next(e for e in data.get("enums", []) if e.get("identifier") == "WidgetAccountOption")
+        assert {c["identifier"] for c in account_enum["cases"]} == {"automatic", "one", "two", "all"}, "Missing account modes"
+        for item, name in [(intent, "AICCWidgetConfigurationIntent"), (refresh, "RefreshWidgetIntent"),
+                           (enum, "WidgetMetricOption"), (account_enum, "WidgetAccountOption")]:
             assert item["fullyQualifiedTypeName"] == f"{module}.{name}", "Wrong metadata module"
             assert "_$s" + item["mangledTypeName"] + "Mn" in symbols, f"Metadata type absent from binary: {name}"
     except (OSError, ValueError, KeyError, StopIteration, AssertionError, subprocess.CalledProcessError) as error:

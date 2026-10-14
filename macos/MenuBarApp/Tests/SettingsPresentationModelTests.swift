@@ -42,30 +42,4 @@ final class SettingsPresentationModelTests: XCTestCase {
         XCTAssertNil(AppThemeMode(rawValue: "invalid"))
     }
 
-    func testStatusDisplayStateRemovesDuplicateUpdates() {
-        let first = StatusItemDisplayState(
-            remaining: 77,
-            showStatus: true,
-            showBalance: true,
-            languageCode: "en",
-            themeMode: "system"
-        )
-        let same = StatusItemDisplayState(
-            remaining: 77,
-            showStatus: true,
-            showBalance: true,
-            languageCode: "en",
-            themeMode: "system"
-        )
-        XCTAssertEqual(first, same)
-    }
-
-    func testTerminationGateRequiresExplicitQuitRequest() {
-        var gate = AppTerminationGate()
-        XCTAssertFalse(gate.allowsTermination)
-
-        gate.requestTermination()
-
-        XCTAssertTrue(gate.allowsTermination)
-    }
 }

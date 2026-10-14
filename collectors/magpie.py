@@ -3,20 +3,28 @@
 import hashlib
 import json
 import os
-import shutil
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from collectors.codex import DATA_ROOT, _percent, mark_stale
+DATA_ROOT = Path(os.environ.get("EINK_DATA_DIR", Path(__file__).resolve().parent.parent / "data"))
+
+
+def _percent(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 100:
+        return None
+    return round(100 - value, 2)
+
+
+def mark_stale(snapshot, state="Cached"):
+    snapshot = {**snapshot, "stale": True, "state": state}
+    snapshot["accounts"] = [{**account, "stale": True} for account in snapshot.get("accounts", [])]
+    return snapshot
+
 
 CACHE_PATH = DATA_ROOT / "magpie_last_success.json"
 MAX_AGE_SECONDS = 300
-
-
-def installed():
-    return bool(os.environ.get("AICC_MAGPIE_URL") or shutil.which("magpie") or Path("/Applications/magpie.app").is_dir())
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -118,7 +126,8 @@ def _request(path, method="GET"):
 
 
 def collect(force=False):
-    _request("/v1/magpie/quotas/refresh?provider=codex", "POST")
+    if force:
+        _request("/v1/magpie/quotas/refresh?provider=codex", "POST")
     snapshot = parse_report(_request("/v1/magpie/quotas?kept=1"))
     try:
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)

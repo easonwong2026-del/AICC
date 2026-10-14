@@ -281,7 +281,7 @@ struct AICCWidgetView: View {
 
     var body: some View {
         Group {
-            if entry.snapshot.codexSource == "Magpie" && entry.configuration == AICCWidgetConfigurationIntent() {
+            if entry.snapshot.codexSource == "Magpie" && entry.configuration.hasDefaultMetrics {
                 codexFocusedContent
             } else if effectiveFamily == .systemMedium {
                 mediumContent
@@ -298,7 +298,7 @@ struct AICCWidgetView: View {
     }
 
     private var refreshButton: some View {
-        Button(intent: RefreshWidgetIntent()) {
+        Button(intent: RefreshWidgetIntent(port: entry.configuration.magpiePort)) {
             Image(systemName: "arrow.clockwise")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.secondary)

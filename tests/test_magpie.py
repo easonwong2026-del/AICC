@@ -7,8 +7,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from collectors import magpie
-from services.collector_manager import CollectorManager
-import server
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures/magpie_quotas.json").read_text())
 NOW = magpie.timestamp("2026-10-14T13:32:00+08:00")
@@ -78,22 +76,8 @@ class MagpieTests(unittest.TestCase):
                 opener.assert_not_called()
         self.assertIsNone(magpie.NoRedirect().redirect_request(None, None, 302, "", {}, "https://example.com"))
 
-    def test_auto_prefers_magpie_and_failure_does_not_switch_accounts(self):
-        previous = server._collector_manager
-        try:
-            with patch.dict(os.environ, {"AICC_CODEX_SOURCE": "auto"}), patch.object(magpie, "installed", return_value=True), \
-                    patch.object(magpie, "load_cache", return_value=None), patch.object(server.monitor, "status") as legacy, \
-                    patch.object(magpie, "collect", side_effect=ValueError("Magpie temporarily unavailable")):
-                server._collector_manager = None
-                slot = server.collector_manager()._slots["codex"]
-                self.assertEqual(slot.value["source"], "Magpie")
-                with self.assertRaises(ValueError):
-                    slot.collect()
-                legacy.assert_not_called()
-        finally:
-            server._collector_manager = previous
-        manager = CollectorManager({"codex": (lambda force=False: (_ for _ in ()).throw(ValueError("Unavailable")),
-                                              120, 1, magpie.parse_report(FIXTURE, NOW))})
-        failed = manager.snapshot(force=True, wait_seconds=2)[0]["codex"]
-        self.assertTrue(failed["stale"])
-        self.assertTrue(all(account["stale"] for account in failed["accounts"]))
+    def test_passive_read_does_not_force_any_provider(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(magpie, "CACHE_PATH", Path(directory) / "magpie.json"), \
+                patch.object(magpie, "_request", return_value=FIXTURE) as request:
+            magpie.collect()
+            request.assert_called_once_with("/v1/magpie/quotas?kept=1")

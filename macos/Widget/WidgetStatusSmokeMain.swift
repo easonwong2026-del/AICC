@@ -190,10 +190,12 @@ struct WidgetStatusSmokeMain {
             }
         }
         WidgetStatusStore.remove()
-        try require(WidgetStatusStore.cachedOrPlaceholder() == .placeholder, "empty cache placeholder")
-        WidgetStatusStore.save(snapshot)
+        try require(WidgetStatusStore.cachedOrPlaceholder().codexSource == "Magpie", "empty cache keeps Magpie presentation")
+        var magpieCache = snapshot
+        magpieCache.codexSource = "Magpie"
+        WidgetStatusStore.save(magpieCache)
         try require(refStale.stale, "Cached snapshot is stale")
-        try require(WidgetStatusStore.cachedOrPlaceholder() == refStale, "last successful snapshot fallback")
+        try require(WidgetStatusStore.cachedOrPlaceholder() == magpieCache.staleCopy, "last successful snapshot fallback")
 
         try require(refStale.deepseekState == "stale" && !refStale.deepseekIsOnline, "offline balance cannot be online")
         try require(snapshot.evaluated(at: fetchedAt.addingTimeInterval(300)).stale, "five minute expiry")

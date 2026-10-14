@@ -26,7 +26,9 @@ public final class DashboardVisualTest extends Instrumentation {
         status.putInt("current", 1);
         sendStatus(1, status);
         try {
+            testCredentialStorage();
             testRenderAccountStates();
+            testPairingSettings();
             sendStatus(0, status);
             finish(Activity.RESULT_OK, new Bundle());
         } catch (Throwable error) {
@@ -64,6 +66,36 @@ public final class DashboardVisualTest extends Instrumentation {
                     save(view, new File(directory, "many-page-2.png"));
                 }
             });
+        }
+    }
+
+    private void testCredentialStorage() throws Exception {
+        android.content.SharedPreferences preferences = getTargetContext().getSharedPreferences("credential-test", 0);
+        preferences.edit().clear().putString("host_id", "test-host").commit();
+        String token = "isolated-test-credential-never-a-real-secret";
+        BridgeCredential.save(preferences, token, "test-host");
+        if (!token.equals(BridgeCredential.load(preferences))) throw new AssertionError("Credential roundtrip failed");
+        if (preferences.getAll().containsValue(token)) throw new AssertionError("Plaintext credential persisted");
+        preferences.edit().putString("host_id", "other-host").commit();
+        if (BridgeCredential.load(preferences) != null) throw new AssertionError("Cross-host credential leak");
+        preferences.edit().putString("host_id", "test-host").putString("bridge_secret", "tampered").commit();
+        if (BridgeCredential.load(preferences) != null) throw new AssertionError("Corrupt credential accepted");
+        preferences.edit().clear().commit();
+    }
+
+    private void testPairingSettings() throws Exception {
+        android.content.Intent intent = new android.content.Intent(getTargetContext(), MainActivity.class);
+        intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+        Activity activity = startActivitySync(intent);
+        runOnMainSync(() -> ((android.view.ViewGroup) activity.findViewById(android.R.id.content)).getChildAt(0).performLongClick());
+        waitForIdleSync();
+        Bitmap screenshot = getUiAutomation().takeScreenshot();
+        if (screenshot == null) throw new AssertionError("Settings screenshot unavailable");
+        try (FileOutputStream output = new FileOutputStream(new File(getTargetContext().getExternalFilesDir("visual"), "pairing-settings.png"))) {
+            if (!screenshot.compress(Bitmap.CompressFormat.PNG, 100, output)) throw new AssertionError("Settings PNG failed");
+        } finally {
+            screenshot.recycle();
+            runOnMainSync(activity::finish);
         }
     }
 

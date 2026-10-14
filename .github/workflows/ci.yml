@@ -21,19 +21,9 @@ jobs:
         run: |
           python -m py_compile collectors/magpie.py
           python -m py_compile server.py
-          python -m py_compile services/codex_monitor.py
-          python -m py_compile services/collector_manager.py
-          python -m py_compile services/cdp.py
-          python -m py_compile collectors/deepseek.py
-          python -m py_compile collectors/workbuddy.py
-          python -m py_compile collectors/system.py
-          python -m py_compile collectors/google.py
 
       - name: Run tests
         run: python -m unittest discover -s tests -v
-
-      - name: Test web quota rendering
-        run: node tests/test_web.js
 
   lint:
     runs-on: ubuntu-latest
@@ -91,13 +81,13 @@ jobs:
       - name: Verify Widget layout symmetry
         run: bash scripts/smoke-test-widget-visual.sh
 
-      - name: Render Codex dashboard acceptance images
-        run: bash scripts/smoke-test-dashboard-visual.sh tests/fixtures/aicc_magpie_status.json
+      - name: Render companion settings acceptance images
+        run: bash scripts/smoke-test-dashboard-visual.sh
 
       - name: Upload dashboard acceptance images
         uses: actions/upload-artifact@v4
         with:
-          name: magpie-dashboard-visuals
+          name: magpie-settings-visuals
           path: /private/tmp/aicc-dashboard-qa/*.png
 
       - name: Upload Widget acceptance images
