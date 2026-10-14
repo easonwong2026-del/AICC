@@ -323,7 +323,7 @@ public final class MainActivity extends Activity {
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(4), 0, dp(4), 0);
 
-        TextView hint = settingText("电脑地址（可手工输入）", 16, muted, false);
+        TextView hint = settingText("电脑地址", 16, muted, false);
         EditText url = new EditText(this);
         styleInput(url, 17, ink);
         url.setSingleLine(true);
@@ -379,7 +379,7 @@ public final class MainActivity extends Activity {
         interval.setText(String.valueOf(refreshMinutes()));
         android.widget.Spinner accountCount = new android.widget.Spinner(this);
         accountCount.setAdapter(new android.widget.ArrayAdapter<String>(this,
-                android.R.layout.simple_spinner_dropdown_item, new String[] { "全部账号（每页最多 4 个）", "1 个账号", "2 个账号" }));
+                android.R.layout.simple_spinner_dropdown_item, new String[] { "全部账号（4 个/页）", "1 个账号", "2 个账号" }));
         String savedMode = preferences.getString("account_mode", "all");
         accountCount.setSelection("one".equals(savedMode) ? 1 : "two".equals(savedMode) ? 2 : 0);
 
