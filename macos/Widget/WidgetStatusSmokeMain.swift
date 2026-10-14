@@ -190,14 +190,18 @@ struct WidgetStatusSmokeMain {
             }
         }
         WidgetStatusStore.remove()
-        try require(WidgetStatusStore.cachedOrPlaceholder() == .placeholder, "empty cache placeholder")
-        WidgetStatusStore.save(snapshot)
+        try require(WidgetStatusStore.cachedOrPlaceholder().codexSource == "Magpie", "empty cache keeps Magpie presentation")
+        var magpieCache = snapshot
+        magpieCache.codexSource = "Magpie"
+        WidgetStatusStore.save(magpieCache)
         try require(refStale.stale, "Cached snapshot is stale")
-        try require(WidgetStatusStore.cachedOrPlaceholder() == refStale, "last successful snapshot fallback")
+        try require(WidgetStatusStore.cachedOrPlaceholder() == magpieCache.staleCopy, "last successful snapshot fallback")
 
         try require(refStale.deepseekState == "stale" && !refStale.deepseekIsOnline, "offline balance cannot be online")
         try require(snapshot.evaluated(at: fetchedAt.addingTimeInterval(300)).stale, "five minute expiry")
         try require(snapshot.evaluated(at: fetchedAt.addingTimeInterval(86400)) == .placeholder, "24h expiry hides old values")
+        try require(magpieCache.evaluated(at: fetchedAt.addingTimeInterval(86400)) == .magpiePlaceholder,
+                    "Magpie cache expiry retains the Codex-only empty layout instead of obsolete provider cards")
         try require(snapshot.age(at: fetchedAt.addingTimeInterval(60)) == 60, "snapshot age")
         let failedBalance = WidgetDisplaySnapshot(payload: try decode(#"{"deepseek":{"status":"Connection error","error_code":"connection_error","stale":true,"balances":[{"currency":"CNY","total_balance":"58.39"}]}}"#), fetchedAt: fetchedAt)
         try require(failedBalance.deepseekBalanceText == "58.39", "last known good remains visible")
@@ -285,6 +289,15 @@ struct WidgetStatusSmokeMain {
         let fullData = try JSONEncoder().encode(fullIntent)
         let fullDecoded = try JSONDecoder().decode(AICCWidgetConfigurationIntent.self, from: fullData)
         try require(fullDecoded == fullIntent, "Full 4-slot intent survives JSON roundtrip")
+        let independent = AICCWidgetConfigurationIntent()
+        independent.magpiePort = 13425
+        independent.accounts = .all
+        let independentData = try JSONEncoder().encode(independent)
+        let independentDecoded = try JSONDecoder().decode(AICCWidgetConfigurationIntent.self, from: independentData)
+        try require(independentDecoded == independent && independentDecoded.hasDefaultMetrics,
+                    "Custom connection and account count retain Codex-focused layout and survive persistence")
+        let oldIntent = try JSONDecoder().decode(AICCWidgetConfigurationIntent.self, from: Data(#"{"primaryMetric":"codex"}"#.utf8))
+        try require(oldIntent.magpiePort == 3425 && oldIntent.accounts == .automatic, "Existing Widget configuration migrates defaults")
 
         // 7.5 Metric Enum Contract
         try require(WidgetMetricOption.codex.rawValue == "codex", "Stable identifier codex")

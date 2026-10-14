@@ -1,64 +1,26 @@
 import Foundation
 
 final class SnapshotProtocol: URLProtocol {
-    static var generation = 0
     static var offline = false
-    static var deepseekFailed = false
     static var requests: [String] = []
-    static var published: [String: Any]?
-    static var displayMode = "automatic"
-    static let fetched = Date.now.timeIntervalSince1970
+    static var generation = 0
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func stopLoading() {}
     override func startLoading() {
-        let path = request.url!.path
-        Self.requests.append("\(request.httpMethod!) \(path)")
+        Self.requests.append(request.httpMethod! + " " + request.url!.absoluteString)
         if Self.offline {
             client?.urlProtocol(self, didFailWithError: URLError(.cannotConnectToHost))
             return
         }
-        var result: [String: Any] = [:]
-        if path == "/api/display-snapshot" {
-            var data = request.httpBody ?? Data()
-            if data.isEmpty, let stream = request.httpBodyStream {
-                stream.open()
-                defer { stream.close() }
-                var buffer = [UInt8](repeating: 0, count: 4096)
-                while stream.hasBytesAvailable {
-                    let count = stream.read(&buffer, maxLength: buffer.count)
-                    if count <= 0 { break }
-                    data.append(buffer, count: count)
-                }
-            }
-            let body = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
-            Self.published = body["snapshot"] as? [String: Any]
-            if let mode = body["codexAccountDisplayMode"] as? String { Self.displayMode = mode }
-            Self.published?["codexAccountDisplayMode"] = Self.displayMode
-            result = ["ok": true]
-        } else {
-            if path == "/api/refresh" { Self.generation += 1; Self.published = nil }
-            let fresh = Self.generation > 0
-            result = [
-                "fetched_at": Self.fetched,
-                "codex_account_display_mode": Self.displayMode,
-                "display_revision": "\(Self.generation)",
-                "google": ["weekly": ["remaining": fresh ? 30 : 70, "reset": "2026-09-18 14:12"],
-                           "five_hour": ["remaining": fresh ? 0 : 87], "updated_epoch": Self.fetched],
-                "codex": ["weekly": ["remaining": fresh ? 10 : 48, "reset": "2026-09-07 12:02"],
-                          "five_hour": ["remaining": fresh ? 88 : 97]],
-                "workbuddy": ["points": fresh ? 5947.0 : 5852.96],
-                "deepseek": ["status": "Online", "balances": [["currency": "CNY", "total_balance": "58.39"]]]
-            ]
-            if Self.deepseekFailed {
-                result["deepseek"] = ["status": "Connection error", "error_code": "connection_error", "stale": true,
-                                      "balances": [["currency": "CNY", "total_balance": "58.39"]]]
-            }
-            if let published = Self.published { result["display_snapshot"] = published }
-        }
-        let data = try! JSONSerialization.data(withJSONObject: result)
-        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        if request.httpMethod == "POST" { Self.generation += 1 }
+        let document: [String: Any] = ["object": "list", "data": [
+            ["provider": "codex", "kind": "subscription", "user": "hidden@example.test",
+             "readAt": ISO8601DateFormatter().string(from: .now), "windows": [
+                ["name": "7 days", "used": Self.generation > 0 ? 90 : 52], ["name": "5 hours", "used": 12]]]]]
+        let data = try! JSONSerialization.data(withJSONObject: document)
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200,
+                           httpVersion: nil, headerFields: nil)!, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
         client?.urlProtocolDidFinishLoading(self)
     }
@@ -66,76 +28,45 @@ final class SnapshotProtocol: URLProtocol {
 
 @main
 struct DisplaySnapshotRegressionMain {
-    @MainActor static func main() async throws {
+    static func main() async throws {
         if CommandLine.arguments.contains("--live") {
-            let api = APIService(baseURL: "http://127.0.0.1:8765")
-            await api.fetchStatus(force: true)
-            guard let dashboard = api.displaySnapshot else { fatalError("Live dashboard fetch failed") }
-            let widget = await WidgetStatusLoader.snapshot(force: true)
-            // Reopening the Dashboard performs GET /api/status after a Widget refresh.
-            await api.fetchStatus()
-            let current = api.displaySnapshot!
-            assert(current.codexWeeklyRemaining == widget.codexWeeklyRemaining)
-            assert(current.codexFiveHourRemaining == widget.codexFiveHourRemaining)
-            assert(current.codexWeeklyReset == widget.codexWeeklyReset)
-            assert(current.workbuddyPoints == widget.workbuddyPoints)
-            assert(current.deepseekBalanceText == widget.deepseekBalanceText)
-            assert(current.deepseekState == widget.deepseekState)
-            print("Dashboard force refresh:", String(data: try JSONEncoder().encode(dashboard), encoding: .utf8)!)
-            print("Widget force refresh:", String(data: try JSONEncoder().encode(widget), encoding: .utf8)!)
-            print("Live Dashboard/Widget display fields match after refresh")
+            guard let snapshot = await WidgetStatusLoader.load(force: true) else { throw URLError(.cannotConnectToHost) }
+            print("Live local Magpie direct read passed; Codex accounts:", snapshot.codexAccounts?.count ?? 0)
             return
         }
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [SnapshotProtocol.self]
-        let session = URLSession(configuration: config)
-        let api = APIService(baseURL: "http://127.0.0.1:8765", session: session)
-        await api.fetchStatus()
-        let old = api.displaySnapshot!
-        WidgetStatusStore.save(old)
-        assert(old.codexWeeklyNumber == "48" && old.workbuddyPoints == 5852.96)
-        await api.fetchStatus(force: true)
-        let dashboard = api.displaySnapshot!
-        let widget = await WidgetStatusLoader.snapshot(session: session)
-        assert(dashboard == widget, "Dashboard and Widget must consume identical normalized snapshots")
-        assert(widget.google?.number == "30" && widget.google?.secondary?.remaining == 0)
-        assert(widget.codexWeeklyNumber == "10" && widget.codexFiveHourRemaining == 88)
-        assert(widget.workbuddyPointsText == "5,947" && widget.workbuddyPoints == 5947)
-        assert(widget.codexWeeklyReset == "2026-09-07 12:02")
-        assert(widget.deepseekBalanceText == "58.39" && widget.deepseekStatusText == "Online")
-        assert(WidgetStatusStore.load() == widget, "host refresh must replace the widget's old values")
-        let before = SnapshotProtocol.generation
-        _ = await WidgetStatusLoader.snapshot(force: true, session: session)
-        assert(SnapshotProtocol.generation == before + 1, "Widget refresh must force backend collection")
-        assert(SnapshotProtocol.requests.contains("POST /api/refresh"))
-        assert(SnapshotProtocol.requests.contains("POST /api/display-snapshot"))
-        SnapshotProtocol.deepseekFailed = true
-        await api.fetchStatus(force: true)
-        let providerFailure = await WidgetStatusLoader.snapshot(session: session)
-        assert(api.displaySnapshot == providerFailure)
-        assert(providerFailure.deepseekState == "stale" && providerFailure.deepseekBalanceText == "58.39")
-        assert(providerFailure.deepseekStatusText == "缓存 / connection_error")
-        var preference = providerFailure
-        preference.codexAccountDisplayMode = .one
-        await DisplaySnapshotBridge.publish(preference, revision: "test", baseURL: "http://127.0.0.1:8765",
-            session: session, codexAccountDisplayMode: .one)
-        let widgetOne = await WidgetStatusLoader.snapshot(session: session)
-        assert(widgetOne.codexAccountDisplayMode == .one, "Widget must use the host preference in the shared snapshot")
-        let widgetRefreshed = await WidgetStatusLoader.snapshot(force: true, session: session)
-        assert(widgetRefreshed.codexAccountDisplayMode == .one, "Source refresh must preserve the host preference")
-        await api.fetchStatus()
-        let hostPreference = CodexAccountDisplayMode(rawValue: AppSettings.shared.codexAccountDisplayMode) ?? .automatic
-        assert(api.displaySnapshot?.codexAccountDisplayMode == hostPreference)
-        assert(SnapshotProtocol.displayMode == hostPreference.rawValue, "Host preference replaces Widget cache preference")
-        _ = await WidgetStatusLoader.snapshot(session: session)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SnapshotProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let port = 13425
+        defer { WidgetStatusStore.remove(port: port) }
+        let fresh = await WidgetStatusLoader.snapshot(force: true, port: port, session: session)
+        assert(fresh.codexWeeklyRemaining == 10 && fresh.codexFiveHourRemaining == 88)
+        assert(fresh.codexSource == "Magpie" && fresh.codexActiveAccountID == nil)
+        let redacted = try JSONEncoder().encode(fresh)
+        assert(!String(data: redacted, encoding: .utf8)!.contains("@"))
+        let count = SnapshotProtocol.generation
+        _ = await WidgetStatusLoader.snapshot(port: port, session: session)
+        assert(SnapshotProtocol.generation == count, "Automatic reads are limited to one refresh per five minutes")
+        assert(SnapshotProtocol.requests.allSatisfy { $0.contains("127.0.0.1:13425/v1/magpie/quotas") })
+        assert(SnapshotProtocol.requests.contains { $0.contains("POST") && $0.contains("provider=codex") })
         SnapshotProtocol.offline = true
-        await api.fetchStatus()
-        let offlineWidget = await WidgetStatusLoader.snapshot(session: session)
-        assert(api.displaySnapshot == offlineWidget)
-        assert(offlineWidget.googleState == "stale" && offlineWidget.google?.number == "30")
-        assert(offlineWidget.deepseekState == "stale" && offlineWidget.codexState == "stale")
-        assert(!offlineWidget.deepseekIsOnline && offlineWidget.deepseekBalanceText == "58.39")
-        WidgetStatusStore.remove()
-        print("Dashboard/Widget shared snapshot, force refresh and offline regression smoke passed")
+        let cached = await WidgetStatusLoader.snapshot(port: port, session: session)
+        assert(cached.stale && cached.codexAccounts?.first?.stale == true && cached.codexWeeklyRemaining == 10)
+        let other = await WidgetStatusLoader.snapshot(port: port + 1, session: session)
+        assert(other.codexAccounts == nil, "A different Magpie port cannot inherit another source cache")
+        let invalid = await WidgetStatusLoader.load(port: 0, session: session)
+        assert(invalid == nil)
+        SnapshotProtocol.offline = false
+        let recovered = await WidgetStatusLoader.snapshot(port: port, session: session)
+        assert(!recovered.stale && recovered.codexWeeklyRemaining == 10)
+        let fixture = try Data(contentsOf: URL(fileURLWithPath: "tests/fixtures/magpie_quotas.json"))
+        let now = ISO8601DateFormatter().date(from: "2026-10-14T13:32:00+08:00")!
+        let mixed = try MagpieQuotaReport.snapshot(data: fixture, now: now)
+        assert(mixed.codexAccounts?.count == 2 && mixed.codexAccounts?[0].weekly?.remaining == 88)
+        assert(mixed.codexAccounts?[1].weekly?.remaining == 59 && mixed.codexWeeklyRemaining == nil)
+        assert(mixed.evaluated(at: now.addingTimeInterval(301)).codexAccounts?.allSatisfy { $0.stale == true } == true)
+        let empty = try MagpieQuotaReport.snapshot(data: Data(#"{"object":"list","data":[]}"#.utf8))
+        assert(empty.codexAccounts?.isEmpty == true && empty.codexWeeklyRemaining == nil)
+        print("Independent Magpie Widget: refresh limits, source isolation, redaction, expiry, offline and recovery passed")
     }
 }

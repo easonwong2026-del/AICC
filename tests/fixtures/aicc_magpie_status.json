@@ -1,0 +1,13 @@
+{
+  "codex": {
+    "schema_version": 2, "source": "Magpie", "available": true, "state": "Connected", "stale": false,
+    "selection_mode": "auto", "active_account_id": null,
+    "accounts": [
+      {"id": "magpie-demo-one", "label": "Codex · 账号 1", "plan": "team", "active": false, "stale": false, "needs_reauth": false,
+       "weekly": {"remaining": 88, "reset": "2026-10-20 16:10"}, "five_hour": {"remaining": 91, "reset": "2026-10-14 16:58"}},
+      {"id": "magpie-demo-two", "label": "Codex · 账号 2", "plan": "plus", "active": false, "stale": false, "needs_reauth": false,
+       "weekly": {"remaining": 59, "reset": "2026-10-21 08:00"}, "five_hour": {"remaining": 0, "reset": "2026-10-14 17:10"}}
+    ]
+  },
+  "updated_at": "2026-10-14 13:32"
+}

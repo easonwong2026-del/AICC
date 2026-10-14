@@ -8,8 +8,8 @@ SIGNING_IDENTITY="${AICC_SIGNING_IDENTITY:--}"
 VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 
 # Required server directories for BUNDLE_SERVER=1
-REQUIRED_SERVER_DIRS=("collectors" "services" "web")
-REQUIRED_SERVER_FILES=("macos/start-workbuddy-monitored.sh")
+REQUIRED_SERVER_DIRS=("collectors")
+REQUIRED_SERVER_FILES=("collectors/magpie.py")
 
 APP_NAME="AICC"
 APP_DIR="$ROOT/dist/mac/$APP_NAME.app"
@@ -59,17 +59,10 @@ if [[ "$BUNDLE_SERVER" == "1" ]]; then
 
   mkdir -p "$BUNDLED_SERVER_DIR"
   cp "$ROOT/server.py" "$ROOT/VERSION" "$BUNDLED_SERVER_DIR/"
-  cp -R "$ROOT/collectors" "$ROOT/services" "$ROOT/web" "$BUNDLED_SERVER_DIR/"
+  cp -R "$ROOT/collectors" "$BUNDLED_SERVER_DIR/"
   # CI syntax/tests may leave bytecode; distribute source only.
   find "$BUNDLED_SERVER_DIR" -type d -name __pycache__ -prune -exec rm -rf {} +
   find "$BUNDLED_SERVER_DIR" -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete
-  mkdir -p "$BUNDLED_SERVER_DIR/macos"
-  cp "$ROOT/macos/start-workbuddy-monitored.sh" "$BUNDLED_SERVER_DIR/macos/"
-  chmod 755 "$BUNDLED_SERVER_DIR/macos/start-workbuddy-monitored.sh"
-  if [ ! -x "$BUNDLED_SERVER_DIR/macos/start-workbuddy-monitored.sh" ]; then
-    echo "ERROR: Bundled WorkBuddy reconnect script is not executable" >&2
-    exit 1
-  fi
   printf '%s\n' "@resources/Server" > "$RESOURCES_DIR/ServerRoot.txt"
 else
   printf '%s\n' "$SERVER_ROOT" > "$RESOURCES_DIR/ServerRoot.txt"
@@ -117,6 +110,7 @@ echo "=== Compiling ==="
 xcrun swiftc \
   -parse-as-library \
   -module-name AICC \
+  -D AICC_HOST \
   -O \
   -sdk "$SDK_PATH" \
   -target arm64-apple-macosx14.0 \

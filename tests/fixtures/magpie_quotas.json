@@ -1,0 +1,14 @@
+{
+  "object": "list",
+  "data": [
+    {"provider": "codex", "name": "Codex", "kind": "subscription", "user": "one@example.invalid", "plan": "team", "readAt": "2026-10-14T13:30:00+08:00", "last": true, "windows": [
+      {"name": "5 hours", "used": 9, "remaining": 91, "resetsAt": "2026-10-14T16:58:46+08:00"},
+      {"name": "7 days", "used": 12, "remaining": 88, "resetsAt": "2026-10-20T16:10:19+08:00"}
+    ]},
+    {"provider": "codex", "name": "Codex", "kind": "subscription", "user": "two@example.invalid", "plan": "plus", "readAt": "2026-10-14T13:30:00+08:00", "windows": [
+      {"name": "5 hours", "used": 100, "remaining": 0},
+      {"name": "7 days", "used": 41, "remaining": 59}
+    ]},
+    {"provider": "workbuddy", "kind": "subscription", "user": "other@example.invalid", "windows": []}
+  ]
+}

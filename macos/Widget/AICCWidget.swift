@@ -7,21 +7,23 @@ struct AICCWidgetProvider: AppIntentTimelineProvider {
     typealias Intent = AICCWidgetConfigurationIntent
 
     func placeholder(in context: Context) -> AICCWidgetEntry {
-        AICCWidgetEntry(date: .now, snapshot: .placeholder, configuration: AICCWidgetConfigurationIntent())
+        AICCWidgetEntry(date: .now, snapshot: .magpiePlaceholder, configuration: AICCWidgetConfigurationIntent())
     }
 
     func snapshot(for configuration: AICCWidgetConfigurationIntent, in context: Context) async -> AICCWidgetEntry {
         if context.isPreview {
-            return AICCWidgetEntry(date: .now, snapshot: .placeholder, configuration: configuration)
+            return AICCWidgetEntry(date: .now, snapshot: .magpiePlaceholder, configuration: configuration)
         }
 
-        let snapshot = await WidgetStatusLoader.snapshot()
+        var snapshot = await WidgetStatusLoader.snapshot(port: configuration.magpiePort)
+        snapshot.codexAccountDisplayMode = configuration.accounts.mode
         return AICCWidgetEntry(date: .now, snapshot: snapshot, configuration: configuration)
     }
 
     func timeline(for configuration: AICCWidgetConfigurationIntent, in context: Context) async -> Timeline<AICCWidgetEntry> {
         let now = Date.now
-        let snapshot = await WidgetStatusLoader.snapshot()
+        var snapshot = await WidgetStatusLoader.snapshot(port: configuration.magpiePort)
+        snapshot.codexAccountDisplayMode = configuration.accounts.mode
         let entry = AICCWidgetEntry(date: now, snapshot: snapshot, configuration: configuration)
         var dates = [snapshot.fetchedAt.addingTimeInterval(WidgetDisplaySnapshot.liveLifetime),
                      snapshot.fetchedAt.addingTimeInterval(WidgetDisplaySnapshot.cacheLifetime)]
@@ -29,6 +31,9 @@ struct AICCWidgetProvider: AppIntentTimelineProvider {
             let source = Date(timeIntervalSince1970: epoch)
             dates += [source.addingTimeInterval(WidgetDisplaySnapshot.liveLifetime),
                       source.addingTimeInterval(WidgetDisplaySnapshot.cacheLifetime)]
+        }
+        dates += (snapshot.codexAccounts ?? []).compactMap { $0.readAt }.map {
+            Date(timeIntervalSince1970: $0).addingTimeInterval(300)
         }
         let future = Array(Set(dates.filter { $0 > now })).sorted()
         let entries = [entry] + future.map { date in
@@ -47,7 +52,7 @@ struct AICCWidget: Widget {
             AICCWidgetView(entry: entry)
         }
         .configurationDisplayName("AICC")
-        .description("AICC status at a glance")
+        .description("Codex quotas from Magpie. Works while AICC is closed.")
         .supportedFamilies([.systemSmall, .systemMedium])
         .contentMarginsDisabled()
     }

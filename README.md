@@ -1,182 +1,68 @@
-# AICC
+# AICC · Magpie 显示伴侣
 
 [English](README.en.md)
 
-面向 macOS 的 AI 状态中心，显示 Codex、WorkBuddy、DeepSeek 和系统状态。支持 Poke4S 墨水屏显示。服务只依赖 Python 标准库。
+AICC 提供 macOS 桌面小组件和 Android 墨水屏 Codex 额度显示。账号登录、模型路由和调用由
+[Magpie](https://github.com/yetone/magpie) 管理。AICC 没有菜单栏图标、弹出看板或 Web 看板，
+不启动代理、不读取供应商密钥、不独立采集 WorkBuddy、DeepSeek、Google 或系统状态。
 
-当前 macOS 版本为 AICC 2.10.2（Build 15）；Android/Poke4S 使用独立版本体系。
+本分支为改版候选，尚未发布。沿用正式版 **2.10.2 / Build 15** 的版本及 Widget 身份；
+不能按版本号区分候选包和正式安装包。当前正式版仍在 [Releases](https://github.com/easonwong2026-del/AICC/releases)。
 
-macOS 菜单栏使用固定的 Codex、Google、WorkBuddy、DeepSeek、System 和 OpenCodex 状态卡片，只读取 `/api/status` 及固定操作接口。Python 服务端通过固定采集器提供 Codex、WorkBuddy、DeepSeek 和系统状态。
+## 桌面小组件
 
-## 使用地址
+1. 安装候选 AICC App，保持 Magpie 正在运行；默认本机端口为 3425。
+2. 桌面右键 → 编辑小组件 → 添加 AICC 小尺寸或中尺寸。
+3. 右键 AICC → 编辑小组件，可独立选择 Magpie 端口及自动/1/2/全部账号。
+4. 可以关闭 AICC。Widget 直接读取本机 Magpie，不依赖 Python 桥接或宿主 App 常驻。
 
-- Mac：`http://localhost:8765`
-- 设置：SwiftUI 原生设置窗口（菜单栏 → Settings）
-- Poke4S：`http://<Mac 当前 Wi-Fi 地址>:8765/?kiosk=1`
+默认页面只显示 Codex：单账号并列周与 5h 剩余，多账号分别显示，小尺寸最多 2 个、中尺寸最多
+4 个，超过容量显示数量提示。原有非默认指标配置继续解码，但已停用的余额/供应商卡片显示未知，
+不会继续展示旧来源缓存或自行推算额度。恢复默认指标配置即可使用 Codex 专用布局。
 
-Mac 与 Poke4S 需要连接同一 Wi-Fi。原生 Android 客户端也可以通过 UDP 自动发现 Mac。
+自动时间线以 5 分钟为目标；同一 Widget 进程对同一端口限制 Codex 专项刷新频率，实际调度由
+WidgetKit 决定。右下角按钮直接请求 Magpie 的 Codex 刷新，再读取标准报告。请求失败保留
+同端口的匿名缓存，并明确标记缓存；源读数超过 5 分钟也标记缓存。超过 24 小时的本地快照隐藏。
 
-## macOS 启动与维护
+## 墨水屏 APK
 
-首次部署见 [MAC-MIGRATION.md](MAC-MIGRATION.md)。常用操作：
+1. 打开 AICC 设置，启用“墨水屏桥接”。Mac 与墨水屏连接同一可信局域网。
+2. APK 长按打开设置，自动发现或输入 Mac 地址；桥接使用 HTTP 8765、UDP 发现 8766。
+3. 在 Mac 点击“生成配对码”，在 APK 输入 8 位码并配对。有效期 2 分钟，只能使用一次，
+   最多尝试 5 次。APK 不需要 Magpie 网关 Key 或任何供应商凭据。
+4. 可关闭 Mac 设置窗口；启用桥接时 AICC 留在后台，停用时关闭窗口即退出。登录启动可单独开启。
 
-正式用户推荐下载 [GitHub Releases](https://github.com/easonwong2026-del/AICC/releases) 中的 DMG，拖入
-`/Applications` 后由 AICC App 通过 `ServerManager` 启动内置 Python Server，并可在设置中使用
-`SMAppService` 管理登录启动。这是 macOS 正式用户唯一支持的运行路径。
+APK 默认每 5 分钟同步，前台或唤醒时立即更新，后台或熄屏时暂停。显示 1/2/全部账号，
+全部账号每页最多 4 个，点击切页；额度内容变化时才重绘，保留既有 BOOX 闪刷校准。
+Mac 在设置中可撤销全部设备，随后需要重新配对。IP 变化会通过稳定主机身份重新发现；
+地址被其他主机占用时不会向其发送已配对凭据。
 
-从旧版本升级时，AICC 首次启动会只针对旧版安装器创建的 3 个精确 LaunchAgent 身份执行一次清理，
-卸载旧服务并移除对应 plist 后继续正常启动；清理失败不会让 App 崩溃，也不会扫描或杀掉其他服务/进程。
+桥接是独立的只读权限：网络设备只能读匿名 Codex 数据，不能刷新上游、管理账号、路由或关闭服务。
+配对凭据在 Mac 钥匙串保存，通过标准输入交给 Python；Android 用 Keystore 加密，关闭备份。
+当前 LAN HTTP 传输没有加密，因此只适合可信局域网，不要开放到公网或公共 Wi-Fi。
 
-源码检出仅支持开发调试，不是生产安装方式：
+## 开发与验收
 
-```bash
-bash macos/start-dashboard.sh              # DEV ONLY：前台启动源码 Server，不注册后台服务
-bash macos/set-deepseek-key.sh             # 更新 DeepSeek 密钥
-BUNDLE_SERVER=1 bash macos/build-aicc-swiftui.sh  # 构建自包含 SwiftUI 菜单栏 App（含 Python 服务）
-bash macos/build-dmg.sh  # 构建自包含 AICC DMG 安装包
-```
-
-WorkBuddy 调试桥自动修复由 AICC Server 内部负责。正式用户通过设置中的“关于与更新”检查公开清单，
-再下载并替换正式 DMG；源码目录不提供另一套生产更新或回滚机制。
-
-DMG App 日志位于 `~/Library/Logs/AICC-Dashboard/`。启动内置 Server 前，
-`aicc-server.log` 和 `aicc-server-error.log` 超过 1 MiB 时会保留最近 256 KiB；日志限制失败不会阻止 Server 启动。
-
-SwiftUI 菜单栏 App（AICC）会生成在 `dist/mac/AICC.app`。`SERVER_ROOT` 仅用于本地开发/调试构建；
-正式 DMG 始终使用 `BUNDLE_SERVER=1`，由 App 管理自带 Server，不指向源码目录。
-`build-dmg.sh` 会打包同一套 SwiftUI App，并生成自包含安装包，默认输出到 `dist/`；传入 `RELEASE_DIR` 后可输出到
-`/Users/easonwong/AICC/releases/mac/` 这类成品目录。DMG 里的 App 自带服务器代码，
-可拖入 `/Applications`。自包含 App 的运行数据写入
-`~/Library/Application Support/AICC-Dashboard/data/`，不会写进 App 包本身。
-App 运行需要 macOS 14 或更高版本、Apple Silicon，以及可执行的 Python 3.10+；DMG 不包含 Python 解释器。
-没有 Developer ID 时生成的是 ad-hoc 测试包，首次在其他 Mac 安装需要右键选择"打开"。
-菜单栏 App 只负责状态显示、启动/停止内部数据服务、手动控制 OpenCodex、打开原生设置窗口、
-打开日志和配置开机自启；固定额度采集仍由现有 Python 服务完成。内部数据服务监督只访问
-`/api/health/live`，状态面板读取 `/api/status` 缓存，不会额外触发 collector 刷新。
-
-### macOS 手动检查更新（可选）
-
-设置 → 通用底部的“关于与更新”只在用户点击“检查更新”后请求一次公开清单，不会后台轮询、自动下载或安装。
-发布版 App 已通过 `Info.plist` 配置公开更新清单：
-`https://raw.githubusercontent.com/easonwong2026-del/AICC/main/updates/aicc-update.json`。
-也可以在启动 App 的环境中设置 `AICC_UPDATE_MANIFEST_URL` 覆盖它。地址和清单中的下载/说明链接都必须使用 HTTPS；
-清单缺失或未配置时会显示“更新源尚未配置”，并提供 GitHub Releases 页面入口。清单格式如下：
-
-```json
-{
-  "version": "2.5.1",
-  "build": "5",
-  "minimumSystemVersion": "14.0",
-  "downloadURL": "https://example.com/AICC-2.5.1.dmg",
-  "releaseNotesURL": "https://example.com/aicc/releases/2.5.1",
-  "publishedAt": "2026-08-03T00:00:00Z"
-}
-```
-
-### 发布版本规则
-
-- `VERSION` 是 AICC 产品版本唯一人工源。
-- 新用户功能发布：minor 版本号加 1；bugfix 发布：patch 版本号加 1。
-- 每个正式 macOS 发布都将 `CFBundleVersion` 加 1；普通开发 commit 不自动 bump 版本。
-- 只有对应 GitHub Release 和 DMG 都已真实存在后，才将版本写入 `updates/aicc-update.json`。
-
-### macOS 桌面 Widget
-
-- 系统要求：macOS 14+、Apple Silicon；先安装并启动 AICC App。
-- 添加方式：桌面右键 → 编辑 Widget → 搜索 “AICC”，选择小尺寸或中尺寸并添加。
-- 自定义指标：桌面右键 Widget → 编辑“AICC” → 选择需要展示的指标（Small 支持配置 2 个主要指标，Medium 支持 4 个槽位独立配置）。
-- 默认布局：Small 默认展示 Codex 与 Google；Medium 默认左上 Codex、右上 Google、左下 WorkBuddy、右下 DeepSeek；支持重复指标自动规整与缺失数据安全降级。
-- Widget 通过 `http://127.0.0.1:8765/api/status` 读取状态，正式端口固定为 `8765`，不会自行启动 Server。
-- 点击右下角刷新按钮会通过本机 `POST /api/refresh` 强制刷新额度并更新 Widget 时间线；AICC App 启动及状态变化时也会通知 Widget 更新。
-- Codex 使用完整账号池和与菜单栏一致的账号 resolver；在菜单栏设置中选择“自动 / 1 / 2 / 全部”后，共享 snapshot 将显示偏好传给 Widget。pinned 优先活动账号，auto 保留源顺序且不伪造 Active。
-- Server 暂时不可达时保留最近一次成功数据并标记为 stale；首次安装没有缓存时显示占位符 `—`。
-- AICC App 负责启动和监督后端；App 重启后会重新加载 Widget 时间线并恢复实时数据。
-
-### 2.10.1 精简桌面 Widget
-
-- 等宽等高的原生圆角卡片，统一数字层级，支持浅色、深色及中英文。
-- 默认只保留服务／账号名、主要额度、积分和余额；隐藏冗余标题、正常状态点及已满的次级 5h 额度。
-- 5h 不足时仍显示百分比，周额度缺失时明确显示 5h；保留缓存、不可用及登录提示。
-
-### 2.10.0 菜单栏与账号池
-
-- Codex 为主额度区，显示账号标签、Active / Reauth、Weekly 百分比与进度条、5h 额度；多账号紧凑卡片隐藏 Reset，单账号全宽卡片可显示完整 Reset。
-- Google 为紧凑次级额度区；WorkBuddy 积分、DeepSeek 余额为辅助状态卡，正常状态只保留轻量状态点，异常时显示明确文字。
-- OpenCodex 控制区保留状态、开关和仪表盘入口，减少重复文字。中英文完整变更见 Changelog。
-
-### 2.4.1 OpenCodex 控制变更
-
-- AICC **不负责打开 Codex Desktop 或 ChatGPT Desktop**。
-- AICC 只负责查看 OpenCodex 状态、启动/停止 OpenCodex、打开 OpenCodex 仪表盘。
-- OpenCodex 开关反映真实运行时状态（通过 `ocx status --json` CLI 发现），支持动态端口。
-- OpenCodex 状态轮询仅在菜单栏面板打开时进行（约 9 秒间隔），面板关闭后停止。
-- 不再保留"随 Codex Desktop 启动 OpenCodex"等联动设置。
-
-## 数据采集与内存策略
-
-- Codex：检测到 OpenCodex 时，从 Account Pool 读取全部账号额度，手动刷新会强制刷新池中额度；`AICC_CODEX_SOURCE=app-server` 可显式使用旧模式，未安装 OpenCodex 时自动回退。OpenCodex 暂不可用时显示标记为 stale 的上次成功快照。
-- Codex 数据源可用 `AICC_CODEX_SOURCE=auto`（默认）、`opencodex`（只用账号池）或 `app-server`（旧版单账号）指定；自动模式发现 `ocx` 后不会因一次请求失败切回单账号。
-- WorkBuddy：优先通过 `127.0.0.1:9223` 的本机调试桥读取账户余额；当前 WorkBuddy/CodeBuddy CLI 只提供编码代理能力，不作为账户积分接口。应用关闭时绝不主动启动；发现 WorkBuddy 已运行但未开放本地桥时，AICC 会在后台自动重启它一次以启用读取通道（恢复 2.3.x 的监控行为，每个 WorkBuddy 进程只重启一次，会话自动恢复），也可在设置中手动「重连 WorkBuddy」。启用后默认每 120 秒读取一次余额，同一页面 target 也会按时间重新读取，手动刷新会强制重新读取。本机数据库中的当日用量仍可被动更新，不保存或传输令牌、Cookie 等认证信息。
-- DeepSeek：密钥只从环境变量或 macOS 钥匙串读取，不写入项目目录。
-- 系统：使用 macOS 自带命令读取内存；没有第三方运行依赖。
-
-- Google：通过 OpenCodex 采集器读取 Google Antigravity 额度，解析 Weekly 与 5h 双窗口并保持独立重置时间。
-
-各采集器并行且互相隔离。某个服务超时不会拖死整个面板；并发请求会共用正在执行的采集任务。缓存仅在数据变化或超过保存周期时写盘。
-
-局域网设备只能读取面板。刷新、修改和 WorkBuddy 重连接口只允许 Mac 本机调用。
-
-## Poke4S
-
-网页模式打开 kiosk 地址后，点一次"进入墨水屏模式"。页面每 5 分钟取数，并保留最近成功数据。
-
-Android/Poke4S 当前源码版本为 `1.2.6-pencil-home`（versionCode 12），与 macOS 版本独立。
-新版在保存地址失效时重复广播、验证所有发现的服务器并自动迁移 IP；多台服务器时可在设置中选择。
-BOOX 透明屏保在休眠时保留静态画面；需要屏幕持续显示最新额度时，请在设备设置中选择“桌面常亮”。
-不要使用仓库内不存在或过时的 APK 路径；请从 [GitHub Releases](https://github.com/easonwong2026-del/AICC/releases)
-下载已发布的 Android APK。当前 1.2.6 APK 位于 [v2.9.0 Release assets](https://github.com/easonwong2026-del/AICC/releases/tag/v2.9.0)，也可直接[下载 APK](https://github.com/easonwong2026-del/AICC/releases/download/v2.9.0/AICC-Poke4S-1.2.6.apk)。本轮 macOS 2.10.2 不改变 Android 版本，也不重复发布 APK。
-它保留 Poke4S 的 AI COMMAND 风格、长按设置、自动发现、缓存减写、R8 和低内存 Canvas 渲染，并兼容现有服务器字段。
-
-`android/poke-dashboard/` 是可重复构建的源码和 Gradle wrapper，不属于 Mac 后台运行时。客户端不使用 AndroidX、图片库或第三方运行依赖；release 构建启用代码与资源瘦身。
-
-## 验证
+Magpie API、版本边界、插件调查和验收限制见 [迁移说明](docs/MAGPIE-MIGRATION.md)。
+Python 桥接只依赖标准库；Swift 使用原生 WidgetKit/App Intents；Android 不增加运行依赖。
 
 ```bash
-# Python 单元测试
-python3 -B -m unittest discover -s tests -v
-
-# SwiftPM 核心包测试
-swift test --package-path macos/MenuBarApp
-
-# Widget smoke test
+python3 -m unittest discover -s tests -v
 bash scripts/smoke-test-widget.sh
-
-# 完整构建
+bash scripts/smoke-test-display-snapshot.sh
+bash scripts/smoke-test-widget-visual.sh
+bash scripts/smoke-test-dashboard-visual.sh
+swift test --package-path macos/MenuBarApp
 BUNDLE_SERVER=1 bash macos/build-aicc-swiftui.sh
-
-# Shell 语法检查
-for f in macos/*.sh scripts/*.sh; do [ -f "$f" ] && bash -n "$f"; done
-
-# Bundled Server Smoke Test
-bash scripts/smoke-test-bundled-server.sh
-
-# DMG 构建
+bash scripts/smoke-test-bundled-server.sh dist/mac/AICC.app/Contents/Resources/Server
 bash macos/build-dmg.sh
-
-# 版本一致性
-bash scripts/validate-version.sh
-
-# Android 测试和 release 构建
-( cd android/poke-dashboard && ./gradlew test assembleRelease )
+./android/poke-dashboard/gradlew -p android/poke-dashboard test assembleRelease
 ```
 
-健康检查：`http://localhost:8765/api/health`。完整状态：`http://localhost:8765/api/status`。
+开发桥接：`bash macos/start-dashboard.sh`；默认产生进程内临时只读凭据，重启后需要重新配对。
+`AICC_MAGPIE_URL` 只接受带端口的 loopback HTTP 地址，禁止代理、重定向、远程地址和 URL 凭据。
+不再支持 `AICC_CODEX_SOURCE` 或旧供应商采集选项，不自动切换来源。
 
-## 本地数据
-
-- `data/status.json`：WorkBuddy 最近状态（旧版本的手工字段仅作兼容，不会在自动采集失败时冒充真实余额）
-- `data/codex_last_success.json`：Codex 最近成功额度
-- `data/workbuddy_last_success.json`：WorkBuddy 最近成功余额
-- `data/deepseek_history.json`：用于计算当日消耗的余额快照
-
-这些文件不包含 DeepSeek、Codex 或 WorkBuddy 密钥。
+PR CI 验证 Python、安全边界、Swift 数据与配置、原生 Widget/设置界面、App/Widget 注册、DMG、
+Android 单元测试和模拟器截图。CI 候选包不代表已安装或正式发布。
+保留原有用户数据目录及旧偏好，升级时只清理历史 AICC 安装器拥有的精确 LaunchAgent 身份。

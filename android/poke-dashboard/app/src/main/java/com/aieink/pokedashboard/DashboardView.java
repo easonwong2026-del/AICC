@@ -29,6 +29,7 @@ final class DashboardView extends View {
     private int batteryPercent = -1;
     private boolean batteryCharging;
     private boolean showDeviceBattery = true;
+    private int accountPage;
 
     DashboardView(Context context) {
         super(context);
@@ -36,17 +37,27 @@ final class DashboardView extends View {
         setBackgroundColor(PAPER);
         setClickable(true);
         setLongClickable(true);
-        setContentDescription("AI COMMAND 仪表盘，长按打开设置");
+        setContentDescription("Codex 额度看板，点击翻页，长按打开设置");
     }
 
     void setData(DashboardData value) { data = value; invalidate(); }
-    void setOffline(boolean offline) { data.offline = offline; invalidate(); }
+    void nextAccountPage() {
+        if (data.accounts.size() > 4) {
+            accountPage = (accountPage + 1) % ((data.accounts.size() + 3) / 4);
+            invalidate();
+        }
+    }
+    void setOffline(boolean offline) {
+        if (data.offline != offline) { data.offline = offline; invalidate(); }
+    }
     void setDeviceBattery(int percent, boolean charging, boolean visible) {
+        if (batteryPercent == percent && batteryCharging == charging && showDeviceBattery == visible) return;
         batteryPercent = percent;
         batteryCharging = charging;
         showDeviceBattery = visible;
         invalidate();
     }
+    void updateSyncTime(String updatedAt) { data.updatedAt = updatedAt; }
     void flashRefresh() {
         handler.removeCallbacks(endFlash);
         flash = true;
@@ -65,9 +76,8 @@ final class DashboardView extends View {
         canvas.scale(sx, sy);
         drawHeader(canvas);
         drawCodex(canvas);
-        drawWorkBuddy(canvas);
-        drawDeepSeek(canvas);
-        drawSystem(canvas);
+        textFit(canvas, data.offline ? "离线 · 保留上次额度" : "同步 " + data.updatedAt, 34, 977, 500, 17, false);
+        textFitRight(canvas, "长按设置", 724, 977, 150, 17);
         canvas.restore();
     }
 
@@ -78,7 +88,7 @@ final class DashboardView extends View {
         text(canvas, "AI", 57, 51, 20, PAPER, true, Paint.Align.CENTER);
         text(canvas, "COMMAND", 100, 52, 28, INK, true, Paint.Align.LEFT);
         String state = data.offline ? "OFFLINE" : "SYNC";
-        if (!data.offline && data.failedCollectors > 0) state = "CHECK";
+        if (!data.offline && !"CONNECTED".equals(data.codexState)) state = "CACHED".equals(data.codexState) ? "CACHED" : "CHECK";
         if (showDeviceBattery && batteryPercent >= 0) {
             state = batteryPercent + "%" + (batteryCharging ? " +" : "") + "  " + state;
         }
@@ -87,79 +97,42 @@ final class DashboardView extends View {
     }
 
     private void drawCodex(Canvas canvas) {
-        outlinedRect(canvas, 34, 98, 690, 315, 2);
+        outlinedRect(canvas, 34, 98, 690, 830, 2);
         text(canvas, "CODEX", 64, 151, 26, INK, true, Paint.Align.LEFT);
-        textFitRight(canvas, data.codexState, 694, 151, 170, 16);
+        textFitRight(canvas, data.codexSource, 694, 151, 210, 16);
         filledRect(canvas, 64, 179, 630, 2, INK);
-
-        boolean weekly = data.weeklyRemaining != null || data.fiveHourRemaining == null;
-        int percent = weekly ? valueOrZero(data.weeklyRemaining) : valueOrZero(data.fiveHourRemaining);
-        String reset = weekly ? data.weeklyReset : data.fiveHourReset;
-        text(canvas, weekly ? "1周剩余" : "5小时剩余", 64, 245, 24, INK, true, Paint.Align.LEFT);
-        text(canvas, percent + "%", 369, 267, 60, INK, true, Paint.Align.CENTER);
-        text(canvas, "额度重置", 694, 234, 20, INK, true, Paint.Align.RIGHT);
-        textFitRight(canvas, reset, 694, 265, 190, 16);
-        quotaBar(canvas, 64, 296, 630, percent);
-        filledRect(canvas, 64, 349, 630, 2, INK);
-        String credits = data.resetCreditsProvided && data.resetCreditsCount != null
-                ? "重置机会  " + data.resetCreditsCount + "次" : "重置机会  未提供";
-        textFit(canvas, credits, 129, 385, 210, 18, true);
-        String expiry = data.resetCreditsProvided && hasValue(data.resetCreditsExpiry)
-                ? "机会到期  " + data.resetCreditsExpiry : "机会到期  --";
-        textFitRight(canvas, expiry, 659, 385, 270, 18);
-    }
-
-    private void drawWorkBuddy(Canvas canvas) {
-        outlinedRect(canvas, 34, 429, 326, 286, 2);
-        text(canvas, "WORKBUDDY", 49, 480, 26, INK, true, Paint.Align.LEFT);
-        textFitRight(canvas, workBuddyStatus(), 343, 480, 142, 13);
-        filledRect(canvas, 49, 503, 295, 2, INK);
-        textFit(canvas, data.workBuddyPoints, 85, 599, 236, 46, true);
-        text(canvas, "PTS", 321, 675, 18, INK, true, Paint.Align.RIGHT);
-        textFit(canvas, "今日使用  " + data.workBuddyUsed, 81, 675, 183, 20, false);
-    }
-
-    private String workBuddyStatus() {
-        String state = data.workBuddyStale ? "CACHED" : data.workBuddyState;
-        if ("UNAVAILABLE".equals(state) && !data.workBuddyErrorCode.isEmpty()) {
-            return state + " " + data.workBuddyErrorCode;
+        int pages = Math.max(1, (data.accounts.size() + 3) / 4);
+        accountPage = Math.min(accountPage, pages - 1);
+        int start = accountPage * 4;
+        int count = Math.min(4, data.accounts.size() - start);
+        if (count == 0) {
+            text(canvas, "暂无 Codex 账号", 64, 265, 28, INK, true, Paint.Align.LEFT);
+            textFit(canvas, data.codexState, 64, 315, 630, 20, false);
         }
-        if (!data.workBuddyStale || data.workBuddyAgeSeconds == null) return state;
-        return state + " " + compactAge(data.workBuddyAgeSeconds);
+        float rowHeight = count > 0 ? Math.min(340, 660f / count) : 0;
+        for (int index = 0; index < count; index++) {
+            DashboardData.Account account = data.accounts.get(start + index);
+            float top = 215 + index * rowHeight;
+            textFit(canvas, account.label, 64, top, 420, 20, true);
+            String state = account.needsReauth ? "需要登录" : account.stale || data.offline ? "缓存" : "";
+            if (!state.isEmpty()) textFitRight(canvas, state, 694, top, 150, 17);
+            drawWindow(canvas, 64, top + 35, account.weekly, account.weeklyReset, "周剩余", rowHeight > 200);
+            drawWindow(canvas, 394, top + 35, account.fiveHour, account.fiveHourReset, "5小时剩余", rowHeight > 200);
+            if (index < count - 1) filledRect(canvas, 64, top + rowHeight - 30, 630, 1, INK);
+        }
+        String footer = data.totalAccounts + " 个账号";
+        if (pages > 1) footer += " · " + (accountPage + 1) + "/" + pages + " · 点击翻页";
+        else if (data.totalAccounts > data.accounts.size()) footer += " · 按 Mac 展示偏好";
+        textFit(canvas, footer, 64, 900, 630, 17, false);
     }
 
-    private String compactAge(long seconds) {
-        if (seconds < 60) return seconds + "s";
-        if (seconds < 3600) return (seconds / 60) + "m";
-        if (seconds < 86400) return (seconds / 3600) + "h";
-        return (seconds / 86400) + "d";
+    private void drawWindow(Canvas canvas, float left, float top, Integer percent, String reset, String title, boolean large) {
+        text(canvas, title, left, top, 17, INK, false, Paint.Align.LEFT);
+        text(canvas, percent == null ? "—" : percent + "%", left, top + (large ? 70 : 43), large ? 60 : 34,
+                INK, true, Paint.Align.LEFT);
+        quotaBar(canvas, left, top + (large ? 95 : 58), 285, percent == null ? 0 : percent);
+        textFit(canvas, "重置 " + (hasValue(reset) ? reset : "—"), left, top + (large ? 128 : 90), 285, 14, false);
     }
-
-    private void drawDeepSeek(Canvas canvas) {
-        outlinedRect(canvas, 379, 429, 345, 286, 2);
-        text(canvas, "DEEPSEEK API", 395, 481, 26, INK, true, Paint.Align.LEFT);
-        textFitRight(canvas, data.deepSeekState, 697, 481, 106, 13);
-        filledRect(canvas, 395, 503, 312, 2, INK);
-        text(canvas, "余额", 408, 533, 17, INK, true, Paint.Align.LEFT);
-        text(canvas, "使用", 573, 533, 17, INK, true, Paint.Align.LEFT);
-        filledRect(canvas, 550, 516, 2, 177, INK);
-        textFit(canvas, data.deepSeekBalance, 411, 611, 106, 40, true);
-        textFit(canvas, data.deepSeekUsage, 613, 617, 61, 40, true);
-        text(canvas, data.deepSeekCurrency, 703, 675, 18, INK, true, Paint.Align.RIGHT);
-    }
-
-    private void drawSystem(Canvas canvas) {
-        outlinedRect(canvas, 34, 734, 690, 270, 2);
-        text(canvas, "SYSTEM", 64, 786, 24, INK, true, Paint.Align.LEFT);
-        filledRect(canvas, 64, 803, 630, 2, INK);
-        textFit(canvas, data.systemLabel, 64, 864, 430, 20, false);
-        textFit(canvas, "CPU " + data.cpu, 474, 865, 180, 18, true);
-        textFit(canvas, "RAM " + data.ram, 474, 922, 230, 18, true);
-        textFit(canvas, data.gpu, 79, 928, 330, 18, false);
-        textFitRight(canvas, data.updatedAt, 694, 979, 210, 15);
-    }
-
-    private int valueOrZero(Integer value) { return value == null ? 0 : value; }
 
     private boolean hasValue(String value) {
         return value != null && !value.isEmpty() && !"--".equals(value)

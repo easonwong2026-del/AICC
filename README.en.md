@@ -1,144 +1,31 @@
-# AICC
+# AICC · Magpie display companion
 
 [简体中文](README.md)
 
-AICC is a local AI status center for macOS. It displays Codex, WorkBuddy, DeepSeek, and system status, with support for Poke4S e-ink devices. The server uses only the Python standard library.
+AICC provides a native macOS Widget and an Android e-ink Codex quota display. Magpie owns authentication,
+accounts, routing and model calls. AICC has no status item, popover dashboard or web dashboard, and no
+independent vendor collectors. This branch is an unpublished candidate; the existing product version
+2.10.2 / Build 15 and bundle identities remain unchanged.
 
-The current macOS version is AICC 2.10.2 (Build 15); Android/Poke4S use an independent version line.
+The Widget reads local Magpie directly, defaults to Codex, and works with AICC closed. Edit the Widget to
+choose its port and account count. Small displays up to two accounts; medium up to four. Existing metric
+configurations still decode, but retired providers show unknown values. No legacy source cache is reused.
+Automatic Codex refresh attempts are limited to five-minute intervals per port in the Widget process;
+WidgetKit controls actual scheduling. Manual refresh only refreshes Codex. Failures retain same-port,
+anonymized cache with explicit stale state; local snapshots expire after 24 hours.
 
-The macOS menu-bar app uses fixed Codex, Google, WorkBuddy, DeepSeek, System, and OpenCodex status cards. It reads `/api/status` and the fixed operation endpoints only. The Python server provides Codex, Google, WorkBuddy, DeepSeek, and system status through dedicated collectors.
+The minimal settings App optionally runs a Python bridge for e-ink devices. Without the bridge, closing
+its window exits AICC. With the bridge enabled, it remains in the background; login launch stays silent.
+Android discovers HTTP 8765 over UDP 8766 and pairs using a single-use eight-digit code (two-minute
+lifetime, five attempts). Its independent read-only credential is stored in the Mac Keychain, passed to
+Python on stdin, and encrypted with Android Keystore. No Magpie gateway key reaches Android. Revoking
+devices in settings rotates the bridge credential. Host identity prevents sending it to another host
+after an IP change. Backup is disabled.
 
-## Access
+Android defaults to five-minute foreground updates, refreshes on resume, pauses when asleep/backgrounded,
+retains meaningful-change redraw and existing BOOX flash calibration, and pages at most four accounts.
+The LAN bridge uses unencrypted HTTP: use a trusted LAN and never expose it publicly.
 
-- Mac dashboard: `http://localhost:8765`
-- Settings: native SwiftUI Settings window from the menu bar
-- Poke4S: `http://<Mac Wi-Fi address>:8765/?kiosk=1`
-
-The Mac and Poke4S device must be on the same Wi-Fi network. The native Android client can discover the Mac over UDP.
-
-## macOS setup and maintenance
-
-See [MAC-MIGRATION.md](MAC-MIGRATION.md) for the first deployment. Common commands:
-
-For end users, download the DMG from [GitHub Releases](https://github.com/easonwong2026-del/AICC/releases) and drag AICC
-into `/Applications`. The AICC App starts the bundled Python server through `ServerManager`, and its login-at-launch
-setting uses `SMAppService`. This is the only supported production macOS runtime path.
-
-When upgrading from an older installation, the first AICC launch performs a one-time cleanup scoped to the three exact
-LaunchAgent identities owned by the retired installer. It unloads the old jobs, removes their matching plists when safe,
-and continues normal startup; failures do not crash the App or scan/kill unrelated services or processes.
-
-Source checkouts support development debugging only; they are not a production installation path.
-
-```bash
-bash macos/start-dashboard.sh              # DEV ONLY: foreground server, no background registration
-bash macos/set-deepseek-key.sh
-BUNDLE_SERVER=1 bash macos/build-aicc-swiftui.sh
-bash macos/build-dmg.sh
-```
-
-Formal users check the public manifest through Settings → General → About & Updates, then download and replace the
-published DMG. Source directories do not provide a second production updater or rollback system.
-
-The DMG App stores logs in `~/Library/Logs/AICC-Dashboard/`. Before the bundled server starts,
-`aicc-server.log` and `aicc-server-error.log` are capped at 1 MiB by retaining their latest 256 KiB;
-log maintenance failures never block server startup.
-
-The AICC server owns WorkBuddy bridge auto-heal. The bundled App owns the server lifecycle; no external LaunchAgent is
-registered by the production path.
-
-The self-contained App is generated at `dist/mac/AICC.app`; the DMG is written to `dist/` by default. Set `RELEASE_DIR` to place release artifacts elsewhere. The DMG bundles the server code and can be dragged into `/Applications`. Runtime data is stored in `~/Library/Application Support/AICC-Dashboard/data/`, not inside the App bundle.
-
-The App requires macOS 14 or later, Apple Silicon, and an executable Python 3.10+. The DMG does not include Python. Without a Developer ID signature, the artifact is ad hoc signed; on another Mac, use Finder's right-click → Open flow if Gatekeeper blocks the first launch.
-
-The menu-bar App displays status, starts and stops the internal data service, controls OpenCodex, opens Settings, shows logs, and configures launch at login. Fixed collectors remain in the existing Python service. The supervisor only checks `/api/health/live`; the dashboard reads cached `/api/status` data and does not trigger an extra collector refresh.
-
-## Manual update checks
-
-Settings → General → About & Updates checks once only when you click the button. It does not poll in the background, download files, or install updates automatically.
-
-Published builds use this public manifest:
-
-`https://raw.githubusercontent.com/easonwong2026-del/AICC/main/updates/aicc-update.json`
-
-Set `AICC_UPDATE_MANIFEST_URL` in the App environment to override it. The manifest URL and its download/release-note URLs must use HTTPS. If the source is missing or not configured, Settings shows “Update source not configured” and provides the GitHub Releases page.
-
-Manifest format:
-
-```json
-{
-  "version": "2.5.1",
-  "build": "5",
-  "minimumSystemVersion": "14.0",
-  "downloadURL": "https://example.com/AICC-2.5.1.dmg",
-  "releaseNotesURL": "https://example.com/aicc/releases/2.5.1",
-  "publishedAt": "2026-08-03T00:00:00Z"
-}
-```
-
-### Release version rules
-
-- `VERSION` is the only manual source of the AICC product version.
-- A new user-feature release increments the minor version; a bugfix release increments the patch version.
-- Increment `CFBundleVersion` for every formal macOS release; ordinary development commits do not bump versions automatically.
-- Update `updates/aicc-update.json` only after the corresponding GitHub Release and DMG both exist.
-
-### macOS desktop Widget
-
-- Requirements: macOS 14+, Apple Silicon, with the AICC App installed and running.
-- Add it from the desktop: right-click → Edit Widgets → search for “AICC”, then choose Small or Medium.
-- Customize metrics: right-click desktop Widget → Edit "AICC" → select displayed metrics (Small configures 2 primary metrics; Medium configures 4 slots independently).
-- Default layout: Small defaults to Codex + Google; Medium defaults to Top Left: Codex, Top Right: Google, Bottom Left: WorkBuddy, Bottom Right: DeepSeek; includes automatic duplicate metric normalization and safe fallbacks.
-- The Widget reads `http://127.0.0.1:8765/api/status`. The production port is fixed at `8765`; it does not start the server.
-- Its bottom-right refresh button uses local `POST /api/refresh` to force quota collection and reload the timeline. The AICC App also notifies WidgetKit on launch and when displayed data changes.
-- Codex uses the complete account pool and the same resolver as the menu bar. Automatic / 1 / 2 / All preferences travel through the shared snapshot; pinned prioritizes the active account and auto preserves source order without inventing Active.
-- If the server is temporarily unavailable, the Widget keeps the last successful snapshot as stale data; a first install without a cache shows `—` placeholders.
-- The AICC App starts and supervises the backend. After an App restart, it reloads Widget timelines and resumes live data.
-
-### 2.10.1 minimal desktop widgets
-
-- Equal-sized native rounded cards with consistent typography in light/dark appearance and Chinese/English.
-- Keeps service/account names, primary quota, points and balance; removes redundant branding, healthy status dots and full secondary 5h quota.
-- Shows reduced 5h quota and explicit 5h fallback when weekly quota is missing; preserves cache, unavailable and sign-in notices.
-
-### 2.10.0 dashboard and pool
-
-- Codex remains the primary quota area: account label, Active / Reauth, Weekly percentage/progress and 5h quota. Compact multi-account cards hide Reset; a full-width single card may show it in full.
-- Google is a compact secondary quota area. WorkBuddy points and DeepSeek balance are auxiliary cards with lightweight healthy status and explicit failure text.
-- OpenCodex retains status, toggle and dashboard access with reduced duplicate text. See the changelogs for the complete changes.
-
-## Data collection and privacy
-
-- Codex: reads all account quotas from OpenCodex Account Pool when OpenCodex is detected, with a forced pool refresh for manual updates and explicit stale fallback. `AICC_CODEX_SOURCE=auto` (default), `opencodex` or `app-server` selects the source. Legacy app-server is used when OpenCodex is absent or explicitly selected; an OpenCodex failure does not silently switch sources.
-- WorkBuddy: reads account balance through the local `127.0.0.1:9223` debugging bridge. AICC does not start WorkBuddy when the App is closed and does not save or transmit tokens or cookies.
-- DeepSeek: reads the key from the environment or macOS Keychain and never writes it to the project directory.
-- System: uses built-in macOS tools for memory and CPU information.
-
-- Google: fetches Google Antigravity quota from OpenCodex, mapping both Weekly and 5-hour limit buckets with distinct reset times.
-
-Collectors run independently. A timeout in one service does not block the whole dashboard, concurrent requests share an in-flight collection, and caches are written only when data changes or the save interval expires.
-
-LAN devices can read the dashboard. Refresh, write, and WorkBuddy reconnect endpoints are restricted to the Mac itself.
-
-## Poke4S and Android
-
-Open the kiosk page and tap “Enter e-ink mode”. The page refreshes every five minutes and keeps the last successful data.
-
-The current Android source version is `1.2.6-pencil-home` (versionCode 12), independent of macOS releases. It discovers and validates multiple servers, migrates a changed LAN address, and offers a server chooser. BOOX transparent screensaver keeps a static image while asleep; use the dashboard's always-on mode when the displayed quota must stay current. The published 1.2.6 APK is available in [v2.9.0](https://github.com/easonwong2026-del/AICC/releases/tag/v2.9.0) or via [direct APK download](https://github.com/easonwong2026-del/AICC/releases/download/v2.9.0/AICC-Poke4S-1.2.6.apk). macOS 2.10.2 does not change the independent Android version or republish the APK.
-
-The Android source is in `android/poke-dashboard/` and is independently buildable with the Gradle wrapper. It is not a runtime dependency of the Mac server. Release builds enable code and resource shrinking.
-
-## Validation
-
-```bash
-python3 -B -m unittest discover -s tests -v
-swift test --package-path macos/MenuBarApp
-bash scripts/smoke-test-widget.sh
-BUNDLE_SERVER=1 bash macos/build-aicc-swiftui.sh
-bash scripts/smoke-test-bundled-server.sh
-bash macos/build-dmg.sh
-bash scripts/validate-version.sh
-( cd android/poke-dashboard && ./gradlew test assembleRelease )
-```
-
-See [English changelog](CHANGELOG.en.md), [中文完整 changelog](CHANGELOG.md), and [LICENSE](LICENSE) for release history and licensing information.
+See the [Chinese README](README.md) for setup/build commands and [migration evidence](docs/MAGPIE-MIGRATION.md)
+for verified API contracts, version limits and outstanding physical-device acceptance. No release or
+installation is implied by CI artifacts.

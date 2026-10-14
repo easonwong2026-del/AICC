@@ -63,7 +63,7 @@ struct QuotaCardView: View {
             if snapshot.codexSelectionMode == "auto" {
                 title = isChinese ? "Codex · 自动" : "Codex · Auto"
             } else if let acct = primaryAccount {
-                title = "Codex · \(acct.safeDisplayName)"
+                title = acct.safeDisplayName.hasPrefix("Codex") ? acct.safeDisplayName : "Codex · \(acct.safeDisplayName)"
             } else {
                 title = "Codex"
             }
@@ -281,7 +281,9 @@ struct AICCWidgetView: View {
 
     var body: some View {
         Group {
-            if effectiveFamily == .systemMedium {
+            if entry.snapshot.codexSource == "Magpie" && entry.configuration.hasDefaultMetrics {
+                codexFocusedContent
+            } else if effectiveFamily == .systemMedium {
                 mediumContent
             } else {
                 smallContent
@@ -296,7 +298,7 @@ struct AICCWidgetView: View {
     }
 
     private var refreshButton: some View {
-        Button(intent: RefreshWidgetIntent()) {
+        Button(intent: RefreshWidgetIntent(port: entry.configuration.magpiePort)) {
             Image(systemName: "arrow.clockwise")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -305,6 +307,95 @@ struct AICCWidgetView: View {
         .buttonStyle(.plain)
         .contentShape(Rectangle())
         .accessibilityLabel(isChinese ? "刷新小组件" : "Refresh Widget")
+    }
+
+    private var codexFocusedContent: some View {
+        let accounts = entry.snapshot.resolvedCodexAccounts ?? []
+        let capacity = effectiveFamily == .systemMedium ? 4 : 2
+        let displayed = Array(accounts.prefix(capacity))
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Codex · Magpie").font(.system(size: 11, weight: .semibold))
+                Spacer(minLength: 0)
+                if accounts.count > capacity {
+                    Text("+\(accounts.count - capacity)").font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+            }
+            if displayed.count <= 1 {
+                let account = displayed.first
+                HStack(spacing: 6) {
+                    focusedWindow(account?.weekly, title: isChinese ? "周剩余" : "Weekly", account: account)
+                    focusedWindow(account?.fiveHour, title: "5h", account: account)
+                }
+            } else {
+                GeometryReader { geometry in
+                    let rows = effectiveFamily == .systemMedium ? (displayed.count > 2 ? 2 : 1) : displayed.count
+                    LazyVGrid(columns: effectiveFamily == .systemMedium ? [GridItem(.flexible()), GridItem(.flexible())] : [GridItem(.flexible())], spacing: 6) {
+                        ForEach(displayed.indices, id: \.self) { index in
+                            focusedAccount(displayed[index], spacious: effectiveFamily == .systemMedium && displayed.count <= 2)
+                                .frame(height: (geometry.size.height - CGFloat(rows - 1) * 6) / CGFloat(rows))
+                        }
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 10)
+        .padding(.bottom, 24)
+    }
+
+    private func focusedAccount(_ account: WidgetCodexAccount, spacious: Bool) -> some View {
+        VStack(alignment: .leading, spacing: spacious ? 8 : 2) {
+            HStack(spacing: 3) {
+                Text(account.safeDisplayName).font(.system(size: 10, weight: .medium)).lineLimit(1).minimumScaleFactor(0.7)
+                Spacer(minLength: 0)
+                if account.needsReauth == true || account.stale == true || entry.snapshot.codexStale || entry.snapshot.stale {
+                    Text(account.needsReauth == true ? (isChinese ? "登录" : "Sign in") : (isChinese ? "缓存" : "Cached"))
+                        .font(.system(size: 8)).foregroundStyle(.orange).lineLimit(1)
+                }
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text((isChinese ? "周 " : "W ") + (account.weekly?.remaining.map { String(format: "%.0f%%", $0) } ?? "—"))
+                    .font(.system(size: spacious ? 22 : 14, weight: .semibold, design: .rounded).monospacedDigit())
+                    .lineLimit(1).fixedSize(horizontal: true, vertical: false)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("5h " + (account.fiveHour?.remaining.map { String(format: "%.0f%%", $0) } ?? "—"))
+                    .font(.system(size: spacious ? 11 : 9).monospacedDigit()).foregroundStyle(.secondary)
+                    .lineLimit(1).fixedSize(horizontal: true, vertical: false)
+            }
+            .lineLimit(1).minimumScaleFactor(0.7)
+            if spacious, let reset = account.weekly?.reset {
+                Text(reset).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.7)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8).padding(.vertical, spacious ? 8 : 4)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
+    }
+
+    private func focusedWindow(_ window: WidgetRateWindow?, title: String, account: WidgetCodexAccount?) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title).font(.system(size: 10)).foregroundStyle(.secondary)
+            Text(window?.remaining.map { String(format: "%.0f%%", $0) } ?? "—")
+                .font(.system(size: effectiveFamily == .systemMedium ? 28 : 20, weight: .semibold, design: .rounded).monospacedDigit())
+                .minimumScaleFactor(0.7).lineLimit(1)
+            if account?.needsReauth == true {
+                Text(isChinese ? "登录" : "Sign in").font(.system(size: 9)).foregroundStyle(.orange)
+            } else if window?.remaining != nil && (entry.snapshot.stale || entry.snapshot.codexStale || account?.stale == true) {
+                Text(isChinese ? "缓存" : "Cached").font(.system(size: 9)).foregroundStyle(.orange)
+            }
+            if effectiveFamily == .systemMedium, let reset = window?.reset {
+                Text(reset).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.7)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
     }
 
     private var mediumContent: some View {

@@ -12,6 +12,7 @@ android {
         targetSdk 35
         versionCode 12
         versionName "1.2.6-pencil-home"
+        testInstrumentationRunner "com.aieink.pokedashboard.DashboardVisualTest"
     }
 
     buildTypes {

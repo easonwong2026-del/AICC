@@ -1,5 +1,12 @@
 import Foundation
 
+enum AICCPaths {
+    static var logsDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/AICC-Dashboard", isDirectory: true)
+    }
+}
+
 enum LogFileLimiter {
     static let maxBytes: UInt64 = 1_048_576
     static let retainedBytes: UInt64 = 262_144

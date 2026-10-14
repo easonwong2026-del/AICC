@@ -36,11 +36,39 @@ final class DiscoveryClient {
         String statusBody;
         DashboardData data;
         boolean stale;
+        boolean pairingRequired;
 
         Candidate(String url) { this.url = url; }
     }
 
     private DiscoveryClient() {}
+
+    static String normaliseBaseUrl(String value) {
+        if (value == null || value.trim().isEmpty()) return null;
+        String input = value.trim();
+        if (!input.contains("://")) input = "http://" + input;
+        try {
+            URL url = new URL(input);
+            if ((!"http".equals(url.getProtocol()) && !"https".equals(url.getProtocol()))
+                    || url.getUserInfo() != null || url.getQuery() != null || url.getRef() != null
+                    || !(url.getPath().isEmpty() || "/".equals(url.getPath()) || "/api/status".equals(url.getPath()))) return null;
+            String[] parts = url.getHost().split("\\.");
+            if (parts.length != 4) return null;
+            int[] octets = new int[4];
+            for (int index = 0; index < 4; index++) {
+                if (!parts[index].matches("0|[1-9][0-9]{0,2}")) return null;
+                octets[index] = Integer.parseInt(parts[index]);
+                if (octets[index] > 255) return null;
+            }
+            boolean local = octets[0] == 10 || octets[0] == 127
+                    || (octets[0] == 192 && octets[1] == 168)
+                    || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31)
+                    || (octets[0] == 169 && octets[1] == 254);
+            int port = url.getPort() == -1 ? 8765 : url.getPort();
+            if (!local || port < 1 || port > 65535) return null;
+            return url.getProtocol() + "://" + url.getHost() + ":" + port;
+        } catch (Exception error) { return null; }
+    }
 
     static List<Candidate> discover() {
         try {
@@ -109,6 +137,10 @@ final class DiscoveryClient {
     }
 
     static Candidate probe(Candidate candidate) {
+        return probe(candidate, null, null);
+    }
+
+    static Candidate probe(Candidate candidate, String token, String pairedHostId) {
         try {
             JSONObject health = new JSONObject(request(candidate.url + "/api/health/live"));
             String protocol = health.optString("protocol", "");
@@ -117,7 +149,20 @@ final class DiscoveryClient {
                     || (!protocol.isEmpty() && !"aicc".equals(protocol))) {
                 throw new IllegalStateException("Not an AICC live server");
             }
-            String body = request(candidate.url + "/api/status");
+            candidate.hostId = health.optString("host_id", "");
+            candidate.hostname = health.optString("hostname", candidate.hostname == null ? "" : candidate.hostname);
+            candidate.platform = health.optString("platform", candidate.platform == null ? "" : candidate.platform);
+            boolean paired = token != null && pairedHostId != null && pairedHostId.equals(candidate.hostId);
+            if (health.optBoolean("pairing_required") && !paired) {
+                candidate.pairingRequired = true;
+                return candidate;
+            }
+            String body;
+            try { body = request(candidate.url + "/api/status", paired ? token : null, null); }
+            catch (Unauthorized error) {
+                candidate.pairingRequired = true;
+                return candidate;
+            }
             JSONObject status = new JSONObject(body);
             if (status.optJSONObject("codex") == null
                     && status.optJSONObject("google") == null
@@ -146,18 +191,45 @@ final class DiscoveryClient {
     }
 
     private static String request(String endpoint) throws Exception {
+        return request(endpoint, null, null);
+    }
+
+    static JSONObject pair(String base, String code) throws Exception {
+        if (!base.equals(normaliseBaseUrl(base))) throw new IllegalArgumentException("Local address required");
+        JSONObject document = new JSONObject();
+        document.put("code", code);
+        return new JSONObject(request(base + "/api/pair", null, document.toString()));
+    }
+
+    private static final class Unauthorized extends Exception {}
+
+    private static String request(String endpoint, String token, String payload) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(endpoint).openConnection();
         connection.setConnectTimeout(5000);
         connection.setReadTimeout(7000);
         connection.setUseCaches(false);
+        connection.setInstanceFollowRedirects(false);
         connection.setRequestProperty("Accept", "application/json");
+        if (token != null) connection.setRequestProperty("Authorization", "Bearer " + token);
         try {
+            if (payload != null) {
+                connection.setRequestMethod("POST");
+                connection.setRequestProperty("Content-Type", "application/json");
+                connection.setDoOutput(true);
+                try (java.io.OutputStream output = connection.getOutputStream()) {
+                    output.write(payload.getBytes(StandardCharsets.UTF_8));
+                }
+            }
+            if (connection.getResponseCode() == 401) throw new Unauthorized();
             if (connection.getResponseCode() != 200) throw new IllegalStateException("HTTP " + connection.getResponseCode());
             StringBuilder body = new StringBuilder();
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(
                     connection.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
-                while ((line = reader.readLine()) != null) body.append(line);
+                while ((line = reader.readLine()) != null) {
+                    body.append(line);
+                    if (body.length() > 1024 * 1024) throw new IllegalStateException("Response too large");
+                }
             }
             return body.toString();
         } finally {

@@ -1,629 +1,130 @@
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @EnvironmentObject private var settings: AppSettings
-    @EnvironmentObject private var ocx: OpenCodexController
-    @EnvironmentObject private var api: APIService
     @EnvironmentObject private var server: ServerManager
     @EnvironmentObject private var loginAtLaunch: LaunchAtLoginService
-
-    var body: some View {
-        TabView {
-            GeneralSettingsView()
-                .tabItem { Label("General", systemImage: "gearshape") }
-            AIProvidersSettingsView()
-                .tabItem { Label("AI Providers", systemImage: "cpu") }
-            DevicesSettingsView()
-                .tabItem { Label("Devices", systemImage: "display.2") }
-            MenuBarSettingsView()
-                .tabItem { Label("Menu Bar", systemImage: "menubar.rectangle") }
-            AdvancedSettingsView()
-                .tabItem { Label("Advanced", systemImage: "wrench.and.screwdriver") }
-        }
-        .frame(width: 640, height: 480)
-        .onAppear {
-            loginAtLaunch.refresh()
-        }
-    }
-}
-
-// MARK: - General
-
-private struct GeneralSettingsView: View {
-    @EnvironmentObject private var settings: AppSettings
-    @EnvironmentObject private var api: APIService
-    @EnvironmentObject private var loginAtLaunch: LaunchAtLoginService
-
-    var body: some View {
-        Form {
-            Section("Startup") {
-                Toggle("Launch AICC at login", isOn: Binding(
-                    get: { loginAtLaunch.isEnabled },
-                    set: { enabled in
-                        loginAtLaunch.setEnabled(enabled)
-                    }
-                ))
-                if let error = loginAtLaunch.errorMessage {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                }
-            }
-
-            Section("Refresh") {
-                Picker("Automatic refresh", selection: $settings.autoRefreshInterval) {
-                    Text("60 seconds").tag(60.0)
-                    Text("120 seconds").tag(120.0)
-                    Text("300 seconds").tag(300.0)
-                }
-                Text("Menu bar updates use the same cached status and do not trigger an additional provider request.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Appearance") {
-                Picker("Language", selection: $settings.languageCode) {
-                    ForEach(AppLanguage.allCases) { language in
-                        Text(language.pickerDisplayName(localize: settings.localized)).tag(language.rawValue)
-                    }
-                }
-                Picker("Theme", selection: $settings.themeMode) {
-                    Text("System").tag("system")
-                    Text("Light").tag("light")
-                    Text("Dark").tag("dark")
-                }
-            }
-
-            AboutAndUpdatesSettingsView()
-        }
-        .formStyle(.grouped)
-        .onChange(of: settings.autoRefreshInterval) { _, interval in
-            api.startAutoRefresh(interval: interval)
-        }
-    }
-}
-
-private struct AboutAndUpdatesSettingsView: View {
-    @EnvironmentObject private var settings: AppSettings
-    @StateObject private var updateService = UpdateService()
-
-    private var versionInfo: AppVersionInfo {
-        AppVersionInfo(bundle: .main)
-    }
-
-    private var isChecking: Bool {
-        updateService.state == .checking
-    }
-
-    var body: some View {
-        Section {
-            Text("AICC")
-                .font(.headline)
-            LabeledContent(settings.localized("Version"), value: versionInfo.shortVersion)
-            LabeledContent(settings.localized("Build"), value: versionInfo.buildVersion)
-
-            HStack(spacing: 10) {
-                Button {
-                    Task { await updateService.checkForUpdates() }
-                } label: {
-                    HStack(spacing: 6) {
-                        if isChecking {
-                            ProgressView()
-                                .controlSize(.small)
-                        }
-                        Text(settings.localized("Check for Updates"))
-                    }
-                }
-                .disabled(isChecking)
-
-                Spacer(minLength: 0)
-            }
-
-            updateStatus
-        } header: {
-            Text(settings.localized("About & Updates"))
-        }
-    }
-
-    @ViewBuilder
-    private var updateStatus: some View {
-        switch updateService.state {
-        case .idle:
-            Text(settings.localized("Updates are checked only when you click the button."))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        case .checking:
-            Text(settings.localized("Checking for Updates…"))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        case .upToDate:
-            Text(settings.localized("You're up to date"))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        case .updateAvailable(let info):
-            VStack(alignment: .leading, spacing: 6) {
-                Text(String(format: settings.localized("Update available: %@"), info.version))
-                    .font(.caption)
-                Button(settings.localized("View Update")) {
-                    openUpdate(info)
-                }
-                .buttonStyle(.link)
-            }
-        case .failed:
-            Text(settings.localized("Update check failed"))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        case .notConfigured:
-            VStack(alignment: .leading, spacing: 6) {
-                Text(settings.localized("Update source not configured"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Button(settings.localized("Open Release Page")) {
-                    openHTTPS(updateService.releasePageURL)
-                }
-                .buttonStyle(.link)
-            }
-        }
-    }
-
-    private func openUpdate(_ info: UpdateInfo) {
-        openHTTPS(info.downloadURL ?? info.releaseNotesURL ?? updateService.releasePageURL)
-    }
-
-    private func openHTTPS(_ url: URL) {
-        guard UpdateManifestConfiguration.httpsURL(url.absoluteString) != nil else { return }
-        NSWorkspace.shared.open(url)
-    }
-}
-
-// MARK: - AI Providers
-
-private struct AIProvidersSettingsView: View {
-    @EnvironmentObject private var settings: AppSettings
-    @EnvironmentObject private var api: APIService
-
-    var body: some View {
-        Form {
-            Section("Providers") {
-                if api.status != nil {
-                    DataSourceRow(
-                        name: "Codex",
-                        status: codexStatus,
-                        lastUpdate: updateText(api.status?.collection?.codex),
-                        action: refresh
-                    )
-                    DataSourceRow(
-                        name: "WorkBuddy",
-                        status: workBuddyStatus,
-                        lastUpdate: workBuddyLastUpdate,
-                        action: refresh
-                    )
-                    Button("Reconnect WorkBuddy") {
-                        Task { await api.reconnectWorkBuddy() }
-                    }
-                    .buttonStyle(.borderless)
-                    DataSourceRow(
-                        name: "DeepSeek",
-                        status: deepSeekStatus,
-                        lastUpdate: updateText(api.status?.collection?.deepseek),
-                        action: refresh
-                    )
-                    DataSourceRow(
-                        name: "System",
-                        status: systemProviderStatus,
-                        lastUpdate: updateText(api.status?.collection?.system),
-                        action: refresh
-                    )
-                } else {
-                    Text(settings.localized("Checking..."))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .formStyle(.grouped)
-    }
-
-    private var codexStatus: String {
-        guard let codex = api.status?.codex else { return settings.localized("Unavailable") }
-        if codex.stale == true { return settings.localized("Cached") }
-        if codex.available == true { return settings.localized("Connected") }
-        return settings.localized(codex.state ?? "Unavailable")
-    }
-
-    private var workBuddyStatus: String {
-        guard let workbuddy = api.status?.workbuddy else { return settings.localized("Unavailable") }
-        if workbuddy.balance_stale == true || workbuddy.balance_state == "Cached" {
-            return settings.localized("Cached")
-        }
-        return settings.localized(workbuddy.points == nil ? "Unavailable" : "Connected")
-    }
-
-    private var workBuddyLastUpdate: String {
-        if let error = api.status?.workbuddy?.balance_error {
-            return "\(settings.localized("Error")): \(error)"
-        }
-        return updateText(api.status?.collection?.workbuddy)
-    }
-
-    private var deepSeekStatus: String {
-        settings.localized(api.status?.deepseek?.status ?? "Unavailable")
-    }
-
-    private var systemProviderStatus: String {
-        settings.localized(api.status?.system?.status ?? "Unavailable")
-    }
-
-    private func updateText(_ item: CollectorStatus?) -> String {
-        guard let item else { return settings.localized("No successful read") }
-        if let age = item.age_seconds {
-            return String(format: settings.localized("Updated %ds ago"), age)
-        }
-        return item.last_success ?? settings.localized("Waiting for first read")
-    }
-
-    private func refresh() {
-        Task { await api.fetchStatus(force: true) }
-    }
-}
-
-private struct DataSourceRow: View {
-    let name: String
-    let status: String
-    let lastUpdate: String
-    let action: () -> Void
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 7, height: 7)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(name)
-                    .font(.system(size: 13, weight: .medium))
-                Text(lastUpdate)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Text(status)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Button("Refresh", action: action)
-                .buttonStyle(.borderless)
-        }
-    }
-
-    private var statusColor: Color {
-        switch status.lowercased() {
-        case "connected", "online", "healthy": return .green
-        case "cached": return .orange
-        default: return .secondary
-        }
-    }
-}
-
-// MARK: - Devices
-
-private struct DevicesSettingsView: View {
-    @EnvironmentObject private var settings: AppSettings
-    @EnvironmentObject private var api: APIService
-
-    var body: some View {
-        Form {
-            Section("Poke4S") {
-                DeviceStatusRow(
-                    name: "Poke4S",
-                    detail: "UDP discovery 8766 · HTTP dashboard 8765",
-                    status: serverStatus
-                )
-            }
-
-            Section("Android Dashboard") {
-                DeviceStatusRow(
-                    name: "Android Dashboard",
-                    detail: "Uses the same cached /api/status contract",
-                    status: serverStatus
-                )
-            }
-
-            Section("Sync") {
-                Button("Sync Now") {
-                    Task { await api.fetchStatus(force: true) }
-                }
-                if let updated = api.lastRefresh {
-                    LabeledContent("Last sync", value: updated.formatted(date: .abbreviated, time: .standard))
-                }
-            }
-        }
-        .formStyle(.grouped)
-    }
-
-    private var serverStatus: String {
-        switch api.state {
-        case .ready: return settings.localized("Available")
-        case .loading: return settings.localized("Checking")
-        case .unavailable: return settings.localized("Offline")
-        case .stale: return settings.localized("Cached")
-        case .error: return settings.localized("Error")
-        }
-    }
-}
-
-private struct DeviceStatusRow: View {
-    let name: String
-    let detail: String
-    let status: String
-
-    var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(name)
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Text("Server: \(status)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
-}
-
-// MARK: - Menu Bar
-
-private struct MenuBarSettingsView: View {
-    @EnvironmentObject private var settings: AppSettings
-
-    var body: some View {
-        Form {
-            Section("Menu bar status") {
-                Toggle("Show Codex status", isOn: $settings.menuBarShowCodexStatus)
-                Toggle("Show Codex balance", isOn: $settings.menuBarShowCodexBalance)
-                Picker(settings.localized("Show accounts"), selection: $settings.codexAccountDisplayMode) {
-                    ForEach(CodexAccountDisplayMode.allCases) { mode in
-                        Text(mode.displayName(localize: settings.localized)).tag(mode.rawValue)
-                    }
-                }
-            }
-
-            Section("Menu bar items") {
-                Toggle("WorkBuddy", isOn: $settings.menuBarShowWorkBuddy)
-                Toggle("DeepSeek", isOn: $settings.menuBarShowDeepSeek)
-                Toggle("System", isOn: $settings.menuBarShowSystem)
-                Toggle("OpenCodex", isOn: $settings.menuBarShowOpenCodex)
-                Toggle(settings.localized("Google Quota"), isOn: $settings.menuBarShowGoogleQuota)
-            }
-
-            Section {
-                Text("The menu bar label only shows Codex. The selected items appear after clicking it.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .formStyle(.grouped)
-    }
-}
-
-// MARK: - Advanced
-
-private struct AdvancedSettingsView: View {
-    @EnvironmentObject private var settings: AppSettings
-    @EnvironmentObject private var ocx: OpenCodexController
-    @EnvironmentObject private var api: APIService
-    @EnvironmentObject private var server: ServerManager
-
+    @State private var connection = "未检查"
+    @State private var pairingCode = ""
+    @State private var busy = false
     @State private var notice = ""
-    @State private var showingClearCacheConfirmation = false
-    @State private var showingOpenCodexUpdateConfirmation = false
+    @State private var showRevoke = false
 
     var body: some View {
         Form {
-            Section("OpenCodex") {
-                HStack {
-                    Text("Executable")
-                    Spacer()
-                    Text(ocx.detectedPath ?? settings.localized("Not detected"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Button("Redetect") {
-                        Task { await ocx.detectExecutable() }
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(ocx.controlsBusy)
-                }
-
-                LabeledContent("Status", value: settings.localized(ocx.status.label))
-                if let version = ocx.ocxVersion {
-                    LabeledContent("Version", value: version)
-                }
-                if let port = ocx.knownPort {
-                    LabeledContent("Port", value: String(port))
-                }
-
-                Button("Check for Update") {
-                    Task { await ocx.checkForUpdate() }
-                }
-                .disabled(ocx.controlsBusy)
-
-                openCodexUpdateStatus
-            }
-
-            Section("Diagnostics") {
-                Toggle("Debug mode", isOn: $settings.debugMode)
-                Text("Debug logging applies after the internal data service is restarted.")
-                    .font(.caption)
+            Section {
+                Label("Magpie 显示伴侣", systemImage: "rectangle.on.rectangle")
+                    .font(.title2.weight(.semibold))
+                Text("账号、模型和调用由 Magpie 管理。AICC 只提供桌面小组件与墨水屏显示。")
                     .foregroundStyle(.secondary)
-                Button("View Logs") { openDirectory(AICCPaths.logsDirectory) }
-                Button("Show Data Directory") {
-                    if let directory = server.dataDirectoryURL {
-                        openDirectory(directory)
-                    }
-                }
-                Button("Export Diagnostic Info") { exportDiagnostics() }
             }
-
-            Section("Service") {
-                Button("Restart Data Service") {
-                    Task {
-                        let success = await server.restartServer()
-                        notice = settings.localized(
-                            success ? "Data service restarted." : "Unable to restart data service."
-                        )
-                        if success { await api.fetchStatus() }
+            Section("Magpie 连接") {
+                TextField("本机端口", value: $settings.magpiePort, format: .number.grouping(.never))
+                HStack {
+                    Text(connection).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("检查连接") { Task { await checkConnection() } }.disabled(busy)
+                    Button("打开 Magpie") {
+                        NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/magpie.app"))
                     }
                 }
-                Button("Clear Cache", role: .destructive) {
-                    showingClearCacheConfirmation = true
+            }
+            Section("桌面小组件") {
+                Text("在桌面添加 AICC 小组件，右键“编辑小组件”设置 Magpie 端口与账号数量。")
+                Text("小组件独立读取 Magpie，关闭 AICC 后仍可更新。手动刷新只请求 Codex 额度。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("墨水屏连接") {
+                Toggle("启用墨水屏桥接", isOn: $settings.bridgeEnabled)
+                if settings.bridgeEnabled {
+                    LabeledContent("桥接状态", value: server.isServerRunning ? "运行中" : "等待连接")
+                    Text("Mac 与墨水屏需在同一可信网络。APK 自动发现电脑，输入下方配对码即可连接。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Button("生成配对码") { Task { await pair() } }.disabled(!server.isServerRunning || busy)
+                        if !pairingCode.isEmpty {
+                            Text(pairingCode).font(.title3.monospacedDigit()).textSelection(.enabled)
+                            Text("2 分钟内有效").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    Toggle("登录时启动桥接", isOn: Binding(get: { loginAtLaunch.isEnabled }, set: loginAtLaunch.setEnabled))
+                    Button("撤销所有已配对设备", role: .destructive) { showRevoke = true }
+                    if let error = loginAtLaunch.errorMessage { Text(error).font(.caption).foregroundStyle(.red) }
                 }
-                if !notice.isEmpty {
-                    Text(notice)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                Text(settings.bridgeEnabled ? "关闭窗口后继续为墨水屏同步。" : "仅使用小组件时无需桥接，关闭窗口即退出 AICC。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("诊断") {
+                HStack {
+                    Button("查看日志") { NSWorkspace.shared.open(AICCPaths.logsDirectory) }
+                    Button("项目与更新") {
+                        NSWorkspace.shared.open(URL(string: "https://github.com/easonwong2026-del/AICC/releases")!)
+                    }
+                    Spacer()
+                    Button("退出 AICC") { NSApp.terminate(nil) }
                 }
+                if !notice.isEmpty { Text(notice).font(.caption).foregroundStyle(.secondary) }
             }
         }
         .formStyle(.grouped)
-        .confirmationDialog(
-            "Clear AICC cached data?",
-            isPresented: $showingClearCacheConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Clear Cache", role: .destructive) { clearCache() }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("Provider credentials are not stored in this cache.")
+        .frame(minWidth: 560, minHeight: 520)
+        .onAppear { loginAtLaunch.refresh() }
+        .onChange(of: settings.bridgeEnabled) { _, enabled in
+            pairingCode = ""
+            if enabled { server.startMonitoring() } else {
+                server.stopMonitoring()
+                server.stopServer(reason: .user)
+                loginAtLaunch.setEnabled(false)
+            }
         }
-        .confirmationDialog(
-            "OpenCodex is running",
-            isPresented: $showingOpenCodexUpdateConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Update OpenCodex") {
-                Task { await ocx.updateOpenCodex() }
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("Updating the running OpenCodex may restart the proxy.")
+        .onChange(of: settings.magpiePort) { _, _ in
+            connection = "未检查"
+            pairingCode = ""
+            if settings.bridgeEnabled { Task { _ = await server.restartServer() } }
         }
-    }
-
-    @ViewBuilder
-    private var openCodexUpdateStatus: some View {
-        switch ocx.updateState {
-        case .idle:
-            EmptyView()
-        case .checking:
-            HStack(spacing: 6) {
-                ProgressView()
-                    .controlSize(.small)
-                Text(settings.localized("Checking for OpenCodex updates…"))
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        case .upToDate:
-            Text(settings.localized("Up to date"))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        case .available(let version):
-            VStack(alignment: .leading, spacing: 6) {
-                Text(String(format: settings.localized("Update available: %@"), version))
-                    .font(.caption)
-                Button("Update OpenCodex") {
-                    startOpenCodexUpdate()
-                }
-                .buttonStyle(.borderless)
-                .disabled(ocx.controlsBusy)
-            }
-        case .updating:
-            HStack(spacing: 6) {
-                ProgressView()
-                    .controlSize(.small)
-                Text(settings.localized("Updating OpenCodex…"))
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        case .updated(let from, let to, let restartRequired):
-            VStack(alignment: .leading, spacing: 4) {
-                Text(String(format: settings.localized("Updated %@ → %@"), from, to))
-                    .font(.caption)
-                if restartRequired {
-                    Text(settings.localized("Restart OpenCodex to use the new version."))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+        .confirmationDialog("撤销设备后需要重新配对", isPresented: $showRevoke) {
+            Button("撤销所有设备", role: .destructive) {
+                Task {
+                    server.stopMonitoring()
+                    server.stopServer(reason: .user, waitForExit: true)
+                    do {
+                        try BridgeCredential.revoke()
+                        pairingCode = ""
+                        server.startMonitoring()
+                        notice = "旧配对凭证已失效。"
+                    } catch { notice = "无法更新配对凭证，请检查钥匙串权限。" }
                 }
             }
-        case .failed(let message):
-            VStack(alignment: .leading, spacing: 6) {
-                Text(settings.localized(message))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Button("Try Again") {
-                    Task { await ocx.checkForUpdate() }
-                }
-                .buttonStyle(.borderless)
-            }
         }
     }
 
-    private func startOpenCodexUpdate() {
-        guard case .available = ocx.updateState else { return }
-        if ocx.status == .running {
-            showingOpenCodexUpdateConfirmation = true
-        } else {
-            Task { await ocx.updateOpenCodex() }
-        }
+    private func checkConnection() async {
+        busy = true
+        defer { busy = false }
+        let snapshot = await WidgetStatusLoader.load(port: settings.magpiePort)
+        if let snapshot {
+            connection = "已连接 · Codex \(snapshot.codexAccounts?.count ?? 0) 个账号"
+            if snapshot.codexStale { connection += " · 缓存" }
+        } else { connection = "无法连接，请启动 Magpie 并检查端口。" }
     }
 
-    private func openDirectory(_ directory: URL) {
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        NSWorkspace.shared.open(directory)
-    }
-
-    private func clearCache() {
-        guard let directory = server.dataDirectoryURL else {
-            notice = settings.localized("Data directory is unavailable.")
-            return
-        }
+    private func pair() async {
+        busy = true
+        defer { busy = false }
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:8765/api/pairing")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 5
         do {
-            let count = try CacheManager.clear(in: directory)
-            notice = count == 0
-                ? settings.localized("No cached files found.")
-                : String(format: settings.localized("Cleared %d cached file(s)."), count)
-            Task { await api.fetchStatus(force: true) }
-        } catch {
-            notice = settings.localized("Cache cleanup failed:") + " \(error.localizedDescription)"
-        }
+            let (data, response) = try await WidgetStatusLoader.session.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                  let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let code = payload["code"] as? String else { throw URLError(.badServerResponse) }
+            pairingCode = code
+            Task {
+                try? await Task.sleep(nanoseconds: 120_000_000_000)
+                if pairingCode == code { pairingCode = "" }
+            }
+        } catch { notice = "无法生成配对码，请检查桥接状态。" }
     }
-
-    private func exportDiagnostics() {
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.json]
-        panel.nameFieldStringValue = "AICC-Diagnostics.json"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-
-        let payload = DiagnosticsPayload(
-            version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev",
-            generatedAt: ISO8601DateFormatter().string(from: Date()),
-            status: api.status
-        )
-        do {
-            let data = try JSONEncoder().encode(payload)
-            try data.write(to: url, options: .atomic)
-            notice = settings.localized("Diagnostic info exported.")
-        } catch {
-            notice = settings.localized("Export failed:") + " \(error.localizedDescription)"
-        }
-    }
-}
-
-private struct DiagnosticsPayload: Codable {
-    let version: String
-    let generatedAt: String
-    let status: StatusResponse?
 }

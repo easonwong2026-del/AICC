@@ -118,6 +118,8 @@ final class ServerManager: ObservableObject {
             env["AICC_BUILD"] = hostBuild
         }
         env["AICC_PARENT_PID"] = "\(ProcessInfo.processInfo.processIdentifier)"
+        env["AICC_TOKEN_STDIN"] = "1"
+        env["AICC_MAGPIE_URL"] = "http://127.0.0.1:\(AppSettings.shared.magpiePort)"
         env.removeValue(forKey: "CODEX_SANDBOX_NETWORK_DISABLED")
         env.removeValue(forKey: "CODEX_SESSION_ID")
         env.removeValue(forKey: "CODEX_THREAD_ID")
@@ -151,6 +153,10 @@ final class ServerManager: ObservableObject {
         }
 
         do {
+            guard !Task.isCancelled, AppSettings.shared.bridgeEnabled else { return false }
+            let token = try BridgeCredential.loadOrCreate()
+            let input = Pipe()
+            process.standardInput = input
             stopReason = .none
             process.terminationHandler = { [weak self] _ in
                 Task { @MainActor [weak self] in
@@ -158,6 +164,8 @@ final class ServerManager: ObservableObject {
                 }
             }
             try process.run()
+            try input.fileHandleForWriting.write(contentsOf: Data((token + "\n").utf8))
+            try input.fileHandleForWriting.close()
             serverProcess = process
             ownership = .managed
             isServerRunning = false
@@ -233,6 +241,7 @@ final class ServerManager: ObservableObject {
         let pid: Int?
         let ppid: Int?
         let serverInstanceID: String?
+        let companion: Bool?
 
         enum CodingKeys: String, CodingKey {
             case ok
@@ -242,6 +251,7 @@ final class ServerManager: ObservableObject {
             case pid
             case ppid
             case serverInstanceID = "server_instance_id"
+            case companion
         }
     }
 
@@ -272,7 +282,7 @@ final class ServerManager: ObservableObject {
                 && health.serverInstanceID.flatMap(UUID.init(uuidString:)) != nil
             let isOrphan = trusted && health.ppid == 1
 
-            return (true, trusted && versionMatch && buildMatch, trusted, isOrphan, health.pid)
+            return (true, trusted && versionMatch && buildMatch && health.companion == true, trusted, isOrphan, health.pid)
         } catch {
             return (false, false, false, false, nil)
         }
@@ -432,14 +442,12 @@ final class ServerManager: ObservableObject {
 class AICCAppDelegate: NSObject, NSApplicationDelegate {
     private let singleInstance = SingleInstanceService.shared
     private let serverManager = ServerManager.shared
-    private var statusItemController: StatusItemController?
     private var settingsWindowCoordinator: SettingsWindowCoordinator?
     private var hasStartedShutdown = false
-    private var terminationGate = AppTerminationGate()
+    private var hasPresentedSettings = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         guard singleInstance.acquire() else {
-            terminationGate.requestTermination()
             NSApp.terminate(nil)
             return
         }
@@ -453,48 +461,52 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
         WidgetCenter.shared.reloadAllTimelines()
 
         settingsWindowCoordinator = SettingsWindowCoordinator(
-            api: APIService.shared,
-            ocx: OpenCodexController.shared,
             settings: AppSettings.shared,
             server: ServerManager.shared,
-            loginAtLaunch: LaunchAtLoginService.shared
+            loginAtLaunch: LaunchAtLoginService.shared,
+            onClose: { [weak self] in self?.finishBackgroundRefresh() }
         )
 
-        statusItemController = StatusItemController(
-            api: APIService.shared,
-            settings: AppSettings.shared,
-            ocx: OpenCodexController.shared,
-            openSettings: { [weak self] in self?.settingsWindowCoordinator?.present() },
-            quitApplication: { [weak self] in self?.requestQuit() }
-        )
-
-        // Start and supervise the Python server.
-        serverManager.startMonitoring()
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            await APIService.shared.fetchStatus()
-            APIService.shared.startAutoRefresh(interval: AppSettings.shared.autoRefreshInterval)
-        }
-
-        // One low-frequency OpenCodex check at app launch. The controller
-        // owns the visible-panel refresh loop and does not poll in the
-        // background while the menu is closed.
-        Task { @MainActor in
-            await OpenCodexController.shared.checkOnce()
+        if AppSettings.shared.bridgeEnabled { serverManager.startMonitoring() }
+        let loginLaunch = NSAppleEventManager.shared().currentAppleEvent?
+            .paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
+        if loginLaunch {
+            hasPresentedSettings = true
+            if !AppSettings.shared.bridgeEnabled { requestQuit() }
+        } else if NSApp.isActive {
+            presentSettings()
         }
     }
 
-    /// AICC is a menu-bar application, so closing its only regular window
-    /// (currently the Settings window) must not terminate the process.
-    /// Quitting remains an explicit command handled by the status-item menu.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        if !hasPresentedSettings { presentSettings() }
+    }
+
+    private func presentSettings() {
+        hasPresentedSettings = true
+        settingsWindowCoordinator?.present()
+    }
+
+    func finishBackgroundRefresh() {
+        guard !AppSettings.shared.bridgeEnabled,
+              settingsWindowCoordinator?.hasVisibleWindow != true else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard self?.settingsWindowCoordinator?.hasVisibleWindow != true,
+                  !AppSettings.shared.bridgeEnabled else { return }
+            self?.requestQuit()
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        false
+        !AppSettings.shared.bridgeEnabled
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        presentSettings()
+        return true
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard terminationGate.allowsTermination else {
-            return .terminateCancel
-        }
         shutDownForTermination()
         return .terminateNow
     }
@@ -504,16 +516,12 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func requestQuit() {
-        terminationGate.requestTermination()
         NSApp.terminate(nil)
     }
 
     private func shutDownForTermination() {
         guard !hasStartedShutdown else { return }
         hasStartedShutdown = true
-        APIService.shared.stopAutoRefresh()
-        statusItemController?.tearDown()
-        statusItemController = nil
         settingsWindowCoordinator?.tearDown()
         settingsWindowCoordinator = nil
         serverManager.stopMonitoring()
@@ -523,6 +531,7 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
 
 // MARK: - AppKit app shell
 
+#if !AICC_VISUAL_TEST
 @main
 @MainActor
 struct AICCApp {
@@ -533,3 +542,4 @@ struct AICCApp {
         application.run()
     }
 }
+#endif

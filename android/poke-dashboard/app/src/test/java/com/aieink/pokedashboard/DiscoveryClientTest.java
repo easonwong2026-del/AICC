@@ -81,7 +81,37 @@ public final class DiscoveryClientTest {
         }
     }
 
+    @Test public void unpairedBridgeIsDiscoverableButCredentialNeverCrossesHosts() throws Exception {
+        try (FakeServer bridge = new FakeServer("paired-mac", true, true)) {
+            DiscoveryClient.Candidate waiting = DiscoveryClient.probe(new DiscoveryClient.Candidate(url(bridge.port())));
+            assertNotNull(waiting);
+            assertTrue(waiting.pairingRequired);
+            assertEquals(0, bridge.statusRequests.get());
+            DiscoveryClient.Candidate other = DiscoveryClient.probe(new DiscoveryClient.Candidate(url(bridge.port())),
+                    "test-read-only-token", "other-mac");
+            assertTrue(other.pairingRequired);
+            assertEquals(0, bridge.statusRequests.get());
+            DiscoveryClient.Candidate paired = DiscoveryClient.probe(new DiscoveryClient.Candidate(url(bridge.port())),
+                    "test-read-only-token", "paired-mac");
+            assertNotNull(paired.data);
+            assertFalse(paired.pairingRequired);
+            DiscoveryClient.Candidate revoked = DiscoveryClient.probe(new DiscoveryClient.Candidate(url(bridge.port())),
+                    "old-token", "paired-mac");
+            assertTrue(revoked.pairingRequired);
+        }
+    }
+
     private static String url(int port) { return "http://127.0.0.1:" + port; }
+
+    @Test public void manualAddressRejectsCredentialsAndPublicDestinations() {
+        assertEquals("http://192.168.1.20:8765", DiscoveryClient.normaliseBaseUrl("192.168.1.20"));
+        assertEquals("http://10.0.0.3:9876", DiscoveryClient.normaliseBaseUrl("http://10.0.0.3:9876/api/status"));
+        for (String invalid : new String[] { "http://user:key@192.168.1.20:8765", "http://example.com:8765",
+                "http://8.8.8.8:8765", "http://192.168.1.20:0", "http://192.168.1.20:8765/?secret=key",
+                "http://192.168.1.20:8765/private", "http://192.168.01.20:8765", "file:///tmp/key" }) {
+            assertNull(DiscoveryClient.normaliseBaseUrl(invalid));
+        }
+    }
 
     private static int unusedPort() throws IOException {
         try (java.net.ServerSocket socket = new java.net.ServerSocket(0)) {
@@ -126,10 +156,15 @@ public final class DiscoveryClientTest {
         private final ServerSocket socket;
         private final Thread thread;
 
-        FakeServer(String hostId, boolean validStatus) throws IOException {
+        final AtomicInteger statusRequests = new AtomicInteger();
+
+        FakeServer(String hostId, boolean validStatus) throws IOException { this(hostId, validStatus, false); }
+
+        FakeServer(String hostId, boolean validStatus, boolean pairing) throws IOException {
             socket = new ServerSocket(0, 0, InetAddress.getByName("127.0.0.1"));
             String identity = "{\"ok\":true,\"status\":\"live\",\"version\":\"2.8.0\""
-                    + (hostId.isEmpty() ? "" : ",\"protocol\":\"aicc\",\"host_id\":\"" + hostId + "\"") + "}";
+                    + (hostId.isEmpty() ? "" : ",\"protocol\":\"aicc\",\"host_id\":\"" + hostId + "\"")
+                    + ",\"pairing_required\":" + pairing + "}";
             thread = new Thread(() -> {
                 while (!socket.isClosed()) {
                     try (Socket client = socket.accept()) {
@@ -137,11 +172,16 @@ public final class DiscoveryClientTest {
                                 client.getInputStream(), StandardCharsets.US_ASCII));
                         String request = input.readLine();
                         String header;
-                        while ((header = input.readLine()) != null && !header.isEmpty()) { }
+                        String authorization = null;
+                        while ((header = input.readLine()) != null && !header.isEmpty()) {
+                            if (header.startsWith("Authorization: ")) authorization = header.substring(15);
+                        }
                         if (request == null) continue;
                         if (request.startsWith("GET /api/health/live ")) send(client, 200, identity);
                         else if (request.startsWith("GET /api/status ")) {
-                            send(client, validStatus ? 200 : 503, validStatus ? STATUS : "{}");
+                            statusRequests.incrementAndGet();
+                            if (pairing && !"Bearer test-read-only-token".equals(authorization)) send(client, 401, "{}");
+                            else send(client, validStatus ? 200 : 503, validStatus ? STATUS : "{}");
                         } else send(client, 404, "{}");
                     } catch (IOException error) {
                         if (!socket.isClosed()) throw new RuntimeException(error);
