@@ -2,14 +2,40 @@ package com.aieink.pokedashboard;
 
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
-import android.test.InstrumentationTestCase;
+import android.app.Activity;
+import android.app.Instrumentation;
+import android.os.Bundle;
+import android.util.Log;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.File;
 import java.io.FileOutputStream;
 
-public final class DashboardVisualTest extends InstrumentationTestCase {
+public final class DashboardVisualTest extends Instrumentation {
+    @Override public void onCreate(Bundle arguments) {
+        super.onCreate(arguments);
+        start();
+    }
+
+    @Override public void onStart() {
+        Bundle status = new Bundle();
+        status.putString("class", getClass().getName());
+        status.putString("test", "testRenderAccountStates");
+        status.putInt("numtests", 1);
+        status.putInt("current", 1);
+        sendStatus(1, status);
+        try {
+            testRenderAccountStates();
+            sendStatus(0, status);
+            finish(Activity.RESULT_OK, new Bundle());
+        } catch (Throwable error) {
+            status.putString("stack", Log.getStackTraceString(error));
+            sendStatus(-2, status);
+            finish(Activity.RESULT_CANCELED, status);
+        }
+    }
+
     public void testRenderAccountStates() throws Exception {
         for (String scenario : new String[]{"one", "two", "many", "empty", "cached", "unknown"}) {
             int count = "many".equals(scenario) ? 7 : "two".equals(scenario) ? 2 : "empty".equals(scenario) ? 0 : 1;
@@ -26,10 +52,10 @@ public final class DashboardVisualTest extends InstrumentationTestCase {
                     .put("accounts", accounts);
             DashboardData data = DashboardData.parse(new JSONObject().put("codex", codex)
                     .put("codex_account_display_mode", "all").toString());
-            File directory = getInstrumentation().getTargetContext().getExternalFilesDir("visual");
-            assertNotNull(directory);
-            getInstrumentation().runOnMainSync(() -> {
-                DashboardView view = new DashboardView(getInstrumentation().getTargetContext());
+            File directory = getTargetContext().getExternalFilesDir("visual");
+            if (directory == null) throw new AssertionError("Missing output directory");
+            runOnMainSync(() -> {
+                DashboardView view = new DashboardView(getTargetContext());
                 view.layout(0, 0, 758, 1024);
                 view.setData(data);
                 save(view, new File(directory, scenario + ".png"));
@@ -44,11 +70,11 @@ public final class DashboardVisualTest extends InstrumentationTestCase {
     private void save(DashboardView view, File file) {
         Bitmap image = Bitmap.createBitmap(758, 1024, Bitmap.Config.ARGB_8888);
         view.draw(new Canvas(image));
-        assertEquals(758, image.getWidth());
-        assertEquals(1024, image.getHeight());
-        assertTrue(image.getPixel(0, 0) != image.getPixel(34, 98));
+        if (image.getWidth() != 758 || image.getHeight() != 1024 || image.getPixel(0, 0) == image.getPixel(34, 98)) {
+            throw new AssertionError("Missing dashboard frame");
+        }
         try (FileOutputStream output = new FileOutputStream(file)) {
-            assertTrue(image.compress(Bitmap.CompressFormat.PNG, 100, output));
+            if (!image.compress(Bitmap.CompressFormat.PNG, 100, output)) throw new AssertionError("PNG encoding failed");
         } catch (Exception error) {
             throw new AssertionError(error);
         } finally {

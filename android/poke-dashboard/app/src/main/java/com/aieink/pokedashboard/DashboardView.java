@@ -86,7 +86,7 @@ final class DashboardView extends View {
         text(canvas, "AI", 57, 51, 20, PAPER, true, Paint.Align.CENTER);
         text(canvas, "COMMAND", 100, 52, 28, INK, true, Paint.Align.LEFT);
         String state = data.offline ? "OFFLINE" : "SYNC";
-        if (!data.offline && data.failedCollectors > 0) state = "CHECK";
+        if (!data.offline && !"CONNECTED".equals(data.codexState)) state = "CACHED".equals(data.codexState) ? "CACHED" : "CHECK";
         if (showDeviceBattery && batteryPercent >= 0) {
             state = batteryPercent + "%" + (batteryCharging ? " +" : "") + "  " + state;
         }
