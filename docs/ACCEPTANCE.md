@@ -81,6 +81,20 @@ Swift 单元测试（`swift test --package-path macos/MenuBarApp`）**本地未�
 - **未执行**：`./gradlew test`、`assembleRelease`、`connectedDebugAndroidTest`（模拟器截图）。均由 CI 执行。
   `DashboardView.java` / `MainActivity.java` / `DiscoveryClient.java` 的编译与渲染验证只在 CI 中完成。
 
+## 三·补、CI（GitHub Actions）
+
+运行 [`39397512549`](https://github.com/easonwong2026-del/AICC/actions/runs/39397512549)（提交 `3643bef`）：
+6 个 job 全部 success —— `test`、`lint`、`android`、`swift-test`、`macos-build`、`android-visual`。
+
+- `swift-test` 在 CI 上跑通了本地跑不了的 `swift test --package-path macos/MenuBarApp`（本机缺 XCTest）。
+- `android` 跑通了本地跑不了的 `./gradlew test assembleRelease`：`DashboardView` / `MainActivity` /
+  `DiscoveryClient` 的编译与 11 个单元测试在 CI 通过。
+- `android-visual` 跑通了模拟器 instrumentation：`DashboardVisualTest` 的 8 种场景渲染通过。
+- `macos-build` 产出 `AICC-2.10.2.dmg` 与 App 工件；`hdiutil verify` 本地复验 CRC 有效。
+
+> CI 的 APK 工件是 `app-release-unsigned.apk`：仓库 `build.gradle` 没有 signingConfig，
+> 正式签名是发布时的仓库外步骤。因此该工件**不能直接安装**，只用于确认构建与单元测试通过。
+
 ## 四、未完成（真机/安装态/上游）
 
 1. **macOS 安装态**：未把候选 DMG 安装到系统并观察桌面 Widget 的真实调度、深浅色、多桌面场景。
