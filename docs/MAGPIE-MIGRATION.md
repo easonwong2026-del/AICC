@@ -1,82 +1,133 @@
-# Magpie 显示伴侣：接口证据与验收边界
+# Magpie 多服务商额度伴侣：架构、契约与验收边界
 
-调查日期：2026-10-14。本机 Magpie **0.1.1230**，默认 `127.0.0.1:3425`。
-正式 AICC **2.10.2 / Build 15**；本轮仅修改 feature 分支及 PR，不合并、不安装、不发布。
+调查与实现日期：2026-10-20。本机 Magpie **0.1.1296**，默认 `127.0.0.1:3425`。
+正式 AICC **2.10.2 / Build 15**；本轮只在 feature 分支与 PR #56 上开发，不合并、不发布、不覆盖正式安装包。
 
-## 已确认的数据与插件能力
+旧版文档（2026-10-14，Magpie 0.1.1230）只描述了 Codex 专项刷新，已被本轮取代。
 
-Magpie 官方项目为 [yetone/magpie](https://github.com/yetone/magpie)。最初接口调查固定在
-[`06c3370`](https://github.com/yetone/magpie/tree/06c3370b749763f3ff73f29dd50ff45abdad7ee0)，
-后续插件能力审核读取了 [`c8c3ce9`](https://github.com/yetone/magpie/tree/c8c3ce9a9a58b53db6bc7cab724dd7590af41221)。
-Magpie 的代理和模型协议兼容性不等于 OpenCodex Account Pool 的 CLI/账号/额度字段兼容。
+## 一、结论先行
 
-| 实际接口 | 已确认用途 |
+1. Magpie 是唯一的服务商认证、账号管理与额度采集来源。AICC 只读它的本机额度接口。
+2. AICC 不再有 Codex / WorkBuddy / DeepSeek 独立采集器，也不读任何供应商凭据文件。
+3. 新增服务商只要 Magpie 能返回额度行，Widget 与墨水屏就能显示，不需要改 AICC 采集器。
+4. 三端（Python 桥接、Swift Widget、Android APK）共用一套 `schema_version: 3` 契约与同一套解释规则。
+
+## 二、已核实的接口（Magpie 0.1.1296）
+
+源码依据：[`internal/gateway/gateway.go`](https://github.com/yetone/magpie/blob/main/internal/gateway/gateway.go)、
+[`internal/provider/quotas.go`](https://github.com/yetone/magpie/blob/main/internal/provider/quotas.go)、
+[`docs/reference.md`](https://github.com/yetone/magpie/blob/main/docs/reference.md)。
+
+| 接口 | 行为（实测） |
 | --- | --- |
-| `GET /v1/magpie/quotas?kept=1` | 标准已保存额度报告，`object=list,data`；不读取上游 |
-| `POST /v1/magpie/quotas/refresh?provider=codex` | Codex 专项刷新，之后再 GET 标准报告；Magpie 有 30 秒保护 |
-| `GET /v1/magpie/quotas/cards` | 原始额度卡片；本实现不依赖它 |
+| `GET /v1/magpie/quotas?kept=1` | 返回 Magpie 上次读取的结果，不请求供应商、不等待读取。200，`{object:"list", data:[...]}` |
+| `GET /v1/magpie/quotas` | 现场读取所有供应商，网关侧 12 秒超时 |
+| `POST /v1/magpie/quotas/refresh` | 重读**所有**卡片并直接返回完整列表；同一卡片 30 秒内最多重读一次 |
+| `POST /v1/magpie/quotas/refresh?provider=<id>` | 只重读该 provider，仍返回完整列表；未知 provider 是空操作（200 + 原列表） |
+| `GET /v1/magpie/quotas/history` | 额度历史，AICC 不使用 |
 
-前两项已在本机验证，存在官方说明和源码实现；**未查到跨版本不变的稳定性承诺**。
-依据：[集成说明](https://github.com/yetone/magpie/blob/06c3370b749763f3ff73f29dd50ff45abdad7ee0/docs/integrating.md)、
-[gateway.go](https://github.com/yetone/magpie/blob/06c3370b749763f3ff73f29dd50ff45abdad7ee0/internal/gateway/gateway.go)、
-[quotas.go](https://github.com/yetone/magpie/blob/06c3370b749763f3ff73f29dd50ff45abdad7ee0/internal/provider/quotas.go)。
+鉴权：本机（loopback）直接可读；跨机需要共享网关 Key。AICC 只走 loopback，从不持有网关 Key。
 
-Codex `subscription` 行按账号读取 `5 hours` 和 `7 days`，`used` 转为剩余百分比；
-原始 `user` 不落盘，转换为来源与账号身份的匿名散列。`last` 是最近服务过请求，不代表当前固定
-账号，不生成 Active/pinned。缺失、错误、过期、布尔或无效百分比均不能伪装成真实零值。
-这是订阅窗口额度，不能从模型 token 消耗或 API Key 金额余额推算。
+`Quota` 字段：`provider`、`name`、`kind`（`subscription`/`plan`/`balance`）、`plan`、`user`、`windows`、`balance`、
+`balanceSplit`、`error`、`asOf`、`readDeferred`、`readAt`、`until`、`renew`、`resets`、`resetsUsed`、`lastServedAt`、
+`last`、`from`、`alias`、`seat`。
+`QuotaSpan` 字段：`name`、`used`、`remaining`、`resetsAt`、`display`、`amount`、`limit`、`unit`、`pool`、`unlimited`、`holds`。
 
-官方插件覆盖供应商认证/模型、网关中间件和 Agent 配置；旧 integrating.md 的插件分类与新文档
-存在差异，应以相应版本源码核对。当前官方源码和社区目录中未发现 macOS WidgetKit 或墨水屏
-APK 插件；Linux Omarchy 的状态栏组件不等于上述平台能力。
-依据：[插件文档](https://usemagpie.ai/docs/plugins)、[社区插件目录](https://github.com/magpie-community/plugins)。
-因此本实现是独立显示伴侣，不冒充已注册的 Magpie 插件。
+**本机实测的两个反例**（说明为什么不能写死窗口）：
 
-网络额度读取依赖 Magpie 共享网关鉴权；预算/模型/账号受限的共享 Key 会被拒绝读取额度，
-未发现专用只读额度 Token。APK 不直连 Magpie，也不持有能调用模型的完整共享 Key。
+- Antigravity 的窗口名随上游变化：未刷新时是 `Gemini · 7 days`，刷新后变成 `Gemini 3.8 Flash (High)` 等 7 个窗口，且出现两个同名 `7 days`。
+- WorkBuddy 的窗口叫 `Credits`，`used=0.048`、`remaining=99.95`，真实用量在 `display="2.27 / 4723"` 里。
 
-## 最终结构
+## 三、数据流
 
 ```mermaid
 flowchart LR
-  M[Mac 上的 Magpie] -->|本机额度报告| W[独立 Widget 与本地缓存]
-  M -->|每 5 分钟 Codex 专项刷新| B[可选 Python 只读桥接]
-  S[最小设置 App] -->|启停与一次性配对码| B
-  B -->|匿名额度 独立只读凭证| A[墨水屏 APK]
+  P[Magpie 内置 Provider / 社区插件] -->|统一额度接口| M[Magpie 本地网关]
+  M -->|GET kept=1 / POST refresh| W[macOS Widget]
+  M -->|GET kept=1 / POST refresh| C[Python 采集器]
+  C -->|只读快照 schema 3| B[局域网桥接]
+  B -->|配对凭据| A[Poke4S 墨水屏 APK]
+  S[AICC 设置 App] -->|端口 / 卡片数量 / 服务商筛选| W
+  S -->|启停桥接 / 一次性配对码| B
 ```
 
-- Widget 自己配置端口和账号数量，不依赖宿主偏好同步或 `/api/display-snapshot`。
-  读取受限于 literal loopback，关闭代理与重定向；缓存按端口隔离。旧配置仍可解码，
-  停用指标明确显示未知。WidgetKit 决定实际时间线频率。
-- 设置 App 保留原 bundle/Widget/App Intent 身份。没有 NSStatusItem、弹出看板或供应商控制。
-  桥接默认关闭；关闭窗口是否退出取决于桥接开关。登录启动启用桥接时留在后台，否则退出。
-- Python 只包含 Magpie 适配器与桥接。刷新独立于设备读取，每 300 秒一次；GET 不触发供应商请求。
-  故障保持 Magpie 来源缓存，每个账号独立判断源年龄。没有 WorkBuddy 自动重启或 Codex app-server。
-- APK 用独立桥接凭据读取，不允许网络刷新、写入显示快照、供应商控制或关闭服务。
-  配对码一次性、120 秒有效、全局最多 5 次尝试，另有请求限速和体积上限。
-  管理/配对码生成要求 loopback、正常本机 Host 和没有跨站 Origin。
-- 凭据通过 Mac Keychain → stdin → Python 内存；Android Keystore 加密持久化并绑定已配对主机。
-  未授权状态返回 401；撤销全部设备会更换凭据。代码、URL、日志、截图与普通文件不保存真实明文密钥。
-- 当前 HTTP LAN 未加密，配对凭据可能被同网段监听者获取；凭据只授权匿名额度读取，不能调用
-  Magpie 模型。可信局域网为使用边界，公网/TLS/远程 Magpie 不属于本轮范围。
+- Widget 直接读 Magpie，不依赖 AICC 常驻，也不依赖 Python 服务。
+- 桥接只做「同一份快照的只读转发」，不做第二套采集。
+- APK 只认桥接凭据，不持有 Magpie 网关 Key。
 
-## 接口不可用时
+## 四、通用数据模型（`schema_version: 3`）
 
-升级 Magpie 后接口改变、loopback 配置受保护或无 Codex subscription 时，显示缓存/未知，
-不切回 OpenCodex、不读账号 auth 文件、不编造另一个接口。不请求用户提交任何密码或 Key。
-最少诊断信息为 Magpie 版本、本机监听端口、是否包含 Codex 订阅账号和脱敏错误状态；
-随后针对官方源码确认适配。如果官方只剩模型 API，则不能提供准确订阅额度。
+字段级契约见 `collectors/magpie.py`、`macos/MenuBarApp/Sources/Models/QuotaModel.swift`、
+`android/.../DashboardData.java`，三者规则必须一致：
 
-## 验收
+| 规则 | 说明 |
+| --- | --- |
+| 账号标识 | 快照只写 `id = "magpie-" + sha256(from, provider, kind, user)[:12]` 和 `account_label`（首字符 + `***`；Magpie 的 `alias`/`seat` 若不含 `@` 且不超过 24 字符则原样显示）。邮箱、原始账号名、错误文本、凭据一律不落盘 |
+| 窗口 | 保留原始 `name`，不做 `five_hour`/`weekly` 映射；同名窗口各算一条（真实数据会出现） |
+| 展示值 | `unlimited` → ∞；否则 `display` 优先；否则剩余百分比；都没有 → 未知（`—`） |
+| 百分比 | 仅当数值有限且落在 0…100 时采用；布尔、字符串、NaN、越界都是未知，不是 0 |
+| 重置时间 | 只用 `resetsAt`；缺失即「未知」，绝不推算 |
+| 余额 | `balance`/`balanceSplit` 原样展示金额，不换算百分比，不因没有窗口而隐藏 |
+| 新鲜度 | `error`、`readDeferred`、`asOf`（缓存读）、缺 `readAt`、`readAt` 超过 300 秒或来自未来 60 秒以上 → 该卡 `stale`；账号级独立判断 |
+| 未知 Provider | 保留；显示名用映射表，未命中则把 id 转成 Title Case |
+| 未知 `kind` | 丢弃该行（无法解释语义），其他行不受影响 |
+| 坏行 | 单行不可读只丢该行；只有信封（`object`/`data`）非法才整份报错 |
+| 重复账号 | 同 `(from, provider, kind, user)` 视为同一卡，保留 `readAt` 较新的一条 |
 
-测试覆盖只读鉴权、配对超时/单次/尝试限制、撤销、跨主机凭据隔离、匿名化、逐账号源过期、
-断线恢复、未知值、Widget 无宿主依赖、旧配置解码、端口隔离、App Intents 双 bundle 注册，
-以及原生设置、Widget 和 Android 画面。退役采集器的测试随实现删除，使用对应新边界测试替代。
-具体最终测试数字及 CI 记录见 PR 验收报告。
+快照顶层：`schema_version`、`source`、`available`、`state`（`Connected`/`Cached`/`Empty`）、`stale`、`providers`、
+`accounts`、`updated_at`、`updated_epoch`、`refresh_seconds`。
 
-未确认：真实 Magpie 多账号、桌面安装后的 WidgetKit 调度、登录启动/关闭窗口完整安装态行为、
-Poke4S 配对与 IP 迁移真机、残影与功耗、Magpie 后续版本兼容性。模型单元测试或模拟器截图不代表真机结果。
-只有完成这些额外验收才需要确认“是否有多个本机 Codex 账号”和“是否有可连接的 Poke4S”，无需凭据。
+## 五、刷新与缓存策略
 
-CI 截图 artifacts：`magpie-settings-visuals`、`magpie-widget-visuals`、`magpie-android-visuals`。
-CI App/DMG/APK 均为候选，现有正式版、更新清单与本机 dist 不变。
+- 刷新周期只有一处：`collectors/magpie.py` 的 `REFRESH_SECONDS = 300`；Swift 侧 `QuotaPolicy.refreshSeconds` 与其对齐，
+  桥接把同一数值下发给 APK（`refresh_seconds`）。
+- 普通读取一律用 `?kept=1`，不让每次 Widget 时间线刷新或 APK 轮询都去打上游。
+- 手动刷新（Widget 点击 / App 内刷新链接）走 `POST /v1/magpie/quotas/refresh`，即刷新**所有** provider，不再写死 Codex。
+- 强制刷新直接用 refresh 的响应作为本次快照，一次请求完成「刷新 + 读取」；失败则退回 `kept=1`。
+- Magpie 自己的 30 秒/卡限制不被绕过；Widget 端另有 300 秒的最小间隔、60 秒兜底，避免时间线抖动造成连续刷新。
+- 缓存写入：同目录临时文件 → `fsync` → `os.replace`，权限 0600，断电不会留下半份 JSON。
+- 旧 `schema_version: 2` 缓存不再解释（不猜字段），直接视为无缓存。
+
+## 六、桥接与安全边界
+
+- `/api/status` 默认返回 `schema_version: 3`；`?format=2` 或 `X-AICC-Schema: 2` 返回旧 `codex` 结构，
+  由同一份通用快照派生（明确的版本分支，不是字段级猜测）。
+- 网络设备只能 `GET /api/status`；`POST /api/refresh`、`/api/pairing`、`/api/shutdown`、任何 Magpie 刷新/账号接口一律 403。
+- 配对码一次性、120 秒有效、最多 5 次尝试；读取限速 60 次/分钟；响应 `no-store` + `nosniff`；1 MiB 上限。
+- 凭据：Mac Keychain → stdin → Python 内存；Android Keystore 加密并绑定 `host_id`；撤销全部设备即换凭据。
+- 桥接仍是**明文 HTTP 局域网**：只适合可信网络，不适合公网。凭据只授权匿名额度读取，不能调用模型。
+- Widget 侧：仅 loopback、禁用代理、禁止重定向、端口隔离缓存、1 MiB 上限。
+
+## 七、三端落地
+
+### Python（`collectors/magpie.py`、`server.py`）
+
+通用采集 + 规范化 + 原子缓存 + 统一刷新；桥接输出通用列表与 `format=2` 兼容层。
+测试：`tests/test_magpie.py`、`tests/test_bridge.py`。
+
+### macOS Widget（`macos/Widget/`、`macos/MenuBarApp/Sources/Models/QuotaModel.swift`）
+
+- 模型：`QuotaSnapshot`/`QuotaCard`/`QuotaItem`，与 Python 同规则。
+- 视图：Small 最多 2 张卡、Medium 最多 4 张；每张卡一个服务商账号，展示前两个窗口，溢出显示 `+N`；
+  无数据/离线/缓存/失败都有明确状态。
+- 配置：端口、显示数量（自动/1/2/4/全部）、服务商筛选，写在 Widget 自己的 display-settings 域；
+  旧 `accounts` 键仍可解码。注册身份 `com.aieink.dashboard.menubar.widget` 与 `StaticConfiguration` 未变。
+- 刷新：点击 Widget 走 `aicc-widget://refresh`，由宿主执行一次全 provider 刷新并重载时间线。
+- **限制**：WidgetKit 不保证时间线准点，`refresh_seconds` 只是「请求重载」的节奏，不是实时定时器。
+
+### Android / Poke4S（`android/poke-dashboard`）
+
+- `DashboardData`：解析 schema 3；显式分支读取旧 `codex` 结构；每页 4 张卡；1/2/全部三种数量；全部模式可翻页。
+- `DashboardView`：电子墨水排版，长名称按宽度缩放，余额与百分比分开表达，状态（缓存/失败/跳过）右上角标注。
+- 仅在 `renderKey` 变化时重绘；保留闪刷校准、休眠暂停、唤醒更新与缓存。
+- 请求带 `X-AICC-Schema: 3`，与桥接显式协商版本；包身份、签名、权限、Keystore、禁止备份策略未改。
+
+## 八、接口不可用时
+
+升级 Magpie 后接口改变、loopback 受保护或服务商全部未登录时：显示缓存或「无额度」，
+不回退到读账号 auth 文件、不编造另一个接口、不把缺失当 0。诊断只需 Magpie 版本、监听端口、
+`providers` 列表与脱敏状态。
+
+## 九、验收情况
+
+见 [`docs/ACCEPTANCE.md`](ACCEPTANCE.md)；服务商逐项结论见 [`docs/PROVIDER-COMPATIBILITY.md`](PROVIDER-COMPATIBILITY.md)。

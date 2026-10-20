@@ -27,7 +27,8 @@ let package = Package(
                 "Views",
             ],
             sources: [
-                "Models/WidgetDisplaySnapshot.swift",
+                "Models/QuotaModel.swift",
+                "Models/WidgetPreferences.swift",
                 "Models/DashboardTypography.swift",
                 "Models/SettingsData.swift",
                 "Models/SettingsPresentationModel.swift",

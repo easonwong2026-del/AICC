@@ -1,230 +1,59 @@
-public enum AICCWidgetMetadata {
-    public static let kind = "com.aieink.dashboard.menubar.widget"
+enum AICCWidgetMetadata {
+    static let kind = "com.aieink.dashboard.menubar.widget"
+    static let refreshURL = URL(string: "aicc-widget://refresh")!
 }
 
 import Foundation
-import AppIntents
 import WidgetKit
 
-public enum WidgetMetricOption: String, CaseIterable, Codable, Sendable, AppEnum {
-    case codex = "codex"
-    case google = "google"
-    case workbuddy = "workbuddy"
-    case deepseek = "deepseek"
-
-    public static var typeDisplayRepresentation: TypeDisplayRepresentation {
-        TypeDisplayRepresentation(name: LocalizedStringResource("Metric", defaultValue: "Metric"))
+/// What the widget draws.  Port, card count and the optional provider filter
+/// live in the shared display-settings domain (`WidgetPreferences`), so one
+/// sandboxed read is enough and no App Intent has to register to configure it.
+struct AICCWidgetConfiguration: Codable, Equatable, Sendable {
+    static func load() -> Self {
+        let settings = WidgetPreferences.load()
+        return Self(magpiePort: settings.port, cards: settings.cards, provider: settings.provider)
     }
 
-    public static var caseDisplayRepresentations: [WidgetMetricOption: DisplayRepresentation] {
-        [
-            .codex: DisplayRepresentation(title: "Codex"),
-            .google: DisplayRepresentation(title: "Google"),
-            .workbuddy: DisplayRepresentation(title: "WorkBuddy"),
-            .deepseek: DisplayRepresentation(title: "DeepSeek")
-        ]
-    }
+    var magpiePort: Int
+    var cards: WidgetCardDisplayMode
+    var provider: String?
 
-    public var displayName: String {
-        switch self {
-        case .codex: return "Codex"
-        case .google: return "Google"
-        case .workbuddy: return "WorkBuddy"
-        case .deepseek: return "DeepSeek"
-        }
-    }
-
-    public func localizedName(isChinese: Bool) -> String {
-        switch self {
-        case .codex: return "Codex"
-        case .google: return "Google"
-        case .workbuddy: return "WorkBuddy"
-        case .deepseek: return "DeepSeek"
-        }
-    }
-
-    public var isQuota: Bool {
-        switch self {
-        case .codex, .google: return true
-        case .workbuddy, .deepseek: return false
-        }
-    }
-}
-
-public enum WidgetAccountOption: String, Codable, Sendable, AppEnum {
-    case automatic, one, two, all
-    public static var typeDisplayRepresentation: TypeDisplayRepresentation { "Accounts" }
-    public static var caseDisplayRepresentations: [Self: DisplayRepresentation] {
-        [.automatic: "Automatic", .one: "1 Account", .two: "2 Accounts", .all: "All Accounts"]
-    }
-    var mode: CodexAccountDisplayMode { CodexAccountDisplayMode(rawValue: rawValue) ?? .automatic }
-}
-
-public struct AICCWidgetConfigurationIntent: WidgetConfigurationIntent, Codable, Equatable, Sendable {
-    public static var title: LocalizedStringResource = "AICC Widget Configuration"
-    public static var description = IntentDescription("Customize displayed metrics in AICC widget")
-
-    @Parameter(title: "Magpie Port", default: 3425)
-    public var magpiePort: Int
-
-    @Parameter(title: "Accounts", default: .automatic)
-    public var accounts: WidgetAccountOption
-
-    @Parameter(title: "Primary Metric", default: .codex)
-    public var primaryMetric: WidgetMetricOption
-
-    @Parameter(title: "Secondary Metric", default: .google)
-    public var secondaryMetric: WidgetMetricOption
-
-    @Parameter(title: "Top Left", default: .codex)
-    public var topLeft: WidgetMetricOption
-
-    @Parameter(title: "Top Right", default: .google)
-    public var topRight: WidgetMetricOption
-
-    @Parameter(title: "Bottom Left", default: .workbuddy)
-    public var bottomLeft: WidgetMetricOption
-
-    @Parameter(title: "Bottom Right", default: .deepseek)
-    public var bottomRight: WidgetMetricOption
-
-    public static var parameterSummary: some ParameterSummary {
-        Switch(.widgetFamily) {
-            Case(.systemSmall) {
-                Summary {
-                    \AICCWidgetConfigurationIntent.$magpiePort
-                    \AICCWidgetConfigurationIntent.$accounts
-                    \AICCWidgetConfigurationIntent.$primaryMetric
-                    \AICCWidgetConfigurationIntent.$secondaryMetric
-                }
-            }
-            DefaultCase {
-                Summary {
-                    \AICCWidgetConfigurationIntent.$magpiePort
-                    \AICCWidgetConfigurationIntent.$accounts
-                    \AICCWidgetConfigurationIntent.$topLeft
-                    \AICCWidgetConfigurationIntent.$topRight
-                    \AICCWidgetConfigurationIntent.$bottomLeft
-                    \AICCWidgetConfigurationIntent.$bottomRight
-                }
-            }
-        }
-    }
-
-    public init() {
-        self.magpiePort = 3425
-        self.accounts = .automatic
-        self.primaryMetric = .codex
-        self.secondaryMetric = .google
-        self.topLeft = .codex
-        self.topRight = .google
-        self.bottomLeft = .workbuddy
-        self.bottomRight = .deepseek
-    }
-
-    public init(primary: WidgetMetricOption, secondary: WidgetMetricOption) {
-        self.magpiePort = 3425
-        self.accounts = .automatic
-        self.primaryMetric = primary
-        self.secondaryMetric = secondary
-        self.topLeft = .codex
-        self.topRight = .google
-        self.bottomLeft = .workbuddy
-        self.bottomRight = .deepseek
-    }
-
-    public init(topLeft: WidgetMetricOption = .codex,
-                topRight: WidgetMetricOption = .google,
-                bottomLeft: WidgetMetricOption = .workbuddy,
-                bottomRight: WidgetMetricOption = .deepseek) {
-        self.magpiePort = 3425
-        self.accounts = .automatic
-        self.primaryMetric = .codex
-        self.secondaryMetric = .google
-        self.topLeft = topLeft
-        self.topRight = topRight
-        self.bottomLeft = bottomLeft
-        self.bottomRight = bottomRight
+    init(magpiePort: Int = 3425, cards: WidgetCardDisplayMode = .automatic, provider: String? = nil) {
+        self.magpiePort = magpiePort
+        self.cards = cards
+        self.provider = provider
     }
 
     enum CodingKeys: String, CodingKey {
-        case magpiePort, accounts
-        case primaryMetric
-        case secondaryMetric
-        case topLeft
-        case topRight
-        case bottomLeft
-        case bottomRight
+        case magpiePort, cards, provider
+        // Pre-3.0 configuration stored the same choice as `accounts`.
+        case accounts
     }
 
-    public init(from decoder: Decoder) throws {
+    init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.magpiePort = try container.decodeIfPresent(Int.self, forKey: .magpiePort) ?? 3425
-        self.accounts = try container.decodeIfPresent(WidgetAccountOption.self, forKey: .accounts) ?? .automatic
-        self.primaryMetric = try container.decodeIfPresent(WidgetMetricOption.self, forKey: .primaryMetric) ?? .codex
-        self.secondaryMetric = try container.decodeIfPresent(WidgetMetricOption.self, forKey: .secondaryMetric) ?? .google
-        self.topLeft = try container.decodeIfPresent(WidgetMetricOption.self, forKey: .topLeft) ?? .codex
-        self.topRight = try container.decodeIfPresent(WidgetMetricOption.self, forKey: .topRight) ?? .google
-        self.bottomLeft = try container.decodeIfPresent(WidgetMetricOption.self, forKey: .bottomLeft) ?? .workbuddy
-        self.bottomRight = try container.decodeIfPresent(WidgetMetricOption.self, forKey: .bottomRight) ?? .deepseek
+        if let cards = try container.decodeIfPresent(WidgetCardDisplayMode.self, forKey: .cards) {
+            self.cards = cards
+        } else if let legacy = try container.decodeIfPresent(String.self, forKey: .accounts) {
+            self.cards = WidgetCardDisplayMode.migrated(legacy)
+        } else {
+            self.cards = .automatic
+        }
+        let provider = try container.decodeIfPresent(String.self, forKey: .provider)
+        self.provider = (provider?.isEmpty == false) ? provider : nil
     }
 
-    public func encode(to encoder: Encoder) throws {
+    func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(magpiePort, forKey: .magpiePort)
-        try container.encode(accounts, forKey: .accounts)
-        try container.encode(primaryMetric, forKey: .primaryMetric)
-        try container.encode(secondaryMetric, forKey: .secondaryMetric)
-        try container.encode(topLeft, forKey: .topLeft)
-        try container.encode(topRight, forKey: .topRight)
-        try container.encode(bottomLeft, forKey: .bottomLeft)
-        try container.encode(bottomRight, forKey: .bottomRight)
+        try container.encode(cards, forKey: .cards)
+        try container.encodeIfPresent(provider, forKey: .provider)
     }
 
-    public static func == (lhs: AICCWidgetConfigurationIntent, rhs: AICCWidgetConfigurationIntent) -> Bool {
-        lhs.magpiePort == rhs.magpiePort && lhs.accounts == rhs.accounts &&
-        lhs.primaryMetric == rhs.primaryMetric &&
-        lhs.secondaryMetric == rhs.secondaryMetric &&
-        lhs.topLeft == rhs.topLeft &&
-        lhs.topRight == rhs.topRight &&
-        lhs.bottomLeft == rhs.bottomLeft &&
-        lhs.bottomRight == rhs.bottomRight
-    }
-
-    var hasDefaultMetrics: Bool {
-        primaryMetric == .codex && secondaryMetric == .google && topLeft == .codex && topRight == .google
-            && bottomLeft == .workbuddy && bottomRight == .deepseek
-    }
-
-    /// Normalizes a list of metrics to ensure uniqueness and reach targetCount
-    /// using deterministic canonical order [.codex, .google, .workbuddy, .deepseek].
-    public static func normalize(_ metrics: [WidgetMetricOption], targetCount: Int) -> [WidgetMetricOption] {
-        let all = WidgetMetricOption.allCases
-        var result: [WidgetMetricOption] = []
-        for metric in metrics {
-            if !result.contains(metric) {
-                result.append(metric)
-            } else {
-                if let unused = all.first(where: { !result.contains($0) }) {
-                    result.append(unused)
-                }
-            }
-        }
-        for candidate in all {
-            if result.count >= targetCount { break }
-            if !result.contains(candidate) {
-                result.append(candidate)
-            }
-        }
-        return Array(result.prefix(targetCount))
-    }
-
-    public func resolvedMetrics(for family: WidgetFamily) -> [WidgetMetricOption] {
-        if family == .systemSmall {
-            return Self.normalize([primaryMetric, secondaryMetric], targetCount: 2)
-        } else {
-            return Self.normalize([topLeft, topRight, bottomLeft, bottomRight], targetCount: 4)
-        }
+    /// Cards the widget may draw for a family, after the count preference.
+    func capacity(familyLimit: Int) -> Int {
+        cards.capacity(for: familyLimit)
     }
 }
-

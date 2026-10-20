@@ -28,14 +28,15 @@ xcrun swiftc \
   -sdk "$SDK_PATH" \
   -target arm64-apple-macosx14.0 \
   -framework SwiftUI \
-  -framework AppIntents \
+  \
   -framework WidgetKit \
   -framework AppKit \
   -module-cache-path "${SWIFT_MODULE_CACHE:-/tmp/swift-module-cache}" \
-  "$ROOT/macos/MenuBarApp/Sources/Models/WidgetDisplaySnapshot.swift" \
+  "$ROOT/macos/MenuBarApp/Sources/Models/QuotaModel.swift" \
+  "$ROOT/macos/MenuBarApp/Sources/Models/WidgetPreferences.swift" \
   "$ROOT/macos/Widget/WidgetStatus.swift" \
   "$ROOT/macos/Widget/WidgetConfiguration.swift" \
-  "$ROOT/macos/Widget/RefreshWidgetIntent.swift"   "$ROOT/macos/Widget/AICCWidgetViews.swift" \
+  "$ROOT/macos/Widget/AICCWidgetViews.swift" \
   "$ROOT/macos/Widget/WidgetVisualSmokeMain.swift" \
   -o "$TEMP_ROOT/aicc-widget-visual-smoke"
 

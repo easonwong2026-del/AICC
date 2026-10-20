@@ -1,4 +1,10 @@
-"""Read-only Magpie companion bridge. Account management belongs to Magpie."""
+"""Read-only Magpie companion bridge. Account management belongs to Magpie.
+
+The bridge serves one generic quota snapshot (`schema_version: 3`): every
+provider Magpie reports, every account, every window, plan credit and balance.
+A pinned `format=2` view keeps the pre-3.0 `codex` object available for older
+readers; it is derived from the same snapshot, never from a second code path.
+"""
 
 import hmac
 import json
@@ -13,7 +19,7 @@ import uuid
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from collectors import magpie
 
@@ -22,6 +28,11 @@ SERVER_STARTED_AT = time.time()
 SERVER_INSTANCE_ID = str(uuid.uuid4())
 DISCOVERY_MAGIC = b"AI_EINK_DISCOVER"
 DATA_PATH = magpie.DATA_ROOT / "status.json"
+READ_LIMIT_PER_MINUTE = 60
+PAIR_LIMIT_PER_MINUTE = 10
+EMPTY_SNAPSHOT = {"schema_version": magpie.SCHEMA_VERSION, "source": "Magpie", "available": False,
+                  "state": "Empty", "stale": True, "providers": [], "accounts": [],
+                  "updated_at": None, "updated_epoch": None, "refresh_seconds": magpie.REFRESH_SECONDS}
 _lock = threading.Lock()
 _snapshot = None
 _token = secrets.token_urlsafe(32)
@@ -50,7 +61,8 @@ def host_id():
 def server_identity():
     return {"protocol": "aicc", "companion": True, "version": version(), "host_id": host_id(),
             "server_instance_id": SERVER_INSTANCE_ID, "hostname": socket.gethostname(),
-            "platform": "macOS" if platform.system() == "Darwin" else platform.system()}
+            "platform": "macOS" if platform.system() == "Darwin" else platform.system(),
+            "status_schema": magpie.SCHEMA_VERSION}
 
 
 def live_health_payload():
@@ -61,29 +73,88 @@ def live_health_payload():
     return payload
 
 
-def refresh_status():
+def refresh_status(force=True):
+    """Read Magpie once.  One provider failing must not blank the others."""
     global _snapshot
     try:
-        snapshot = magpie.collect(force=True)
+        snapshot = magpie.collect(force=force)
     except Exception:
-        snapshot = magpie.load_cache() or {"source": "Magpie", "accounts": [], "stale": True, "available": False}
+        snapshot = magpie.load_cache() or dict(EMPTY_SNAPSHOT)
     with _lock:
         _snapshot = snapshot
+    return snapshot
 
 
-def load_status():
+def snapshot_copy():
     with _lock:
-        snapshot = _snapshot or magpie.load_cache() or {"source": "Magpie", "accounts": [], "stale": True, "available": False}
-        snapshot = json.loads(json.dumps(snapshot))
-    now = time.time()
-    for account in snapshot.get("accounts", []):
-        read = account.get("read_at")
-        account["stale"] = bool(account.get("stale") or read is None or now - read >= 300)
+        snapshot = _snapshot or magpie.load_cache() or dict(EMPTY_SNAPSHOT)
+    return json.loads(json.dumps(snapshot))
+
+
+def age_accounts(snapshot, now=None):
+    """Recompute freshness for the moment of reading, per account."""
+    now = time.time() if now is None else now
     accounts = snapshot.get("accounts", [])
-    snapshot["stale"] = not accounts or all(account["stale"] for account in accounts)
     for account in accounts:
-        account.pop("read_at", None)
-    return {"codex": snapshot, "fetched_at": now, "codex_account_display_mode": "all"}
+        read = account.get("read_at")
+        if read is None or now - read >= magpie.MAX_AGE_SECONDS or read > now + 60:
+            account["stale"] = True
+    # A snapshot the collector already marked stale (an error, a deferred read,
+    # or a cache fallback) stays stale: freshness is only ever added, never
+    # claimed back from a failed read.
+    snapshot["stale"] = (not accounts or bool(snapshot.get("stale"))
+                         or all(account["stale"] for account in accounts))
+    snapshot["state"] = "Empty" if not accounts else ("Cached" if snapshot["stale"] else "Connected")
+    return snapshot
+
+
+def legacy_view(snapshot):
+    """The pre-3.0 `codex` object, built from the generic cards.
+
+    Only local Codex subscriptions have a place in it; every other provider,
+    plan and balance is dropped, which is why new readers ask for schema 3.
+    """
+    windows = {"7 days": ("weekly", 10080), "5 hours": ("five_hour", 300)}
+    accounts = []
+    for card in snapshot.get("accounts", []):
+        if card.get("provider") != "codex" or card.get("kind") != "subscription" or card.get("from"):
+            continue
+        entry = {"id": card["id"], "label": f"Codex · {card['account_label']}", "plan": card.get("plan"),
+                 "active": False, "needs_reauth": False, "stale": card.get("stale", True),
+                 "read_at": card.get("read_at")}
+        for item in card.get("items", []):
+            mapped = windows.get(item.get("name"))
+            if mapped is None:
+                continue
+            entry[mapped[0]] = {"remaining": item.get("remaining"), "duration_minutes": mapped[1],
+                                "reset": item.get("reset")}
+        if not any(key in entry for key in ("weekly", "five_hour")):
+            continue
+        accounts.append(entry)
+    codex = {"schema_version": 2, "source": "Magpie", "available": bool(accounts),
+             "state": snapshot.get("state") if accounts else "No Codex accounts",
+             "stale": snapshot.get("stale", True), "accounts": accounts}
+    if len(accounts) == 1:
+        codex["weekly"] = accounts[0].get("weekly")
+        codex["five_hour"] = accounts[0].get("five_hour")
+    return {"codex": codex, "fetched_at": time.time(), "codex_account_display_mode": "all"}
+
+
+def requested_schema(handler, query):
+    """Explicit version negotiation: `format` query, else header, else 3."""
+    for candidate in (query.get("format", [None])[0], handler.headers.get("X-AICC-Schema")):
+        if candidate == "2":
+            return 2
+        if candidate == "3":
+            return 3
+    return magpie.SCHEMA_VERSION
+
+
+def load_status(schema=magpie.SCHEMA_VERSION):
+    snapshot = age_accounts(snapshot_copy())
+    if schema == 2:
+        return legacy_view(snapshot)
+    return {**snapshot, "fetched_at": time.time()}
 
 
 def allow_request(address, kind, limit):
@@ -119,9 +190,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return hmac.compare_digest(supplied.encode(), ("Bearer " + _token).encode())
 
     def do_GET(self):
-        if not allow_request(self.client_address[0], "read", 60):
+        if not allow_request(self.client_address[0], "read", READ_LIMIT_PER_MINUTE):
             return self.send_json({"error": "Too many requests"}, 429)
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == "/api/health/live":
             return self.send_json(live_health_payload())
         if path == "/api/health/ready" and self.is_local_request():
@@ -130,12 +202,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self.send_json({"error": "Not found"}, 404)
         if not self.authorized():
             return self.send_json({"error": "Pair this device in AICC settings"}, 401)
-        return self.send_json(load_status())
+        query = parse_qs(parsed.query)
+        schema = requested_schema(self, query)
+        return self.send_json(load_status(schema), headers={"X-AICC-Schema": str(schema)})
 
     def do_POST(self):
         global _pair_code, _pair_deadline, _pair_attempts
         path = urlparse(self.path).path
-        if not allow_request(self.client_address[0], "pair", 10):
+        if not allow_request(self.client_address[0], "pair", PAIR_LIMIT_PER_MINUTE):
             return self.send_json({"error": "Too many requests"}, 429)
         if path == "/api/shutdown" and self.is_local_request():
             self.send_json({"ok": True, "pid": os.getpid()})
@@ -149,6 +223,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 code = _pair_code
             return self.send_json({"code": code, "expires_seconds": 120})
         if path != "/api/pair":
+            # Network devices never reach Magpie's refresh, account or routing APIs.
             return self.send_json({"error": "Read-only bridge"}, 403)
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -170,13 +245,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self.send_json({"error": "Pairing code expired or incorrect"}, 403)
         return self.send_json({"token": _token, "host_id": host_id()})
 
-    def send_json(self, payload, status=200):
+    def send_json(self, payload, status=200, headers=None):
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -218,7 +295,7 @@ def main():
     def poll():
         while True:
             refresh_status()
-            time.sleep(300)
+            time.sleep(magpie.REFRESH_SECONDS)
 
     def watchdog():
         parent = int(os.environ["AICC_PARENT_PID"])

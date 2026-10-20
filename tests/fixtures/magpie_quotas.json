@@ -1,14 +1,124 @@
 {
   "object": "list",
   "data": [
-    {"provider": "codex", "name": "Codex", "kind": "subscription", "user": "one@example.invalid", "plan": "team", "readAt": "2026-10-14T13:30:00+08:00", "last": true, "windows": [
-      {"name": "5 hours", "used": 9, "remaining": 91, "resetsAt": "2026-10-14T16:58:46+08:00"},
-      {"name": "7 days", "used": 12, "remaining": 88, "resetsAt": "2026-10-20T16:10:19+08:00"}
-    ]},
-    {"provider": "codex", "name": "Codex", "kind": "subscription", "user": "two@example.invalid", "plan": "plus", "readAt": "2026-10-14T13:30:00+08:00", "windows": [
-      {"name": "5 hours", "used": 100, "remaining": 0},
-      {"name": "7 days", "used": 41, "remaining": 59}
-    ]},
-    {"provider": "workbuddy", "kind": "subscription", "user": "other@example.invalid", "windows": []}
+    {
+      "provider": "codex",
+      "name": "Codex",
+      "kind": "subscription",
+      "plan": "team",
+      "user": "one@example.invalid · Team",
+      "readAt": "2026-10-14T13:30:00+08:00",
+      "until": "2027-07-01T04:07:05Z",
+      "lastServedAt": "2026-10-14T05:13:55Z",
+      "last": true,
+      "resets": {"count": 2, "until": "2026-10-29T19:34:52Z", "each": [{"until": "2026-10-29T19:34:52Z"}, {"until": "2026-11-06T23:57:51Z"}]},
+      "windows": [
+        {"name": "5 hours", "used": 9, "remaining": 91, "resetsAt": "2026-10-14T16:58:46+08:00"},
+        {"name": "7 days", "used": 12, "remaining": 88, "resetsAt": "2026-10-20T16:10:19+08:00"}
+      ]
+    },
+    {
+      "provider": "codex",
+      "name": "Codex",
+      "kind": "subscription",
+      "plan": "plus",
+      "user": "two@example.invalid",
+      "readAt": "2026-10-14T13:30:00+08:00",
+      "windows": [
+        {"name": "5 hours", "used": 100, "remaining": 0},
+        {"name": "7 days", "used": 41, "remaining": 59}
+      ]
+    },
+    {
+      "provider": "workbuddy",
+      "name": "WorkBuddy",
+      "kind": "subscription",
+      "plan": "Free",
+      "user": "wb-one@example.invalid",
+      "readAt": "2026-10-14T13:30:00+08:00",
+      "windows": [
+        {"name": "Credits", "used": 0.04806267181875926, "remaining": 99.95193732818124,
+         "display": "2.27 / 4723", "amount": 2.27, "limit": 4723, "unit": "credits", "holdsWhy": "low"}
+      ]
+    },
+    {
+      "provider": "workbuddy",
+      "name": "WorkBuddy",
+      "kind": "subscription",
+      "plan": "Free",
+      "user": "wb-two@example.invalid",
+      "readAt": "2026-10-14T13:30:00+08:00",
+      "windows": [
+        {"name": "Credits", "used": 0, "remaining": 100, "display": "0 / 4224",
+         "limit": 4224, "unit": "credits", "holdsWhy": "low"}
+      ]
+    },
+    {
+      "provider": "antigravity",
+      "name": "Antigravity",
+      "kind": "subscription",
+      "plan": "Google AI Pro",
+      "user": "three@example.invalid",
+      "readAt": "2026-10-14T13:30:00+08:00",
+      "windows": [
+        {"name": "Gemini · 7 days", "used": 18.53448, "remaining": 81.46552, "resetsAt": "2026-10-24T04:51:32Z", "pool": "Gemini"},
+        {"name": "Claude & GPT · 5 hours", "used": 0, "remaining": 100, "resetsAt": "2026-10-14T13:33:43Z", "pool": "Claude & GPT"}
+      ]
+    },
+    {
+      "provider": "zcode",
+      "name": "ZCode",
+      "kind": "plan",
+      "plan": "GLM Coding Plan",
+      "user": "glm@example.invalid",
+      "readAt": "2026-10-14T13:30:00+08:00",
+      "until": "2026-11-20T00:00:00Z",
+      "renew": "auto",
+      "windows": [
+        {"name": "prompts", "used": 12.5, "remaining": 87.5, "resetsAt": "2026-10-15T00:00:00+08:00", "display": "35 / 40", "amount": 35, "limit": 40, "unit": "prompts"}
+      ]
+    },
+    {
+      "provider": "deepseek",
+      "name": "DeepSeek",
+      "kind": "balance",
+      "user": "key-main@example.invalid",
+      "readAt": "2026-10-14T13:30:00+08:00",
+      "balance": "12.34 USD",
+      "balanceSplit": [
+        {"label": "paid", "text": "10.00 USD"},
+        {"label": "bonus", "text": "2.34 USD", "percent": null}
+      ]
+    },
+    {
+      "provider": "brandnew-vendor",
+      "name": "Brand New",
+      "kind": "subscription",
+      "user": "unknown@example.invalid",
+      "readAt": "2026-10-14T13:30:00+08:00",
+      "windows": [
+        {"name": "Monthly", "used": 10, "remaining": 90, "resetsAt": "2026-11-01T00:00:00Z"}
+      ]
+    },
+    {
+      "provider": "codex",
+      "name": "Codex",
+      "kind": "subscription",
+      "user": "broken@example.invalid",
+      "readAt": "2026-10-14T13:30:00+08:00",
+      "error": "401 invalid_grant: refresh token rejected for broken@example.invalid",
+      "windows": []
+    },
+    {
+      "provider": "workbuddy",
+      "name": "WorkBuddy",
+      "kind": "subscription",
+      "user": "deferred@example.invalid",
+      "readAt": "2026-10-14T13:30:00+08:00",
+      "readDeferred": true,
+      "windows": [
+        {"name": "Credits", "used": 50, "remaining": 50, "display": "50 / 100", "limit": 100, "unit": "credits"}
+      ]
+    }
   ]
 }

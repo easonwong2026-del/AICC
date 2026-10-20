@@ -158,15 +158,15 @@ final class DiscoveryClient {
                 return candidate;
             }
             String body;
-            try { body = request(candidate.url + "/api/status", paired ? token : null, null); }
+            try { body = request(candidate.url + "/api/status", paired ? token : null, null, true); }
             catch (Unauthorized error) {
                 candidate.pairingRequired = true;
                 return candidate;
             }
             JSONObject status = new JSONObject(body);
-            if (status.optJSONObject("codex") == null
-                    && status.optJSONObject("google") == null
-                    && status.optJSONObject("workbuddy") == null) {
+            boolean generic = status.optInt("schema_version", 0) >= DashboardData.SCHEMA_VERSION
+                    && status.optJSONArray("accounts") != null;
+            if (!generic && status.optJSONObject("codex") == null) {
                 throw new IllegalStateException("Not an AICC status response");
             }
             candidate.data = DashboardData.parse(body);
@@ -175,13 +175,8 @@ final class DiscoveryClient {
             candidate.hostname = health.optString("hostname", candidate.hostname == null ? "" : candidate.hostname);
             candidate.platform = health.optString("platform", candidate.platform == null ? "" : candidate.platform);
             JSONObject codex = status.optJSONObject("codex");
-            JSONObject google = status.optJSONObject("google");
-            JSONObject deepseek = status.optJSONObject("deepseek");
-            JSONObject workbuddy = status.optJSONObject("workbuddy");
-            candidate.stale = (codex != null && codex.optBoolean("stale"))
-                    || (google != null && google.optBoolean("stale"))
-                    || (deepseek != null && deepseek.optBoolean("stale"))
-                    || (workbuddy != null && workbuddy.optBoolean("balance_stale"));
+            candidate.stale = generic ? status.optBoolean("stale", true)
+                    : (codex != null && codex.optBoolean("stale"));
             Log.i(TAG, "Candidate verified: " + candidate.url);
             return candidate;
         } catch (Exception error) {
@@ -204,12 +199,19 @@ final class DiscoveryClient {
     private static final class Unauthorized extends Exception {}
 
     private static String request(String endpoint, String token, String payload) throws Exception {
+        return request(endpoint, token, payload, false);
+    }
+
+    private static String request(String endpoint, String token, String payload, boolean status) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(endpoint).openConnection();
         connection.setConnectTimeout(5000);
         connection.setReadTimeout(7000);
         connection.setUseCaches(false);
         connection.setInstanceFollowRedirects(false);
         connection.setRequestProperty("Accept", "application/json");
+        // Explicit version negotiation: the bridge answers schema 3 to callers
+        // that ask for it, and the older Codex-only shape to those that don't.
+        if (status) connection.setRequestProperty("X-AICC-Schema", String.valueOf(DashboardData.SCHEMA_VERSION));
         if (token != null) connection.setRequestProperty("Authorization", "Bearer " + token);
         try {
             if (payload != null) {

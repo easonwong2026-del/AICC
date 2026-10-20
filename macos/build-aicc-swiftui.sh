@@ -76,11 +76,10 @@ SWIFT_FILES=()
 while IFS= read -r -d '' file; do
   SWIFT_FILES+=("$file")
 done < <(find "$SOURCE_DIR" -name "*.swift" -print0)
-# Saved widget configurations resolve against the containing app identity.
+# Shared Widget settings and the direct Magpie loader are used by the host refresh link.
 SWIFT_FILES+=(
   "$WIDGET_SOURCE_DIR/WidgetConfiguration.swift"
   "$WIDGET_SOURCE_DIR/WidgetStatus.swift"
-  "$WIDGET_SOURCE_DIR/RefreshWidgetIntent.swift"
 )
 
 echo "Swift sources: ${#SWIFT_FILES[@]} files"
@@ -118,7 +117,6 @@ xcrun swiftc \
   -framework AppKit \
   -framework Foundation \
   -framework WidgetKit \
-  -framework AppIntents \
   -module-cache-path /tmp/swift-module-cache \
   -Xlinker -rpath -Xlinker /usr/lib/swift \
   "${SWIFT_FILES[@]}" \
@@ -126,12 +124,12 @@ xcrun swiftc \
 
 echo "=== Building Widget extension ==="
 WIDGET_FILES=(
-  "$SOURCE_DIR/Models/WidgetDisplaySnapshot.swift"
+  "$SOURCE_DIR/Models/QuotaModel.swift"
+  "$SOURCE_DIR/Models/WidgetPreferences.swift"
   "$WIDGET_SOURCE_DIR/WidgetStatus.swift"
   "$WIDGET_SOURCE_DIR/WidgetConfiguration.swift"
   "$WIDGET_SOURCE_DIR/AICCWidgetViews.swift"
   "$WIDGET_SOURCE_DIR/AICCWidget.swift"
-  "$WIDGET_SOURCE_DIR/RefreshWidgetIntent.swift"
 )
 for file in "${WIDGET_FILES[@]}"; do
   if [ ! -f "$file" ]; then
@@ -159,34 +157,12 @@ xcrun swiftc \
   -target arm64-apple-macosx14.0 \
   -framework WidgetKit \
   -framework SwiftUI \
-  -framework AppIntents \
   -framework Foundation \
   -module-cache-path /tmp/swift-module-cache \
   -Xlinker -e \
   -Xlinker _NSExtensionMain \
   "${WIDGET_FILES[@]}" \
   -o "$WIDGET_MACOS_DIR/AICCWidget"
-
-echo "=== Extracting App Intents metadata for app and widget ==="
-APPINTENTS_PROCESSOR=""
-if xcrun --find appintentsmetadataprocessor >/dev/null 2>&1; then
-  APPINTENTS_PROCESSOR="$(xcrun --find appintentsmetadataprocessor)"
-fi
-extract_appintents() {
-  local resources="$1" module="$2" bundle_id="$3" binary="$4"
-  mkdir -p "$resources/Metadata.appintents"
-  if [ -n "$APPINTENTS_PROCESSOR" ] && [ -x "$APPINTENTS_PROCESSOR" ]; then
-    "$APPINTENTS_PROCESSOR" --output "$resources" --module-name "$module" \
-      --bundle-identifier "$bundle_id" --sdk-root "$SDK_PATH" \
-      --binary-file "$binary" --compile-time-extraction && return
-    echo "appintentsmetadataprocessor failed, falling back to generator"
-  fi
-  python3 "$ROOT/scripts/generate-widget-appintents.py" "$resources/Metadata.appintents" "$module"
-}
-extract_appintents "$RESOURCES_DIR" AICC "com.aieink.dashboard.menubar" "$MACOS_DIR/$APP_NAME"
-extract_appintents "$WIDGET_APP_DIR/Contents/Resources" AICCWidget \
-  "com.aieink.dashboard.menubar.widget" "$WIDGET_MACOS_DIR/AICCWidget"
-bash "$ROOT/scripts/validate-widget-appintents.sh" "$APP_DIR"
 
 echo "=== Signing ==="
 if [[ "$SIGNING_IDENTITY" == "-" ]]; then
@@ -216,4 +192,4 @@ echo "$APP_DIR"
 echo "$WIDGET_APP_DIR"
 
 # Post-build validation
-bash "$ROOT/scripts/validate-widget-appintents.sh" "$APP_DIR"
+bash "$ROOT/scripts/validate-widget-bundle.sh" "$APP_DIR"

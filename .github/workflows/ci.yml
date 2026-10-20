@@ -78,7 +78,7 @@ jobs:
       - name: Run shared display snapshot regression smoke
         run: bash scripts/smoke-test-display-snapshot.sh
 
-      - name: Verify Widget layout symmetry
+      - name: Verify Widget layouts render in every state
         run: bash scripts/smoke-test-widget-visual.sh
 
       - name: Render companion settings acceptance images
@@ -94,7 +94,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: magpie-widget-visuals
-          path: /private/tmp/widget_qa/*magpie*.png
+          path: /private/tmp/widget_qa/*.png
 
       - name: Run Swift core library tests
         run: swift test --package-path macos/MenuBarApp
@@ -145,10 +145,10 @@ jobs:
         run: |
           BUNDLE_SERVER=1 bash macos/build-aicc-swiftui.sh
 
-      - name: Validate App Intents metadata
+      - name: Validate sandboxed Widget bundle
         run: |
-          bash scripts/validate-widget-appintents.sh
-          bash scripts/smoke-test-widget-appintents.sh
+          bash scripts/validate-widget-bundle.sh
+          bash scripts/smoke-test-widget-bundle.sh
 
       - name: Validate macOS scripts
         run: |

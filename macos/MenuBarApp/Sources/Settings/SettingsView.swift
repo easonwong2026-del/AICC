@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import WidgetKit
 
 struct SettingsView: View {
     @EnvironmentObject private var settings: AppSettings
@@ -10,6 +11,7 @@ struct SettingsView: View {
     @State private var busy = false
     @State private var notice = ""
     @State private var showRevoke = false
+    @State private var widgetProviders: [String] = []
 
     var body: some View {
         Form {
@@ -31,8 +33,21 @@ struct SettingsView: View {
                 }
             }
             Section("桌面小组件") {
-                Text("在桌面添加 AICC 小组件，右键“编辑小组件”设置 Magpie 端口与账号数量。")
-                Text("小组件独立读取 Magpie，关闭 AICC 后仍可更新。手动刷新只请求 Codex 额度。")
+                Picker("显示数量", selection: $settings.widgetCards) {
+                    Text("自动").tag(WidgetCardDisplayMode.automatic)
+                    Text("1 个").tag(WidgetCardDisplayMode.one)
+                    Text("2 个").tag(WidgetCardDisplayMode.two)
+                    Text("4 个").tag(WidgetCardDisplayMode.four)
+                    Text("全部").tag(WidgetCardDisplayMode.all)
+                }
+                Picker("服务商", selection: $settings.widgetProvider) {
+                    Text("全部服务商").tag("")
+                    ForEach(widgetProviders, id: \.self) { provider in
+                        Text(MagpieQuotaParser.providerName(provider)).tag(provider)
+                    }
+                }
+                Text("小尺寸最多 2 张、中尺寸最多 4 张额度卡片；一个账号的多个额度窗口合并显示。")
+                Text("小组件独立读取 Magpie，关闭 AICC 后仍可更新。点击刷新会短暂运行刷新任务，不打开设置窗口。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("墨水屏连接") {
@@ -79,10 +94,15 @@ struct SettingsView: View {
             }
         }
         .onChange(of: settings.magpiePort) { _, _ in
+            reloadWidgets()
+            widgetProviders = WidgetStatusStore.load(port: settings.magpiePort)?.providers ?? []
             connection = "未检查"
             pairingCode = ""
             if settings.bridgeEnabled { Task { _ = await server.restartServer() } }
         }
+        .onChange(of: settings.widgetCards) { _, _ in reloadWidgets() }
+        .onChange(of: settings.widgetProvider) { _, _ in reloadWidgets() }
+        .task { widgetProviders = WidgetStatusStore.load(port: settings.magpiePort)?.providers ?? [] }
         .confirmationDialog("撤销设备后需要重新配对", isPresented: $showRevoke) {
             Button("撤销所有设备", role: .destructive) {
                 Task {
@@ -99,13 +119,22 @@ struct SettingsView: View {
         }
     }
 
+    private func reloadWidgets() {
+        settings.publishWidgetSettings(providers: WidgetStatusStore.load(port: settings.magpiePort)?.providers
+            ?? widgetProviders)
+        WidgetCenter.shared.reloadAllTimelines()
+    }
+
     private func checkConnection() async {
         busy = true
         defer { busy = false }
         let snapshot = await WidgetStatusLoader.load(port: settings.magpiePort)
         if let snapshot {
-            connection = "已连接 · Codex \(snapshot.codexAccounts?.count ?? 0) 个账号"
-            if snapshot.codexStale { connection += " · 缓存" }
+            let providers = snapshot.providers.map(MagpieQuotaParser.providerName).joined(separator: "、")
+            connection = "已连接 · \(providers.isEmpty ? "暂无服务商" : providers) · \(snapshot.accounts.count) 张额度卡"
+            if snapshot.stale { connection += " · 缓存" }
+            widgetProviders = snapshot.providers
+            settings.publishWidgetSettings(providers: snapshot.providers)
         } else { connection = "无法连接，请启动 Magpie 并检查端口。" }
     }
 

@@ -27,8 +27,12 @@ if grep -RniE 'Text\(".*(Updated|ago)' "$ROOT/macos/Widget"; then
   exit 1
 fi
 
-if ! grep -q 'WidgetCenter.shared.reloadTimelines' "$ROOT/macos/Widget/RefreshWidgetIntent.swift"; then
-  echo "Error: RefreshWidgetIntent does not call WidgetCenter.shared.reloadTimelines" >&2
+if ! grep -q 'StaticConfiguration' "$ROOT/macos/Widget/AICCWidget.swift"; then
+  echo "Error: Widget must use a timeline without App Intent registration" >&2
+  exit 1
+fi
+if ! grep -q 'WidgetCenter.shared.reloadTimelines' "$ROOT/macos/MenuBarApp/Sources/AICCApp.swift"; then
+  echo "Error: Widget refresh URL must reload its timeline" >&2
   exit 1
 fi
 
@@ -57,10 +61,11 @@ xcrun swiftc \
   -O \
   -sdk "$SDK_PATH" \
   -target arm64-apple-macosx14.0 \
-  -framework AppIntents \
+  \
   -framework WidgetKit \
   -module-cache-path "${SWIFT_MODULE_CACHE:-/tmp/swift-module-cache}" \
-  "$ROOT/macos/MenuBarApp/Sources/Models/WidgetDisplaySnapshot.swift" \
+  "$ROOT/macos/MenuBarApp/Sources/Models/QuotaModel.swift" \
+  "$ROOT/macos/MenuBarApp/Sources/Models/WidgetPreferences.swift" \
   "$ROOT/macos/Widget/WidgetStatus.swift" \
   "$ROOT/macos/Widget/WidgetConfiguration.swift" \
   "$ROOT/macos/Widget/WidgetStatusSmokeMain.swift" \

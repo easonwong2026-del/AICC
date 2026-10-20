@@ -39,21 +39,8 @@ public final class DashboardVisualTest extends Instrumentation {
     }
 
     public void testRenderAccountStates() throws Exception {
-        for (String scenario : new String[]{"one", "two", "many", "empty", "cached", "unknown"}) {
-            int count = "many".equals(scenario) ? 7 : "two".equals(scenario) ? 2 : "empty".equals(scenario) ? 0 : 1;
-            JSONArray accounts = new JSONArray();
-            for (int index = 0; index < count; index++) {
-                JSONObject row = new JSONObject().put("id", "magpie-" + index).put("label", "Codex · " + (index + 1));
-                row.put("weekly", new JSONObject().put("remaining", "unknown".equals(scenario) ? JSONObject.NULL : 88 - index * 10)
-                        .put("reset", "2026-10-20 16:10"));
-                row.put("five_hour", new JSONObject().put("remaining", 91 - index * 10).put("reset", "2026-10-14 16:58"));
-                accounts.put(row);
-            }
-            JSONObject codex = new JSONObject().put("source", "Magpie").put("available", count > 0)
-                    .put("stale", "cached".equals(scenario)).put("updated_at", "2026-10-14 13:32")
-                    .put("accounts", accounts);
-            DashboardData data = DashboardData.parse(new JSONObject().put("codex", codex)
-                    .put("codex_account_display_mode", "all").toString());
+        for (String scenario : new String[]{"one", "two", "many", "empty", "cached", "unknown", "mixed", "long"}) {
+            DashboardData data = parse(scenario);
             File directory = getTargetContext().getExternalFilesDir("visual");
             if (directory == null) throw new AssertionError("Missing output directory");
             runOnMainSync(() -> {
@@ -61,12 +48,62 @@ public final class DashboardVisualTest extends Instrumentation {
                 view.layout(0, 0, 758, 1024);
                 view.setData(data);
                 save(view, new File(directory, scenario + ".png"));
-                if (count > 4) {
-                    view.nextAccountPage();
-                    save(view, new File(directory, "many-page-2.png"));
+                if (data.pageCount() > 1) {
+                    view.nextPage();
+                    save(view, new File(directory, scenario + "-page-2.png"));
                 }
             });
         }
+    }
+
+    /** Schema-3 snapshots, exactly what the bridge answers a v3 client. */
+    private DashboardData parse(String scenario) throws Exception {
+        boolean many = "many".equals(scenario) || "mixed".equals(scenario);
+        int count = many ? 7 : "empty".equals(scenario) ? 0 : "two".equals(scenario) ? 2 : 1;
+        JSONArray accounts = new JSONArray();
+        for (int index = 0; index < count; index++) {
+            boolean balance = "mixed".equals(scenario) && index == 6;
+            boolean plan = "mixed".equals(scenario) && index == 5;
+            boolean cached = "cached".equals(scenario);
+            JSONObject row = new JSONObject()
+                    .put("id", "magpie-" + index)
+                    .put("provider", balance ? "deepseek" : plan ? "zcode" : index % 2 == 0 ? "codex" : "workbuddy")
+                    .put("provider_name", balance ? "DeepSeek" : plan ? "ZCode" : index % 2 == 0 ? "Codex" : "WorkBuddy")
+                    .put("account_label", "长服务商名称测试" + (index + 1) + "***")
+                    .put("kind", balance ? "balance" : plan ? "plan" : "subscription")
+                    .put("plan", plan ? "GLM Coding Plan" : "Free")
+                    .put("stale", cached)
+                    .put("failed", "unknown".equals(scenario))
+                    .put("deferred", false)
+                    .put("read_at", 1792000000)
+                    .put("balance", balance ? "58.70 CNY" : JSONObject.NULL);
+            JSONArray items = new JSONArray();
+            if (balance) {
+                items.put(new JSONObject().put("name", "balance").put("remaining", JSONObject.NULL));
+            } else if (plan) {
+                items.put(new JSONObject().put("name", "prompts").put("remaining", 87.5)
+                        .put("display", "35 / 40").put("unit", "prompts")
+                        .put("reset", "2026-10-21 00:00"));
+            } else if ("unknown".equals(scenario)) {
+                items.put(new JSONObject().put("name", "5 hours").put("remaining", JSONObject.NULL));
+            } else {
+                items.put(new JSONObject().put("name", "5 hours").put("remaining", 91 - index * 5)
+                        .put("reset", "2026-10-20 19:40"));
+                items.put(new JSONObject().put("name", "Credits").put("remaining", 88 - index * 5)
+                        .put("display", (4723 - index * 100) + " / 4723").put("unit", "credits"));
+            }
+            row.put("items", items);
+            accounts.put(row);
+        }
+        JSONObject document = new JSONObject()
+                .put("schema_version", 3)
+                .put("source", "Magpie")
+                .put("available", count > 0)
+                .put("state", count == 0 ? "Empty" : "cached".equals(scenario) ? "Cached" : "Connected")
+                .put("stale", "cached".equals(scenario))
+                .put("updated_at", "2026-10-20 16:30")
+                .put("accounts", accounts);
+        return DashboardData.parse(document.toString(), "all");
     }
 
     private void testCredentialStorage() throws Exception {

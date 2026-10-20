@@ -445,6 +445,7 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindowCoordinator: SettingsWindowCoordinator?
     private var hasStartedShutdown = false
     private var hasPresentedSettings = false
+    private var widgetRefreshTask: Task<Void, Never>?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         guard singleInstance.acquire() else {
@@ -473,13 +474,28 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
         if loginLaunch {
             hasPresentedSettings = true
             if !AppSettings.shared.bridgeEnabled { requestQuit() }
-        } else if NSApp.isActive {
+        } else if notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? Bool == false {
+            hasPresentedSettings = true
+        } else if NSApp.isActive && !hasPresentedSettings {
             presentSettings()
         }
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        if !hasPresentedSettings { presentSettings() }
+        if settingsWindowCoordinator != nil && !hasPresentedSettings { presentSettings() }
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard urls.contains(AICCWidgetMetadata.refreshURL) else { return }
+        hasPresentedSettings = true
+        guard widgetRefreshTask == nil else { return }
+        widgetRefreshTask = Task {
+            let snapshot = await WidgetStatusLoader.snapshot(force: true, port: AppSettings.shared.magpiePort)
+            AppSettings.shared.publishWidgetSettings(providers: snapshot.providers)
+            WidgetCenter.shared.reloadTimelines(ofKind: AICCWidgetMetadata.kind)
+            widgetRefreshTask = nil
+            finishBackgroundRefresh()
+        }
     }
 
     private func presentSettings() {

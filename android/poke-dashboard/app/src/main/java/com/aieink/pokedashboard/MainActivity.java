@@ -97,7 +97,7 @@ public final class MainActivity extends Activity {
         preferences = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         initialiseV11Preferences();
         dashboard = new DashboardView(this);
-        dashboard.setOnClickListener(view -> dashboard.nextAccountPage());
+        dashboard.setOnClickListener(view -> dashboard.nextPage());
         dashboard.setOnLongClickListener(view -> {
             showSettings();
             return true;
@@ -493,9 +493,7 @@ public final class MainActivity extends Activity {
     }
 
     private DashboardData parseData(String raw) throws Exception {
-        org.json.JSONObject document = new org.json.JSONObject(raw);
-        document.put("codex_account_display_mode", preferences.getString("account_mode", "all"));
-        return DashboardData.parse(document.toString());
+        return DashboardData.parse(raw, preferences.getString("account_mode", "all"));
     }
 
     private GradientDrawable outline(int fill, int stroke, int strokeWidth, int radius) {

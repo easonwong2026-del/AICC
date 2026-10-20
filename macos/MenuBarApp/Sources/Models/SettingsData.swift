@@ -6,7 +6,23 @@ class AppSettings: ObservableObject {
         didSet { UserDefaults.standard.set(bridgeEnabled, forKey: "bridgeEnabled") }
     }
     @Published var magpiePort: Int {
-        didSet { UserDefaults.standard.set(magpiePort, forKey: "magpiePort") }
+        didSet {
+            UserDefaults.standard.set(magpiePort, forKey: "magpiePort")
+            publishWidgetSettings()
+        }
+    }
+    @Published var widgetCards: WidgetCardDisplayMode {
+        didSet {
+            UserDefaults.standard.set(widgetCards.rawValue, forKey: "widgetCards")
+            publishWidgetSettings()
+        }
+    }
+    /// Empty means every provider Magpie reports.
+    @Published var widgetProvider: String {
+        didSet {
+            UserDefaults.standard.set(widgetProvider, forKey: "widgetProvider")
+            publishWidgetSettings()
+        }
     }
     @Published var themeMode: String {
         didSet { UserDefaults.standard.set(themeMode, forKey: "themeMode") }
@@ -36,14 +52,26 @@ class AppSettings: ObservableObject {
               let bundle = Bundle(path: path) else { return key }
         return bundle.localizedString(forKey: key, value: key, table: nil)
     }
+    /// Port, card count and provider filter live in the widget's own settings
+    /// domain, so the extension never needs the host's preferences file.
+    func publishWidgetSettings(providers: [String]? = nil) {
+        WidgetPreferences.save(port: magpiePort, cards: widgetCards,
+                               provider: widgetProvider.isEmpty ? nil : widgetProvider,
+                               providers: providers ?? WidgetPreferences.load().providers)
+    }
     private init() {
         let defaults = UserDefaults.standard
         bridgeEnabled = defaults.bool(forKey: "bridgeEnabled")
         let port = defaults.integer(forKey: "magpiePort")
         magpiePort = (1...65535).contains(port) ? port : 3425
+        // `widgetAccounts` is the pre-3.0 key for the same choice.
+        let stored = defaults.string(forKey: "widgetCards") ?? defaults.string(forKey: "widgetAccounts") ?? ""
+        widgetCards = WidgetCardDisplayMode(rawValue: stored) ?? WidgetCardDisplayMode.migrated(stored)
+        widgetProvider = defaults.string(forKey: "widgetProvider") ?? ""
         themeMode = defaults.string(forKey: "themeMode") ?? "system"
         languageCode = defaults.string(forKey: "languageCode") ?? AppLanguage.system.rawValue
         debugMode = defaults.bool(forKey: "debugMode")
+        publishWidgetSettings()
     }
     static let shared = AppSettings()
 }
