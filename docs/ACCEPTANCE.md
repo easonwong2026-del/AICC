@@ -119,6 +119,25 @@ Swift 单元测试（`swift test --package-path macos/MenuBarApp`）**本地未�
 `dist/backup-installed-2.10.2.app`），新扩展进程写入的容器缓存为
 `state=Connected / providers=[codex, workbuddy, antigravity] / 5 张卡`，Codex 显示 `94%`、`86%`。
 
+### 修复 3（外观）
+
+第一版修完能看见数字后，用户反馈「丑 / 某种状态全白 / 对齐乱」。原因是仍在使用语义色：
+`windowBackgroundColor` + `labelColor` 在桌面小组件的 vibrant 合成下并不保证同向。
+
+改为**显式调色板**：`WidgetPalette` 按 `colorScheme` 返回固定 RGB（浅色纸白 / 深色近黑，卡片、
+描边、墨色、次要色、警示色各一枚），不再依赖 `.primary`/`.secondary`/语义 `NSColor`。
+排版重做：provider + plan 顶行、匿名账号次行、大号剩余值 + 窗口名、剩余比例细条、
+第二窗口与重置时间同一行右对齐；单卡时放大并垂直居中；空状态居中并给出原因。
+重置时间按距离缩写（`23:40` / `明天 09:00` / `周三 14:30` / `10-27 14:30`），小尺寸不再截断。
+
+72 张离屏渲染全部通过并逐张查看（浅色、深色、1/2/4 卡、筛选、余额、空、缓存、长名称）。
+
+### 安装态副作用（记录）
+
+每次用 ad-hoc 签名重新构建并覆盖 `/Applications/AICC.app`，代码签名都会变，
+macOS 会弹一次「AICC 想访问钥匙串」——这是桥接凭据的访问授权，不是应用缺陷。
+点「始终允许」即可；正式发布用稳定 Developer ID 签名不会有这个提示。
+
 ## 四、未完成（真机/安装态/上游）
 
 1. **macOS 安装态**：未把候选 DMG 安装到系统并观察桌面 Widget 的真实调度、深浅色、多桌面场景。
