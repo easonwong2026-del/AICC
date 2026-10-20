@@ -1,5 +1,6 @@
 import SwiftUI
 import WidgetKit
+import AppKit
 
 struct AICCWidgetEntry: TimelineEntry {
     let date: Date
@@ -42,8 +43,17 @@ struct AICCWidgetView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+        .foregroundStyle(Color(nsColor: .labelColor))
+        .containerBackground(for: .widget) { Color(nsColor: .windowBackgroundColor) }
         .widgetURL(AICCWidgetMetadata.refreshURL)
     }
+}
+
+private extension ShapeStyle where Self == Color {
+    static var widgetLabel: Color { Color(nsColor: .labelColor) }
+    static var widgetSecondary: Color { Color(nsColor: .secondaryLabelColor) }
+    static var widgetCard: Color { Color(nsColor: .controlBackgroundColor) }
+    static var widgetEdge: Color { Color(nsColor: .separatorColor) }
 }
 
 struct SmallQuotaView: View {
@@ -65,7 +75,7 @@ struct SmallQuotaView: View {
                 if hidden > 0 {
                     Text("+\(hidden)")
                         .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.widgetSecondary)
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }
             }
@@ -98,7 +108,7 @@ struct MediumQuotaView: View {
                     if hidden > 0 {
                         Text("+\(hidden)")
                             .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.widgetSecondary)
                             .frame(maxWidth: .infinity, alignment: .trailing)
                     }
                 }
@@ -124,6 +134,7 @@ struct QuotaCardCell: View {
             HStack(spacing: 4) {
                 Text(card.providerName)
                     .font(.system(size: compact ? 9 : 10, weight: .semibold))
+                    .foregroundStyle(.widgetLabel)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                 Spacer(minLength: 0)
@@ -136,17 +147,18 @@ struct QuotaCardCell: View {
             }
             Text(card.accountLabel)
                 .font(.system(size: compact ? 8 : 9))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.widgetSecondary)
                 .lineLimit(1)
             if card.isBalance {
                 Text(card.balanceText)
                     .font(.system(size: compact ? 17 : 22, weight: .semibold, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.widgetLabel)
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
                 if let second = card.balanceParts.first {
                     Text("\(second.label ?? "") \(second.text)")
                         .font(.system(size: 8).monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.widgetSecondary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                 }
@@ -154,44 +166,46 @@ struct QuotaCardCell: View {
                 HStack(alignment: .firstTextBaseline, spacing: 3) {
                     Text(item.primaryText)
                         .font(.system(size: compact ? 16 : 20, weight: .semibold, design: .rounded).monospacedDigit())
+                        .foregroundStyle(.widgetLabel)
                         .lineLimit(1)
                         .minimumScaleFactor(0.6)
                     if item.isPercentage {
                         Text(item.name)
                             .font(.system(size: 8))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.widgetSecondary)
                             .lineLimit(1)
                     }
                 }
                 if let second = card.secondaryItem {
                     Text("\(second.name) \(second.primaryText)")
                         .font(.system(size: 8).monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.widgetSecondary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                 }
                 if let reset = item.reset ?? card.secondaryItem?.reset {
                     Text(reset)
                         .font(.system(size: 8))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.widgetSecondary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                 } else if card.extraWindows > 0 {
                     Text("+\(card.extraWindows)")
                         .font(.system(size: 8))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.widgetSecondary)
                 }
             } else {
                 Text("无额度")
                     .font(.system(size: compact ? 12 : 14, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.widgetSecondary)
             }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, compact ? 4 : 7)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(.widgetCard, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.widgetEdge, lineWidth: 0.5))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(card.providerName) \(card.accountLabel) \(card.primaryItem?.primaryText ?? card.balanceText)")
     }
@@ -208,15 +222,15 @@ struct EmptyQuotaView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("AICC").font(.system(size: 11, weight: .semibold))
+            Text("AICC").font(.system(size: 11, weight: .semibold)).foregroundStyle(.widgetLabel)
             Text(message)
                 .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.widgetSecondary)
                 .lineLimit(2)
                 .minimumScaleFactor(0.8)
             Text("打开 Magpie 检查登录")
                 .font(.system(size: 9))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.widgetSecondary)
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

@@ -17,5 +17,6 @@ PY
 xcrun swiftc -parse-as-library -sdk "$SDK_PATH" -target arm64-apple-macosx14.0 \
   -module-cache-path "${SWIFT_MODULE_CACHE:-/tmp/swift-module-cache}" \
   "${SOURCES[@]}" "$ROOT/macos/Widget/WidgetStatus.swift" \
+  "$ROOT/macos/Widget/WidgetConfiguration.swift" \
   "$ROOT/macos/Widget/DisplaySnapshotRegressionMain.swift" -o "$TEMP_ROOT/check"
 "$TEMP_ROOT/check" "$@"

@@ -95,6 +95,30 @@ Swift 单元测试（`swift test --package-path macos/MenuBarApp`）**本地未�
 > CI 的 APK 工件是 `app-release-unsigned.apk`：仓库 `build.gradle` 没有 signingConfig，
 > 正式签名是发布时的仓库外步骤。因此该工件**不能直接安装**，只用于确认构建与单元测试通过。
 
+## 三·补2、安装态问题与修复（2026-10-20 晚）
+
+用户在 `/Applications/AICC.app`（2.10.2，17:07 安装）上遇到「小组件没有数值」。排查结论：
+
+1. Widget 扩展进程 `AICCWidget` 是**升级前启动的旧进程**（映射的二进制 919 KB，磁盘上的新二进制 476 KB），
+   Chronod 没有重启它；旧进程里只有 2026-10-15 的旧格式缓存，超过 24 小时后按设计显示占位符 → 全为 `—`。
+2. 结束该进程后，新扩展启动并把 `aicc.widget.quota.3425` 写入容器：
+   `state=Connected`、`providers=[codex, workbuddy, antigravity]`、5 张卡 —— 说明新链路本身是通的。
+3. 同时发现一个真实设计缺陷：旧实现**先 POST 刷新再读取**，刷新慢或被 WidgetKit 时间线预算打断时，
+   整个时间线回退到占位符，已经存在的 Magpie 数据反而不显示。
+
+修复 1（取数顺序）：`WidgetStatusLoader.load` 改为**先读 `?kept=1` 并落盘，再做刷新**；有数据时刷新放到
+后台任务，无数据或用户主动点击时才等待刷新。另加 `aicc.widget.diag` 诊断键（只记状态码与条数）。
+
+修复 2（渲染）：截屏确认卡片底是浅灰、文字完全看不见。系统为 Dark Mode，Widget 没有
+`containerBackground`，SwiftUI 的 `.primary` 在桌面小组件的 vibrancy 合成下与自绘半透明底撞色。
+改为：整块 Widget 用 `.containerBackground(for: .widget) { windowBackgroundColor }`，
+卡片底用 `controlBackgroundColor` + `separatorColor` 细边，文字统一 `labelColor`/`secondaryLabelColor`，
+不再依赖 `.primary`/`.secondary` 的 vibrancy 解析。
+
+重新构建并覆盖安装到 `/Applications/AICC.app`（Build 15，覆盖前备份到
+`dist/backup-installed-2.10.2.app`），新扩展进程写入的容器缓存为
+`state=Connected / providers=[codex, workbuddy, antigravity] / 5 张卡`，Codex 显示 `94%`、`86%`。
+
 ## 四、未完成（真机/安装态/上游）
 
 1. **macOS 安装态**：未把候选 DMG 安装到系统并观察桌面 Widget 的真实调度、深浅色、多桌面场景。
