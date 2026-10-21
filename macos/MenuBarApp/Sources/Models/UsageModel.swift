@@ -192,7 +192,8 @@ enum UsageParser {
         }
 
         if let quotas, let root = object(quotas) {
-            if let tightest = tightestWindow(root["data"] as? [[String: Any]] ?? []) {
+            if let tightest = tightestWindow(root["data"] as? [[String: Any]] ?? [],
+                                             now: now.timeIntervalSince1970) {
                 snapshot.remainingPercent = max(0, min(100, Int((tightest.remaining).rounded())))
                 snapshot.remainingWindow = tightest.label
                 snapshot.resetSeconds = tightest.resetSeconds
@@ -202,9 +203,9 @@ enum UsageParser {
     }
 
     /// "Codex · 7 天" — the window closest to running out across every provider.
-    private static func tightestWindow(_ providers: [[String: Any]]) -> (remaining: Double, label: String, resetSeconds: Int)? {
+    private static func tightestWindow(_ providers: [[String: Any]],
+                                       now: TimeInterval) -> (remaining: Double, label: String, resetSeconds: Int)? {
         var best: (Double, String, Int)?
-        let now = Date.now.timeIntervalSince1970
         for provider in providers {
             let providerName = displayProvider(string(provider["provider_name"]) ?? string(provider["provider"]) ?? "")
             let windows = (provider["windows"] as? [[String: Any]]) ?? []

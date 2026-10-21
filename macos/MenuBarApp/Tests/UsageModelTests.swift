@@ -82,8 +82,8 @@ final class UsageModelTests: XCTestCase {
         let now = ISO8601DateFormatter().date(from: "2026-10-21T10:00:00Z")!
         let snapshot = UsageParser.snapshot(usage: nil, requests: nil, quotas: quotas, now: now)
         XCTAssertEqual(snapshot.remainingPercent, 64)
-        XCTAssertEqual(snapshot.remainingWindow, "Codex · 7 days")
-        XCTAssertEqual(snapshot.resetSeconds, 5 * 86400 + 18 * 3600, accuracy: 60)
+        XCTAssertEqual(snapshot.remainingWindow, "Codex · 7 天")
+        XCTAssertEqual(snapshot.resetSeconds, 5 * 86400 + 16 * 3600, accuracy: 60)
     }
 
     func testAnEmptyPayloadIsUnavailableRatherThanZero() {
