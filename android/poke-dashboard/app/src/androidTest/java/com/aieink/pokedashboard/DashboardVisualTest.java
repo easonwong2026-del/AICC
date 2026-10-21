@@ -168,9 +168,24 @@ public final class DashboardVisualTest extends Instrumentation {
     private void save(DashboardView view, File file) {
         Bitmap image = Bitmap.createBitmap(758, 1024, Bitmap.Config.ARGB_8888);
         view.draw(new Canvas(image));
-        if (image.getWidth() != 758 || image.getHeight() != 1024 || image.getPixel(0, 0) == image.getPixel(34, 98)) {
-            throw new AssertionError("Missing dashboard frame");
+        // The panel is paper with ink on it: a blank or a wholly black frame both
+        // fail here, without pinning the assertion to one layout's coordinates.
+        int ink = 0;
+        int sampled = 0;
+        for (int y = 6; y < 1018; y += 6) {
+            for (int x = 6; x < 752; x += 6) {
+                int pixel = image.getPixel(x, y);
+                sampled++;
+                int luminance = (((pixel >> 16) & 0xff) * 21 + ((pixel >> 8) & 0xff) * 72 + (pixel & 0xff) * 7) / 100;
+                if (luminance < 128) ink++;
+            }
         }
+        double ratio = (double) ink / Math.max(1, sampled);
+        if (image.getWidth() != 758 || image.getHeight() != 1024) {
+            throw new AssertionError("Unexpected panel size");
+        }
+        if (ratio < 0.005) throw new AssertionError("Blank panel");
+        if (ratio > 0.85) throw new AssertionError("Panel is flooded with ink");
         try (FileOutputStream output = new FileOutputStream(file)) {
             if (!image.compress(Bitmap.CompressFormat.PNG, 100, output)) throw new AssertionError("PNG encoding failed");
         } catch (Exception error) {
