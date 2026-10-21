@@ -48,10 +48,11 @@ class ReportTests(unittest.TestCase):
         self.assertIsNone(find(magpie.parse_report(unlimited, NOW), "workbuddy")["items"][0]["remaining_text"])
 
     def test_a_credit_window_with_nothing_used_still_reports_the_full_limit(self):
-        report = {"object": "list", "data": [{"provider": "workbuddy", "kind": "subscription",
-                                             "user": "fresh@example.invalid", "windows": [
-            {"name": "Credits", "used": 0, "remaining": 100, "display": "0 / 4224",
-             "limit": 4224, "unit": "credits"}]}]}
+        window = {"name": "Credits", "used": 0, "remaining": 100, "display": "0 / 4224",
+                  "limit": 4224, "unit": "credits"}
+        report = {"object": "list",
+                  "data": [{"provider": "workbuddy", "kind": "subscription",
+                            "user": "fresh@example.invalid", "windows": [window]}]}
         self.assertEqual(find(magpie.parse_report(report, NOW), "workbuddy")["items"][0]["remaining_text"], "4224")
 
     def test_plan_cards_accept_any_window_name(self):
