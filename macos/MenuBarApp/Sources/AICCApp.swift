@@ -493,6 +493,7 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
             let snapshot = await WidgetStatusLoader.snapshot(force: true, port: AppSettings.shared.magpiePort)
             AppSettings.shared.publishWidgetSettings(providers: snapshot.providers)
             WidgetCenter.shared.reloadTimelines(ofKind: AICCWidgetMetadata.kind)
+            WidgetCenter.shared.reloadTimelines(ofKind: AICCWidgetMetadata.boardKind)
             widgetRefreshTask = nil
             finishBackgroundRefresh()
         }

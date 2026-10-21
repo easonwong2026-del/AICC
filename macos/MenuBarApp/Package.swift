@@ -28,6 +28,7 @@ let package = Package(
             ],
             sources: [
                 "Models/QuotaModel.swift",
+                "Models/UsageModel.swift",
                 "Models/WidgetPreferences.swift",
                 "Models/DashboardTypography.swift",
                 "Models/SettingsData.swift",
@@ -52,6 +53,7 @@ let package = Package(
                 "LogFileLimiterTests.swift",
                 "LegacyLaunchAgentMigrationTests.swift",
                 "UpdateServiceTests.swift",
+                "UsageModelTests.swift",
             ]
         ),
     ]

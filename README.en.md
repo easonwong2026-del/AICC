@@ -46,6 +46,27 @@ and drops the background (*Dim widgets on desktop*, Automatically by default). A
 mode (translucent white surfaces, opaque text) so the numbers stay readable; to keep full colour all the time, set
 System Settings → Desktop & Dock → Widgets → **Dim widgets on desktop** to *Never*.
 
+## Usage board widget (optional)
+
+The widget gallery also offers **AICC Board** (the `large` family), a usage view that sits beside the quota widget
+without touching it:
+
+| Page | Shows |
+| --- | --- |
+| Overview | today's success ring, calls, errors, lowest remaining quota, today's tokens |
+| Requests | latest model, status, latency, average TTFT, today's tokens, last three requests |
+| Sessions | 30-day sessions, total tokens, estimated cost, top model |
+| Context | cache-hit ratio and the input / output / cache-read / reasoning split |
+
+- The four pages rotate every 15 seconds. A desktop widget cannot be swiped, so the timeline does the cycling;
+  WidgetKit does not promise an exact clock, so it is approximate.
+- Data comes straight from Magpie's local API (`/v1/magpie/quotas`, `/v1/magpie/usage`,
+  `/v1/magpie/usage/requests?limit=3`), cached for 60 seconds, falling back to the last reading on failure.
+- Dark mode reuses the reference project's AMOLED palette; light mode darkens the same hues; macOS 26's dimmed
+  rendering falls back to white and opacity.
+- Layout and palette follow [peterroe/magpie-usage-display](https://github.com/peterroe/magpie-usage-display) (MIT);
+  see `THIRD_PARTY_NOTICES.md`.
+
 ## E-ink APK
 
 The APK reads the same generic snapshot through the paired, read-only bridge: multiple providers, multiple accounts,
