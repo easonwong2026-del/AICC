@@ -4,6 +4,32 @@
 
 This file summarizes the current and recent public releases. The Chinese changelog contains the older detailed history.
 
+## 2.11.0 - 2026-10-21
+
+### Quota model
+
+- **No longer Codex-only**: the contract is `schema_version: 3`. Any provider and any window name Magpie reports is kept; subscription windows, plans and balances are all supported, and the `provider == "codex"` filter plus the fixed `five_hour` / `weekly` mapping are gone.
+- **Semantics over guesses**: the vendor's own `display` wins, then a remaining percentage, otherwise unknown. Balances stay money, missing reset times are not invented. Credit windows report what is left (`4650 credits`, `共 4727`).
+- **Account anonymity**: snapshots, caches and logs keep a stable anonymous id and a first-character label only.
+- **Bridge**: read-only local Magpie API with `X-AICC-Schema` negotiation; the old `codex` shape only answers `format=2`.
+
+### macOS widget
+
+- Generic quota cards: several windows per account, two on Small, four on Medium, `+N` overflow.
+- **Pick which quotas to show**: a new sheet ticks windows per provider and account; tick order is display order, and a stale tick is skipped instead of blanking the tile.
+- One hue per provider (hashed for unknown ones), amber under 15% remaining.
+- Two real fixes: read the kept report before refreshing (a failed refresh no longer blanks the widget), and support macOS 26's accented rendering (cards were becoming white slabs that swallowed the text).
+
+### E-ink APK (1.2.6)
+
+- Rebuilt around one hero window: oversized number, superscript unit, thick bar, relative countdown, then three summary rows; accounts with three or more windows get a page listing all of them, with pooled duplicates labelled (`7 天 · Gemini`).
+- Fixes the divider striking through the reset line, mismatched baselines, the dead-end "+5 windows", the missing total, the triple "重置 未知", the double footer and the inconsistent branding.
+- Units localized: `credits → 积分`, `5 hours → 5 小时`, `7 days → 7 天`.
+
+### Version
+
+- AICC 2.11.0, macOS Build 16; APK 1.2.6 (versionCode 12, same certificate as before, upgrades in place).
+
 ## 2.10.2 - 2026-10-04
 
 ### macOS
