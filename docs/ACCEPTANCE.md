@@ -213,6 +213,16 @@ USB 连接 `46C8BEA3`（BOOX Poke4S，Android 11），用本机构建的 release
 真机（Poke4S）逐页截图确认：总览、Antigravity 详情、断网离线态。单测 26 项通过
 （17 DashboardData + 9 DiscoveryClient）。
 
+真机操作踩到的两个坑（记下来省下次的时间）：
+
+1. 跑过 `./gradlew connectedDebugAndroidTest` 之后，`am start` 会报
+   `Error type 3 / Activity class does not exist`，但 APK 与 dumpsys 组件表都正常——
+   实际是应用被系统**置为 disabled**。`adb shell pm enable com.aieink.pokedashboard` 即恢复，
+   不需要重启设备（本次先做了一次重启，白折腾）。
+2. 焦点卡选中的可能正是账号的第二个窗口，所以 caption 不能再盲目取 `items.get(1)`，
+   否则会把焦点自己再写一遍（`最低剩余 · Codex 7 天 64%` + `7 天 64%`）。
+   现在取「不是焦点的那个窗口」，显示为 `5 天 22 时后重置 · 5 小时 95%`。
+
 ## 四、未完成（真机/安装态/上游）
 
 1. **macOS 安装态**：未把候选 DMG 安装到系统并观察桌面 Widget 的真实调度、深浅色、多桌面场景。

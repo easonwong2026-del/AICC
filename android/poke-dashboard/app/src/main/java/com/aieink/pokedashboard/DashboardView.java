@@ -213,15 +213,23 @@ final class DashboardView extends View {
         if (unit != null) text(canvas, unit, x + numberWidth + 10, baseline, 44, MUTED, true, Paint.Align.LEFT);
     }
 
+    /** The account's other window: the hero may well be the second one. */
+    private static DashboardData.Item otherItem(DashboardData.Slot slot) {
+        for (DashboardData.Item item : slot.account.items) {
+            if (item != slot.item) return item;
+        }
+        return null;
+    }
+
     private String caption(DashboardData.Slot slot) {
         DashboardData.Item item = slot.item;
         StringBuilder text = new StringBuilder();
         String countdown = item.countdown(nowSeconds());
         if (countdown != null) text.append(countdown);
-        if (slot.account.items.size() == 2) {
-            DashboardData.Item second = slot.account.items.get(1);
+        DashboardData.Item other = slot.account.items.size() == 2 ? otherItem(slot) : null;
+        if (other != null) {
             if (text.length() > 0) text.append(" · ");
-            text.append(second.label()).append(" ").append(second.primaryText());
+            text.append(other.label()).append(" ").append(other.primaryText());
         } else if (slot.account.items.size() > 2) {
             if (text.length() > 0) text.append(" · ");
             text.append("共 ").append(slot.account.items.size()).append(" 个窗口");
