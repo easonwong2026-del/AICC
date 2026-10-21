@@ -19,14 +19,8 @@ jobs:
 
       - name: Check Python syntax
         run: |
+          python -m py_compile collectors/magpie.py
           python -m py_compile server.py
-          python -m py_compile services/codex_monitor.py
-          python -m py_compile services/collector_manager.py
-          python -m py_compile services/cdp.py
-          python -m py_compile collectors/deepseek.py
-          python -m py_compile collectors/workbuddy.py
-          python -m py_compile collectors/system.py
-          python -m py_compile collectors/google.py
 
       - name: Run tests
         run: python -m unittest discover -s tests -v
@@ -84,8 +78,23 @@ jobs:
       - name: Run shared display snapshot regression smoke
         run: bash scripts/smoke-test-display-snapshot.sh
 
-      - name: Verify Widget layout symmetry
+      - name: Verify Widget layouts render in every state
         run: bash scripts/smoke-test-widget-visual.sh
+
+      - name: Render companion settings acceptance images
+        run: bash scripts/smoke-test-dashboard-visual.sh
+
+      - name: Upload dashboard acceptance images
+        uses: actions/upload-artifact@v4
+        with:
+          name: magpie-settings-visuals
+          path: /private/tmp/aicc-dashboard-qa/*.png
+
+      - name: Upload Widget acceptance images
+        uses: actions/upload-artifact@v4
+        with:
+          name: magpie-widget-visuals
+          path: /private/tmp/widget_qa/*.png
 
       - name: Run Swift core library tests
         run: swift test --package-path macos/MenuBarApp
@@ -136,10 +145,10 @@ jobs:
         run: |
           BUNDLE_SERVER=1 bash macos/build-aicc-swiftui.sh
 
-      - name: Validate App Intents metadata
+      - name: Validate sandboxed Widget bundle
         run: |
-          bash scripts/validate-widget-appintents.sh
-          bash scripts/smoke-test-widget-appintents.sh
+          bash scripts/validate-widget-bundle.sh
+          bash scripts/smoke-test-widget-bundle.sh
 
       - name: Validate macOS scripts
         run: |
@@ -169,3 +178,30 @@ jobs:
         with:
           name: aicc-macos-dmg
           path: dist/*.dmg
+
+  android-visual:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Enable emulator acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Render native Android acceptance images
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          disable-animations: true
+          script: bash scripts/smoke-test-android-visual.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: magpie-android-visuals
+          path: android-visuals/*.png

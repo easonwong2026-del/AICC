@@ -1,0 +1,79 @@
+{
+  "_comment": "Shape captured from a live Magpie 0.1.1296 gateway on 2026-10-20 (GET /v1/magpie/quotas and POST /v1/magpie/quotas/refresh?provider=...). Identities and absolute times are replaced; field presence, window names, duplicate window names and numeric ranges are what the gateway actually returned.",
+  "object": "list",
+  "data": [
+    {
+      "provider": "codex",
+      "name": "Codex",
+      "kind": "subscription",
+      "plan": "team",
+      "user": "member-one@example.invalid · Team",
+      "readAt": "2026-10-20T16:33:43.112963+08:00",
+      "until": "2027-07-01T04:07:05Z",
+      "resets": {"count": 2, "until": "2026-10-29T19:34:52.032024Z",
+                 "each": [{"until": "2026-10-29T19:34:52.032024Z"}, {"until": "2026-11-06T23:57:51.791206Z"}]},
+      "lastServedAt": "2026-10-20T08:13:55.488058Z",
+      "last": true,
+      "windows": [
+        {"name": "5 hours", "used": 32, "remaining": 68, "resetsAt": "2026-10-20T19:40:25+08:00",
+         "holds": {"tokens": 575313, "cost": 0.07511975, "priced": true, "used": 32,
+                   "routed": {"calls": 8, "tokens": 184100, "cacheRead": 464512, "cost": 0.02403832},
+                   "since": "2026-10-20T14:40:25+08:00"}},
+        {"name": "7 days", "used": 5, "remaining": 95, "resetsAt": "2026-10-27T14:40:25+08:00",
+         "holds": {"tokens": 3682000, "cost": 0.4807664, "priced": true, "used": 5}}
+      ]
+    },
+    {
+      "provider": "workbuddy",
+      "name": "WorkBuddy",
+      "kind": "subscription",
+      "plan": "Free",
+      "user": "member-two@example.invalid",
+      "readAt": "2026-10-20T16:33:43.250696+08:00",
+      "windows": [
+        {"name": "Credits", "used": 0.04806267181875926, "remaining": 99.95193732818124,
+         "display": "2.27 / 4723", "amount": 2.26999999, "limit": 4723, "unit": "credits", "holdsWhy": "low"}
+      ]
+    },
+    {
+      "provider": "workbuddy",
+      "name": "WorkBuddy",
+      "kind": "subscription",
+      "plan": "Free",
+      "user": "member-three@example.invalid",
+      "readAt": "2026-10-20T16:33:43.338138+08:00",
+      "windows": [
+        {"name": "Credits", "used": 0, "remaining": 100, "display": "0 / 4224", "limit": 4224, "unit": "credits", "holdsWhy": "low"}
+      ]
+    },
+    {
+      "provider": "workbuddy",
+      "name": "WorkBuddy",
+      "kind": "subscription",
+      "plan": "Free",
+      "user": "member-four@example.invalid",
+      "readAt": "2026-10-20T16:33:43.21049+08:00",
+      "windows": [
+        {"name": "Credits", "used": 0, "remaining": 100, "display": "0 / 3717", "limit": 3717, "unit": "credits", "holdsWhy": "low"}
+      ]
+    },
+    {
+      "provider": "antigravity",
+      "name": "Antigravity",
+      "kind": "subscription",
+      "plan": "Google AI Pro",
+      "user": "member-five@example.invalid",
+      "readAt": "2026-10-20T16:33:43.762558+08:00",
+      "lastServedAt": "2026-10-20T07:58:47.701189Z",
+      "windows": [
+        {"name": "Gemini 3.8 Flash (High)", "used": 18.53448, "remaining": 81.46552, "resetsAt": "2026-10-24T04:51:32Z"},
+        {"name": "Gemini 3.8 Flash (Low)", "used": 0, "remaining": 100, "resetsAt": "2026-10-24T04:51:32Z"},
+        {"name": "Gemini 3.8 Flash (Medium)", "used": 0, "remaining": 100, "resetsAt": "2026-10-24T04:51:32Z"},
+        {"name": "7 days", "used": 18.53448, "remaining": 81.46552, "resetsAt": "2026-10-24T04:51:32Z", "pool": "Gemini"},
+        {"name": "5 hours", "used": 8.896899999999997, "remaining": 91.1031, "resetsAt": "2026-10-20T08:57:03Z", "pool": "Gemini"},
+        {"name": "7 days", "used": 0, "remaining": 100, "resetsAt": "2026-10-27T08:33:43Z", "pool": "Claude & GPT"},
+        {"name": "5 hours", "used": 0, "remaining": 100, "resetsAt": "2026-10-20T13:33:43Z", "pool": "Claude & GPT"}
+      ]
+    }
+  ]
+}

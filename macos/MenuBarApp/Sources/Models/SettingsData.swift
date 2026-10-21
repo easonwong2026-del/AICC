@@ -2,8 +2,34 @@ import Foundation
 import SwiftUI
 
 class AppSettings: ObservableObject {
-    @Published var autoRefreshInterval: Double {
-        didSet { UserDefaults.standard.set(autoRefreshInterval, forKey: "autoRefreshInterval") }
+    @Published var bridgeEnabled: Bool {
+        didSet { UserDefaults.standard.set(bridgeEnabled, forKey: "bridgeEnabled") }
+    }
+    @Published var magpiePort: Int {
+        didSet {
+            UserDefaults.standard.set(magpiePort, forKey: "magpiePort")
+            publishWidgetSettings()
+        }
+    }
+    @Published var widgetCards: WidgetCardDisplayMode {
+        didSet {
+            UserDefaults.standard.set(widgetCards.rawValue, forKey: "widgetCards")
+            publishWidgetSettings()
+        }
+    }
+    /// Empty means every provider Magpie reports.
+    @Published var widgetProvider: String {
+        didSet {
+            UserDefaults.standard.set(widgetProvider, forKey: "widgetProvider")
+            publishWidgetSettings()
+        }
+    }
+    /// Quota windows the widgets draw, in display order.  Empty means automatic.
+    @Published var widgetSelection: [String] {
+        didSet {
+            UserDefaults.standard.set(widgetSelection, forKey: "widgetSelection")
+            publishWidgetSettings()
+        }
     }
     @Published var themeMode: String {
         didSet { UserDefaults.standard.set(themeMode, forKey: "themeMode") }
@@ -11,43 +37,9 @@ class AppSettings: ObservableObject {
     @Published var languageCode: String {
         didSet { UserDefaults.standard.set(languageCode, forKey: "languageCode") }
     }
-
-    @Published var menuBarShowCodexStatus: Bool {
-        didSet { UserDefaults.standard.set(menuBarShowCodexStatus, forKey: "menuBarShowCodexStatus") }
-    }
-    @Published var menuBarShowCodexBalance: Bool {
-        didSet { UserDefaults.standard.set(menuBarShowCodexBalance, forKey: "menuBarShowCodexBalance") }
-    }
-    @Published var menuBarShowWorkBuddy: Bool {
-        didSet { UserDefaults.standard.set(menuBarShowWorkBuddy, forKey: "menuBarShowWorkBuddy") }
-    }
-    @Published var menuBarShowDeepSeek: Bool {
-        didSet { UserDefaults.standard.set(menuBarShowDeepSeek, forKey: "menuBarShowDeepSeek") }
-    }
-    @Published var menuBarShowSystem: Bool {
-        didSet { UserDefaults.standard.set(menuBarShowSystem, forKey: "menuBarShowSystem") }
-    }
-    @Published var menuBarShowOpenCodex: Bool {
-        didSet { UserDefaults.standard.set(menuBarShowOpenCodex, forKey: "menuBarShowOpenCodex") }
-    }
-    @Published var menuBarShowGoogleQuota: Bool {
-        didSet { UserDefaults.standard.set(menuBarShowGoogleQuota, forKey: "menuBarShowGoogleQuota") }
-    }
-    @Published var codexAccountDisplayMode: String {
-        didSet {
-            UserDefaults.standard.set(codexAccountDisplayMode, forKey: "codexAccountDisplayMode")
-            Task { @MainActor in await APIService.shared.syncCodexDisplayPreference() }
-        }
-    }
-
-    @Published var ocxCustomPath: String {
-        didSet { UserDefaults.standard.set(ocxCustomPath, forKey: "ocxCustomPath") }
-    }
-
     @Published var debugMode: Bool {
         didSet { UserDefaults.standard.set(debugMode, forKey: "debugMode") }
     }
-
     var preferredColorScheme: ColorScheme? {
         switch AppThemeMode(rawValue: themeMode) ?? .system {
         case .light: return .light
@@ -55,56 +47,40 @@ class AppSettings: ObservableObject {
         case .system: return nil
         }
     }
-
-    var language: AppLanguage {
-        AppLanguage(rawValue: languageCode) ?? .system
-    }
-
-    var locale: Locale {
-        language.locale
-    }
-
+    var language: AppLanguage { AppLanguage(rawValue: languageCode) ?? .system }
+    var locale: Locale { language.locale }
     var presentationIdentity: SettingsPresentationIdentity {
         SettingsPresentationIdentity(languageCode: languageCode, themeMode: themeMode)
     }
-
-    func localized(_ key: String) -> String {
-        localized(key, languageCode: languageCode)
-    }
-
+    func localized(_ key: String) -> String { localized(key, languageCode: languageCode) }
     func localized(_ key: String, languageCode: String) -> String {
-        let selectedLanguage = AppLanguage(rawValue: languageCode) ?? .system
-        let localization = selectedLanguage.localizationIdentifier
-
-        guard
-            let path = Bundle.main.path(forResource: localization, ofType: "lproj"),
-            let bundle = Bundle(path: path)
-        else {
-            return key
-        }
+        let selected = AppLanguage(rawValue: languageCode) ?? .system
+        guard let path = Bundle.main.path(forResource: selected.localizationIdentifier, ofType: "lproj"),
+              let bundle = Bundle(path: path) else { return key }
         return bundle.localizedString(forKey: key, value: key, table: nil)
     }
-
+    /// Port, card count and provider filter live in the widget's own settings
+    /// domain, so the extension never needs the host's preferences file.
+    func publishWidgetSettings(providers: [String]? = nil) {
+        WidgetPreferences.save(port: magpiePort, cards: widgetCards,
+                               provider: widgetProvider.isEmpty ? nil : widgetProvider,
+                               providers: providers ?? WidgetPreferences.load().providers,
+                               selection: widgetSelection)
+    }
     private init() {
         let defaults = UserDefaults.standard
-        languageCode = defaults.string(forKey: "languageCode") ?? AppLanguage.system.rawValue
-        let storedInterval = defaults.double(forKey: "autoRefreshInterval")
-        autoRefreshInterval = storedInterval < 60 ? 120.0 : storedInterval
-        if storedInterval < 60 {
-            defaults.set(120.0, forKey: "autoRefreshInterval")
-        }
+        bridgeEnabled = defaults.bool(forKey: "bridgeEnabled")
+        let port = defaults.integer(forKey: "magpiePort")
+        magpiePort = (1...65535).contains(port) ? port : 3425
+        // `widgetAccounts` is the pre-3.0 key for the same choice.
+        let stored = defaults.string(forKey: "widgetCards") ?? defaults.string(forKey: "widgetAccounts") ?? ""
+        widgetCards = WidgetCardDisplayMode(rawValue: stored) ?? WidgetCardDisplayMode.migrated(stored)
+        widgetProvider = defaults.string(forKey: "widgetProvider") ?? ""
+        widgetSelection = defaults.stringArray(forKey: "widgetSelection") ?? []
         themeMode = defaults.string(forKey: "themeMode") ?? "system"
-        menuBarShowCodexStatus = defaults.object(forKey: "menuBarShowCodexStatus") as? Bool ?? true
-        menuBarShowCodexBalance = defaults.object(forKey: "menuBarShowCodexBalance") as? Bool ?? true
-        menuBarShowWorkBuddy = defaults.object(forKey: "menuBarShowWorkBuddy") as? Bool ?? true
-        menuBarShowDeepSeek = defaults.object(forKey: "menuBarShowDeepSeek") as? Bool ?? true
-        menuBarShowSystem = defaults.object(forKey: "menuBarShowSystem") as? Bool ?? true
-        menuBarShowOpenCodex = defaults.object(forKey: "menuBarShowOpenCodex") as? Bool ?? true
-        menuBarShowGoogleQuota = defaults.object(forKey: "menuBarShowGoogleQuota") as? Bool ?? true
-        codexAccountDisplayMode = defaults.string(forKey: "codexAccountDisplayMode") ?? CodexAccountDisplayMode.automatic.rawValue
-        ocxCustomPath = defaults.string(forKey: "ocxCustomPath") ?? ""
-        debugMode = defaults.object(forKey: "debugMode") as? Bool ?? false
+        languageCode = defaults.string(forKey: "languageCode") ?? AppLanguage.system.rawValue
+        debugMode = defaults.bool(forKey: "debugMode")
+        publishWidgetSettings()
     }
-
     static let shared = AppSettings()
 }

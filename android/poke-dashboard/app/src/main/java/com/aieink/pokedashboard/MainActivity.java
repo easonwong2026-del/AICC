@@ -56,6 +56,7 @@ public final class MainActivity extends Activity {
     private DashboardView dashboard;
     private SharedPreferences preferences;
     private int refreshCount;
+    private String lastRenderedStatus;
     private boolean resumed;
     private boolean choicePromptShown;
     private volatile boolean destroyed;
@@ -96,6 +97,7 @@ public final class MainActivity extends Activity {
         preferences = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         initialiseV11Preferences();
         dashboard = new DashboardView(this);
+        dashboard.setOnClickListener(view -> dashboard.nextPage());
         dashboard.setOnLongClickListener(view -> {
             showSettings();
             return true;
@@ -176,8 +178,9 @@ public final class MainActivity extends Activity {
         network.execute(() -> {
             String saved = normaliseBaseUrl(preferences.getString(KEY_URL, null));
             String preferredHostId = preferences.getString(KEY_HOST_ID, null);
+            String token = BridgeCredential.load(preferences);
             DiscoveryClient.Candidate selected = saved == null ? null
-                    : DiscoveryClient.probe(new DiscoveryClient.Candidate(saved));
+                    : DiscoveryClient.probe(new DiscoveryClient.Candidate(saved), token, preferredHostId);
             if (selected != null && preferredHostId != null
                     && !preferredHostId.equals(selected.hostId)) {
                 Log.w(TAG, "Saved address belongs to a different server: " + saved);
@@ -187,6 +190,9 @@ public final class MainActivity extends Activity {
             if (selected == null) {
                 found = DiscoveryClient.findServers();
                 selected = DiscoveryClient.choose(found, preferredHostId);
+                if (selected != null && selected.pairingRequired && token != null) {
+                    selected = DiscoveryClient.probe(selected, token, preferredHostId);
+                }
             }
             final DiscoveryClient.Candidate result = selected;
             final List<DiscoveryClient.Candidate> alternatives = found;
@@ -208,6 +214,17 @@ public final class MainActivity extends Activity {
     }
 
     private void selectServer(DiscoveryClient.Candidate candidate, EditText urlField) {
+        if (candidate.pairingRequired) {
+            if (urlField != null) urlField.setText(candidate.url);
+            else preferences.edit().putString(KEY_URL, candidate.url).apply();
+            dashboard.setOffline(true);
+            if (resumed && !choicePromptShown && urlField == null) {
+                choicePromptShown = true;
+                Toast.makeText(this, "请在设置中输入 Mac AICC 的配对码", Toast.LENGTH_LONG).show();
+                showSettings();
+            }
+            return;
+        }
         String previous = preferences.getString(KEY_URL, null);
         String hostId = candidate.hostId == null || candidate.hostId.isEmpty() ? null : candidate.hostId;
         if (!candidate.url.equals(previous)
@@ -226,9 +243,16 @@ public final class MainActivity extends Activity {
             preferences.edit().putString(KEY_CACHE, candidate.statusBody).apply();
         }
         if (resumed) {
-            dashboard.setData(candidate.data);
-            refreshCount++;
-            if (refreshCount % 12 == 0) dashboard.flashRefresh();
+            try { candidate.data = parseData(candidate.statusBody); } catch (Exception ignored) { return; }
+            if (!candidate.data.renderKey.equals(lastRenderedStatus)) {
+                lastRenderedStatus = candidate.data.renderKey;
+                dashboard.setData(candidate.data);
+                refreshCount++;
+                if (refreshCount % 12 == 0) dashboard.flashRefresh();
+            } else {
+                dashboard.updateSyncTime(candidate.data.updatedAt);
+                dashboard.setOffline(false);
+            }
         }
         choicePromptShown = false;
     }
@@ -274,13 +298,13 @@ public final class MainActivity extends Activity {
         String raw = preferences.getString(KEY_CACHE, null);
         if (raw == null) return;
         try {
-            DashboardData data = DashboardData.parse(raw);
+            DashboardData data = parseData(raw);
             data.offline = true;
             dashboard.setData(data);
         } catch (Exception ignored) { }
     }
 
-    private void showSettings() {
+    Dialog showSettings() {
         final int padding = dp(18);
         final int ink = Color.rgb(17, 17, 17);
         final int muted = Color.rgb(85, 85, 85);
@@ -292,7 +316,7 @@ public final class MainActivity extends Activity {
         panel.setPadding(padding, dp(14), padding, 0);
         panel.setBackground(outline(Color.WHITE, ink, dp(2), dp(14)));
 
-        TextView title = settingText("AI E-Ink 设置", 24, ink, true);
+        TextView title = settingText("Magpie 墨水屏伴侣", 24, ink, true);
         title.setGravity(Gravity.CENTER);
         panel.addView(title, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(48)));
@@ -300,7 +324,7 @@ public final class MainActivity extends Activity {
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(4), 0, dp(4), 0);
 
-        TextView hint = settingText("电脑地址（可手工输入）", 16, muted, false);
+        TextView hint = settingText("电脑地址", 16, muted, false);
         EditText url = new EditText(this);
         styleInput(url, 17, ink);
         url.setSingleLine(true);
@@ -308,6 +332,41 @@ public final class MainActivity extends Activity {
         url.setText(preferences.getString(KEY_URL, ""));
         Button chooseServer = settingButton("选择服务器");
         chooseServer.setOnClickListener(view -> forceDiscovery(url));
+        EditText code = new EditText(this);
+        styleInput(code, 20, ink);
+        code.setHint("Mac AICC 配对码（8 位）");
+        code.setInputType(InputType.TYPE_CLASS_NUMBER);
+        code.setFilters(new android.text.InputFilter[] { new android.text.InputFilter.LengthFilter(8) });
+        Button pair = settingButton("配对这台电脑");
+        pair.setOnClickListener(view -> {
+            String base = normaliseBaseUrl(url.getText().toString());
+            String pairingCode = code.getText().toString();
+            if (base == null || !pairingCode.matches("[0-9]{8}")) {
+                Toast.makeText(this, "请输入电脑地址和 8 位配对码", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            pair.setEnabled(false);
+            network.execute(() -> {
+                boolean success = false;
+                try {
+                    org.json.JSONObject result = DiscoveryClient.pair(base, pairingCode);
+                    String token = result.getString("token");
+                    String host = result.getString("host_id");
+                    if (token.length() < 32 || host.isEmpty()) throw new IllegalStateException();
+                    BridgeCredential.save(preferences, token, host);
+                    preferences.edit().putString(KEY_HOST_ID, host).putString(KEY_URL, base).remove(KEY_CACHE).commit();
+                    success = true;
+                } catch (Exception ignored) { }
+                boolean paired = success;
+                handler.post(() -> {
+                    if (destroyed) return;
+                    pair.setEnabled(true);
+                    code.setText("");
+                    Toast.makeText(this, paired ? "配对成功" : "配对失败，请生成新配对码后重试", Toast.LENGTH_LONG).show();
+                    if (paired) { dialog.dismiss(); fetchStatus(); }
+                });
+            });
+        });
         LinearLayout addressHeader = new LinearLayout(this);
         addressHeader.setOrientation(LinearLayout.HORIZONTAL);
         addressHeader.addView(hint, new LinearLayout.LayoutParams(0, dp(38), 1f));
@@ -319,6 +378,11 @@ public final class MainActivity extends Activity {
         interval.setSingleLine(true);
         interval.setInputType(InputType.TYPE_CLASS_NUMBER);
         interval.setText(String.valueOf(refreshMinutes()));
+        android.widget.Spinner accountCount = new android.widget.Spinner(this);
+        accountCount.setAdapter(new android.widget.ArrayAdapter<String>(this,
+                android.R.layout.simple_spinner_dropdown_item, new String[] { "全部账号（4 个/页）", "1 个账号", "2 个账号" }));
+        String savedMode = preferences.getString("account_mode", "all");
+        accountCount.setSelection("one".equals(savedMode) ? 1 : "two".equals(savedMode) ? 2 : 0);
 
         TextView modeHint = settingText("显示模式（省电模式需在 BOOX 中启用透明屏保）", 14, muted, false);
         RadioGroup displayMode = new RadioGroup(this);
@@ -343,10 +407,15 @@ public final class MainActivity extends Activity {
         content.addView(addressHeader);
         content.addView(url, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(42)));
+        content.addView(code, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)));
+        content.addView(pair);
+        content.addView(settingText("仅在可信局域网配对，不需要 Magpie 网关密钥。", 14, muted, false));
         content.addView(settingDivider());
         content.addView(intervalHint);
         content.addView(interval, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(42)));
+        content.addView(settingText("显示账号", 16, muted, false));
+        content.addView(accountCount);
         content.addView(settingDivider());
         content.addView(modeHint);
         content.addView(displayMode);
@@ -383,6 +452,8 @@ public final class MainActivity extends Activity {
                     catch (NumberFormatException ignored) { }
                     minutes = Math.max(1, Math.min(60, minutes));
                     SharedPreferences.Editor editor = preferences.edit()
+                            .putString("account_mode", accountCount.getSelectedItemPosition() == 1 ? "one"
+                                    : accountCount.getSelectedItemPosition() == 2 ? "two" : "all")
                             .putInt("refresh_minutes", minutes)
                             .putBoolean(KEY_KEEP_AWAKE, alwaysOnMode.isChecked())
                             .putBoolean(KEY_SHOW_BATTERY, showBattery.isChecked())
@@ -414,10 +485,15 @@ public final class MainActivity extends Activity {
             dialog.getWindow().setLayout((int) (getResources().getDisplayMetrics().widthPixels * .94f),
                     (int) (getResources().getDisplayMetrics().heightPixels * .78f));
         }
+        return dialog;
     }
 
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private DashboardData parseData(String raw) throws Exception {
+        return DashboardData.parse(raw, preferences.getString("account_mode", "all"));
     }
 
     private GradientDrawable outline(int fill, int stroke, int strokeWidth, int radius) {
@@ -494,11 +570,7 @@ public final class MainActivity extends Activity {
     }
 
     private String normaliseBaseUrl(String value) {
-        String result = value == null ? "" : value.trim();
-        if (result.isEmpty()) return null;
-        while (result.endsWith("/")) result = result.substring(0, result.length() - 1);
-        if (result.endsWith("/api/status")) result = result.substring(0, result.length() - 11);
-        return result.isEmpty() ? null : result;
+        return DiscoveryClient.normaliseBaseUrl(value);
     }
 
     private void applyDisplayMode() {

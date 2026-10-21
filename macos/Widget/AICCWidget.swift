@@ -1,53 +1,60 @@
 import SwiftUI
 import WidgetKit
-import AppIntents
 
-struct AICCWidgetProvider: AppIntentTimelineProvider {
+struct AICCWidgetProvider: TimelineProvider {
     typealias Entry = AICCWidgetEntry
-    typealias Intent = AICCWidgetConfigurationIntent
 
     func placeholder(in context: Context) -> AICCWidgetEntry {
-        AICCWidgetEntry(date: .now, snapshot: .placeholder, configuration: AICCWidgetConfigurationIntent())
+        AICCWidgetEntry(date: .now, snapshot: .placeholder(), configuration: AICCWidgetConfiguration())
     }
 
-    func snapshot(for configuration: AICCWidgetConfigurationIntent, in context: Context) async -> AICCWidgetEntry {
+    func getSnapshot(in context: Context, completion: @escaping (AICCWidgetEntry) -> Void) {
+        let configuration = AICCWidgetConfiguration.load()
         if context.isPreview {
-            return AICCWidgetEntry(date: .now, snapshot: .placeholder, configuration: configuration)
+            completion(AICCWidgetEntry(date: .now, snapshot: .placeholder(), configuration: configuration))
+            return
         }
-
-        let snapshot = await WidgetStatusLoader.snapshot()
-        return AICCWidgetEntry(date: .now, snapshot: snapshot, configuration: configuration)
+        Task {
+            let snapshot = await WidgetStatusLoader.snapshot(port: configuration.magpiePort)
+            completion(AICCWidgetEntry(date: .now, snapshot: snapshot, configuration: configuration))
+        }
     }
 
-    func timeline(for configuration: AICCWidgetConfigurationIntent, in context: Context) async -> Timeline<AICCWidgetEntry> {
+    func getTimeline(in context: Context, completion: @escaping (Timeline<AICCWidgetEntry>) -> Void) {
+        Task { completion(await timeline()) }
+    }
+
+    private func timeline() async -> Timeline<AICCWidgetEntry> {
+        let configuration = AICCWidgetConfiguration.load()
         let now = Date.now
-        let snapshot = await WidgetStatusLoader.snapshot()
+        let snapshot = await WidgetStatusLoader.snapshot(port: configuration.magpiePort)
         let entry = AICCWidgetEntry(date: now, snapshot: snapshot, configuration: configuration)
-        var dates = [snapshot.fetchedAt.addingTimeInterval(WidgetDisplaySnapshot.liveLifetime),
-                     snapshot.fetchedAt.addingTimeInterval(WidgetDisplaySnapshot.cacheLifetime)]
-        if let epoch = snapshot.google?.updated_epoch {
-            let source = Date(timeIntervalSince1970: epoch)
-            dates += [source.addingTimeInterval(WidgetDisplaySnapshot.liveLifetime),
-                      source.addingTimeInterval(WidgetDisplaySnapshot.cacheLifetime)]
+        // WidgetKit does not honour an exact timer: this only asks for a reload
+        // around the moment the reading stops being fresh.
+        var dates: [Date] = [Date(timeIntervalSince1970: snapshot.fetchedAt)
+            .addingTimeInterval(QuotaSnapshot.liveLifetime)]
+        dates += snapshot.accounts.compactMap { $0.readAt }.map {
+            Date(timeIntervalSince1970: $0).addingTimeInterval(QuotaSnapshot.liveLifetime)
         }
         let future = Array(Set(dates.filter { $0 > now })).sorted()
         let entries = [entry] + future.map { date in
             AICCWidgetEntry(date: date, snapshot: snapshot.evaluated(at: date), configuration: configuration)
         }
-        return Timeline(entries: entries, policy: .after(now.addingTimeInterval(5 * 60)))
+        return Timeline(entries: entries, policy: .after(now.addingTimeInterval(QuotaPolicy.refreshSeconds)))
     }
 }
 
 @main
 struct AICCWidget: Widget {
-    nonisolated static let kind = "com.aieink.dashboard.menubar.widget"
+    nonisolated static let kind = AICCWidgetMetadata.kind
 
     var body: some WidgetConfiguration {
-        AppIntentConfiguration(kind: Self.kind, intent: AICCWidgetConfigurationIntent.self, provider: AICCWidgetProvider()) { entry in
+        StaticConfiguration(kind: Self.kind, provider: AICCWidgetProvider()) { entry in
             AICCWidgetView(entry: entry)
+                .widgetURL(AICCWidgetMetadata.refreshURL)
         }
         .configurationDisplayName("AICC")
-        .description("AICC status at a glance")
+        .description("Magpie 中所有服务商的额度。关闭 AICC 也能更新。")
         .supportedFamilies([.systemSmall, .systemMedium])
         .contentMarginsDisabled()
     }
