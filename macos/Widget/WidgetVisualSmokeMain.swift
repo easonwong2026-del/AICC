@@ -56,13 +56,20 @@ struct WidgetVisualSmokeMain {
 
     @MainActor
     static func render(_ snapshot: QuotaSnapshot, configuration: AICCWidgetConfiguration,
-                       family: WidgetFamily, scheme: ColorScheme, name: String) {
+                       family: WidgetFamily, scheme: ColorScheme, name: String,
+                       mode: WidgetRenderingMode = .fullColor) {
         let entry = AICCWidgetEntry(date: .now, snapshot: snapshot, configuration: configuration)
         let width: CGFloat = family == .systemMedium ? 330 : 155
         let size = CGSize(width: width, height: 155)
-        let background: Color = scheme == .dark ? Color(red: 0.12, green: 0.12, blue: 0.14) : Color.white
+        // In accented rendering the system removes the widget's background and
+        // puts its own glass under the content, so preview it over a wallpaper.
+        let accented = mode != .fullColor
+        let background: Color = accented
+            ? Color(red: 0.16, green: 0.22, blue: 0.29)
+            : (scheme == .dark ? Color(red: 0.12, green: 0.12, blue: 0.14) : Color.white)
         let view = AICCWidgetView(entry: entry, familyOverride: family)
             .environment(\.colorScheme, scheme)
+            .environment(\.widgetRenderingMode, mode)
             .frame(width: size.width, height: size.height)
             .background(background)
             .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
@@ -83,12 +90,32 @@ struct WidgetVisualSmokeMain {
                 guard let pixel = bitmap.colorAt(x: x, y: y)?.usingColorSpace(NSColorSpace.deviceRGB) else { continue }
                 sampled += 1
                 let luminance = 0.2126 * pixel.redComponent + 0.7152 * pixel.greenComponent + 0.0722 * pixel.blueComponent
-                if scheme == .dark ? luminance > 0.55 : luminance < 0.55 { ink += 1 }
+                if scheme == .dark || accented {
+                    // Accented content is white on the glass: a card that came out
+                    // as a solid white block would show almost no dark pixels.
+                    if luminance > 0.55 { ink += 1 }
+                } else if luminance < 0.55 {
+                    ink += 1
+                }
             }
         }
         let ratio = Double(ink) / Double(max(1, sampled))
         precondition(ratio > 0.002, "Blank widget: \(name)")
         precondition(ratio < 0.75, "Overfull widget: \(name)")
+        if accented {
+            // Dimmed on the desktop, an opaque card would be tinted to a solid
+            // white slab.  Text is a small share of the tile; a slab is not.
+            var solid = 0
+            for y in stride(from: 6, to: bitmap.pixelsHigh - 6, by: 3) {
+                for x in stride(from: 6, to: bitmap.pixelsWide - 6, by: 3) {
+                    guard let pixel = bitmap.colorAt(x: x, y: y)?.usingColorSpace(NSColorSpace.deviceRGB) else { continue }
+                    let luminance = 0.2126 * pixel.redComponent + 0.7152 * pixel.greenComponent + 0.0722 * pixel.blueComponent
+                    if luminance > 0.9 { solid += 1 }
+                }
+            }
+            let slab = Double(solid) / Double(max(1, sampled))
+            precondition(slab < 0.18, "Accented render has solid white slabs (\(slab)): \(name)")
+        }
         guard let png = bitmap.representation(using: .png, properties: [:]) else {
             fatalError("Failed to encode \(name)")
         }
@@ -137,6 +164,17 @@ struct WidgetVisualSmokeMain {
                         rendered += 1
                     }
                 }
+            }
+        }
+        // macOS 26 dims desktop widgets into accented rendering whenever another
+        // app is in front.  The same layouts have to hold up there too.
+        let dimmedStates = states.filter { ["real", "mixed", "balance", "empty", "long_labels"].contains($0.0) }
+        for family in [WidgetFamily.systemSmall, .systemMedium] {
+            let familyName = family == .systemMedium ? "medium" : "small"
+            for state in dimmedStates {
+                render(state.1, configuration: AICCWidgetConfiguration(), family: family, scheme: .dark,
+                       name: "\(familyName)_\(state.0)_accented", mode: .accented)
+                rendered += 1
             }
         }
         print("Visual QA rendered \(rendered) widget PNGs to \(outputDir)")

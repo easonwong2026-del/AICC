@@ -40,6 +40,11 @@ Configuration (port, card count, optional provider filter) lives in the Widget's
 edited in the AICC settings window. The widget kind identifier and upgrade compatibility are unchanged; the static
 configuration is kept because dynamic App Intents configuration cannot be registered reliably with this build path.
 
+While any app window is in front, macOS dims desktop widgets into **accented rendering** — it tints all content white
+and drops the background (*Dim widgets on desktop*, Automatically by default). AICC ships a separate palette for that
+mode (translucent white surfaces, opaque text) so the numbers stay readable; to keep full colour all the time, set
+System Settings → Desktop & Dock → Widgets → **Dim widgets on desktop** to *Never*.
+
 ## E-ink APK
 
 The APK reads the same generic snapshot through the paired, read-only bridge: multiple providers, multiple accounts,

@@ -25,8 +25,22 @@ struct WidgetPalette {
     let muted: Color
     let warning: Color
 
-    static func of(_ scheme: ColorScheme) -> WidgetPalette {
-        scheme == .dark
+    /// `accented` is what macOS 26 does to desktop widgets whenever another app
+    /// is in front ("Dim widgets on desktop" = Automatically): the system tints
+    /// every colour to white and drops the background, so only **opacity**
+    /// survives.  An opaque card fill therefore turns into a solid white block
+    /// that swallows the equally white text — the white-boxes state.  There the
+    /// card has to be a soft white wash instead, and the text stays opaque.
+    static func of(_ scheme: ColorScheme, mode: WidgetRenderingMode = .fullColor) -> WidgetPalette {
+        if mode != .fullColor {
+            return WidgetPalette(background: .clear,
+                                 card: Color(.sRGB, white: 1, opacity: 0.14),
+                                 edge: Color(.sRGB, white: 1, opacity: 0.26),
+                                 ink: Color(.sRGB, white: 1, opacity: 1),
+                                 muted: Color(.sRGB, white: 1, opacity: 0.66),
+                                 warning: Color(.sRGB, white: 1, opacity: 0.92))
+        }
+        return scheme == .dark
             ? WidgetPalette(background: Color(red: 0.09, green: 0.09, blue: 0.10),
                             card: Color(red: 0.15, green: 0.15, blue: 0.17),
                             edge: Color(.sRGB, white: 1, opacity: 0.10),
@@ -49,9 +63,10 @@ struct AICCWidgetView: View {
     var familyOverride: WidgetFamily? = nil
     @Environment(\.widgetFamily) private var environmentFamily
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.widgetRenderingMode) private var renderingMode
 
     private var family: WidgetFamily { familyOverride ?? environmentFamily }
-    private var palette: WidgetPalette { .of(scheme) }
+    private var palette: WidgetPalette { .of(scheme, mode: renderingMode) }
 
     private var limit: Int {
         entry.configuration.capacity(familyLimit: family == .systemMedium ? 4 : 2)
