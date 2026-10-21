@@ -27,3 +27,7 @@ dist/*.app/
 dist/mac/*.app/
 dist/mac/*.dmg
 dist/mac/AppIcon.iconset/
+
+# Local acceptance artefacts and tool state
+outputs/
+.workbuddy/
