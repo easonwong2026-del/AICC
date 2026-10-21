@@ -1,5 +1,7 @@
 enum AICCWidgetMetadata {
     static let kind = "com.aieink.dashboard.menubar.widget"
+    /// The usage board is a separate widget so both can sit on the desktop.
+    static let boardKind = "com.aieink.dashboard.menubar.board"
     static let refreshURL = URL(string: "aicc-widget://refresh")!
 }
 

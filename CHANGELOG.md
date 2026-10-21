@@ -2,6 +2,18 @@
 
 [English](CHANGELOG.en.md)
 
+## 未发布
+
+### macOS
+
+- **新增 AICC 看板小组件**（large）：四页自动轮播 —— 总览（成功率环、调用、错误、最低剩余、今日 Token）、
+  请求（最近模型、状态、延迟、平均 TTFT、今日 Token、最近三条请求）、会话（30 天会话数、总 Token、估算费用、
+  最常用模型）、上下文（缓存命中率与 token 构成）。
+- 数据直接读 Magpie 的 `/v1/magpie/usage` 与 `/v1/magpie/usage/requests`，用量 60 秒缓存；
+  指标口径与 [peterroe/magpie-usage-display](https://github.com/peterroe/magpie-usage-display) 一致。
+- 深色 / 浅色两套配色，dark 沿用参考项目的 AMOLED 色值；macOS 26 变暗态单独适配。
+- 新增 `scripts/smoke-test-board-visual.sh`（28 张离屏渲染）与 `UsageModelTests`（7 项解析测试）。
+
 ## 2.11.0 - 2026-10-21
 
 ### 通用额度

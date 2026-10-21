@@ -125,11 +125,15 @@ xcrun swiftc \
 echo "=== Building Widget extension ==="
 WIDGET_FILES=(
   "$SOURCE_DIR/Models/QuotaModel.swift"
+  "$SOURCE_DIR/Models/UsageModel.swift"
   "$SOURCE_DIR/Models/WidgetPreferences.swift"
   "$WIDGET_SOURCE_DIR/WidgetStatus.swift"
   "$WIDGET_SOURCE_DIR/WidgetConfiguration.swift"
   "$WIDGET_SOURCE_DIR/AICCWidgetViews.swift"
   "$WIDGET_SOURCE_DIR/AICCWidget.swift"
+  "$WIDGET_SOURCE_DIR/WidgetUsage.swift"
+  "$WIDGET_SOURCE_DIR/BoardWidgetViews.swift"
+  "$WIDGET_SOURCE_DIR/BoardWidget.swift"
 )
 for file in "${WIDGET_FILES[@]}"; do
   if [ ! -f "$file" ]; then

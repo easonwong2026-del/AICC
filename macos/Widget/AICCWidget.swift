@@ -44,7 +44,6 @@ struct AICCWidgetProvider: TimelineProvider {
     }
 }
 
-@main
 struct AICCWidget: Widget {
     nonisolated static let kind = AICCWidgetMetadata.kind
 
@@ -57,5 +56,13 @@ struct AICCWidget: Widget {
         .description("Magpie 中所有服务商的额度。关闭 AICC 也能更新。")
         .supportedFamilies([.systemSmall, .systemMedium])
         .contentMarginsDisabled()
+    }
+}
+
+@main
+struct AICCWidgetBundle: WidgetBundle {
+    var body: some Widget {
+        AICCWidget()
+        AICCBoardWidget()
     }
 }

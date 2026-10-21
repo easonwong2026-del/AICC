@@ -81,6 +81,9 @@ jobs:
       - name: Verify Widget layouts render in every state
         run: bash scripts/smoke-test-widget-visual.sh
 
+      - name: Verify the usage board renders on every page
+        run: bash scripts/smoke-test-board-visual.sh
+
       - name: Render companion settings acceptance images
         run: bash scripts/smoke-test-dashboard-visual.sh
 
