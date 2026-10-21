@@ -81,32 +81,98 @@ public final class DashboardDataTest {
         assertNull(account.primary());
     }
 
-    @Test public void pagesHoldFourCardsAndAllModePages() throws Exception {
+    @Test public void onlyAccountsWithManyWindowsGetTheirOwnPage() throws Exception {
+        String wide = "{\"name\":\"Gemini 7 days\",\"remaining\":80},"
+                + "{\"name\":\"Gemini 5 hours\",\"remaining\":70},"
+                + "{\"name\":\"Claude 7 days\",\"remaining\":60}";
         String body = snapshot(
-                card("codex", "subscription", "a***", "{\"name\":\"7 days\",\"remaining\":10}"),
-                card("codex", "subscription", "b***", "{\"name\":\"7 days\",\"remaining\":20}"),
-                card("workbuddy", "subscription", "c***", "{\"name\":\"Credits\",\"remaining\":30}"),
-                card("workbuddy", "subscription", "d***", "{\"name\":\"Credits\",\"remaining\":40}"),
-                card("zcode", "plan", "e***", "{\"name\":\"prompts\",\"remaining\":50}"),
-                card("kiro", "subscription", "f***", "{\"name\":\"Monthly\",\"remaining\":60}"));
+                card("codex", "subscription", "a***", "{\"name\":\"7 days\",\"remaining\":10},"
+                        + "{\"name\":\"5 hours\",\"remaining\":20}"),
+                card("antigravity", "subscription", "b***", wide),
+                card("kiro", "subscription", "c***", "{\"name\":\"Monthly\",\"remaining\":90}"));
         DashboardData all = DashboardData.parse(body, "all");
         assertEquals(2, all.pageCount());
-        assertEquals(4, all.visibleAccounts().size());
+        assertNull(all.detailAccount());
         all.nextPage();
-        assertEquals(2, all.visibleAccounts().size());
-        assertEquals("Kiro · f***", all.visibleAccounts().get(1).title());
+        assertEquals("Antigravity · b***", all.detailAccount().title());
+        assertEquals(3, all.detailAccount().items.size());
         all.nextPage();
         assertEquals(0, all.page);
 
         DashboardData two = DashboardData.parse(body, "two");
-        assertEquals(2, two.shownAccounts().size());
-        assertEquals(1, two.pageCount());
-        two.nextPage();
-        assertEquals(0, two.page);
+        assertEquals(2, two.pageCount());
 
         DashboardData one = DashboardData.parse(body, "one");
-        assertEquals(1, one.shownAccounts().size());
-        assertEquals("Codex · a***", one.visibleAccounts().get(0).title());
+        assertEquals(1, one.pageCount());
+        one.nextPage();
+        assertEquals(0, one.page);
+    }
+
+    @Test public void theOverviewLeadsWithWhateverIsClosestToEmpty() throws Exception {
+        String body = snapshot(
+                card("codex", "subscription", "a***", "{\"name\":\"7 days\",\"remaining\":88}"),
+                card("workbuddy", "subscription", "b***",
+                        "{\"name\":\"Credits\",\"remaining\":99,\"remaining_text\":\"4650\",\"unit\":\"credits\",\"limit\":4727}"),
+                card("zcode", "plan", "c***", "{\"name\":\"prompts\",\"remaining\":12}"));
+        DashboardData.Slot hero = DashboardData.parse(body, "all").hero();
+        assertEquals("zcode", hero.account.provider);
+        assertEquals(12.0, hero.item.remaining, 0.001);
+    }
+
+    @Test public void summaryRowsSkipTheHeroAccountAndCapAtThree() throws Exception {
+        String body = snapshot(
+                card("codex", "subscription", "a***", "{\"name\":\"7 days\",\"remaining\":5}"),
+                card("workbuddy", "subscription", "b***", "{\"name\":\"Credits\",\"remaining\":60}"),
+                card("workbuddy", "subscription", "c***", "{\"name\":\"Credits\",\"remaining\":70}"),
+                card("kiro", "subscription", "d***", "{\"name\":\"Monthly\",\"remaining\":80}"),
+                card("zcode", "plan", "e***", "{\"name\":\"prompts\",\"remaining\":90}"));
+        DashboardData data = DashboardData.parse(body, "all");
+        assertEquals(4, data.summaryAccounts().size());
+        assertEquals(1, data.hiddenAccountCount());
+        for (DashboardData.Account account : data.summaryAccounts()) {
+            assertTrue(!"a***".equals(account.label));
+        }
+        assertEquals(4, data.providerCount());
+    }
+
+    @Test public void resetsAreShownAsACountdownAndWindowsAreNamedInChinese() throws Exception {
+        long now = 1_800_000_000L;
+        DashboardData.Item item = new DashboardData.Item();
+        item.name = "7 days";
+        item.resetAt = (double) now + 3 * 86400 + 4 * 3600;
+        assertEquals("7 天", item.windowLabel());
+        assertEquals("3 天 4 时后重置", item.countdown(now));
+        item.resetAt = (double) now + 4 * 3600 + 12 * 60;
+        assertEquals("4 时 12 分后重置", item.countdown(now));
+        item.resetAt = (double) now + 90;
+        assertEquals("1 分后重置", item.countdown(now));
+        item.resetAt = (double) now - 5;
+        assertEquals("即将重置", item.countdown(now));
+        item.resetAt = null;
+        item.reset = "2026-10-22 14:14";
+        assertEquals("2026-10-22 14:14", item.countdown(now));
+
+        DashboardData.Item credits = new DashboardData.Item();
+        credits.name = "Credits";
+        assertEquals("积分", credits.windowLabel());
+        DashboardData.Item hours = new DashboardData.Item();
+        hours.name = "5 hours";
+        assertEquals("5 小时", hours.windowLabel());
+        DashboardData.Item custom = new DashboardData.Item();
+        custom.name = "Gemini 3.8 Flash";
+        assertEquals("Gemini 3.8 Flash", custom.windowLabel());
+    }
+
+    @Test public void countedWindowsCarryTheirTotal() throws Exception {
+        DashboardData.Item item = new DashboardData.Item();
+        item.unit = "credits";
+        item.limit = 4727.0;
+        assertEquals("共 4727", item.totalText());
+        item.unlimited = true;
+        assertNull(item.totalText());
+        item.unlimited = false;
+        item.unit = null;
+        assertNull(item.totalText());
     }
 
     @Test public void unknownProvidersStayAndUnknownKindsAreSkipped() throws Exception {

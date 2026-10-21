@@ -11,14 +11,31 @@ import android.os.Looper;
 import android.view.View;
 
 /**
- * Direct, allocation-light renderer for the Poke4S e-ink panel.  Four quota
- * cards a page, any provider, paged with a tap; only real changes repaint.
+ * Direct, allocation-light renderer for the Poke4S e-ink panel.
+ *
+ * <p>Two kinds of page: an overview that leads with the window closest to
+ * running out and lists three more accounts, then one page per account that
+ * shows every window that account has — including the ones the overview had to
+ * leave out.  A tap moves to the next page, a long-press opens settings.
+ *
+ * <p>Layout follows the visual language borrowed from magpie-usage-display:
+ * small label above, oversized number with a superscript unit, a thick rounded
+ * bar, then a relative countdown.  Colour is not available on this panel, so
+ * hierarchy comes from weight and grey instead.
  */
 final class DashboardView extends View {
+    static final int SUMMARY_ROWS = 3;
+
     private static final int PAPER = Color.rgb(247, 247, 244);
     private static final int INK = Color.rgb(17, 17, 17);
+    private static final int MUTED = Color.rgb(95, 94, 90);
+    private static final int HAIR = Color.rgb(201, 199, 191);
+    private static final int TRACK = Color.rgb(226, 224, 216);
+
     private static final float DESIGN_WIDTH = 758f;
     private static final float DESIGN_HEIGHT = 1024f;
+    private static final float LEFT = 34f;
+    private static final float RIGHT = 724f;
     private static final Typeface REGULAR = Typeface.DEFAULT;
     private static final Typeface BOLD = Typeface.DEFAULT_BOLD;
 
@@ -90,123 +107,299 @@ final class DashboardView extends View {
         canvas.save();
         canvas.scale(sx, sy);
         drawHeader(canvas);
-        drawQuota(canvas);
-        textFit(canvas, data.offline ? "离线 · 保留上次额度" : "同步 " + data.updatedAt, 34, 977, 470, 17, false);
-        textFitRight(canvas, "长按设置", 724, 977, 150, 17);
+        DashboardData.Account detail = data.detailAccount();
+        if (data.accounts.isEmpty()) {
+            drawEmpty(canvas);
+        } else if (detail != null) {
+            drawDetail(canvas, detail);
+        } else {
+            drawOverview(canvas);
+        }
+        drawFooter(canvas);
         canvas.restore();
     }
 
+    // ---------------------------------------------------------------- header
+
     private void drawHeader(Canvas canvas) {
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(INK);
-        canvas.drawRect(34, 20, 80, 66, paint);
-        text(canvas, "AI", 57, 51, 20, PAPER, true, Paint.Align.CENTER);
-        text(canvas, "COMMAND", 100, 52, 28, INK, true, Paint.Align.LEFT);
+        filledRect(canvas, LEFT, 26, 44, 44, INK);
+        text(canvas, "AI", LEFT + 22, 56, 22, PAPER, true, Paint.Align.CENTER);
+        text(canvas, "AICC", 92, 58, 34, INK, true, Paint.Align.LEFT);
+        text(canvas, "MAGPIE", 92, 84, 18, MUTED, true, Paint.Align.LEFT);
+
         String state = headerState();
-        if (showDeviceBattery && batteryPercent >= 0) {
-            state = batteryPercent + "%" + (batteryCharging ? " +" : "") + "  " + state;
+        float size = fittedSize(state, 300, 24, true);
+        paint.setTextSize(size);
+        paint.setTypeface(BOLD);
+        float width = paint.measureText(state);
+        float dotX = RIGHT - width - 28;
+        if (data.offline) {
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(2.5f);
+            paint.setColor(MUTED);
+            canvas.drawCircle(dotX + 6, 50, 6, paint);
+        } else {
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(INK);
+            canvas.drawCircle(dotX + 6, 50, 6, paint);
         }
-        textFitRight(canvas, state, 724, 47, 190, 17);
-        filledRect(canvas, 34, 78, 690, 3, INK);
+        text(canvas, state, RIGHT, 58, 24, MUTED, true, Paint.Align.RIGHT);
+        filledRect(canvas, LEFT, 100, RIGHT - LEFT, 2, INK);
     }
 
     private String headerState() {
         if (data.offline) return "OFFLINE";
         if (data.accounts.isEmpty()) return "EMPTY";
         if (!"Connected".equals(data.state)) return "Cached".equals(data.state) ? "CACHED" : "CHECK";
-        return "SYNC";
+        return "SYNC · " + clock(data.updatedAt);
     }
 
-    private void drawQuota(Canvas canvas) {
-        outlinedRect(canvas, 34, 98, 690, 830, 2);
-        int total = data.shownAccounts().size();
-        text(canvas, "QUOTA", 64, 151, 26, INK, true, Paint.Align.LEFT);
-        textFitRight(canvas, total + " 张 · " + providerSummary(), 694, 151, 430, 16);
-        filledRect(canvas, 64, 179, 630, 2, INK);
-
-        data.clampPage();
-        java.util.List<DashboardData.Account> visible = data.visibleAccounts();
-        if (visible.isEmpty()) {
-            text(canvas, "Magpie 暂无额度", 64, 268, 28, INK, true, Paint.Align.LEFT);
-            textFit(canvas, data.offline ? "离线，等待重新连接" : "打开 Magpie 检查服务商登录", 64, 312, 630, 19, false);
+    /** The panel has room for HH:mm, not for a full date; the date is on the card. */
+    private static String clock(String stamp) {
+        String text = stamp == null ? "" : stamp.trim();
+        if (text.length() >= 5) {
+            String tail = text.substring(text.length() - 5);
+            if (tail.matches("\\d{2}:\\d{2}")) return tail;
         }
-        int count = visible.size();
-        float rowHeight = count > 0 ? Math.min(320, 660f / count) : 0;
+        return text.isEmpty() ? "--" : text;
+    }
+
+    // -------------------------------------------------------------- overview
+
+    private void drawOverview(Canvas canvas) {
+        DashboardData.Slot hero = data.hero();
+        if (hero == null) { drawEmpty(canvas); return; }
+
+        outlinedRect(canvas, LEFT, 116, RIGHT - LEFT, 334, 3, 10);
+        textFit(canvas, "最低剩余 · " + hero.account.providerName + " " + hero.item.label(),
+                LEFT + 26, 164, 600, 26, false);
+        drawHeroValue(canvas, hero, 60, 316);
+
+        rect.set(60, 352, 698, 368);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(TRACK);
+        canvas.drawRoundRect(rect, 8, 8, paint);
+        double share = hero.item.remaining == null ? 0 : hero.item.remaining;
+        float filled = (float) (638 * Math.min(1, Math.max(0, share / 100)));
+        if (filled > 0) {
+            rect.set(60, 352, 60 + Math.max(8, filled), 368);
+            paint.setColor(INK);
+            canvas.drawRoundRect(rect, 8, 8, paint);
+        }
+
+        String caption = caption(hero);
+        textFit(canvas, caption, 60, 414, 620, 24, false);
+
+        java.util.List<DashboardData.Account> rows = data.summaryAccounts();
+        int count = Math.min(SUMMARY_ROWS, rows.size());
         for (int index = 0; index < count; index++) {
-            drawCard(canvas, visible.get(index), 205 + index * rowHeight, rowHeight);
-            if (index < count - 1) filledRect(canvas, 64, 205 + (index + 1) * rowHeight - 22, 630, 1, INK);
+            drawSummaryRow(canvas, rows.get(index), 476 + index * 140);
         }
-
-        String footer = total + " 张额度卡";
-        if (data.pageCount() > 1) {
-            footer += " · " + (data.page + 1) + "/" + data.pageCount() + " · 点击翻页";
-        } else if (data.accounts.size() > total) {
-            footer += " · 按设置只显示 " + total + " 张";
-        }
-        textFit(canvas, footer, 64, 900, 630, 17, false);
     }
 
-    private String providerSummary() {
-        StringBuilder summary = new StringBuilder();
-        for (DashboardData.Account account : data.shownAccounts()) {
-            if (summary.indexOf(account.providerName) >= 0) continue;
-            if (summary.length() > 0) summary.append(" / ");
-            summary.append(account.providerName);
-            if (summary.length() > 48) break;
+    private void drawHeroValue(Canvas canvas, DashboardData.Slot slot, float x, float baseline) {
+        DashboardData.Item item = slot.item;
+        String value = item.primaryText();
+        String unit = item.unitLabel();
+        if (value.endsWith("%")) { value = value.substring(0, value.length() - 1); unit = "%"; }
+        float numberWidth = measure(value, 150, true);
+        float size = 150;
+        // A credits count can be long; keep the number inside the card.
+        while (size > 90 && numberWidth + 60 > 600) {
+            size *= 0.9f;
+            numberWidth = measure(value, size, true);
         }
-        return summary.length() == 0 ? "—" : summary.toString();
+        text(canvas, value, x, baseline, size, INK, true, Paint.Align.LEFT);
+        if (unit != null) text(canvas, unit, x + numberWidth + 10, baseline, 44, MUTED, true, Paint.Align.LEFT);
     }
 
-    private void drawCard(Canvas canvas, DashboardData.Account account, float top, float height) {
-        textFit(canvas, account.title(), 64, top + 24, 430, 21, true);
-        String status = account.statusText();
-        if (status != null) textFitRight(canvas, status, 694, top + 24, 130, 16);
-        else if (account.plan != null) textFitRight(canvas, account.plan, 694, top + 24, 200, 15);
+    private String caption(DashboardData.Slot slot) {
+        DashboardData.Item item = slot.item;
+        StringBuilder text = new StringBuilder();
+        String countdown = item.countdown(nowSeconds());
+        if (countdown != null) text.append(countdown);
+        if (slot.account.items.size() == 2) {
+            DashboardData.Item second = slot.account.items.get(1);
+            if (text.length() > 0) text.append(" · ");
+            text.append(second.label()).append(" ").append(second.primaryText());
+        } else if (slot.account.items.size() > 2) {
+            if (text.length() > 0) text.append(" · ");
+            text.append("共 ").append(slot.account.items.size()).append(" 个窗口");
+        }
+        if (text.length() == 0) text.append(item.name);
+        return text.toString();
+    }
 
-        boolean roomy = height >= 150;
-        if (account.isBalance()) {
-            textFit(canvas, account.balanceText(), 64, top + (roomy ? 88 : 74), 420, roomy ? 46 : 38, true);
-            textFit(canvas, "余额", 64, top + (roomy ? 120 : 102), 200, 15, false);
+    private void drawSummaryRow(Canvas canvas, DashboardData.Account account, float top) {
+        textFit(canvas, account.title(), LEFT, top + 34, 470, 28, true);
+        String right = account.statusText() != null ? account.statusText()
+                : (account.plan == null ? "" : account.plan);
+        if (!right.isEmpty()) textFitRight(canvas, right, RIGHT, top + 34, 220, 22);
+
+        DashboardData.Item item = account.primary();
+        String value = account.isBalance() ? account.balanceText() : (item == null ? "无额度" : item.primaryText());
+        float valueSize = account.isBalance() ? 40 : 52;
+        text(canvas, value, LEFT, top + 96, valueSize, INK, true, Paint.Align.LEFT);
+        float width = measure(value, valueSize, true);
+        String unit = null;
+        if (account.isBalance()) unit = "余额";
+        else if (item != null && item.isPercent()) unit = item.label();
+        else if (item != null) unit = item.unitLabel();
+        if (unit != null) text(canvas, unit, LEFT + width + 12, top + 96, 24, MUTED, false, Paint.Align.LEFT);
+
+        String detail = trailing(account);
+        if (detail != null) textFitRight(canvas, detail, RIGHT, top + 96, 240, 22);
+
+        float share = share(account);
+        float barWidth = 300;
+        bar(canvas, LEFT, top + 112, barWidth, 6, share);
+        String countdown = item == null ? null : item.countdown(nowSeconds());
+        if (countdown != null) textFitRight(canvas, countdown, RIGHT, top + 120, 320, 20);
+    }
+
+    private String trailing(DashboardData.Account account) {
+        if (account.isBalance()) return null;
+        DashboardData.Item item = account.primary();
+        if (item == null) return null;
+        if (account.items.size() == 2) {
+            DashboardData.Item second = account.items.get(1);
+            return second.label() + " " + second.primaryText();
+        }
+        if (account.items.size() > 2) return "+" + (account.items.size() - 1) + " 窗口";
+        return item.totalText();
+    }
+
+    private static float share(DashboardData.Account account) {
+        DashboardData.Item item = account.primary();
+        if (account.isBalance() || item == null || item.remaining == null || item.unlimited) return -1;
+        return (float) Math.min(1, Math.max(0, item.remaining / 100));
+    }
+
+    // ---------------------------------------------------------------- detail
+
+    private void drawDetail(Canvas canvas, DashboardData.Account account) {
+        textFit(canvas, account.title(), LEFT, 152, 520, 40, true);
+        if (account.plan != null) textFitRight(canvas, account.plan, RIGHT, 152, 200, 24);
+        String sub = account.items.isEmpty()
+                ? "余额 · " + account.balanceText()
+                : account.items.size() + " 个额度窗口";
+        if (account.statusText() != null) sub = account.statusText() + " · " + sub;
+        textFit(canvas, sub, LEFT, 190, 640, 24, false);
+        filledRect(canvas, LEFT, 208, RIGHT - LEFT, 2, INK);
+
+        if (account.items.isEmpty()) {
+            text(canvas, account.balanceText(), LEFT, 300, 84, INK, true, Paint.Align.LEFT);
             return;
         }
-        DashboardData.Item primary = account.primary();
-        if (primary == null) {
-            textFit(canvas, "无额度", 64, top + (roomy ? 84 : 70), 420, 24, true);
-            return;
-        }
-        textFit(canvas, primary.primaryText(), 64, top + (roomy ? 90 : 74), 330, roomy ? 44 : 36, true);
-        if (primary.isPercent()) {
-            textFit(canvas, primary.name, 64, top + (roomy ? 120 : 100), 330, 16, false);
-        } else if (primary.unitLabel() != null) {
-            textFit(canvas, primary.unitLabel(), 64, top + (roomy ? 120 : 100), 330, 15, false);
-        }
-        DashboardData.Item secondary = account.secondary();
-        if (secondary != null) {
-            textFitRight(canvas, secondary.name + " " + secondary.primaryText(), 694,
-                    top + (roomy ? 86 : 72), 300, 18);
-            if (account.items.size() > 2) {
-                textFitRight(canvas, "+" + (account.items.size() - 2) + " 个窗口", 694,
-                        top + (roomy ? 112 : 96), 300, 14);
+
+        int count = account.items.size();
+        float pitch = Math.min(122, 664f / count);
+        float start = 226 + Math.max(0, (664 - count * pitch) / 2);
+        for (int index = 0; index < count; index++) {
+            DashboardData.Item item = account.items.get(index);
+            float top = start + index * pitch;
+            textFit(canvas, item.label(), LEFT, top + 30, 380, 28, true);
+            String value = item.primaryText();
+            String unit = item.unitLabel();
+            if (value.endsWith("%")) { value = value.substring(0, value.length() - 1); unit = "%"; }
+            float width = measure(value, 32, true);
+            float unitWidth = unit == null ? 0 : measure(unit, 20, false) + 6;
+            text(canvas, value, RIGHT - unitWidth, top + 30, 32, INK, true, Paint.Align.RIGHT);
+            if (unit != null) text(canvas, unit, RIGHT, top + 30, 20, MUTED, false, Paint.Align.RIGHT);
+
+            float share = item.remaining == null || item.unlimited
+                    ? -1 : (float) Math.min(1, Math.max(0, item.remaining / 100));
+            bar(canvas, LEFT, top + 50, 300, 6, share);
+
+            String countdown = item.countdown(nowSeconds());
+            if (countdown != null) {
+                String text = countdown;
+                if (item.remaining != null && item.remaining <= 20) text += " · 偏低";
+                textFit(canvas, text, LEFT, top + 80, 420, 20, false);
             }
         }
-        String reset = primary.reset != null ? primary.reset
-                : (secondary != null ? secondary.reset : null);
-        textFit(canvas, "重置 " + (reset == null ? "未知" : reset), 64,
-                top + (roomy ? 148 : 124), 430, 15, false);
     }
 
-    private void outlinedRect(Canvas canvas, float x, float y, float width, float height, float stroke) {
+    // ------------------------------------------------------------- empty/state
+
+    private void drawEmpty(Canvas canvas) {
+        text(canvas, data.offline ? "未连接 Magpie" : "Magpie 暂无额度", LEFT, 470, 44, INK, true, Paint.Align.LEFT);
+        String detail = data.offline ? "确认设备与 Mac 在同一局域网" : "在 Magpie 登录服务商后自动出现";
+        textFit(canvas, detail, LEFT, 516, 620, 26, false);
+    }
+
+    // ----------------------------------------------------------------- footer
+
+    private void drawFooter(Canvas canvas) {
+        float rule = 912;
+        filledRect(canvas, LEFT, rule, RIGHT - LEFT, 1, HAIR);
+
+        String left = data.shownAccounts().size() + " 张卡 · " + data.providerCount() + " 服务商";
+        textFit(canvas, left, LEFT, rule + 34, 380, 22, false);
+
+        String right = "";
+        if (showDeviceBattery && batteryPercent >= 0) {
+            right = "电量 " + batteryPercent + "%" + (batteryCharging ? " ↑" : "");
+        }
+        if (data.offline) {
+            right = (right.isEmpty() ? "" : right + "   ") + "上次 " + clock(data.updatedAt);
+        }
+        if (!right.isEmpty()) textFitRight(canvas, right, RIGHT, rule + 34, 340, 22);
+
+        int pages = data.pageCount();
+        if (pages > 1) {
+            float width = pages * 18 - 8;
+            float start = DESIGN_WIDTH / 2f - width / 2f;
+            for (int index = 0; index < pages; index++) {
+                float cx = start + index * 18 + 5;
+                if (index == data.page) {
+                    paint.setStyle(Paint.Style.FILL);
+                    paint.setColor(INK);
+                    canvas.drawCircle(cx, rule + 62, 5, paint);
+                } else {
+                    paint.setStyle(Paint.Style.STROKE);
+                    paint.setStrokeWidth(2);
+                    paint.setColor(HAIR);
+                    canvas.drawCircle(cx, rule + 62, 5, paint);
+                }
+            }
+            text(canvas, (data.page + 1) + "/" + pages, RIGHT, rule + 70, 20, MUTED, true, Paint.Align.RIGHT);
+        }
+
+        String hint = data.pageCount() <= 1 ? "长按设置"
+                : data.page == 0 ? "点击翻页 · 长按设置" : "点击下一屏 · 长按设置";
+        text(canvas, hint, DESIGN_WIDTH / 2f, 1004, 20, MUTED, false, Paint.Align.CENTER);
+    }
+
+    private static long nowSeconds() { return System.currentTimeMillis() / 1000L; }
+
+    // ------------------------------------------------------------- primitives
+
+    private void outlinedRect(Canvas canvas, float x, float y, float width, float height,
+                              float stroke, float radius) {
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(stroke);
         paint.setColor(INK);
+        rect.set(x + stroke / 2, y + stroke / 2, x + width - stroke / 2, y + height - stroke / 2);
+        canvas.drawRoundRect(rect, radius, radius, paint);
+    }
+
+    /** A rounded share bar: light track, ink fill, nothing when the share is unknown. */
+    private void bar(Canvas canvas, float x, float y, float width, float height, float share) {
         rect.set(x, y, x + width, y + height);
-        canvas.drawRect(rect, paint);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(TRACK);
+        canvas.drawRoundRect(rect, height / 2, height / 2, paint);
+        if (share < 0) return;
+        rect.set(x, y, x + Math.max(height, width * share), y + height);
+        paint.setColor(INK);
+        canvas.drawRoundRect(rect, height / 2, height / 2, paint);
     }
 
     private void filledRect(Canvas canvas, float x, float y, float width, float height, int color) {
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(color);
-        canvas.drawRect(x, y, x + width, y + height, paint);
+        canvas.drawRect(x, y, x + Math.max(0, width), y + height, paint);
     }
 
     private void text(Canvas canvas, String value, float x, float y, float size, int color,
@@ -228,7 +421,7 @@ final class DashboardView extends View {
 
     private float fittedSize(String value, float maxWidth, float size, boolean bold) {
         float current = size;
-        while (current > 9 && measure(value, current, bold) > maxWidth) current *= .92f;
+        while (current > 12 && measure(value, current, bold) > maxWidth) current *= .92f;
         return current;
     }
 
@@ -238,6 +431,6 @@ final class DashboardView extends View {
     }
 
     private void textFitRight(Canvas canvas, String value, float x, float y, float maxWidth, float size) {
-        text(canvas, value, x, y, fittedSize(value, maxWidth, size, true), INK, true, Paint.Align.RIGHT);
+        text(canvas, value, x, y, fittedSize(value, maxWidth, size, true), MUTED, true, Paint.Align.RIGHT);
     }
 }

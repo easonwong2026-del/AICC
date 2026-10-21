@@ -5,6 +5,9 @@ import org.json.JSONObject;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * The bridge's generic quota snapshot (schema 3): every provider Magpie
@@ -22,7 +25,13 @@ final class DashboardData {
         String reset;
         String unit;
         String pool;
+        /** Set when two windows of one account share a name; disambiguates them. */
+        String qualifier;
         Double remaining;
+        Double amount;
+        Double limit;
+        /** Epoch seconds Magpie reported for the next reset, when it did. */
+        Double resetAt;
         boolean unlimited;
 
         boolean isPercent() {
@@ -35,6 +44,47 @@ final class DashboardData {
             if (display != null && !display.isEmpty()) return display;
             if (remaining != null) return Math.round(remaining) + "%";
             return "—";
+        }
+
+        /** "7 days" as a person reads it: "7 天". Vendor names are kept as-is. */
+        String windowLabel() {
+            String key = name.trim().toLowerCase(Locale.ROOT);
+            Matcher match = WINDOW.matcher(key);
+            if (match.find()) {
+                String count = match.group(1);
+                String unit = match.group(2);
+                if (unit.startsWith("day")) return count + " 天";
+                if (unit.startsWith("hour")) return count + " 小时";
+                if (unit.startsWith("week")) return count + " 周";
+                if (unit.startsWith("month")) return count + " 月";
+                return count + " 分";
+            }
+            if (key.startsWith("credit")) return "积分";
+            if (key.startsWith("prompt")) return "次";
+            return name;
+        }
+
+        /** The label to draw: the window name, plus its pool when names repeat. */
+        String label() {
+            return qualifier == null ? windowLabel() : windowLabel() + " · " + qualifier;
+        }
+
+        /** "3 天 4 时后重置"; falls back to the vendor's own text when no epoch. */
+        String countdown(long nowSeconds) {
+            if (resetAt == null) return reset == null || reset.isEmpty() ? null : reset;
+            long seconds = Math.round(resetAt) - nowSeconds;
+            if (seconds <= 0) return "即将重置";
+            long minutes = seconds / 60;
+            if (minutes < 60) return Math.max(1, minutes) + " 分后重置";
+            long hours = minutes / 60;
+            if (hours < 24) return hours + " 时 " + (minutes % 60) + " 分后重置";
+            return (hours / 24) + " 天 " + (hours % 24) + " 时后重置";
+        }
+
+        /** "共 4727" for a counted window, null when there is nothing to total. */
+        String totalText() {
+            if (unlimited || limit == null || limit <= 0 || unit == null) return null;
+            return "共 " + Math.round(limit);
         }
 
         /** Magpie names units in English; the panel is Chinese, like the widget. */
@@ -86,6 +136,20 @@ final class DashboardData {
             if (deferred) return "本轮跳过";
             if (stale) return "缓存";
             return null;
+        }
+    }
+
+    private static final Pattern WINDOW = Pattern.compile(
+            "^(\\d+)\\s*(day|days|hour|hours|week|weeks|month|months|minute|minutes|min|mins)");
+
+    /** One account together with the window the panel leads with. */
+    static final class Slot {
+        final Account account;
+        final Item item;
+
+        Slot(Account account, Item item) {
+            this.account = account;
+            this.item = item;
         }
     }
 
@@ -161,6 +225,14 @@ final class DashboardData {
             Item item = item(items.optJSONObject(index));
             if (item != null) account.items.add(item);
         }
+        // "7 天" appears once per pool on a pooled account; tell them apart.
+        for (Item item : account.items) {
+            int same = 0;
+            for (Item other : account.items) {
+                if (other.windowLabel().equals(item.windowLabel())) same++;
+            }
+            if (same > 1 && item.pool != null && !item.pool.isEmpty()) item.qualifier = item.pool;
+        }
         if (account.balance == null && "balance".equals(kind)) {
             JSONArray parts = row.optJSONArray("balance_parts");
             StringBuilder joined = new StringBuilder();
@@ -192,6 +264,9 @@ final class DashboardData {
         item.reset = optional(row, "reset");
         item.unit = optional(row, "unit");
         item.pool = optional(row, "pool");
+        item.resetAt = number(row.opt("resets_at"));
+        item.amount = number(row.opt("amount"));
+        item.limit = number(row.opt("limit"));
         return item;
     }
 
@@ -276,7 +351,7 @@ final class DashboardData {
     /** Everything that should repaint the panel, and nothing that should not. */
     private static String key(DashboardData data) {
         StringBuilder key = new StringBuilder(data.state).append('|').append(data.available ? 1 : 0)
-                .append('|').append(data.displayLimit);
+                .append('|').append(data.displayLimit).append('|').append(data.page);
         for (Account account : data.accounts) {
             key.append('|').append(account.provider).append('/').append(account.label)
                     .append('/').append(account.kind).append('/').append(account.stale ? 1 : 0)
@@ -284,7 +359,7 @@ final class DashboardData {
                     .append('/').append(account.plan).append('/').append(account.balance);
             for (Item item : account.items) {
                 key.append('[').append(item.name).append('=').append(item.primaryText())
-                        .append('@').append(item.reset).append(']');
+                        .append('@').append(item.reset).append('#').append(item.resetAt).append(']');
             }
         }
         return key.toString();
@@ -295,23 +370,90 @@ final class DashboardData {
         return new ArrayList<>(accounts.subList(0, Math.max(0, displayLimit)));
     }
 
+    /**
+     * Accounts that need a page of their own: the ones with more windows than the
+     * overview can show.  An account with one or two windows is already told in
+     * full by its summary row (and by the hero caption), so an extra page would
+     * only be a near-empty screen.
+     */
+    List<Account> detailAccounts() {
+        List<Account> detail = new ArrayList<>();
+        for (Account account : shownAccounts()) {
+            if (account.items.size() >= 3) detail.add(account);
+        }
+        return detail;
+    }
+
+    /** Page 0 is the overview; each account with three or more windows follows. */
     int pageCount() {
-        List<Account> shown = shownAccounts();
-        return Math.max(1, (shown.size() + CARDS_PER_PAGE - 1) / CARDS_PER_PAGE);
+        return 1 + detailAccounts().size();
     }
 
     void clampPage() {
         page = Math.max(0, Math.min(page, pageCount() - 1));
     }
 
-    List<Account> visibleAccounts() {
-        List<Account> shown = shownAccounts();
-        int start = page * CARDS_PER_PAGE;
-        if (start >= shown.size()) return new ArrayList<>();
-        return new ArrayList<>(shown.subList(start, Math.min(shown.size(), start + CARDS_PER_PAGE)));
+    /** The account a detail page is about, or null on the overview. */
+    Account detailAccount() {
+        List<Account> detail = detailAccounts();
+        int index = page - 1;
+        return index >= 0 && index < detail.size() ? detail.get(index) : null;
+    }
+
+    /**
+     * The window the overview leads with: whatever is closest to running out.
+     * Ties go to the window that resets first, so a stale-but-full account never
+     * takes the hero slot from a nearly empty one.
+     */
+    Slot hero() {
+        Slot best = null;
+        for (Account account : shownAccounts()) {
+            for (Item item : account.items) {
+                if (item.remaining == null || item.unlimited) continue;
+                if (best == null) { best = new Slot(account, item); continue; }
+                double left = item.remaining;
+                double current = best.item.remaining;
+                if (left < current) { best = new Slot(account, item); continue; }
+                if (left == current && resetTime(item) < resetTime(best.item)) {
+                    best = new Slot(account, item);
+                }
+            }
+        }
+        if (best != null) return best;
+        for (Account account : shownAccounts()) {
+            if (!account.items.isEmpty()) return new Slot(account, account.items.get(0));
+        }
+        return null;
+    }
+
+    private static double resetTime(Item item) {
+        return item.resetAt == null ? Double.MAX_VALUE : item.resetAt;
+    }
+
+    /** Up to three accounts under the hero, never the hero's own account. */
+    List<Account> summaryAccounts() {
+        Slot hero = hero();
+        List<Account> rows = new ArrayList<>();
+        for (Account account : shownAccounts()) {
+            if (hero != null && account == hero.account) continue;
+            rows.add(account);
+        }
+        return rows;
+    }
+
+    int hiddenAccountCount() {
+        return Math.max(0, summaryAccounts().size() - DashboardView.SUMMARY_ROWS);
+    }
+
+    int providerCount() {
+        List<String> seen = new ArrayList<>();
+        for (Account account : shownAccounts()) {
+            if (!seen.contains(account.provider)) seen.add(account.provider);
+        }
+        return seen.size();
     }
 
     void nextPage() {
-        if (pageCount() > 1) page = (page + 1) % pageCount();
+        page = (page + 1) % pageCount();
     }
 }
