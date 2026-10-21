@@ -1,8 +1,8 @@
 {
-  "version": "2.10.2",
-  "build": "15",
+  "version": "2.11.0",
+  "build": "16",
   "minimumSystemVersion": "14.0",
-  "downloadURL": "https://github.com/easonwong2026-del/AICC/releases/download/v2.10.2/AICC-2.10.2.dmg",
-  "releaseNotesURL": "https://github.com/easonwong2026-del/AICC/releases/tag/v2.10.2",
-  "publishedAt": "2026-10-05T00:59:18Z"
+  "downloadURL": "https://github.com/easonwong2026-del/AICC/releases/download/v2.11.0/AICC-2.11.0.dmg",
+  "releaseNotesURL": "https://github.com/easonwong2026-del/AICC/releases/tag/v2.11.0",
+  "publishedAt": "2026-10-21T08:18:56Z"
 }
