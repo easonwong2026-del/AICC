@@ -24,6 +24,9 @@ struct WidgetPalette {
     let ink: Color
     let muted: Color
     let warning: Color
+    /// True when the system is rendering us in accented mode: colours are gone.
+    var accented: Bool = false
+    var isDark: Bool = true
 
     /// `accented` is what macOS 26 does to desktop widgets whenever another app
     /// is in front ("Dim widgets on desktop" = Automatically): the system tints
@@ -38,7 +41,9 @@ struct WidgetPalette {
                                  edge: Color(.sRGB, white: 1, opacity: 0.26),
                                  ink: Color(.sRGB, white: 1, opacity: 1),
                                  muted: Color(.sRGB, white: 1, opacity: 0.66),
-                                 warning: Color(.sRGB, white: 1, opacity: 0.92))
+                                 warning: Color(.sRGB, white: 1, opacity: 0.92),
+                                 accented: true,
+                                 isDark: true)
         }
         return scheme == .dark
             ? WidgetPalette(background: Color(red: 0.09, green: 0.09, blue: 0.10),
@@ -46,13 +51,58 @@ struct WidgetPalette {
                             edge: Color(.sRGB, white: 1, opacity: 0.10),
                             ink: Color(.sRGB, white: 0.98, opacity: 1),
                             muted: Color(.sRGB, white: 0.68, opacity: 1),
-                            warning: Color(red: 1.0, green: 0.68, blue: 0.30))
+                            warning: Color(red: 1.0, green: 0.62, blue: 0.28),
+                            isDark: true)
             : WidgetPalette(background: Color(red: 0.95, green: 0.95, blue: 0.93),
                             card: Color.white,
                             edge: Color(.sRGB, white: 0, opacity: 0.08),
                             ink: Color(red: 0.07, green: 0.07, blue: 0.08),
                             muted: Color(red: 0.42, green: 0.42, blue: 0.44),
-                            warning: Color(red: 0.72, green: 0.37, blue: 0.02))
+                            warning: Color(red: 0.72, green: 0.37, blue: 0.02),
+                            isDark: false)
+    }
+
+    // MARK: - Provider colour
+
+    /// One hue per provider, so four cards are four colours instead of four grey
+    /// bars.  Known providers get a hand-picked hue; anything else gets a stable
+    /// hue derived from its id, so a new Magpie plugin is never colourless.
+    private static let knownHues: [String: Double] = [
+        "codex": 0.57,          // blue
+        "workbuddy": 0.40,      // green
+        "antigravity": 0.74,    // violet
+        "zcode": 0.68, "zhipu": 0.68, "glm": 0.68,
+        "kiro": 0.08,           // amber
+        "deepseek": 0.62,
+        "minimax": 0.02,        // red
+        "gemini": 0.60,
+        "claude": 0.09,
+        "commandcode": 0.52,
+        "cursor": 0.55,
+        "copilot": 0.45,
+    ]
+
+    func accent(for provider: String) -> Color {
+        // Accented rendering tints everything white; a hue would be thrown away.
+        if accented { return ink }
+        let key = provider.lowercased()
+        let hue = Self.knownHues[key]
+            ?? Self.knownHues.first { key.hasPrefix($0.key) }?.value
+            ?? Self.hue(for: key)
+        return Color(hue: hue, saturation: isDark ? 0.58 : 0.74, brightness: isDark ? 1.0 : 0.66)
+    }
+
+    /// Deterministic hue for an unknown provider id.
+    private static func hue(for provider: String) -> Double {
+        var hash: UInt64 = 5381
+        for byte in provider.utf8 { hash = hash &* 33 &+ UInt64(byte) }
+        return Double(hash % 360) / 360
+    }
+
+    /// A window that is nearly used up turns amber, whatever its provider.
+    func tone(for provider: String, remaining: Double?) -> Color {
+        if !accented, let remaining, remaining <= 15 { return warning }
+        return accent(for: provider)
     }
 }
 
@@ -173,6 +223,9 @@ struct QuotaCardCell: View {
     private var card: QuotaCard { slot.card }
     private var item: QuotaItem { slot.primary }
 
+    /// The provider's own hue, ambered once the window is nearly used up.
+    private var tone: Color { palette.tone(for: card.provider, remaining: item.remaining) }
+
     private var status: (text: String, color: Color)? {
         if card.failed { return ("读取失败", palette.warning) }
         if card.deferred { return ("本轮跳过", palette.warning) }
@@ -188,10 +241,11 @@ struct QuotaCardCell: View {
     }
 
     private var trailingDetail: String? {
-        if let second = slot.secondary {
-            return "\(second.name) \(second.primaryText)"
-        }
-        return item.totalText
+        guard let second = slot.secondary else { return item.totalText }
+        // The small widget has ~55pt for this: "7 days 74%" truncates, so the
+        // window name is compressed the way a person would write it.
+        let name = compact ? WidgetWindow.short(second.name) : second.name
+        return "\(name) \(second.primaryText)"
     }
 
     var body: some View {
@@ -201,7 +255,7 @@ struct QuotaCardCell: View {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Text(card.title)
                     .font(.system(size: hero ? 13 : compact ? 9.5 : 10.5, weight: .semibold))
-                    .foregroundStyle(palette.ink)
+                    .foregroundStyle(palette.accent(for: card.provider))
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                 Spacer(minLength: 2)
@@ -241,7 +295,7 @@ struct QuotaCardCell: View {
             }
 
             if let share = item.remaining, !item.unlimited {
-                ShareBar(share: share, palette: palette)
+                ShareBar(share: share, tone: tone, track: palette.ink.opacity(0.12))
             }
 
             if let reset = WidgetClock.short(item.resetsAt) ?? WidgetClock.short(slot.secondary?.resetsAt) {
@@ -270,9 +324,33 @@ struct QuotaCardCell: View {
     }
 }
 
+/// Window names come from the vendor ("5 hours", "7 days", "Credits").  In the
+/// small widget they have to fit in a few characters, so the common ones get a
+/// short form and everything else is shortened without losing its identity.
+enum WidgetWindow {
+    static func short(_ name: String) -> String {
+        let lower = name.lowercased()
+        if let count = leadingNumber(lower) {
+            if lower.contains("hour") { return "\(count)时" }
+            if lower.contains("day") { return "\(count)天" }
+            if lower.contains("week") { return "\(count)周" }
+            if lower.contains("month") { return "\(count)月" }
+            if lower.contains("min") { return "\(count)分" }
+        }
+        if lower.contains("hour") { return "小时" }
+        if lower.contains("day") { return "天" }
+        if lower.contains("week") { return "周" }
+        return name.count > 6 ? String(name.prefix(5)) + "…" : name
+    }
+
+    private static func leadingNumber(_ text: String) -> String? {
+        let digits = text.prefix { $0.isNumber || $0 == "." }
+        return digits.isEmpty ? nil : String(digits)
+    }
+}
+
 /// Magpie reports units in English ("credits", "prompts"); the panel is Chinese.
-enum WidgetUnit {
-    static func localized(_ unit: String) -> String {
+enum WidgetUnit {    static func localized(_ unit: String) -> String {
         switch unit.lowercased() {
         case "credits", "credit": return "积分"
         case "prompts", "prompt", "requests", "request", "calls": return "次"
@@ -285,14 +363,15 @@ enum WidgetUnit {
 /// A thin share bar for percentage windows; silent when the share is unknown.
 struct ShareBar: View {
     let share: Double
-    let palette: WidgetPalette
+    let tone: Color
+    let track: Color
 
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .leading) {
-                Capsule().fill(palette.ink.opacity(0.08))
+                Capsule().fill(track)
                 Capsule()
-                    .fill(palette.ink.opacity(0.42))
+                    .fill(tone)
                     .frame(width: max(2, geometry.size.width * min(1, max(0, share / 100))))
             }
         }
