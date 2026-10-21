@@ -177,6 +177,24 @@ ZCode 紫蓝、Kiro 琥珀、DeepSeek 蓝、MiniMax 红…），用于**服务�
 
 顺带修掉小尺寸 `7 days 7…` 的截断：窗口名压成 `7天 / 5时 / 2周`。
 
+### 真机验收（Poke4S，2026-10-21）
+
+USB 连接 `46C8BEA3`（BOOX Poke4S，Android 11），用本机构建的 release APK（debug 证书签名，
+与既有安装同签名，`adb install -r` 保留配对数据）覆盖安装，逐项实测：
+
+| 项 | 结果 |
+| --- | --- |
+| 覆盖安装 / 升级 | 通过，包身份 `com.aieink.pokedashboard`、versionCode 12 未变 |
+| UDP 发现（8766） | 通过，日志 `Candidate verified: http://192.168.0.18:8765` |
+| 8 位配对码配对 | 通过（本机 `POST /api/pairing` 生成，设备输入后 `配对成功`） |
+| 通用额度渲染 | 通过：`5 张 · Codex / WorkBuddy / Antigravity`，Codex 79%（5 hours，右 7 days 70%）、WorkBuddy 4650/4222/3717 积分、Antigravity 100%（Gemini 3.8 Flash，+5 个窗口） |
+| 分页 | 通过：4 张/页，`1/2 · 点击翻页`，第 2 页正常 |
+| 离线缓存 | 通过：断网重启后 `OFFLINE` + `离线 · 保留上次额度`，仍显示上次额度；恢复网络后回到 `SYNC` |
+| 单位中文化 | 修复：`credits` 显示为「积分」（与 Mac 小组件一致），`prompts/requests` → 「次」 |
+
+本轮同时发现并修掉：`credits` 在墨水屏上仍显示英文。其余仍待真机验证：BOOX 闪刷校准、休眠/唤醒、
+长时功耗与残影。
+
 ## 四、未完成（真机/安装态/上游）
 
 1. **macOS 安装态**：未把候选 DMG 安装到系统并观察桌面 Widget 的真实调度、深浅色、多桌面场景。

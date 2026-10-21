@@ -36,6 +36,15 @@ final class DashboardData {
             if (remaining != null) return Math.round(remaining) + "%";
             return "—";
         }
+
+        /** Magpie names units in English; the panel is Chinese, like the widget. */
+        String unitLabel() {
+            if (unit == null || unit.isEmpty()) return null;
+            String key = unit.trim().toLowerCase(java.util.Locale.ROOT);
+            if (key.startsWith("credit")) return "积分";
+            if (key.startsWith("prompt") || key.startsWith("request") || key.startsWith("call")) return "次";
+            return unit;
+        }
     }
 
     static final class Account {

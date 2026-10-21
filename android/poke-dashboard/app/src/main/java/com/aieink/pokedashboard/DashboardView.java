@@ -177,8 +177,8 @@ final class DashboardView extends View {
         textFit(canvas, primary.primaryText(), 64, top + (roomy ? 90 : 74), 330, roomy ? 44 : 36, true);
         if (primary.isPercent()) {
             textFit(canvas, primary.name, 64, top + (roomy ? 120 : 100), 330, 16, false);
-        } else if (primary.unit != null) {
-            textFit(canvas, primary.unit, 64, top + (roomy ? 120 : 100), 330, 15, false);
+        } else if (primary.unitLabel() != null) {
+            textFit(canvas, primary.unitLabel(), 64, top + (roomy ? 120 : 100), 330, 15, false);
         }
         DashboardData.Item secondary = account.secondary();
         if (secondary != null) {

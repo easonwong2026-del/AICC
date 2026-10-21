@@ -55,6 +55,21 @@ public final class DashboardDataTest {
         assertEquals("22 / 4727", item.display);
     }
 
+    @Test public void unitsAreShownInChineseLikeTheWidget() throws Exception {
+        String body = snapshot(card("workbuddy", "subscription", "a***",
+                "{\"name\":\"Credits\",\"remaining\":99.5,\"remaining_text\":\"4705\",\"unit\":\"credits\"}"));
+        DashboardData.Account account = DashboardData.parse(body, "all").accounts.get(0);
+        assertEquals("积分", account.primary().unitLabel());
+
+        DashboardData.Item prompts = new DashboardData.Item();
+        prompts.unit = "prompts";
+        assertEquals("次", prompts.unitLabel());
+        DashboardData.Item tokens = new DashboardData.Item();
+        tokens.unit = "tokens";
+        assertEquals("tokens", tokens.unitLabel());
+        assertNull(new DashboardData.Item().unitLabel());
+    }
+
     @Test public void balanceIsMoneyAndNeverAShare() throws Exception {
         String body = snapshot("{\"id\":\"magpie-d\",\"provider\":\"deepseek\",\"provider_name\":\"DeepSeek\","
                 + "\"account_label\":\"d***\",\"kind\":\"balance\",\"balance\":\"58.70 CNY\",\"items\":[],"
