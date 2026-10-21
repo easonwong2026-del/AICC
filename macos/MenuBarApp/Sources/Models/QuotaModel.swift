@@ -24,6 +24,9 @@ struct QuotaItem: Codable, Equatable, Sendable {
     let name: String
     let used: Double?
     let remaining: Double?
+    /// What is left in the vendor's own unit ("4705" credits, "91%"), already
+    /// normalized by the bridge and by `MagpieQuotaParser`.
+    let remainingText: String?
     let display: String?
     let amount: Double?
     let limit: Double?
@@ -33,15 +36,29 @@ struct QuotaItem: Codable, Equatable, Sendable {
     let resetsAt: Double?
     let pool: String?
 
-    /// What the vendor told us, when it told us its own count ("2.27 / 4723").
+    enum CodingKeys: String, CodingKey {
+        case name, used, remaining, display, amount, limit, unit, unlimited, reset, pool
+        case remainingText = "remaining_text"
+        case resetsAt = "resets_at"
+    }
+
+    /// What is left: the vendor's count when it counts in one, else its own
+    /// text, else the share.  Never "used / total".
     var primaryText: String {
         if unlimited { return "∞" }
+        if let remainingText, !remainingText.isEmpty { return remainingText }
         if let display, !display.isEmpty { return display }
         if let remaining { return String(format: "%.0f%%", remaining) }
         return "—"
     }
 
-    var isPercentage: Bool { !unlimited && display == nil && remaining != nil }
+    var isPercentage: Bool { !unlimited && remaining != nil && remainingText?.hasSuffix("%") != false }
+
+    /// "共 4723" for a counted window, nil otherwise.
+    var totalText: String? {
+        guard !unlimited, let limit, limit > 0, unit != nil else { return nil }
+        return "共 " + String(format: "%.0f", limit)
+    }
 
     var secondaryText: String? {
         guard let reset else { return nil }
@@ -80,6 +97,12 @@ struct QuotaCard: Codable, Equatable, Sendable, Identifiable {
     }
 
     var title: String { "\(providerName) · \(accountLabel)" }
+
+    /// Stable per-window key for the user's display selection.  Window names are
+    /// the vendor's and may repeat, so the pool is part of the identity.
+    func key(for item: QuotaItem) -> String {
+        "\(id)|\(item.name)|\(item.pool ?? "")"
+    }
     var primaryItem: QuotaItem? { items.first }
     var secondaryItem: QuotaItem? { items.count > 1 ? items[1] : nil }
     var extraWindows: Int { max(0, items.count - 2) }
@@ -91,6 +114,13 @@ struct QuotaCard: Codable, Equatable, Sendable, Identifiable {
         if deferred { return "本轮跳过" }
         if stale { return "缓存" }
         return nil
+    }
+
+    /// A balance card drawn through the same slot shape as a window card.
+    var balanceItem: QuotaItem {
+        QuotaItem(name: "余额", used: nil, remaining: nil, remainingText: balanceText,
+                  display: nil, amount: nil, limit: nil, unit: nil, unlimited: false,
+                  reset: nil, resetsAt: nil, pool: nil)
     }
 
     var balanceText: String {
@@ -105,6 +135,16 @@ struct QuotaCard: Codable, Equatable, Sendable, Identifiable {
         copy.stale = true
         return copy
     }
+}
+
+/// One drawn card: an account together with the window(s) the user picked.
+struct QuotaSlot: Equatable, Sendable {
+    let card: QuotaCard
+    let primary: QuotaItem
+    let secondary: QuotaItem?
+    let extra: Int
+
+    var id: String { card.id }
 }
 
 struct QuotaSnapshot: Codable, Equatable, Sendable {
@@ -186,19 +226,60 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
         return copy
     }
 
-    /// Cards to draw, honouring the provider filter and the family's capacity.
-    func cards(provider: String? = nil, limit: Int) -> (shown: [QuotaCard], hidden: Int) {
+    /// What to draw, honouring the user's window selection, the optional
+    /// provider filter and the family's capacity.
+    ///
+    /// A selection is a list of `QuotaCard.key(for:)` values in the order the
+    /// user ticked them.  A card shows at most two of its selected windows, so
+    /// the card keeps its shape while the choice is per window.  A key that no
+    /// longer exists (a vendor renamed its window) is skipped rather than
+    /// blanking the widget; no usable key at all falls back to automatic.
+    func slots(selection: [String], provider: String? = nil, limit: Int) -> (shown: [QuotaSlot], hidden: Int) {
         var pool = accounts
         if let provider, !provider.isEmpty {
             pool = pool.filter { $0.provider == provider }
         }
-        // Last served first, as Magpie's own panel orders them; the rest keep
-        // the gateway's order so a refresh never reshuffles the widget.
-        let ranked = pool.enumerated().sorted { left, right in
+        var cards: [QuotaCard] = []
+        var chosen: [String: [QuotaItem]] = [:]
+        if !selection.isEmpty {
+            var byKey: [String: (QuotaCard, QuotaItem)] = [:]
+            for card in pool {
+                for item in card.items { byKey[card.key(for: item)] = (card, item) }
+            }
+            for key in selection {
+                guard let (card, item) = byKey[key] else { continue }
+                if chosen[card.id] == nil {
+                    cards.append(card)
+                    chosen[card.id] = []
+                }
+                guard let picked = chosen[card.id], picked.count < 2 else { continue }
+                if picked.contains(where: { $0.name == item.name && $0.pool == item.pool }) { continue }
+                chosen[card.id] = picked + [item]
+            }
+        }
+        if cards.isEmpty {
+            cards = pool
+            for card in pool { chosen[card.id] = Array(card.items.prefix(2)) }
+        }
+        // Last served first, then the order the user chose.
+        let ranked = cards.enumerated().sorted { left, right in
             if left.element.last != right.element.last { return left.element.last }
             return left.offset < right.offset
         }.map { $0.element }
-        return (Array(ranked.prefix(limit)), max(0, ranked.count - limit))
+
+        let slots: [QuotaSlot] = ranked.compactMap { card in
+            var items = chosen[card.id] ?? []
+            // A balance card has no window: it is still a card, with the amount
+            // standing in for the leading value rather than being dropped.
+            if items.isEmpty, card.isBalance {
+                items = [card.balanceItem]
+            }
+            guard let first = items.first else { return nil }
+            return QuotaSlot(card: card, primary: first,
+                             secondary: items.count > 1 ? items[1] : nil,
+                             extra: max(0, card.items.count - items.count))
+        }
+        return (Array(slots.prefix(limit)), max(0, slots.count - limit))
     }
 
     static func placeholder() -> QuotaSnapshot {
@@ -327,13 +408,32 @@ enum MagpieQuotaParser {
         if remaining == nil, !unlimited, let used { remaining = percent(100 - used) }
         let display = (window["display"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resetsAt = date(window["resetsAt"])
+        let unitText = (window["unit"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let limitValue = number(window["limit"])
+        var remainingText: String?
+        if !unlimited {
+            if let limitValue, let unitText, !unitText.isEmpty {
+                // Magpie omits `amount` when nothing is used.
+                var usedCount = number(window["amount"])
+                if usedCount == nil, remaining == 100 || used == 0 { usedCount = 0 }
+                if let usedCount { remainingText = count(max(0, limitValue - usedCount)) }
+            }
+            if remainingText == nil {
+                if let display, !display.isEmpty {
+                    remainingText = String(display.prefix(32))
+                } else if let remaining {
+                    remainingText = String(Int(remaining.rounded())) + "%"
+                }
+            }
+        }
         return QuotaItem(name: String(name.prefix(40)),
                          used: unlimited ? nil : used,
                          remaining: remaining,
+                         remainingText: remainingText,
                          display: (display?.isEmpty == false) ? String(display!.prefix(32)) : nil,
                          amount: number(window["amount"]),
                          limit: number(window["limit"]),
-                         unit: (window["unit"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                         unit: unitText,
                          unlimited: unlimited,
                          reset: resetsAt.map(clock),
                          resetsAt: resetsAt,
@@ -349,6 +449,16 @@ enum MagpieQuotaParser {
             return QuotaBalancePart(label: (label?.isEmpty == false) ? label : nil, text: String(text.prefix(32)),
                                     percent: percent(row["percent"]))
         }
+    }
+
+    /// Same rule as `_count` in collectors/magpie.py: whole numbers, one
+    /// decimal when the count is small.
+    static func count(_ value: Double) -> String {
+        if value >= 100 { return String(Int(value.rounded())) }
+        var text = String(format: "%.1f", value)
+        while text.hasSuffix("0") { text.removeLast() }
+        if text.hasSuffix(".") { text.removeLast() }
+        return text
     }
 
     static func number(_ value: Any?) -> Double? {

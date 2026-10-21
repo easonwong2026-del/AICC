@@ -46,6 +46,15 @@ public final class DashboardDataTest {
         assertTrue(data.accounts.get(3).isBalance());
     }
 
+    @Test public void creditsReportWhatIsLeftNotUsedOverTotal() throws Exception {
+        String body = snapshot(card("workbuddy", "subscription", "a***",
+                "{\"name\":\"Credits\",\"remaining\":99.5,\"display\":\"22 / 4727\","
+                        + "\"remaining_text\":\"4705\",\"unit\":\"credits\",\"limit\":4727}"));
+        DashboardData.Item item = DashboardData.parse(body, "all").accounts.get(0).primary();
+        assertEquals("4705", item.primaryText());
+        assertEquals("22 / 4727", item.display);
+    }
+
     @Test public void balanceIsMoneyAndNeverAShare() throws Exception {
         String body = snapshot("{\"id\":\"magpie-d\",\"provider\":\"deepseek\",\"provider_name\":\"DeepSeek\","
                 + "\"account_label\":\"d***\",\"kind\":\"balance\",\"balance\":\"58.70 CNY\",\"items\":[],"

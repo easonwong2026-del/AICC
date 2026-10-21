@@ -158,6 +158,13 @@ def display_label(row):
     return mask_identity(row.get("user")) or "***"
 
 
+def _count(value):
+    """A count as a person reads it: whole numbers, one decimal when small."""
+    if value >= 100:
+        return str(int(round(value)))
+    return ("%.1f" % value).rstrip("0").rstrip(".")
+
+
 def _item(window):
     """One window as the clients render it, or None when unreadable."""
     if not isinstance(window, dict):
@@ -183,13 +190,32 @@ def _item(window):
     pool = window.get("pool")
     pool = pool.strip()[:32] if isinstance(pool, str) and pool.strip() else None
     resets_at = timestamp(window.get("resetsAt"))
+    amount, limit = _number(window.get("amount")), _number(window.get("limit"))
+    # What is left, in the vendor's own unit when it counts in one: a credits
+    # window reads "4720", not "2.27 / 4723" (used / total).
+    remaining_text = None
+    if not unlimited:
+        if limit is not None and unit:
+            # Magpie omits `amount` when it is 0, so a 0% window still means
+            # "nothing used", not "unknown".
+            used_count = amount
+            if used_count is None and (remaining == 100 or used == 0):
+                used_count = 0.0
+            if used_count is not None:
+                remaining_text = _count(max(0.0, limit - used_count))
+        if remaining_text is None:
+            if display:
+                remaining_text = display
+            elif remaining is not None:
+                remaining_text = str(int(round(remaining))) + "%"
     return {
         "name": name,
         "used": None if unlimited else used,
         "remaining": remaining,
+        "remaining_text": remaining_text,
         "display": display,
-        "amount": _number(window.get("amount")),
-        "limit": _number(window.get("limit")),
+        "amount": amount,
+        "limit": limit,
         "unit": unit,
         "unlimited": unlimited,
         "resets_at": resets_at,

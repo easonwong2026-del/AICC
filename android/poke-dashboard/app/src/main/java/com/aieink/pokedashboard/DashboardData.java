@@ -18,6 +18,7 @@ final class DashboardData {
     static final class Item {
         String name = "";
         String display;
+        String remainingText;
         String reset;
         String unit;
         String pool;
@@ -30,6 +31,7 @@ final class DashboardData {
 
         String primaryText() {
             if (unlimited) return "∞";
+            if (remainingText != null && !remainingText.isEmpty()) return remainingText;
             if (display != null && !display.isEmpty()) return display;
             if (remaining != null) return Math.round(remaining) + "%";
             return "—";
@@ -176,8 +178,8 @@ final class DashboardData {
         item.remaining = percent(row.opt("remaining"));
         Double used = percent(row.opt("used"));
         if (!item.unlimited && item.remaining == null && used != null) item.remaining = percent(100 - used);
-        String display = optional(row, "display");
-        item.display = display;
+        item.display = optional(row, "display");
+        item.remainingText = optional(row, "remaining_text");
         item.reset = optional(row, "reset");
         item.unit = optional(row, "unit");
         item.pool = optional(row, "pool");

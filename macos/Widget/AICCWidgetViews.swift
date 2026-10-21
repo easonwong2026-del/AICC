@@ -16,8 +16,7 @@ struct AICCWidgetEntry: TimelineEntry {
 
 /// Explicit colours instead of semantic ones: a desktop widget is composited
 /// with the wallpaper's vibrant material, where `.primary`/`.secondary` can
-/// resolve to the same colour as a custom fill.  Owning both the background
-/// and the ink keeps every state readable, in light and dark alike.
+/// resolve to the same colour as a custom fill.
 struct WidgetPalette {
     let background: Color
     let card: Color
@@ -58,8 +57,10 @@ struct AICCWidgetView: View {
         entry.configuration.capacity(familyLimit: family == .systemMedium ? 4 : 2)
     }
 
-    private var selection: (shown: [QuotaCard], hidden: Int) {
-        entry.snapshot.cards(provider: entry.configuration.provider, limit: limit)
+    private var selection: (shown: [QuotaSlot], hidden: Int) {
+        entry.snapshot.slots(selection: entry.configuration.selection,
+                             provider: entry.configuration.provider,
+                             limit: limit)
     }
 
     var body: some View {
@@ -67,9 +68,9 @@ struct AICCWidgetView: View {
             if selection.shown.isEmpty {
                 EmptyQuotaView(snapshot: entry.snapshot, palette: palette)
             } else if family == .systemMedium {
-                MediumQuotaView(entry: entry, cards: selection.shown, hidden: selection.hidden, palette: palette)
+                MediumQuotaView(entry: entry, slots: selection.shown, hidden: selection.hidden, palette: palette)
             } else {
-                SmallQuotaView(entry: entry, cards: selection.shown, hidden: selection.hidden, palette: palette)
+                SmallQuotaView(entry: entry, slots: selection.shown, hidden: selection.hidden, palette: palette)
             }
         }
         .padding(.horizontal, 12)
@@ -80,19 +81,19 @@ struct AICCWidgetView: View {
 
 struct SmallQuotaView: View {
     let entry: AICCWidgetEntry
-    let cards: [QuotaCard]
+    let slots: [QuotaSlot]
     let hidden: Int
     let palette: WidgetPalette
 
     var body: some View {
         GeometryReader { geometry in
             let spacing: CGFloat = 6
-            let footer: CGFloat = hidden > 0 ? 12 : 0
-            let each = (geometry.size.height - footer - spacing * CGFloat(max(0, cards.count - 1)))
-                / CGFloat(max(1, cards.count))
+            let footer: CGFloat = hidden > 0 ? 11 : 0
+            let each = (geometry.size.height - footer - spacing * CGFloat(max(0, slots.count - 1)))
+                / CGFloat(max(1, slots.count))
             VStack(spacing: spacing) {
-                ForEach(cards.indices, id: \.self) { index in
-                    QuotaCardCell(card: cards[index], compact: true, palette: palette)
+                ForEach(slots.indices, id: \.self) { index in
+                    QuotaCardCell(slot: slots[index], compact: true, palette: palette)
                         .frame(height: max(44, each))
                 }
                 if hidden > 0 {
@@ -108,27 +109,27 @@ struct SmallQuotaView: View {
 
 struct MediumQuotaView: View {
     let entry: AICCWidgetEntry
-    let cards: [QuotaCard]
+    let slots: [QuotaSlot]
     let hidden: Int
     let palette: WidgetPalette
 
     var body: some View {
         GeometryReader { geometry in
             let spacing: CGFloat = 6
-            let footer: CGFloat = hidden > 0 ? 12 : 0
+            let footer: CGFloat = hidden > 0 ? 11 : 0
             let usable = geometry.size.height - footer
-            if cards.count == 1 {
-                QuotaCardCell(card: cards[0], compact: false, palette: palette, hero: true)
+            if slots.count == 1 {
+                QuotaCardCell(slot: slots[0], compact: false, palette: palette, hero: true)
                     .frame(height: usable)
             } else {
-                let rows = cards.count > 2 ? 2 : 1
+                let rows = slots.count > 2 ? 2 : 1
                 let height = (usable - spacing * CGFloat(rows - 1)) / CGFloat(rows)
                 VStack(spacing: spacing) {
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: spacing),
                                         GridItem(.flexible(), spacing: spacing)],
                               spacing: spacing) {
-                        ForEach(cards.indices, id: \.self) { index in
-                            QuotaCardCell(card: cards[index], compact: rows == 2, palette: palette)
+                        ForEach(slots.indices, id: \.self) { index in
+                            QuotaCardCell(slot: slots[index], compact: rows == 2, palette: palette)
                                 .frame(height: max(44, height))
                         }
                     }
@@ -144,17 +145,18 @@ struct MediumQuotaView: View {
     }
 }
 
-/// One provider account: header (provider, plan or status), the anonymous
-/// account label, the leading window with its share bar, then either the second
-/// window or the balance breakdown.  Numbers are monospaced so a refresh never
-/// makes them jitter.
+/// One account card: provider and masked account on the title line, what is
+/// left in the leading window, the second window beside it, then the share bar
+/// and the reset time.  Three rows instead of five, so two cards in a medium
+/// widget stay aligned.
 struct QuotaCardCell: View {
-    let card: QuotaCard
+    let slot: QuotaSlot
     let compact: Bool
     let palette: WidgetPalette
-    /// A medium widget showing one account gets a larger, vertically centred
-    /// card instead of a small one floating at the top of the tile.
     var hero: Bool = false
+
+    private var card: QuotaCard { slot.card }
+    private var item: QuotaItem { slot.primary }
 
     private var status: (text: String, color: Color)? {
         if card.failed { return ("读取失败", palette.warning) }
@@ -163,14 +165,30 @@ struct QuotaCardCell: View {
         return nil
     }
 
+    private var unitLabel: String? {
+        if item.unlimited { return nil }
+        if item.isPercentage { return item.name }
+        if let unit = item.unit, !unit.isEmpty { return WidgetUnit.localized(unit) }
+        return item.name
+    }
+
+    private var trailingDetail: String? {
+        if let second = slot.secondary {
+            return "\(second.name) \(second.primaryText)"
+        }
+        return item.totalText
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 2 : 4) {
             if hero { Spacer(minLength: 0) }
+
             HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(card.providerName)
+                Text(card.title)
                     .font(.system(size: hero ? 13 : compact ? 9.5 : 10.5, weight: .semibold))
                     .foregroundStyle(palette.ink)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.8)
                 Spacer(minLength: 2)
                 if let status {
                     Text(status.text)
@@ -179,33 +197,47 @@ struct QuotaCardCell: View {
                         .lineLimit(1)
                 } else if let plan = card.plan, !plan.isEmpty {
                     Text(plan)
-                        .font(.system(size: 8, weight: .medium))
+                        .font(.system(size: hero ? 9.5 : 8, weight: .medium))
                         .foregroundStyle(palette.muted)
                         .lineLimit(1)
                 }
             }
 
-            Text(card.accountLabel)
-                .font(.system(size: hero ? 10 : 8.5))
-                .foregroundStyle(palette.muted)
-                .lineLimit(1)
-
-            if card.isBalance {
-                balance(compact: compact)
-            } else if let item = card.primaryItem {
-                window(item, compact: compact)
-                if let second = card.secondaryItem {
-                    secondary(second)
-                } else if let reset = item.reset {
-                    Text(reset)
-                        .font(.system(size: 8))
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(item.primaryText)
+                    .font(.system(size: hero ? 34 : compact ? 19 : 22, weight: .semibold, design: .rounded).monospacedDigit())
+                    .foregroundStyle(palette.ink)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.55)
+                if let unitLabel {
+                    Text(unitLabel)
+                        .font(.system(size: hero ? 11 : 8.5))
+                        .foregroundStyle(palette.muted)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 2)
+                if let trailingDetail {
+                    Text(trailingDetail)
+                        .font(.system(size: hero ? 10.5 : 8.5).monospacedDigit())
                         .foregroundStyle(palette.muted)
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
                 }
-            } else {
-                Text("无额度")
-                    .font(.system(size: compact ? 11 : 13, weight: .medium))
+            }
+
+            if let share = item.remaining, !item.unlimited {
+                ShareBar(share: share, palette: palette)
+            }
+
+            if let reset = WidgetClock.short(item.resetsAt) ?? WidgetClock.short(slot.secondary?.resetsAt) {
+                Text(reset)
+                    .font(.system(size: hero ? 10 : 8).monospacedDigit())
+                    .foregroundStyle(palette.muted)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+            } else if slot.extra > 0 {
+                Text("+\(slot.extra) 个窗口")
+                    .font(.system(size: 8))
                     .foregroundStyle(palette.muted)
             }
 
@@ -219,68 +251,41 @@ struct QuotaCardCell: View {
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
             .strokeBorder(palette.edge, lineWidth: 0.5))
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(card.providerName) \(card.accountLabel) \(card.primaryItem?.primaryText ?? card.balanceText)")
+        .accessibilityLabel("\(card.title) \(item.name) \(item.primaryText)")
     }
+}
 
-    private func window(_ item: QuotaItem, compact: Bool) -> some View {
-        VStack(alignment: .leading, spacing: compact ? 2 : 4) {
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(item.primaryText)
-                    .font(.system(size: hero ? 34 : compact ? 18 : 22, weight: .semibold, design: .rounded).monospacedDigit())
-                    .foregroundStyle(palette.ink)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.55)
-                Text(item.isPercentage ? item.name : (item.unit ?? item.name))
-                    .font(.system(size: hero ? 11 : 8.5))
-                    .foregroundStyle(palette.muted)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-            }
-            if item.isPercentage, let remaining = item.remaining {
-                ShareBar(share: remaining, palette: palette)
-            }
-        }
-    }
-
-    private func secondary(_ item: QuotaItem) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 3) {
-            Text(item.name)
-                .font(.system(size: hero ? 10 : 8))
-                .foregroundStyle(palette.muted)
-                .lineLimit(1)
-            Text(item.primaryText)
-                .font(.system(size: hero ? 11 : 8.5, weight: .medium).monospacedDigit())
-                .foregroundStyle(palette.ink.opacity(0.85))
-                .lineLimit(1)
-            Spacer(minLength: 0)
-            if let text = WidgetClock.short(item.resetsAt) ?? item.reset {
-                Text(text)
-                    .font(.system(size: 7.5).monospacedDigit())
-                    .foregroundStyle(palette.muted)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-            }
-        }
-    }
-
-    private func balance(compact: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(card.balanceText)
-                .font(.system(size: hero ? 34 : compact ? 18 : 22, weight: .semibold, design: .rounded).monospacedDigit())
-                .foregroundStyle(palette.ink)
-                .lineLimit(1)
-                .minimumScaleFactor(0.55)
-            if let first = card.balanceParts.first {
-                Text([first.label, first.text].compactMap { $0 }.joined(separator: " "))
-                    .font(.system(size: 8))
-                    .foregroundStyle(palette.muted)
-                    .lineLimit(1)
-            }
+/// Magpie reports units in English ("credits", "prompts"); the panel is Chinese.
+enum WidgetUnit {
+    static func localized(_ unit: String) -> String {
+        switch unit.lowercased() {
+        case "credits", "credit": return "积分"
+        case "prompts", "prompt", "requests", "request", "calls": return "次"
+        case "tokens", "token": return "token"
+        default: return unit
         }
     }
 }
 
-/// Reset times are the tightest text in a small widget: "23:39" today,
+/// A thin share bar for percentage windows; silent when the share is unknown.
+struct ShareBar: View {
+    let share: Double
+    let palette: WidgetPalette
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule().fill(palette.ink.opacity(0.08))
+                Capsule()
+                    .fill(palette.ink.opacity(0.42))
+                    .frame(width: max(2, geometry.size.width * min(1, max(0, share / 100))))
+            }
+        }
+        .frame(height: 2.5)
+    }
+}
+
+/// Reset times are the tightest text in a widget: "23:39" today,
 /// "明天 09:00", "周三 14:30" this week, else "10-27 14:30".
 enum WidgetClock {
     static func short(_ epoch: Double?, now: Date = .now) -> String? {
@@ -306,24 +311,6 @@ enum WidgetClock {
         stamped.locale = .current
         stamped.dateFormat = "MM-dd HH:mm"
         return stamped.string(from: date)
-    }
-}
-
-/// A thin share bar for percentage windows; silent when the share is unknown.
-struct ShareBar: View {
-    let share: Double
-    let palette: WidgetPalette
-
-    var body: some View {
-        GeometryReader { geometry in
-            ZStack(alignment: .leading) {
-                Capsule().fill(palette.ink.opacity(0.08))
-                Capsule()
-                    .fill(palette.ink.opacity(0.42))
-                    .frame(width: max(2, geometry.size.width * min(1, max(0, share / 100))))
-            }
-        }
-        .frame(height: 2.5)
     }
 }
 

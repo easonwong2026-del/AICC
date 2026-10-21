@@ -37,6 +37,23 @@ struct WidgetVisualSmokeMain {
         return try! MagpieQuotaParser.snapshot(data: raw)
     }
 
+    /// Real numbers for the preview: the bridge's last snapshot if the collector
+    /// has run, else whatever the installed widget cached.
+    static func cachedSnapshot() -> QuotaSnapshot? {
+        let bridge = FileManager.default.currentDirectoryPath + "/data/magpie_last_success.json"
+        if let data = FileManager.default.contents(atPath: bridge),
+           let snapshot = try? JSONDecoder().decode(QuotaSnapshot.self, from: data) {
+            return snapshot
+        }
+        let path = NSHomeDirectory()
+            + "/Library/Containers/com.aieink.dashboard.menubar.widget/Data/Library/Preferences/"
+            + "com.aieink.dashboard.menubar.widget.plist"
+        guard let data = FileManager.default.contents(atPath: path),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let raw = plist["aicc.widget.quota.3425"] as? Data else { return nil }
+        return try? JSONDecoder().decode(QuotaSnapshot.self, from: raw)
+    }
+
     @MainActor
     static func render(_ snapshot: QuotaSnapshot, configuration: AICCWidgetConfiguration,
                        family: WidgetFamily, scheme: ColorScheme, name: String) {
@@ -95,8 +112,10 @@ struct WidgetVisualSmokeMain {
             ("workbuddy-ai", "WorkBuddy AI Enterprise Seat", nil),
         ])
         let balances = balanceSnapshot
+        var real: [String: QuotaSnapshot] = [:]
+        if let cached = cachedSnapshot() { real["real"] = cached }
 
-        let states: [(String, QuotaSnapshot)] = [
+        let states: [(String, QuotaSnapshot)] = Array(real.map { ($0.key, $0.value) }) + [
             ("mixed", mixed), ("stale", stale), ("empty", empty),
             ("single", single), ("long_labels", longLabels), ("balance", balances),
         ]

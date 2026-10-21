@@ -65,7 +65,7 @@ struct WidgetStatusSmokeMain {
         try require(codex.items.count == 2, "Both windows survive")
 
         let credits = snapshot.accounts[2]
-        try require(credits.primaryItem?.primaryText == "2.27 / 4723", "The vendor's own count wins over a percentage")
+        try require(credits.primaryItem?.primaryText == "4721", "A credits window reports what is left, not used / total")
         try require(credits.primaryItem?.unit == "credits" && credits.plan == "Free", "Plan and unit survive")
         try require(credits.primaryItem?.isPercentage == false, "A credit window is not shown as a percentage")
 
@@ -87,21 +87,53 @@ struct WidgetStatusSmokeMain {
         try require(!encoded.contains("@"), "No email reaches the cache")
         try require(!encoded.contains("invalid_grant"), "No provider error text reaches the cache")
 
-        let small = snapshot.cards(limit: 2)
-        try require(small.shown.count == 2 && small.shown[0].last, "The last served card leads")
-        let medium = snapshot.cards(limit: 4)
-        try require(medium.shown.count == 4 && medium.hidden == 4, "Overflow is counted, not truncated silently")
-        let onlyWorkBuddy = snapshot.cards(provider: "workbuddy", limit: 4)
-        try require(onlyWorkBuddy.shown.count == 2 && onlyWorkBuddy.shown.allSatisfy { $0.provider == "workbuddy" },
+        let small = snapshot.slots(selection: [], limit: 2)
+        try require(small.shown.count == 2 && small.shown[0].card.last, "The last served card leads")
+        let medium = snapshot.slots(selection: [], limit: 4)
+        try require(medium.shown.count == 4 && medium.hidden == 2, "Overflow is counted, not truncated silently")
+        let onlyWorkBuddy = snapshot.slots(selection: [], provider: "workbuddy", limit: 4)
+        try require(onlyWorkBuddy.shown.count == 1
+                    && onlyWorkBuddy.shown.allSatisfy { $0.card.provider == "workbuddy" },
                     "A provider filter keeps only that provider")
-        try require(snapshot.cards(provider: "missing", limit: 4).shown.isEmpty, "An unknown filter shows nothing")
+        try require(snapshot.slots(selection: [], provider: "missing", limit: 4).shown.isEmpty,
+                    "An unknown filter shows nothing")
+
+        let balanceSlot = snapshot.slots(selection: [], limit: 8).shown.first { $0.card.kind == .balance }
+        try require(balanceSlot?.primary.primaryText == "12.34 USD", "A balance card survives without any window")
+
+        // A credits window reports what is left, never "used / total".
+        let creditWindow = snapshot.accounts.first { $0.provider == "workbuddy" }?.primaryItem
+        try require(creditWindow?.primaryText == "4721",
+                    "Credits show the remaining count: \(creditWindow?.primaryText ?? "-")")
+        try require(creditWindow?.totalText == "共 4723", "The total moves to a secondary label")
+
+        // Selecting one window of one account is enough to make it its own card.
+        let pools = """
+        {"object": "list", "data": [{"provider": "antigravity", "kind": "subscription", "user": "a@example.invalid",
+          "readAt": "\(stamp())", "windows": [
+            {"name": "7 天", "used": 19, "remaining": 81, "pool": "Gemini"},
+            {"name": "7 天", "used": 2, "remaining": 98, "pool": "Claude & GPT"},
+            {"name": "5 小时", "used": 9, "remaining": 91, "pool": "Gemini"}]}]}
+        """
+        let poolSnapshot = try parse(pools)
+        let card = poolSnapshot.accounts[0]
+        let geminiWeek = card.key(for: card.items[0])
+        let picked = poolSnapshot.slots(selection: [geminiWeek], limit: 4)
+        try require(picked.shown.count == 1 && picked.shown[0].primary.name == "7 天"
+                    && picked.shown[0].primary.pool == "Gemini",
+                    "A window-level selection picks exactly that window")
+        try require(picked.shown[0].secondary == nil, "An unselected window of the same account stays out")
+        let bothGemini = poolSnapshot.slots(selection: [geminiWeek, card.key(for: card.items[2])], limit: 4)
+        try require(bothGemini.shown[0].secondary?.pool == "Gemini", "Two selected windows share one card")
+        let stale = poolSnapshot.slots(selection: ["gone|window|"], limit: 4)
+        try require(stale.shown.count == 1, "A selection whose keys vanished falls back to automatic")
         try require(WidgetCardDisplayMode.one.capacity(for: 4) == 1, "One card means one")
         try require(WidgetCardDisplayMode.automatic.capacity(for: 2) == 2, "Small family holds two")
         try require(WidgetCardDisplayMode.all.capacity(for: 4) > 1000, "All means all")
 
         let later = snapshot.evaluated(at: .now.addingTimeInterval(QuotaSnapshot.liveLifetime + 1))
         try require(later.stale && later.accounts.allSatisfy(\.stale), "An old reading is cached")
-        try require(later.accounts[2].primaryItem?.primaryText == "2.27 / 4723", "Ageing keeps the last value")
+        try require(later.accounts[2].primaryItem?.primaryText == "4721", "Ageing keeps the last value")
         let offline = snapshot.evaluated(at: .now, offline: true)
         try require(offline.stale && offline.state == "Cached", "Offline is cached, not live")
         let expired = snapshot.evaluated(at: .now.addingTimeInterval(QuotaSnapshot.retention + 1))
@@ -109,7 +141,7 @@ struct WidgetStatusSmokeMain {
 
         let empty = try parse(#"{"object": "list", "data": []}"#)
         try require(empty.accounts.isEmpty && empty.state == "Empty" && !empty.available, "Empty is not zero")
-        try require(empty.cards(limit: 4).shown.isEmpty, "No cards without data")
+        try require(empty.slots(selection: [], limit: 4).shown.isEmpty, "No cards without data")
         for broken in [#"{}"#, #"{"object": "list"}"#, #"{"object": "list", "data": {}}"#] {
             var rejected = false
             do { _ = try parse(broken) } catch { rejected = true }

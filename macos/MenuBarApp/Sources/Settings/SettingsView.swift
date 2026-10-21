@@ -12,6 +12,7 @@ struct SettingsView: View {
     @State private var notice = ""
     @State private var showRevoke = false
     @State private var widgetProviders: [String] = []
+    @State private var showSelection = false
 
     var body: some View {
         Form {
@@ -40,12 +41,13 @@ struct SettingsView: View {
                     Text("4 个").tag(WidgetCardDisplayMode.four)
                     Text("全部").tag(WidgetCardDisplayMode.all)
                 }
-                Picker("服务商", selection: $settings.widgetProvider) {
-                    Text("全部服务商").tag("")
-                    ForEach(widgetProviders, id: \.self) { provider in
-                        Text(MagpieQuotaParser.providerName(provider)).tag(provider)
-                    }
+                HStack {
+                    Text("显示额度")
+                    Spacer()
+                    Text(selectionSummary).foregroundStyle(.secondary)
+                    Button("选择额度…") { showSelection = true }
                 }
+                Text("可以勾选具体窗口（例如只显示 Gemini 的 7 天额度），勾选顺序即显示顺序。")
                 Text("小尺寸最多 2 张、中尺寸最多 4 张额度卡片；一个账号的多个额度窗口合并显示。")
                 Text("小组件独立读取 Magpie，关闭 AICC 后仍可更新。点击刷新会短暂运行刷新任务，不打开设置窗口。")
                     .font(.caption).foregroundStyle(.secondary)
@@ -102,6 +104,12 @@ struct SettingsView: View {
         }
         .onChange(of: settings.widgetCards) { _, _ in reloadWidgets() }
         .onChange(of: settings.widgetProvider) { _, _ in reloadWidgets() }
+        .onChange(of: settings.widgetSelection) { _, _ in reloadWidgets() }
+        .sheet(isPresented: $showSelection) {
+            QuotaSelectionView(port: settings.magpiePort, selection: $settings.widgetSelection) { picked in
+                settings.widgetSelection = picked
+            }
+        }
         .task { widgetProviders = WidgetStatusStore.load(port: settings.magpiePort)?.providers ?? [] }
         .confirmationDialog("撤销设备后需要重新配对", isPresented: $showRevoke) {
             Button("撤销所有设备", role: .destructive) {
@@ -117,6 +125,10 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    private var selectionSummary: String {
+        settings.widgetSelection.isEmpty ? "自动" : "已选 \(settings.widgetSelection.count) 项"
     }
 
     private func reloadWidgets() {

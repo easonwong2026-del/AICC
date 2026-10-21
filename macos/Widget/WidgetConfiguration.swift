@@ -12,21 +12,27 @@ import WidgetKit
 struct AICCWidgetConfiguration: Codable, Equatable, Sendable {
     static func load() -> Self {
         let settings = WidgetPreferences.load()
-        return Self(magpiePort: settings.port, cards: settings.cards, provider: settings.provider)
+        return Self(magpiePort: settings.port, cards: settings.cards,
+                    provider: settings.provider, selection: settings.selection)
     }
 
     var magpiePort: Int
     var cards: WidgetCardDisplayMode
     var provider: String?
+    /// Windows the user ticked in settings, in display order.  Empty means
+    /// "decide for me".
+    var selection: [String]
 
-    init(magpiePort: Int = 3425, cards: WidgetCardDisplayMode = .automatic, provider: String? = nil) {
+    init(magpiePort: Int = 3425, cards: WidgetCardDisplayMode = .automatic,
+         provider: String? = nil, selection: [String] = []) {
         self.magpiePort = magpiePort
         self.cards = cards
         self.provider = provider
+        self.selection = selection
     }
 
     enum CodingKeys: String, CodingKey {
-        case magpiePort, cards, provider
+        case magpiePort, cards, provider, selection
         // Pre-3.0 configuration stored the same choice as `accounts`.
         case accounts
     }
@@ -43,6 +49,7 @@ struct AICCWidgetConfiguration: Codable, Equatable, Sendable {
         }
         let provider = try container.decodeIfPresent(String.self, forKey: .provider)
         self.provider = (provider?.isEmpty == false) ? provider : nil
+        self.selection = try container.decodeIfPresent([String].self, forKey: .selection) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -50,6 +57,7 @@ struct AICCWidgetConfiguration: Codable, Equatable, Sendable {
         try container.encode(magpiePort, forKey: .magpiePort)
         try container.encode(cards, forKey: .cards)
         try container.encodeIfPresent(provider, forKey: .provider)
+        try container.encode(selection, forKey: .selection)
     }
 
     /// Cards the widget may draw for a family, after the count preference.

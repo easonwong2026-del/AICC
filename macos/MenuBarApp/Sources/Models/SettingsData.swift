@@ -24,6 +24,13 @@ class AppSettings: ObservableObject {
             publishWidgetSettings()
         }
     }
+    /// Quota windows the widgets draw, in display order.  Empty means automatic.
+    @Published var widgetSelection: [String] {
+        didSet {
+            UserDefaults.standard.set(widgetSelection, forKey: "widgetSelection")
+            publishWidgetSettings()
+        }
+    }
     @Published var themeMode: String {
         didSet { UserDefaults.standard.set(themeMode, forKey: "themeMode") }
     }
@@ -57,7 +64,8 @@ class AppSettings: ObservableObject {
     func publishWidgetSettings(providers: [String]? = nil) {
         WidgetPreferences.save(port: magpiePort, cards: widgetCards,
                                provider: widgetProvider.isEmpty ? nil : widgetProvider,
-                               providers: providers ?? WidgetPreferences.load().providers)
+                               providers: providers ?? WidgetPreferences.load().providers,
+                               selection: widgetSelection)
     }
     private init() {
         let defaults = UserDefaults.standard
@@ -68,6 +76,7 @@ class AppSettings: ObservableObject {
         let stored = defaults.string(forKey: "widgetCards") ?? defaults.string(forKey: "widgetAccounts") ?? ""
         widgetCards = WidgetCardDisplayMode(rawValue: stored) ?? WidgetCardDisplayMode.migrated(stored)
         widgetProvider = defaults.string(forKey: "widgetProvider") ?? ""
+        widgetSelection = defaults.stringArray(forKey: "widgetSelection") ?? []
         themeMode = defaults.string(forKey: "themeMode") ?? "system"
         languageCode = defaults.string(forKey: "languageCode") ?? AppLanguage.system.rawValue
         debugMode = defaults.bool(forKey: "debugMode")

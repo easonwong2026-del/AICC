@@ -10,6 +10,7 @@ enum WidgetPreferences {
         var cards: WidgetCardDisplayMode
         var provider: String?
         var providers: [String]
+        var selection: [String]
     }
 
     static func load(from defaults: UserDefaults = defaults) -> Display {
@@ -22,14 +23,17 @@ enum WidgetPreferences {
         return Display(port: (1...65535).contains(port) ? port : 3425,
                        cards: cards,
                        provider: (provider?.isEmpty == false) ? provider : nil,
-                       providers: values["providers"] as? [String] ?? [])
+                       providers: values["providers"] as? [String] ?? [],
+                       selection: values["selection"] as? [String] ?? [])
     }
 
     static func save(port: Int, cards: WidgetCardDisplayMode, provider: String? = nil,
-                     providers: [String] = [], to defaults: UserDefaults = defaults) {
+                     providers: [String] = [], selection: [String] = [],
+                     to defaults: UserDefaults = defaults) {
         var values: [String: Any] = ["port": (1...65535).contains(port) ? port : 3425,
                                      "cards": cards.rawValue,
-                                     "providers": providers]
+                                     "providers": providers,
+                                     "selection": selection]
         if let provider, !provider.isEmpty { values["provider"] = provider }
         defaults.set(values, forKey: "display")
     }
