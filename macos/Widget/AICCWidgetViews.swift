@@ -163,7 +163,7 @@ struct SmallQuotaView: View {
                 }
                 if hidden > 0 {
                     Text("+\(hidden)")
-                        .font(.system(size: 8, weight: .medium).monospacedDigit())
+                        .font(.system(size: 9, weight: .medium).monospacedDigit())
                         .foregroundStyle(palette.muted)
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }
@@ -200,7 +200,7 @@ struct MediumQuotaView: View {
                     }
                     if hidden > 0 {
                         Text("还有 \(hidden) 张")
-                            .font(.system(size: 8, weight: .medium))
+                            .font(.system(size: 9, weight: .medium))
                             .foregroundStyle(palette.muted)
                             .frame(maxWidth: .infinity, alignment: .trailing)
                     }
@@ -254,19 +254,19 @@ struct QuotaCardCell: View {
 
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Text(card.title)
-                    .font(.system(size: hero ? 13 : compact ? 9.5 : 10.5, weight: .semibold))
+                    .font(.system(size: hero ? 13.5 : compact ? 10 : 11, weight: .semibold))
                     .foregroundStyle(palette.accent(for: card.provider))
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                 Spacer(minLength: 2)
                 if let status {
                     Text(status.text)
-                        .font(.system(size: hero ? 9.5 : 8, weight: .semibold))
+                        .font(.system(size: hero ? 10 : 9, weight: .semibold))
                         .foregroundStyle(status.color)
                         .lineLimit(1)
                 } else if let plan = card.plan, !plan.isEmpty {
                     Text(plan)
-                        .font(.system(size: hero ? 9.5 : 8, weight: .medium))
+                        .font(.system(size: hero ? 10 : 9, weight: .medium))
                         .foregroundStyle(palette.muted)
                         .lineLimit(1)
                 }
@@ -280,14 +280,15 @@ struct QuotaCardCell: View {
                     .minimumScaleFactor(0.55)
                 if let unitLabel {
                     Text(unitLabel)
-                        .font(.system(size: hero ? 11 : 8.5))
+                        .font(.system(size: hero ? 11.5 : compact ? 9 : 9.5))
+                        .minimumScaleFactor(0.9)
                         .foregroundStyle(palette.muted)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 2)
                 if let trailingDetail {
                     Text(trailingDetail)
-                        .font(.system(size: hero ? 10.5 : 8.5).monospacedDigit())
+                        .font(.system(size: hero ? 11 : compact ? 9 : 9.5).monospacedDigit())
                         .foregroundStyle(palette.muted)
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
@@ -300,13 +301,13 @@ struct QuotaCardCell: View {
 
             if let reset = WidgetClock.short(item.resetsAt) ?? WidgetClock.short(slot.secondary?.resetsAt) {
                 Text(reset)
-                    .font(.system(size: hero ? 10 : 8).monospacedDigit())
+                    .font(.system(size: hero ? 10.5 : 9).monospacedDigit())
                     .foregroundStyle(palette.muted)
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
             } else if slot.extra > 0 {
                 Text("+\(slot.extra) 个窗口")
-                    .font(.system(size: 8))
+                    .font(.system(size: 9))
                     .foregroundStyle(palette.muted)
             }
 

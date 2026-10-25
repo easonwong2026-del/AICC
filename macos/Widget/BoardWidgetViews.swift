@@ -1,5 +1,6 @@
 import SwiftUI
 import WidgetKit
+import AppIntents
 
 enum BoardPage: Int, CaseIterable, Codable, Sendable {
     case overview, requests, sessions, context
@@ -33,6 +34,9 @@ struct BoardPalette {
     let amber: Color
     let red: Color
     let cyan: Color
+    /// A hairline around cards: a white card on a white desktop page would
+    /// otherwise have no edge at all.
+    let edge: Color
     var accented: Bool = false
     var isDark: Bool = true
 
@@ -50,6 +54,7 @@ struct BoardPalette {
                                 amber: Color(.sRGB, white: 1, opacity: 0.9),
                                 red: Color(.sRGB, white: 1, opacity: 0.9),
                                 cyan: Color(.sRGB, white: 1, opacity: 0.86),
+                                edge: Color(.sRGB, white: 1, opacity: 0.10),
                                 accented: true,
                                 isDark: true)
         }
@@ -59,24 +64,53 @@ struct BoardPalette {
                            track: Color(red: 0x1A / 255, green: 0x23 / 255, blue: 0x1E / 255),
                            divider: Color(red: 0x1E / 255, green: 0x2A / 255, blue: 0x25 / 255),
                            ink: Color(red: 0xF4 / 255, green: 0xF7 / 255, blue: 0xED / 255),
-                           muted: Color(red: 0x71 / 255, green: 0x80 / 255, blue: 0x79 / 255),
+                           muted: Color(red: 0x86 / 255, green: 0x95 / 255, blue: 0x8D / 255),
                            accent: Color(red: 0xA8 / 255, green: 0xFF / 255, blue: 0x4F / 255),
                            amber: Color(red: 0xFF / 255, green: 0xB0 / 255, blue: 0x2E / 255),
                            red: Color(red: 0xFF / 255, green: 0x5F / 255, blue: 0x57 / 255),
                            cyan: Color(red: 0x55 / 255, green: 0xE6 / 255, blue: 0xD2 / 255),
+                           edge: Color(.sRGB, white: 1, opacity: 0.05),
                            isDark: true)
             : BoardPalette(background: Color(red: 0xF7 / 255, green: 0xF8 / 255, blue: 0xF3 / 255),
                            card: .white,
                            track: Color(red: 0xE4 / 255, green: 0xE6 / 255, blue: 0xDE / 255),
                            divider: Color(red: 0xD9 / 255, green: 0xDC / 255, blue: 0xD2 / 255),
                            ink: Color(red: 0x14 / 255, green: 0x17 / 255, blue: 0x0F / 255),
-                           muted: Color(red: 0x6A / 255, green: 0x6F / 255, blue: 0x63 / 255),
+                           muted: Color(red: 0x63 / 255, green: 0x68 / 255, blue: 0x5C / 255),
                            accent: Color(red: 0x4E / 255, green: 0x8C / 255, blue: 0x0E / 255),
                            amber: Color(red: 0xA9 / 255, green: 0x69 / 255, blue: 0x0A / 255),
                            red: Color(red: 0xC0 / 255, green: 0x39 / 255, blue: 0x2B / 255),
                            cyan: Color(red: 0x0E / 255, green: 0x8C / 255, blue: 0x7C / 255),
+                           edge: Color(red: 0xE1 / 255, green: 0xE5 / 255, blue: 0xDA / 255),
                            isDark: false)
     }
+}
+
+/// Type is set in real points, not scaled from the 480 unit design grid: the
+/// tile is a fixed 338×354 and the old `× s` sizes landed on the 9pt floor,
+/// which is where "the labels look too small" came from.  Spacing still follows
+/// `s` so the proportions of the panel are kept.
+private enum BoardText {
+    /// Brand line and status.
+    static let brand: CGFloat = 11.5
+    static let status: CGFloat = 11
+    /// Page title, and the muted range beside it.
+    static let pageTitle: CGFloat = 18
+    static let range: CGFloat = 10.5
+    /// Section labels: 最近模型, 会话, 缓存命中.
+    static let section: CGFloat = 11
+    /// Card label and its number.
+    static let cardLabel: CGFloat = 11
+    static let cardValue: CGFloat = 17.5
+    /// A recent request line and the muted summary under the pages.
+    static let row: CGFloat = 11.5
+    static let summary: CGFloat = 10.5
+    /// Footer count.
+    static let footer: CGFloat = 10.5
+    /// The big numbers.
+    static let hero: CGFloat = 40
+    static let heroFlat: CGFloat = 34
+    static let model: CGFloat = 16
 }
 
 struct BoardEntry: TimelineEntry {
@@ -84,6 +118,8 @@ struct BoardEntry: TimelineEntry {
     let snapshot: UsageSnapshot
     let page: BoardPage
     let port: Int
+    /// True while a tapped page is held, so the footer can say so.
+    var manual: Bool = false
 }
 
 /// One 480×480 design, laid out in points as the tile is.  Every measurement is
@@ -102,32 +138,42 @@ struct BoardView: View {
             VStack(alignment: .leading, spacing: 0) {
                 header(s, palette)
                 pageTitle(s, palette)
-                body(s, palette).padding(.top, 10 * s)
+                body(s, palette).padding(.top, 9 * s)
                 Spacer(minLength: 0)
-                footer(s, palette)
             }
             .padding(.horizontal, 22 * s)
             .padding(.top, 16 * s)
-            .padding(.bottom, 14 * s)
+            // The footer is pinned to the bottom edge: controls must not travel
+            // when the pages above it differ in height.
+            .padding(.bottom, Self.footerHeight(s) + 13 * s)
             .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+            .overlay(alignment: .bottom) {
+                footer(s, palette)
+                    .padding(.horizontal, 22 * s)
+                    .padding(.bottom, 13 * s)
+            }
             .containerBackground(for: .widget) { palette.background }
         }
     }
+
+    /// Button row plus its top gap, reserved out of the page area.
+    private static func footerHeight(_ s: CGFloat) -> CGFloat { 22 + 5 * s }
 
     // MARK: chrome
 
     private func header(_ s: CGFloat, _ palette: BoardPalette) -> some View {
         HStack(spacing: 6 * s) {
             Circle()
-                .fill(entry.snapshot.stale ? palette.amber : palette.accent)
+                .fill(stateTint(palette))
                 .frame(width: 6 * s, height: 6 * s)
             Text("MAGPIE")
-                .font(.system(size: fs(14, s), weight: .medium))
+                .font(.system(size: BoardText.brand, weight: .semibold))
+                .tracking(0.7)
                 .foregroundStyle(palette.ink)
             Spacer(minLength: 0)
             Text(state)
-                .font(.system(size: fs(12, s), weight: .medium))
-                .foregroundStyle(entry.snapshot.stale ? palette.amber : palette.accent)
+                .font(.system(size: BoardText.status, weight: .medium))
+                .foregroundStyle(stateTint(palette))
         }
     }
 
@@ -136,35 +182,74 @@ struct BoardView: View {
         return entry.snapshot.stale ? "缓存" : "在线"
     }
 
+    /// Green only means "this is live": a disconnected tile is grey, a kept one
+    /// is amber, so the dot and the word agree with the numbers under them.
+    private func stateTint(_ palette: BoardPalette) -> Color {
+        if !entry.snapshot.available { return palette.muted }
+        return entry.snapshot.stale ? palette.amber : palette.accent
+    }
+
     private func pageTitle(_ s: CGFloat, _ palette: BoardPalette) -> some View {
-        VStack(alignment: .leading, spacing: 8 * s) {
+        VStack(alignment: .leading, spacing: 7 * s) {
             HStack(alignment: .firstTextBaseline) {
                 Text(entry.page.title)
-                    .font(.system(size: fs(20, s), weight: .semibold))
+                    .font(.system(size: BoardText.pageTitle, weight: .semibold))
                     .foregroundStyle(palette.accent)
                 Spacer(minLength: 0)
                 Text(entry.page.range)
-                    .font(.system(size: fs(12, s)))
+                    .font(.system(size: BoardText.range, weight: .medium))
                     .foregroundStyle(palette.muted)
             }
             Rectangle().fill(palette.divider).frame(height: max(0.5, 1 * s))
         }
-        .padding(.top, 10 * s)
+        .padding(.top, 9 * s)
     }
 
+    /// Dots and the page count on the left, the controls on the right.  A held
+    /// page also says 手动, so the tile never looks like it stopped by itself.
     private func footer(_ s: CGFloat, _ palette: BoardPalette) -> some View {
-        HStack(spacing: 8 * s) {
-            ForEach(BoardPage.allCases, id: \.rawValue) { page in
-                Circle()
-                    .fill(page == entry.page ? palette.accent : palette.muted.opacity(0.35))
-                    .frame(width: 6 * s, height: 6 * s)
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                ForEach(BoardPage.allCases, id: \.rawValue) { page in
+                    Circle()
+                        .fill(page == entry.page ? palette.accent : palette.muted.opacity(0.35))
+                        .frame(width: 5, height: 5)
+                }
             }
-            Spacer(minLength: 0)
             Text("\(entry.page.rawValue + 1)/\(BoardPage.allCases.count)")
-                .font(.system(size: fs(11, s)))
+                .font(.system(size: BoardText.footer, weight: .medium).monospacedDigit())
                 .foregroundStyle(palette.muted)
+            if entry.manual {
+                Text("手动")
+                    .font(.system(size: BoardText.footer, weight: .medium))
+                    .foregroundStyle(palette.amber)
+            }
+            Spacer(minLength: 6)
+            control("chevron.left", palette, label: "上一页",
+                    intent: BoardStepIntent(delta: -1, port: entry.port))
+            control("chevron.right", palette, label: "下一页",
+                    intent: BoardStepIntent(delta: 1, port: entry.port))
+            control("arrow.clockwise", palette, label: "立即刷新",
+                    intent: BoardRefreshIntent(port: entry.port))
         }
-        .padding(.top, 6 * s)
+        .padding(.top, 5 * s)
+    }
+
+    private func control(_ symbol: String, _ palette: BoardPalette,
+                         label: String, intent: some AppIntent) -> some View {
+        Button(intent: intent) {
+            Image(systemName: symbol)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(palette.ink.opacity(0.9))
+                .frame(width: 22, height: 22)
+                .background(palette.card, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(palette.edge, lineWidth: 1)
+                }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(label))
     }
 
     // MARK: pages
@@ -181,16 +266,17 @@ struct BoardView: View {
 
     private func overview(_ s: CGFloat, _ palette: BoardPalette) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .center, spacing: 18 * s) {
+            HStack(alignment: .center, spacing: 15 * s) {
                 RingView(permille: entry.snapshot.successPermille,
-                         caption: "成功率", s: s, palette: palette)
-                    .frame(width: 224 * s, height: 224 * s)
+                         caption: "成功率", s: s, palette: palette,
+                         empty: !entry.snapshot.available)
+                    .frame(width: 222 * s, height: 222 * s)
                 VStack(spacing: 10 * s) {
-                    HStack(spacing: 10 * s) {
+                    HStack(spacing: 9 * s) {
                         card("调用", UsageFormat.grouped(entry.snapshot.callsToday), palette, s)
                         card("错误", "\(entry.snapshot.errorsToday)", palette, s, tint: palette.amber)
                     }
-                    HStack(spacing: 10 * s) {
+                    HStack(spacing: 9 * s) {
                         card("剩余额度", UsageFormat.percent(entry.snapshot.remainingPercent), palette, s)
                         card("今日 Token", UsageFormat.count(entry.snapshot.tokensToday), palette, s)
                     }
@@ -215,36 +301,36 @@ struct BoardView: View {
             Spacer(minLength: 0)
             Text(trailing)
         }
-        .font(.system(size: fs(12, s)))
+        .font(.system(size: BoardText.summary, weight: .medium))
         .foregroundStyle(palette.muted)
         .lineLimit(1)
         .minimumScaleFactor(0.7)
-        .padding(.top, 10 * s)
+        .padding(.top, 9 * s)
         .overlay(alignment: .top) {
             Rectangle().fill(palette.divider).frame(height: max(0.5, 1 * s))
         }
     }
 
     private func requests(_ s: CGFloat, _ palette: BoardPalette) -> some View {
-        VStack(alignment: .leading, spacing: 14 * s) {
-            VStack(alignment: .leading, spacing: 4 * s) {
+        VStack(alignment: .leading, spacing: 9 * s) {
+            VStack(alignment: .leading, spacing: 3 * s) {
                 Text("最近模型")
-                    .font(.system(size: fs(12, s)))
+                    .font(.system(size: BoardText.section, weight: .medium))
                     .foregroundStyle(palette.muted)
                 Text(entry.snapshot.latestModel.isEmpty ? "—" : entry.snapshot.latestModel)
-                    .font(.system(size: fs(24, s), weight: .semibold))
+                    .font(.system(size: BoardText.cardValue, weight: .semibold))
                     .foregroundStyle(palette.ink)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
             }
-            VStack(spacing: 10 * s) {
-                HStack(spacing: 10 * s) {
+            VStack(spacing: 9 * s) {
+                HStack(spacing: 9 * s) {
                     card("状态", statusText, palette, s,
                          tint: entry.snapshot.latestFailed ? palette.red : palette.accent)
                     card("延迟", UsageFormat.seconds(millis: entry.snapshot.latestLatencyMillis),
                          palette, s)
                 }
-                HStack(spacing: 10 * s) {
+                HStack(spacing: 9 * s) {
                     card("平均 TTFT", UsageFormat.seconds(millis: entry.snapshot.averageTTFTMillis),
                          palette, s)
                     card("今日 Token", UsageFormat.count(entry.snapshot.tokensToday),
@@ -260,21 +346,23 @@ struct BoardView: View {
                                 .minimumScaleFactor(0.7)
                             Spacer(minLength: 0)
                             Text(request.status == 0 ? "—" : "\(request.status)")
+                                .monospacedDigit()
                                 .foregroundStyle(request.status >= 400 || request.status < 200
                                                  ? palette.red : palette.muted)
                             Text(UsageFormat.seconds(millis: request.millis))
+                                .monospacedDigit()
                                 .foregroundStyle(palette.muted)
-                                .frame(width: 46 * s, alignment: .trailing)
+                                .frame(width: 44, alignment: .trailing)
                         }
-                        .font(.system(size: fs(12, s)))
+                        .font(.system(size: BoardText.row))
                         .foregroundStyle(palette.ink)
-                        .padding(.vertical, 6 * s)
+                        .padding(.vertical, 4 * s)
                         if index < entry.snapshot.recent.count - 1 { divider(palette, s) }
                     }
                 }
-                .padding(.top, 4 * s)
+                .padding(.top, 2 * s)
             }
-            Spacer(minLength: 6 * s)
+            Spacer(minLength: 4 * s)
             summary("今日 " + UsageFormat.grouped(entry.snapshot.callsToday) + " 次",
                     "错误 " + "\(entry.snapshot.errorsToday)",
                     "7 天 " + UsageFormat.count(entry.snapshot.tokens7d), palette, s)
@@ -287,31 +375,31 @@ struct BoardView: View {
     }
 
     private func sessions(_ s: CGFloat, _ palette: BoardPalette) -> some View {
-        VStack(alignment: .leading, spacing: 14 * s) {
+        VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 2 * s) {
-                Text("会话")
-                    .font(.system(size: fs(12, s)))
+                Text("累计会话")
+                    .font(.system(size: BoardText.section, weight: .medium))
                     .foregroundStyle(palette.muted)
                 Text(UsageFormat.grouped(entry.snapshot.sessionCount))
-                    .font(.system(size: fs(54, s), weight: .semibold))
+                    .font(.system(size: BoardText.hero, weight: .semibold).monospacedDigit())
                     .foregroundStyle(palette.ink)
             }
-            HStack(spacing: 10 * s) {
+            HStack(spacing: 9 * s) {
                 card("总 Token", UsageFormat.count(entry.snapshot.totalTokens), palette, s)
                 card("估算费用", UsageFormat.money(micros: entry.snapshot.costMicros), palette, s)
             }
+            .padding(.top, 12 * s)
             Spacer(minLength: 6 * s)
-            VStack(alignment: .leading, spacing: 4 * s) {
+            VStack(alignment: .leading, spacing: 3 * s) {
                 Text("最常用模型")
-                    .font(.system(size: fs(12, s)))
+                    .font(.system(size: BoardText.section, weight: .medium))
                     .foregroundStyle(palette.muted)
                 Text(entry.snapshot.topModel.isEmpty ? "—" : entry.snapshot.topModel)
-                    .font(.system(size: fs(20, s), weight: .medium))
+                    .font(.system(size: BoardText.model, weight: .medium))
                     .foregroundStyle(palette.accent)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
             }
-            Spacer(minLength: 0)
             summary("最常用 " + UsageFormat.grouped(entry.snapshot.topModelCalls) + " 次",
                     "总计 " + UsageFormat.count(entry.snapshot.totalTokens),
                     "", palette, s)
@@ -320,17 +408,17 @@ struct BoardView: View {
     }
 
     private func context(_ s: CGFloat, _ palette: BoardPalette) -> some View {
-        VStack(alignment: .leading, spacing: 12 * s) {
+        VStack(alignment: .leading, spacing: 11 * s) {
             VStack(alignment: .leading, spacing: 2 * s) {
                 Text("缓存命中")
-                    .font(.system(size: fs(12, s)))
+                    .font(.system(size: BoardText.section, weight: .medium))
                     .foregroundStyle(palette.muted)
                 HStack(alignment: .firstTextBaseline, spacing: 2 * s) {
                     Text(UsageFormat.tenths(entry.snapshot.cacheHitPermille))
-                        .font(.system(size: fs(50, s), weight: .semibold))
+                        .font(.system(size: BoardText.heroFlat, weight: .semibold).monospacedDigit())
                         .foregroundStyle(palette.ink)
                     Text("%")
-                        .font(.system(size: fs(20, s), weight: .medium))
+                        .font(.system(size: BoardText.model, weight: .medium))
                         .foregroundStyle(palette.muted)
                 }
             }
@@ -342,7 +430,7 @@ struct BoardView: View {
                         .frame(width: max(3, geo.size.width * CGFloat(entry.snapshot.cacheHitPermille) / 1000))
                 }
             }
-            .frame(height: 10 * s)
+            .frame(height: 9 * s)
             VStack(spacing: 0) {
                 row("输入", UsageFormat.count(entry.snapshot.totalInput), palette, s, flexible: true)
                 divider(palette, s)
@@ -363,28 +451,32 @@ struct BoardView: View {
     @ViewBuilder
     private func card(_ label: String, _ value: String, _ palette: BoardPalette,
                       _ s: CGFloat, tint: Color? = nil, flexible: Bool = false) -> some View {
-        let body = VStack(alignment: .leading, spacing: 4 * s) {
+        let body = VStack(alignment: .leading, spacing: 3 * s) {
             Text(label)
-                .font(.system(size: fs(12, s)))
+                .font(.system(size: BoardText.cardLabel, weight: .medium))
                 .foregroundStyle(palette.muted)
                 .lineLimit(1)
+                .minimumScaleFactor(0.8)
             Spacer(minLength: 0)
             Text(value)
-                .font(.system(size: fs(22, s), weight: .semibold))
+                .font(.system(size: BoardText.cardValue, weight: .semibold).monospacedDigit())
                 .foregroundStyle(tint ?? palette.ink)
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
         }
-        .padding(.horizontal, 10 * s)
-        .padding(.vertical, 8 * s)
+        .padding(.horizontal, 9 * s)
+        .padding(.vertical, 7 * s)
+        let shape = RoundedRectangle(cornerRadius: 8 * s, style: .continuous)
         if flexible {
             body
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                .background(palette.card, in: RoundedRectangle(cornerRadius: 8 * s, style: .continuous))
+                .background(palette.card, in: shape)
+                .overlay { shape.strokeBorder(palette.edge, lineWidth: 1) }
         } else {
             body
-                .frame(maxWidth: .infinity, minHeight: 78 * s, maxHeight: 78 * s, alignment: .leading)
-                .background(palette.card, in: RoundedRectangle(cornerRadius: 8 * s, style: .continuous))
+                .frame(maxWidth: .infinity, minHeight: 74 * s, maxHeight: 74 * s, alignment: .leading)
+                .background(palette.card, in: shape)
+                .overlay { shape.strokeBorder(palette.edge, lineWidth: 1) }
         }
     }
 
@@ -393,11 +485,11 @@ struct BoardView: View {
                      _ s: CGFloat, tint: Color? = nil, flexible: Bool = false) -> some View {
         let content = HStack {
             Text(label)
-                .font(.system(size: fs(13, s), weight: .medium))
+                .font(.system(size: 12.5, weight: .medium))
                 .foregroundStyle(palette.ink)
             Spacer(minLength: 0)
             Text(value)
-                .font(.system(size: fs(14, s), weight: .medium).monospacedDigit())
+                .font(.system(size: 13, weight: .medium).monospacedDigit())
                 .foregroundStyle(tint ?? palette.ink)
         }
         .padding(.vertical, 9 * s)
@@ -411,8 +503,6 @@ struct BoardView: View {
     private func divider(_ palette: BoardPalette, _ s: CGFloat) -> some View {
         Rectangle().fill(palette.divider).frame(height: max(0.5, 1 * s))
     }
-
-    private func fs(_ size: CGFloat, _ s: CGFloat) -> CGFloat { max(9, size * s) }
 }
 
 /// Success rate as the device draws it: a ring with the number inside.
@@ -421,26 +511,33 @@ struct RingView: View {
     let caption: String
     let s: CGFloat
     let palette: BoardPalette
+    /// Nothing is being reported, so an empty ring instead of a 100% that the
+    /// tile never measured.
+    var empty: Bool = false
 
     var body: some View {
         ZStack {
             Circle()
-                .stroke(palette.track, lineWidth: 14 * s)
-            Circle()
-                .trim(from: 0, to: max(0.001, min(1, CGFloat(permille) / 1000)))
-                .stroke(palette.accent, style: StrokeStyle(lineWidth: 14 * s, lineCap: .round))
-                .rotationEffect(.degrees(-90))
+                .stroke(palette.track, lineWidth: 13 * s)
+            if !empty {
+                Circle()
+                    .trim(from: 0, to: max(0.001, min(1, CGFloat(permille) / 1000)))
+                    .stroke(palette.accent, style: StrokeStyle(lineWidth: 13 * s, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+            }
             VStack(spacing: 2 * s) {
                 HStack(alignment: .firstTextBaseline, spacing: 1 * s) {
-                    Text(UsageFormat.tenths(permille))
-                        .font(.system(size: max(14, 42 * s), weight: .semibold))
+                    Text(empty ? "—" : UsageFormat.tenths(permille))
+                        .font(.system(size: 30, weight: .semibold).monospacedDigit())
                         .foregroundStyle(palette.ink)
-                    Text("%")
-                        .font(.system(size: max(9, 16 * s), weight: .medium))
-                        .foregroundStyle(palette.muted)
+                    if !empty {
+                        Text("%")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(palette.muted)
+                    }
                 }
                 Text(caption)
-                    .font(.system(size: max(9, 11 * s)))
+                    .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(palette.muted)
             }
         }

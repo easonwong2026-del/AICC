@@ -5,6 +5,7 @@ APP_DIR="${1:-$ROOT/dist/mac/AICC.app}"
 python3 - "$APP_DIR" <<'PY'
 import plistlib
 from pathlib import Path
+import json
 import subprocess
 import sys
 
@@ -20,8 +21,16 @@ for key in ("CFBundleShortVersionString", "CFBundleVersion"):
 assert any("aicc-widget" in entry.get("CFBundleURLSchemes", []) for entry in host_info.get("CFBundleURLTypes", [])), "Missing refresh URL scheme"
 for bundle in (app, widget):
     assert (bundle / "Contents/MacOS" / ("AICC" if bundle == app else "AICCWidget")).is_file(), "Missing executable"
-    assert not (bundle / "Contents/Resources/Metadata.appintents").exists(), "Unexpected App Intent dependency"
     subprocess.run(["codesign", "--verify", "--strict", str(bundle)], check=True)
+# The board's footer buttons need the metadata Xcode's build phase would write;
+# the host itself stays free of it.
+assert not (app / "Contents/Resources/Metadata.appintents").exists(), "Host should not carry App Intent metadata"
+metadata = widget / "Contents/Resources/Metadata.appintents"
+assert metadata.is_dir(), "Widget is missing App Intent metadata"
+actions = json.loads((metadata / "extract.actionsdata").read_text())["actions"]
+assert set(actions) == {"BoardStepIntent", "BoardRefreshIntent"}, f"Unexpected App Intents: {sorted(actions)}"
+for name, action in actions.items():
+    assert action["mangledTypeName"] and action["identifier"] == name, f"Unresolvable intent: {name}"
 raw = subprocess.check_output(["codesign", "-d", "--entitlements", ":-", str(widget)], stderr=subprocess.DEVNULL)
 entitlements = plistlib.loads(raw)
 assert entitlements == {

@@ -32,13 +32,20 @@ struct BoardVisualSmokeMain {
             render(fixture, page: page, scheme: .dark, mode: .accented, name: "live_\(page)_accented")
             rendered += 1
         }
+        // A held page: the footer has to show 手动 without moving the controls.
+        for page in BoardPage.allCases {
+            render(fixture, page: page, scheme: .dark, manual: true, name: "held_\(page)_dark")
+            rendered += 1
+        }
+        render(fixture, page: .requests, scheme: .light, manual: true, name: "held_requests_light")
+        rendered += 1
         print("Board QA rendered \(rendered) PNGs to \(outputDir)")
     }
 
     @MainActor
     static func render(_ snapshot: UsageSnapshot, page: BoardPage, scheme: ColorScheme,
-                       mode: WidgetRenderingMode = .fullColor, name: String) {
-        let entry = BoardEntry(date: .now, snapshot: snapshot, page: page, port: 3425)
+                       mode: WidgetRenderingMode = .fullColor, manual: Bool = false, name: String) {
+        let entry = BoardEntry(date: .now, snapshot: snapshot, page: page, port: 3425, manual: manual)
         let accented = mode != .fullColor
         let backdrop: Color = accented
             ? Color(red: 0.16, green: 0.22, blue: 0.29)
