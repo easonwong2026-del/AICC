@@ -47,6 +47,7 @@ let package = Package(
             exclude: ["Fixtures"],
             sources: [
                 "AppSettingsTests.swift",
+                "BoardCommandTests.swift",
                 "ProcessRunnerTests.swift",
                 "DashboardTypographyTests.swift",
                 "SettingsPresentationModelTests.swift",

@@ -9,8 +9,10 @@
 - **新增 AICC 看板小组件**（large）：四页自动轮播 —— 总览（成功率环、调用、错误、最低剩余、今日 Token）、
   请求（最近模型、状态、延迟、平均 TTFT、今日 Token、最近三条请求）、会话（30 天会话数、总 Token、估算费用、
   最常用模型）、上下文（缓存命中率与 token 构成）。
-- 看板页脚新增 `‹` / `›` / `⟳` 三个按钮（App Intents）：手动翻页停住 5 分钟并显示"手动"，`⟳` 立即读 Magpie；
-  不点则回到自动轮播。
+- 看板页脚新增 `‹` / `›` / `⟳` 三个控件：手动翻页停住 5 分钟并显示"手动"，`⟳` 立即读 Magpie；
+  不点则回到自动轮播。控件走 `aicc-widget://board/next|previous` 深链交给主机 App 投递翻页请求
+  （桌面小组件的 `Button(intent:)` 需要 Xcode 生成的 App Intents 元数据，手工打包下点击会被系统静默丢弃），
+  代价是点一下会短暂唤起 AICC。
 - 看板排版重做字号层级：正文改用固定点数（原先从 480 网格缩放后落到 9pt 下限），卡片小标题、最近请求行、
   页脚与摘要整体放大一级；页脚固定在底边，翻页时控件不再位移。浅色模式下卡片补了 1px 描边，
   未连接时状态改为灰色、成功率环留空。
@@ -18,7 +20,11 @@
 - 数据直接读 Magpie 的 `/v1/magpie/usage` 与 `/v1/magpie/usage/requests`，用量 60 秒缓存；
   指标口径与 [peterroe/magpie-usage-display](https://github.com/peterroe/magpie-usage-display) 一致。
 - 深色 / 浅色两套配色，dark 沿用参考项目的 AMOLED 色值；macOS 26 变暗态单独适配。
-- 新增 `scripts/smoke-test-board-visual.sh`（28 张离屏渲染）与 `UsageModelTests`（7 项解析测试）。
+- 看板可读性再调：区块标签 / 卡片标题 / 请求行 / 页脚整体上调一档（正文 11→12pt），大数字不动；
+  页脚控件 22→27pt 并换成更亮的底色与可见描边，"手动"改为琥珀色胶囊徽章；总览环形与右侧卡片等高、
+  会话页把「最常用模型」提到卡片下方，消掉页面中部的空洞。
+- 新增 `scripts/smoke-test-board-visual.sh`（33 张离屏渲染）与 `UsageModelTests`（7 项解析测试）、
+  `BoardCommandTests`（翻页请求的投递与幂等语义）。
 
 ## 2.11.0 - 2026-10-21
 

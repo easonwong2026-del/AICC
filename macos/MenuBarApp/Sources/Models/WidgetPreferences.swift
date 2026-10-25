@@ -61,6 +61,8 @@ enum WidgetPreferences {
 
     static func requestBoardStep(_ step: Int, at: Date = .now,
                                  to defaults: UserDefaults = defaults) {
-        defaults.set(["step": step, "at": at.timeIntervalSince1970], forKey: boardCommandKey)
+        // One page per request; the provider multiplies nothing.
+        let clamped = step < 0 ? -1 : 1
+        defaults.set(["step": clamped, "at": at.timeIntervalSince1970], forKey: boardCommandKey)
     }
 }

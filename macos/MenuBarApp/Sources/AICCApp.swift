@@ -498,8 +498,9 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
         // aicc-widget://board/next, aicc-widget://board/previous, aicc-widget://refresh
         for url in urls where url.scheme == "aicc-widget" {
             if url.host == "board" {
+                guard let step = AICCWidgetMetadata.boardStep(fromPath: url.path) else { continue }
                 hasPresentedSettings = true
-                WidgetPreferences.requestBoardStep(url.path == "/next" ? 1 : -1)
+                WidgetPreferences.requestBoardStep(step)
                 WidgetCenter.shared.reloadTimelines(ofKind: AICCWidgetMetadata.boardKind)
                 finishBackgroundRefresh()
             } else {

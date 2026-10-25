@@ -11,6 +11,17 @@ enum AICCWidgetMetadata {
     static func boardStepURL(_ step: Int) -> URL {
         URL(string: "aicc-widget://board/\(step > 0 ? "next" : "previous")")!
     }
+
+    /// The only two paths the host app acts on; anything else is ignored rather
+    /// than guessed at, so a typo cannot silently page backwards out of a cold
+    /// launch.
+    static func boardStep(fromPath path: String) -> Int? {
+        switch path {
+        case "/next": return 1
+        case "/previous": return -1
+        default: return nil
+        }
+    }
 }
 
 import Foundation
