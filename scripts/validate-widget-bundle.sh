@@ -22,15 +22,12 @@ assert any("aicc-widget" in entry.get("CFBundleURLSchemes", []) for entry in hos
 for bundle in (app, widget):
     assert (bundle / "Contents/MacOS" / ("AICC" if bundle == app else "AICCWidget")).is_file(), "Missing executable"
     subprocess.run(["codesign", "--verify", "--strict", str(bundle)], check=True)
-# The board's footer buttons need the metadata Xcode's build phase would write;
-# the host itself stays free of it.
-assert not (app / "Contents/Resources/Metadata.appintents").exists(), "Host should not carry App Intent metadata"
-metadata = widget / "Contents/Resources/Metadata.appintents"
-assert metadata.is_dir(), "Widget is missing App Intent metadata"
-actions = json.loads((metadata / "extract.actionsdata").read_text())["actions"]
-assert set(actions) == {"BoardStepIntent", "BoardRefreshIntent"}, f"Unexpected App Intents: {sorted(actions)}"
-for name, action in actions.items():
-    assert action["mangledTypeName"] and action["identifier"] == name, f"Unresolvable intent: {name}"
+# The board's footer controls are Links routed through the host URL scheme, so
+# no App Intents metadata should ship at all.  If one appears, someone wired a
+# `Button(intent:)` back in without the signed build that it needs to function.
+for bundle in (app, widget):
+    assert not (bundle / "Contents/Resources/Metadata.appintents").exists(), \
+        f"Unexpected App Intent metadata in {bundle.name}: footer taps use Links"
 raw = subprocess.check_output(["codesign", "-d", "--entitlements", ":-", str(widget)], stderr=subprocess.DEVNULL)
 entitlements = plistlib.loads(raw)
 assert entitlements == {

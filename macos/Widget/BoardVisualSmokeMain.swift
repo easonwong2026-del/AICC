@@ -50,7 +50,7 @@ struct BoardVisualSmokeMain {
         let backdrop: Color = accented
             ? Color(red: 0.16, green: 0.22, blue: 0.29)
             : (scheme == .dark ? Color(red: 0.12, green: 0.12, blue: 0.14) : Color.white)
-        let view = BoardView(entry: entry)
+        let view = BoardView(entry: entry, interactive: false)
             .environment(\.colorScheme, scheme)
             .environment(\.widgetRenderingMode, mode)
             .frame(width: tile.width, height: tile.height)

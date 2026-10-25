@@ -471,9 +471,17 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
         if AppSettings.shared.bridgeEnabled { serverManager.startMonitoring() }
         let loginLaunch = NSAppleEventManager.shared().currentAppleEvent?
             .paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
-        if loginLaunch {
+        // A footer tap on the widget launches us with a URL.  That is a page
+        // turn, not someone opening settings: apply it and get out of the way
+        // instead of throwing the window in their face every time.
+        let urlLaunch = {
+            guard let event = NSAppleEventManager.shared().currentAppleEvent else { return false }
+            return event.eventClass == AEEventClass(kInternetEventClass)
+                && event.eventID == AEEventID(kAEGetURL)
+        }()
+        if loginLaunch || urlLaunch {
             hasPresentedSettings = true
-            if !AppSettings.shared.bridgeEnabled { requestQuit() }
+            if !AppSettings.shared.bridgeEnabled && loginLaunch { requestQuit() }
         } else if notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? Bool == false {
             hasPresentedSettings = true
         } else if NSApp.isActive && !hasPresentedSettings {
@@ -486,8 +494,22 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        guard urls.contains(AICCWidgetMetadata.refreshURL) else { return }
-        hasPresentedSettings = true
+        // Footer taps on the usage board arrive as links, one URL per control:
+        // aicc-widget://board/next, aicc-widget://board/previous, aicc-widget://refresh
+        for url in urls where url.scheme == "aicc-widget" {
+            if url.host == "board" {
+                hasPresentedSettings = true
+                WidgetPreferences.requestBoardStep(url.path == "/next" ? 1 : -1)
+                WidgetCenter.shared.reloadTimelines(ofKind: AICCWidgetMetadata.boardKind)
+                finishBackgroundRefresh()
+            } else {
+                hasPresentedSettings = true
+                refreshWidgets()
+            }
+        }
+    }
+
+    private func refreshWidgets() {
         guard widgetRefreshTask == nil else { return }
         widgetRefreshTask = Task {
             let snapshot = await WidgetStatusLoader.snapshot(force: true, port: AppSettings.shared.magpiePort)

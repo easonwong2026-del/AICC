@@ -4,7 +4,7 @@
 
 - 分支：`feature/usage-board-widget`（PR [#58](https://github.com/easonwong2026-del/AICC/pull/58) → `main`）
 - 版本基线：`VERSION` = 2.11.0；`main` 已发布 v2.11.0 / macOS Build 16，本分支的本地构建是 **Build 17**
-- 这个分支要合的是「AICC 看板」小组件：四页轮播、手动翻页、字号重排、App Intents 元数据
+- 这个分支要合的是「AICC 看板」小组件：四页轮播、手动翻页、字号重排
 
 ## 1. 现在的状态
 
@@ -16,8 +16,9 @@
 | bundle / 签名 / 版本一致性校验 | 通过 |
 | Android 墨水屏 | 与本次改动无关，未动 |
 
-**唯一未闭环的问题**：看板页脚 `‹` `›` `⟳` 点击后没有反应。已定位为手工打包缺少 `Metadata.appintents`，
-本轮补了手写的元数据生成器，但需要装机验证（见第 6 节）。
+**手动翻页已改为 Link + 深链方案**：`Button(intent:)` 在没有 Xcode 的手工打包下拿不到可用的
+App Intents 元数据，三轮尝试后放弃，改成页脚走 `aicc-widget://board/next|previous`，主机 App 投递
+翻页请求（见第 6 节）。深链这一半已在本机端到端验证通过，剩下只有「桌面上点 Link」这一步需要人眼确认。
 
 ## 2. 目录地图
 
@@ -27,13 +28,12 @@ macos/
   MenuBarApp/Tests/       swift test 单测（用量解析、设置、更新服务等）
   Widget/                 Widget 扩展源码
     AICCWidget.swift/.Views.swift   额度小组件（small/medium）
-    BoardWidget.swift               看板：TimelineProvider + BoardCursor + 两个 App Intent
+    BoardWidget.swift               看板：TimelineProvider + BoardCursor + 翻页命令消费
     BoardWidgetViews.swift          看板四页 UI、配色、字号层级
     WidgetUsage.swift               看板的数据读取与缓存（60s）
     WidgetStatus.swift              额度读取、诊断、共享策略
     BoardVisualSmokeMain.swift      离屏渲染入口（QA）
   build-aicc-swiftui.sh   构建 App + Widget 扩展（swiftc 直编，不依赖 Xcode）
-  make-appintents-metadata.py       生成 Metadata.appintents（见第 6 节）
   entitlements.plist / Widget/entitlements.plist
 android/poke-dashboard/   墨水屏 App（Gradle，gradlew 已带）
 server.py                 AICC 本地服务（桥接、Web 看板等）
@@ -79,7 +79,7 @@ open /Applications/AICC.app
 
 ```bash
 bash macos/build-aicc-swiftui.sh                  # App + Widget 扩展，末尾自动跑 bundle 校验
-bash scripts/validate-widget-bundle.sh            # 单独校验：身份、版本、签名、权限、App Intents 元数据
+bash scripts/validate-widget-bundle.sh            # 单独校验：身份、版本、签名、权限、无残留元数据
 bash scripts/smoke-test-board-visual.sh           # 看板离屏渲染 → /private/tmp/board_qa（33 张）
 bash scripts/smoke-test-widget-visual.sh          # 额度小组件渲染 → /private/tmp/widget_qa（94 张）
 cd macos/MenuBarApp && swift test                 # Swift 单测
@@ -101,18 +101,33 @@ cd android/poke-dashboard && ./gradlew assembleDebug
 `‹ / ›` 把目标页写进 hold、`reloadTimelines`；provider 看到 hold 就每 60 秒给一条同页 entry，
 到期后从停住那页继续轮播（不跳回总览）。页脚此时显示「手动」。
 
-**App Intents 元数据是手写的，这是本项目最脆的一环**：Xcode 的 `appintentsmetadataprocessor`
-会在 appex 里生成 `Resources/Metadata.appintents`，系统靠它把 `Button(intent:)` 的点击路由回来。
-本机只有 Command Line Tools，所以由 `macos/make-appintents-metadata.py` 生成（构建脚本在签名前调用）：
+**页脚三个控件是 `Link`，不是 `Button(intent:)`**——这是被真机否掉一轮之后定下来的。
+`Button(intent:)` 要靠 appex 里的 `Resources/Metadata.appintents` 才能把点击路由回来，而那个文件由
+Xcode 的 `appintentsmetadataprocessor` 生成；本机只有 Command Line Tools，手写一份（试过三轮：
+带参 intent、去掉 `.buttonStyle(.plain)`、逐字段照抄系统样例）系统都**静默丢弃**，表现就是按钮画出来、
+点了没反应、扩展里连痕迹都没有（诊断键 `aicc.board.intent.last` 始终为空）。所以改成 Link：
 
-- mangled 名不是猜的，是从二进制符号核对的：`10AICCWidget15BoardStepIntentV` / `10AICCWidget18BoardRefreshIntentV`
-- 格式对照系统自带小组件（如 `WorldClockWidget.appex`）的样例；改 Intent 名字要同步改这个脚本
-- `CFBundleVersion` 从 16 提到 17，是为了让系统重新索引扩展（不然还认旧缓存）
-- `scripts/validate-widget-bundle.sh` 里已从「不得存在元数据」改为「必须存在且恰好这两个 intent」
+```
+‹ → aicc-widget://board/previous
+› → aicc-widget://board/next
+⟳ → aicc-widget://refresh
+```
 
-如果点击仍然无效，按顺序试：① 移除重加小组件；② 提高 `CFBundleVersion` 再重装；
-③ 退路是点整块小组件走 `aicc-widget://` 深链让主机 App 翻页（代价：会唤起 AICC，冷启动约 1 秒）；
-④ 装 Xcode 后改用官方 `appintentsmetadataprocessor` 生成，删掉手写脚本。
+主机 App 在 `application(_:open:)` 里接这三条：翻页那条把 `{step, at}` 写进
+`com.aieink.dashboard.widget-settings` 域的 `boardCommand`，然后 `reloadTimelines`。
+扩展的自有容器主机写不进去，共享域它只有只读例外，所以只能这样「投递请求」：
+
+- 请求带时间戳 `at`，扩展把自己处理过的最后一个 `at` 记在 `aicc.board.command.applied`
+- `BoardWidgetProvider.timeline()` 先 `consume` 命令（幂等，rebuild 不会重复翻页），再走 hold 逻辑
+- 代价：点一下会唤起 AICC（冷启动约 1 秒）。启动是 URL 触发的，所以走 `kAEGetURL` 分支不弹设置窗
+
+禁用元数据是有意的：`scripts/validate-widget-bundle.sh` 现在断言 appex 里**不得**出现
+`Metadata.appintents`；`macos/make-appintents-metadata.py` 已删除。如果以后装 Xcode 想换回
+`Button(intent:)`，把手工脚本换回官方生成器再改回去，别只改一半。
+
+**离屏 QA 的坑**：`ImageRenderer` 画不了 `Link`，整棵子树会被替换成一个「禁止」图形，33 张图会全废。
+所以 `BoardView` 有个 `interactive` 开关，`BoardVisualSmokeMain` 传 `false`，渲染时画的是惰性控件——
+Link 本身不带任何外观，图片仍然是真实排版。
 
 **字号层级是固定点数**：瓦片固定 338×354，`s = min(w,h)/480` 只用于间距和图形。早期正文用
 `size × s` 缩放，12pt 落到 9pt 下限，这是「字太小」的根因。现在 `BoardText` 里的数值就是屏幕上
@@ -124,7 +139,7 @@ cd android/poke-dashboard && ./gradlew assembleDebug
 | --- | --- |
 | `macos/build-aicc-swiftui.sh` | 唯一构建入口（App + 扩展 + 签名 + 校验） |
 | `macos/build-dmg.sh` / `build-release-mac.sh` | 打 dmg / 发版流程 |
-| `scripts/validate-widget-bundle.sh` | 身份、版本号、URL scheme、沙箱权限、App Intents 元数据 |
+| `scripts/validate-widget-bundle.sh` | 身份、版本号、URL scheme、沙箱权限、确认没有 App Intents 元数据 |
 | `scripts/validate-version.sh` | `VERSION` 与构建产物、更新清单是否一致 |
 | `scripts/smoke-test-board-visual.sh` | 看板 33 张离屏渲染 |
 | `scripts/smoke-test-widget-visual.sh` | 额度小组件 94 张离屏渲染 |
@@ -133,7 +148,8 @@ cd android/poke-dashboard && ./gradlew assembleDebug
 
 ## 8. 已知问题 / 风险
 
-1. **手动翻页按钮真机未验证**（最重要，见第 6 节末）。
+1. **手动翻页「桌面点 Link」这一步未验证**（见第 6 节）。深链、投递、消费、渲染各段都已在本机
+   用 `open aicc-widget://board/next` 端到端跑通，剩下的只有 WidgetKit 把点击变成 `open` 的那一跳。
 2. 手工打包的 App 是 ad-hoc 签名（`codesign --sign -`），换机器首次打开可能被 Gatekeeper 拦，
    需要「右键 → 打开」或 `xattr -dr com.apple.quarantine`。
 3. WidgetKit 的刷新时间不保证，页内数字最多可能滞后约 2 分钟（120 秒一轮重新读）。
@@ -147,7 +163,8 @@ cd android/poke-dashboard && ./gradlew assembleDebug
 
 1. 装机后移除重加看板 → 点 `›`，看页脚是否出现「手动」且停在该页；同时看
    `~/Library/Containers/com.aieink.dashboard.menubar.widget/Data/Library/Preferences/*.plist`
-   里有没有 `aicc.board.hold.page.<port>`（有 = intent 执行了，问题在渲染；没有 = 还是路由问题）
+   里有没有 `aicc.board.intent.last`（`previous@…` = intent 跑了）与 `aicc.board.hold.page.<port>`
+  （有 = 渲染该更新；两个都空 = 路由问题）
 2. 通过后跑一遍 `bash scripts/smoke-test-board-visual.sh` 与 `swift test`，再看 CI（PR #58）
 3. 决定是否把「点整块翻页」作为冗余手势补上
 4. 收尾：`VERSION` 定版（2.11.1 或 2.12.0）、`CHANGELOG` 补条目、走 `scripts/build-release-mac.sh` 发版

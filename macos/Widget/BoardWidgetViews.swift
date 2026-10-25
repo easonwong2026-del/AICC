@@ -128,6 +128,10 @@ struct BoardView: View {
     let entry: BoardEntry
     /// The offscreen checks set this; a real widget reads it from the environment.
     var familyOverride: WidgetFamily? = nil
+    /// `ImageRenderer` cannot draw a `Link` — it swaps the whole subtree for a
+    /// "not allowed" glyph — so the QA renders draw the controls inert.  A link
+    /// adds no chrome of its own, so the pictures still show the real layout.
+    var interactive: Bool = true
     @Environment(\.colorScheme) private var scheme
     @Environment(\.widgetRenderingMode) private var renderingMode
 
@@ -226,30 +230,43 @@ struct BoardView: View {
             }
             Spacer(minLength: 6)
             control("chevron.left", palette, label: "上一页",
-                    intent: BoardStepIntent(delta: -1, port: entry.port))
+                    url: AICCWidgetMetadata.boardStepURL(-1))
             control("chevron.right", palette, label: "下一页",
-                    intent: BoardStepIntent(delta: 1, port: entry.port))
+                    url: AICCWidgetMetadata.boardStepURL(1))
             control("arrow.clockwise", palette, label: "立即刷新",
-                    intent: BoardRefreshIntent(port: entry.port))
+                    url: AICCWidgetMetadata.refreshURL)
         }
         .padding(.top, 5 * s)
     }
 
+    /// A footer control.  It is a `Link`, not `Button(intent:)`: the intent path
+    /// needs App Intents metadata that only a signed Xcode build produces, and a
+    /// hand-written copy is dropped by the system without a word — the button
+    /// draws and the tap dies.  A link always works; the price is that the host
+    /// app comes forward for a moment.
+    @ViewBuilder
     private func control(_ symbol: String, _ palette: BoardPalette,
-                         label: String, intent: some AppIntent) -> some View {
-        Button(intent: intent) {
-            Image(systemName: symbol)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(palette.ink.opacity(0.9))
-                .frame(width: 22, height: 22)
-                .background(palette.card, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .strokeBorder(palette.edge, lineWidth: 1)
-                }
+                         label: String, url: URL) -> some View {
+        if interactive {
+            Link(destination: url) {
+                controlGlyph(symbol, palette)
+            }
+            .accessibilityLabel(Text(label))
+        } else {
+            controlGlyph(symbol, palette)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(Text(label))
+    }
+
+    private func controlGlyph(_ symbol: String, _ palette: BoardPalette) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(palette.ink.opacity(0.9))
+            .frame(width: 22, height: 22)
+            .background(palette.card, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(palette.edge, lineWidth: 1)
+            }
     }
 
     // MARK: pages

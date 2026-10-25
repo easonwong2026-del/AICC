@@ -1,6 +1,5 @@
 import SwiftUI
 import WidgetKit
-import AppIntents
 
 /// Four pages, one per reading, cycled by the timeline rather than by a gesture:
 /// a desktop widget has no swipe, and WidgetKit's schedule is the only clock it
@@ -43,9 +42,17 @@ struct BoardWidgetProvider: TimelineProvider {
     private func timeline() async -> Timeline<BoardEntry> {
         let configuration = AICCWidgetConfiguration.load()
         let port = configuration.magpiePort
-        let snapshot = await WidgetUsageLoader.load(port: port)
         let now = Date.now
         let pages = BoardPage.allCases
+
+        // A page turn asked for from the host app (the footer links open it)
+        // lands here: apply it once, then the hold below keeps the page still.
+        if let command = WidgetPreferences.boardCommand(),
+           BoardCursor.consume(command, port: port, now: now) {
+            return await timeline()
+        }
+
+        let snapshot = await WidgetUsageLoader.load(port: port)
 
         // A tapped page stands still, with a slow refresh of its own so the
         // numbers do not go stale while the page is being read.
@@ -98,6 +105,7 @@ enum BoardCursor {
     private static func anchorDateKey(_ port: Int) -> String { "aicc.board.anchor.date.\(port)" }
     private static func holdPageKey(_ port: Int) -> String { "aicc.board.hold.page.\(port)" }
     private static func holdUntilKey(_ port: Int) -> String { "aicc.board.hold.until.\(port)" }
+    private static let commandAppliedKey = "aicc.board.command.applied"
 
     static func anchor(port: Int, defaults: UserDefaults = .standard) -> Anchor? {
         guard let raw = defaults.object(forKey: anchorPageKey(port)) as? Int,
@@ -123,6 +131,22 @@ enum BoardCursor {
     static func setHold(_ hold: Hold, port: Int, defaults: UserDefaults = .standard) {
         defaults.set(hold.page.rawValue, forKey: holdPageKey(port))
         defaults.set(hold.until.timeIntervalSince1970, forKey: holdUntilKey(port))
+    }
+
+    /// Apply a page turn requested by the host app, once per request.
+    ///
+    /// The request carries the stamp it was made at; the extension records the
+    /// last stamp it honoured, so a second timeline build for the same tap is a
+    /// no-op.  Returns true when this call did the work, and the caller rebuilds
+    /// its timeline around the new hold.
+    @discardableResult
+    static func consume(_ command: WidgetPreferences.BoardCommand, port: Int, now: Date = .now,
+                        defaults: UserDefaults = .standard) -> Bool {
+        let applied = defaults.double(forKey: commandAppliedKey)
+        guard command.at > applied else { return false }
+        defaults.set(command.at, forKey: commandAppliedKey)
+        _ = step(command.step, port: port, now: now, defaults: defaults)
+        return true
     }
 
     /// The page the tile is showing right now, derived from the anchor its
@@ -156,57 +180,6 @@ enum BoardCursor {
         setHold(Hold(page: page, until: now.addingTimeInterval(BoardWidgetProvider.manualSeconds)),
                 port: port, defaults: defaults)
         return page
-    }
-}
-
-/// Footer ‹ / ›: move one page and hold it for a few minutes.
-struct BoardStepIntent: AppIntent {
-    static var title: LocalizedStringResource = "切换 AICC 看板页"
-    static var isDiscoverable: Bool = false
-
-    @Parameter(title: "步长")
-    var delta: Int
-
-    @Parameter(title: "端口")
-    var port: Int
-
-    init() {
-        delta = 1
-        port = 3425
-    }
-
-    init(delta: Int, port: Int) {
-        self.delta = delta
-        self.port = port
-    }
-
-    func perform() async throws -> some IntentResult {
-        BoardCursor.step(delta, port: port)
-        WidgetCenter.shared.reloadTimelines(ofKind: AICCWidgetMetadata.boardKind)
-        return .result()
-    }
-}
-
-/// Footer ⟳: read Magpie now instead of waiting for the loop to come round.
-struct BoardRefreshIntent: AppIntent {
-    static var title: LocalizedStringResource = "刷新 AICC 看板"
-    static var isDiscoverable: Bool = false
-
-    @Parameter(title: "端口")
-    var port: Int
-
-    init() {
-        port = 3425
-    }
-
-    init(port: Int) {
-        self.port = port
-    }
-
-    func perform() async throws -> some IntentResult {
-        _ = await WidgetUsageLoader.load(port: port, force: true)
-        WidgetCenter.shared.reloadTimelines(ofKind: AICCWidgetMetadata.boardKind)
-        return .result()
     }
 }
 

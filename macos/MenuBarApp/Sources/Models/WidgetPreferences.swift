@@ -37,4 +37,30 @@ enum WidgetPreferences {
         if let provider, !provider.isEmpty { values["provider"] = provider }
         defaults.set(values, forKey: "display")
     }
+
+    /// A page turn requested from outside the extension.
+    ///
+    /// The widget's own container is not writable from the host app, so a footer
+    /// tap has to travel this way: the app drops a request into the one domain
+    /// the widget may read, and the extension applies it on its next timeline
+    /// build.  `at` makes the request idempotent — the widget remembers the last
+    /// stamp it honoured, so a rebuild cannot apply the same tap twice.
+    struct BoardCommand: Equatable {
+        var step: Int
+        var at: Double
+    }
+
+    private static let boardCommandKey = "boardCommand"
+
+    static func boardCommand(from defaults: UserDefaults = defaults) -> BoardCommand? {
+        guard let values = defaults.dictionary(forKey: boardCommandKey),
+              let step = values["step"] as? Int,
+              let at = values["at"] as? Double else { return nil }
+        return BoardCommand(step: step, at: at)
+    }
+
+    static func requestBoardStep(_ step: Int, at: Date = .now,
+                                 to defaults: UserDefaults = defaults) {
+        defaults.set(["step": step, "at": at.timeIntervalSince1970], forKey: boardCommandKey)
+    }
 }

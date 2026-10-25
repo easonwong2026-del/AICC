@@ -152,9 +152,11 @@ mkdir -p "$WIDGET_APP_DIR/Contents/Resources"
 if [ -d "$ROOT/macos/MenuBarApp/Resources" ]; then
   cp -R "$ROOT/macos/MenuBarApp/Resources/." "$WIDGET_APP_DIR/Contents/Resources/"
 fi
-# Widget buttons are resolved through this metadata; Xcode's build phase writes
-# it, a swiftc build has to write it by hand.
-python3 -B "$ROOT/macos/make-appintents-metadata.py" "$WIDGET_APP_DIR"
+# No App Intents metadata: the board's footer controls are Links, which need
+# nothing beyond the URL scheme the host app already claims.  Xcode's generated
+# metadata is what routes `Button(intent:)`, and a hand-written copy of it is
+# ignored by the system — see HANDOFF.md §6.
+rm -rf "$WIDGET_APP_DIR/Contents/Resources/Metadata.appintents"
 xcrun swiftc \
   -parse-as-library \
   -application-extension \
