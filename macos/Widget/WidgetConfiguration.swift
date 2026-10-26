@@ -1,6 +1,27 @@
 enum AICCWidgetMetadata {
     static let kind = "com.aieink.dashboard.menubar.widget"
+    /// The usage board is a separate widget so both can sit on the desktop.
+    static let boardKind = "com.aieink.dashboard.menubar.board"
     static let refreshURL = URL(string: "aicc-widget://refresh")!
+
+    /// Footer taps travel as links.  `Button(intent:)` needs App Intents
+    /// metadata that only a signed Xcode build can produce, and a hand-written
+    /// copy is silently ignored by the system, so the buttons use the one
+    /// interaction WidgetKit has always honoured: open the app with a URL.
+    static func boardStepURL(_ step: Int) -> URL {
+        URL(string: "aicc-widget://board/\(step > 0 ? "next" : "previous")")!
+    }
+
+    /// The only two paths the host app acts on; anything else is ignored rather
+    /// than guessed at, so a typo cannot silently page backwards out of a cold
+    /// launch.
+    static func boardStep(fromPath path: String) -> Int? {
+        switch path {
+        case "/next": return 1
+        case "/previous": return -1
+        default: return nil
+        }
+    }
 }
 
 import Foundation

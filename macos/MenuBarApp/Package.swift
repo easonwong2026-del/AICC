@@ -28,6 +28,7 @@ let package = Package(
             ],
             sources: [
                 "Models/QuotaModel.swift",
+                "Models/UsageModel.swift",
                 "Models/WidgetPreferences.swift",
                 "Models/DashboardTypography.swift",
                 "Models/SettingsData.swift",
@@ -46,12 +47,14 @@ let package = Package(
             exclude: ["Fixtures"],
             sources: [
                 "AppSettingsTests.swift",
+                "BoardCommandTests.swift",
                 "ProcessRunnerTests.swift",
                 "DashboardTypographyTests.swift",
                 "SettingsPresentationModelTests.swift",
                 "LogFileLimiterTests.swift",
                 "LegacyLaunchAgentMigrationTests.swift",
                 "UpdateServiceTests.swift",
+                "UsageModelTests.swift",
             ]
         ),
     ]

@@ -18,15 +18,11 @@ data/
 *.bak
 *.bak2
 
-# Build artifacts (keep source, not built apps)
-dist/*.apk
-dist/*.dmg
-dist/*.sha256
-dist/*.idsig
-dist/*.app/
-dist/mac/*.app/
-dist/mac/*.dmg
-dist/mac/AppIcon.iconset/
+# Build artifacts (keep source, not built apps). Nothing under dist/ is tracked.
+dist/
+
+# Local backups of installed bundles (ditto copies, old .app)
+.attic/
 
 # Local acceptance artefacts and tool state
 outputs/

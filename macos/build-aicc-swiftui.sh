@@ -125,11 +125,15 @@ xcrun swiftc \
 echo "=== Building Widget extension ==="
 WIDGET_FILES=(
   "$SOURCE_DIR/Models/QuotaModel.swift"
+  "$SOURCE_DIR/Models/UsageModel.swift"
   "$SOURCE_DIR/Models/WidgetPreferences.swift"
   "$WIDGET_SOURCE_DIR/WidgetStatus.swift"
   "$WIDGET_SOURCE_DIR/WidgetConfiguration.swift"
   "$WIDGET_SOURCE_DIR/AICCWidgetViews.swift"
   "$WIDGET_SOURCE_DIR/AICCWidget.swift"
+  "$WIDGET_SOURCE_DIR/WidgetUsage.swift"
+  "$WIDGET_SOURCE_DIR/BoardWidgetViews.swift"
+  "$WIDGET_SOURCE_DIR/BoardWidget.swift"
 )
 for file in "${WIDGET_FILES[@]}"; do
   if [ ! -f "$file" ]; then
@@ -148,6 +152,11 @@ mkdir -p "$WIDGET_APP_DIR/Contents/Resources"
 if [ -d "$ROOT/macos/MenuBarApp/Resources" ]; then
   cp -R "$ROOT/macos/MenuBarApp/Resources/." "$WIDGET_APP_DIR/Contents/Resources/"
 fi
+# No App Intents metadata: the board's footer controls are Links, which need
+# nothing beyond the URL scheme the host app already claims.  Xcode's generated
+# metadata is what routes `Button(intent:)`, and a hand-written copy of it is
+# ignored by the system — see HANDOFF.md §6.
+rm -rf "$WIDGET_APP_DIR/Contents/Resources/Metadata.appintents"
 xcrun swiftc \
   -parse-as-library \
   -application-extension \

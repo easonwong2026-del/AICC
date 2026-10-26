@@ -5,6 +5,7 @@ APP_DIR="${1:-$ROOT/dist/mac/AICC.app}"
 python3 - "$APP_DIR" <<'PY'
 import plistlib
 from pathlib import Path
+import json
 import subprocess
 import sys
 
@@ -20,8 +21,13 @@ for key in ("CFBundleShortVersionString", "CFBundleVersion"):
 assert any("aicc-widget" in entry.get("CFBundleURLSchemes", []) for entry in host_info.get("CFBundleURLTypes", [])), "Missing refresh URL scheme"
 for bundle in (app, widget):
     assert (bundle / "Contents/MacOS" / ("AICC" if bundle == app else "AICCWidget")).is_file(), "Missing executable"
-    assert not (bundle / "Contents/Resources/Metadata.appintents").exists(), "Unexpected App Intent dependency"
     subprocess.run(["codesign", "--verify", "--strict", str(bundle)], check=True)
+# The board's footer controls are Links routed through the host URL scheme, so
+# no App Intents metadata should ship at all.  If one appears, someone wired a
+# `Button(intent:)` back in without the signed build that it needs to function.
+for bundle in (app, widget):
+    assert not (bundle / "Contents/Resources/Metadata.appintents").exists(), \
+        f"Unexpected App Intent metadata in {bundle.name}: footer taps use Links"
 raw = subprocess.check_output(["codesign", "-d", "--entitlements", ":-", str(widget)], stderr=subprocess.DEVNULL)
 entitlements = plistlib.loads(raw)
 assert entitlements == {
