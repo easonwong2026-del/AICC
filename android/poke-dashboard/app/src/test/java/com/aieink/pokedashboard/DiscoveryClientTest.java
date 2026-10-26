@@ -101,6 +101,26 @@ public final class DiscoveryClientTest {
         }
     }
 
+    /**
+     * Discovery probes without a credential, so a found server comes back marked
+     * pairing-required.  The re-probe with the stored token must clear that mark:
+     * otherwise MainActivity throws away the data it just fetched and asks the
+     * user to pair again, which is what happens after every IP change.
+     */
+    @Test public void reProbeWithStoredCredentialClearsPairingFlag() throws Exception {
+        try (FakeServer bridge = new FakeServer("paired-mac", true, true)) {
+            List<DiscoveryClient.Candidate> found = DiscoveryClient.verify(
+                    discovered(500, 0, reply(bridge.port(), true)));
+            assertEquals(1, found.size());
+            DiscoveryClient.Candidate candidate = found.get(0);
+            assertTrue(candidate.pairingRequired);
+            DiscoveryClient.Candidate paired = DiscoveryClient.probe(candidate, "test-read-only-token", "paired-mac");
+            assertNotNull(paired);
+            assertFalse(paired.pairingRequired);
+            assertNotNull(paired.data);
+        }
+    }
+
     private static String url(int port) { return "http://127.0.0.1:" + port; }
 
     @Test public void manualAddressRejectsCredentialsAndPublicDestinations() {

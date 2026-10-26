@@ -49,6 +49,9 @@ public final class MainActivity extends Activity {
     private static final String KEY_SHOW_BATTERY = "show_battery";
     private static final String KEY_V11_INITIALIZED = "v11_initialized";
     private static final String TAG = "AICC Discovery";
+    /** A bridge answers Empty until its first Magpie read lands; ask again soon. */
+    private static final long EMPTY_RETRY_MS = 15_000L;
+    private static final int EMPTY_RETRY_LIMIT = 4;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService network = Executors.newSingleThreadExecutor();
@@ -56,6 +59,7 @@ public final class MainActivity extends Activity {
     private DashboardView dashboard;
     private SharedPreferences preferences;
     private int refreshCount;
+    private int emptyRetries;
     private String lastRenderedStatus;
     private boolean resumed;
     private boolean choicePromptShown;
@@ -176,27 +180,36 @@ public final class MainActivity extends Activity {
     private void fetchStatus() {
         if (!fetching.compareAndSet(false, true)) return;
         network.execute(() -> {
-            String saved = normaliseBaseUrl(preferences.getString(KEY_URL, null));
-            String preferredHostId = preferences.getString(KEY_HOST_ID, null);
-            String token = BridgeCredential.load(preferences);
-            DiscoveryClient.Candidate selected = saved == null ? null
-                    : DiscoveryClient.probe(new DiscoveryClient.Candidate(saved), token, preferredHostId);
-            if (selected != null && preferredHostId != null
-                    && !preferredHostId.equals(selected.hostId)) {
-                Log.w(TAG, "Saved address belongs to a different server: " + saved);
-                selected = null;
-            }
+            DiscoveryClient.Candidate selected = null;
             List<DiscoveryClient.Candidate> found = new ArrayList<>();
-            if (selected == null) {
-                found = DiscoveryClient.findServers();
-                selected = DiscoveryClient.choose(found, preferredHostId);
-                if (selected != null && selected.pairingRequired && token != null) {
-                    selected = DiscoveryClient.probe(selected, token, preferredHostId);
+            try {
+                String saved = normaliseBaseUrl(preferences.getString(KEY_URL, null));
+                String preferredHostId = preferences.getString(KEY_HOST_ID, null);
+                String token = BridgeCredential.load(preferences);
+                selected = saved == null ? null
+                        : DiscoveryClient.probe(new DiscoveryClient.Candidate(saved), token, preferredHostId);
+                if (selected != null && preferredHostId != null
+                        && !preferredHostId.equals(selected.hostId)) {
+                    Log.w(TAG, "Saved address belongs to a different server: " + saved);
+                    selected = null;
                 }
+                if (selected == null) {
+                    found = DiscoveryClient.findServers();
+                    selected = DiscoveryClient.choose(found, preferredHostId);
+                    if (selected != null && selected.pairingRequired && token != null) {
+                        selected = DiscoveryClient.probe(selected, token, preferredHostId);
+                    }
+                }
+            } catch (RuntimeException error) {
+                // Never leave the in-flight flag set: one unexpected error here
+                // would otherwise stop every later refresh until a restart.
+                Log.w(TAG, "Status refresh failed", error);
+                selected = null;
+            } finally {
+                fetching.set(false);
             }
             final DiscoveryClient.Candidate result = selected;
             final List<DiscoveryClient.Candidate> alternatives = found;
-            fetching.set(false);
             if (destroyed) return;
             handler.post(() -> {
                 if (destroyed) return;
@@ -253,8 +266,24 @@ public final class MainActivity extends Activity {
                 dashboard.updateSyncTime(candidate.data.updatedAt);
                 dashboard.setOffline(false);
             }
+            retryWhenEmpty(candidate.data.available);
         }
         choicePromptShown = false;
+    }
+
+    /**
+     * The bridge can only answer with the accounts it has read so far, which is
+     * "none" for the first seconds after the Mac app starts (and for as long as
+     * Magpie is not up).  Waiting a full refresh interval would leave the panel
+     * saying "Magpie 暂无额度" with real quotas one read away, so poll again a
+     * few times before falling back to the normal schedule.
+     */
+    private void retryWhenEmpty(boolean available) {
+        if (available) { emptyRetries = 0; return; }
+        if (emptyRetries >= EMPTY_RETRY_LIMIT) return;
+        emptyRetries++;
+        handler.removeCallbacks(refreshLoop);
+        handler.postDelayed(refreshLoop, EMPTY_RETRY_MS);
     }
 
     private void forceDiscovery(EditText urlField) {
