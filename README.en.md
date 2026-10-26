@@ -5,7 +5,7 @@
 AICC shows the quota Magpie already knows about: a native macOS Widget and an Android e-ink panel covering every
 provider and account in Magpie. Magpie owns authentication, accounts, routing and quota reads. AICC has no status
 item, popover or web dashboard, no vendor collectors of its own, and never reads vendor credential files.
-Current release: **2.11.0 / macOS Build 16** ([Releases](https://github.com/easonwong2026-del/AICC/releases)).
+Current release: **2.12.0 / macOS Build 22** ([Releases](https://github.com/easonwong2026-del/AICC/releases)).
 The widget kind, its shared settings domain and existing instances are unchanged, so upgrading needs no re-adding.
 
 ## What it shows
