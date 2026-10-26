@@ -171,9 +171,11 @@ final class DiscoveryClient {
             }
             candidate.data = DashboardData.parse(body);
             candidate.statusBody = body;
-            candidate.hostId = health.optString("host_id", "");
-            candidate.hostname = health.optString("hostname", candidate.hostname == null ? "" : candidate.hostname);
-            candidate.platform = health.optString("platform", candidate.platform == null ? "" : candidate.platform);
+            // A candidate that discovery probed without a credential was marked
+            // pairing-required; this pass proved the stored token still works, so
+            // clear the mark.  It is read by MainActivity to decide whether the
+            // panel may show the data it just fetched.
+            candidate.pairingRequired = false;
             JSONObject codex = status.optJSONObject("codex");
             candidate.stale = generic ? status.optBoolean("stale", true)
                     : (codex != null && codex.optBoolean("stale"));
