@@ -4,6 +4,20 @@
 
 This file summarizes the current and recent public releases. The Chinese changelog contains the older detailed history.
 
+## 2.12.1 - 2026-10-26
+
+### E-ink APK
+
+- **Fixed: paired device showing no data.** Discovery probes without a credential and marks the server pairing-required; the follow-up probe with the stored token fetched the snapshot but never cleared that mark, so the app dropped the data and asked to pair again. A DHCP lease change, a router reboot or one timed-out poll was enough. A successful probe now clears it.
+- **Fixed: refresh wedged for good.** The in-flight flag was only cleared on the happy path, so an unexpected error blocked every later refresh until a restart. It clears in a `finally` now.
+- **Fixed: "Magpie 暂无额度" right after start.** The bridge has nothing to answer with until its first Magpie read lands; a refresh in that window drew an empty panel and then waited a whole interval. An empty answer retries after 15 s, four times.
+- New test `reProbeWithStoredCredentialClearsPairingFlag`; APK is `1.2.7-pencil-home` (versionCode 13).
+
+### Build and docs
+
+- `release-publish.sh` takes the repository and both manifest URLs from `remote.origin.url`, so a fork publishes to itself.
+- Both READMEs now state the released version.
+
 ## 2.11.0 - 2026-10-21
 
 ### Quota model

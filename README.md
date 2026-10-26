@@ -6,7 +6,7 @@ AICC 提供 macOS 桌面小组件和 Android 墨水屏的**额度显示**，覆�
 账号登录、模型路由和额度采集都由 [Magpie](https://github.com/yetone/magpie) 负责。AICC 没有菜单栏图标、
 弹出看板或 Web 看板，不启动代理、不读取供应商密钥，也不再自带 Codex / WorkBuddy / DeepSeek 采集器。
 
-当前版本 **2.12.0 / macOS Build 22**，见 [Releases](https://github.com/easonwong2026-del/AICC/releases)。
+当前版本 **2.12.1 / macOS Build 23**，见 [Releases](https://github.com/easonwong2026-del/AICC/releases)。
 Widget 的 kind 标识、共享设置域与既有实例配置保持不变，升级后不用重新添加小组件。
 
 ## 显示什么

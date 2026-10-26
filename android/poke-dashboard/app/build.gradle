@@ -10,8 +10,8 @@ android {
         applicationId "com.aieink.pokedashboard"
         minSdk 23
         targetSdk 35
-        versionCode 12
-        versionName "1.2.6-pencil-home"
+        versionCode 13
+        versionName "1.2.7-pencil-home"
         testInstrumentationRunner "com.aieink.pokedashboard.DashboardVisualTest"
     }
 
