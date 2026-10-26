@@ -24,6 +24,13 @@ cd "$ROOT"
 
 OWNER="easonwong2026-del"
 REPO="AICC"
+# Follow the repository this checkout actually points at, so a fork publishes
+# to itself instead of the upstream project.  Falls back to the defaults above.
+REMOTE="$(git config --get remote.origin.url 2>/dev/null || true)"
+if [[ "$REMOTE" =~ github\.com[:/]+([^/]+)/([^/]+)$ ]]; then
+  OWNER="${BASH_REMATCH[1]}"
+  REPO="${BASH_REMATCH[2]%.git}"
+fi
 API="https://api.github.com/repos/$OWNER/$REPO"
 DRY_RUN=0
 [[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
@@ -131,17 +138,17 @@ done
 if [[ $DRY_RUN -eq 0 ]]; then
   PUBLISHED="$(curl -sS --max-time 20 "$API/releases/$RELEASE_ID" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["published_at"])')"
-  python3 - "$VERSION" "$BUILD" "$PUBLISHED" <<'PY'
+  python3 - "$VERSION" "$BUILD" "$PUBLISHED" "$OWNER" "$REPO" <<'PY'
 import json, pathlib, sys
-version, build, published = sys.argv[1:4]
+version, build, published, owner, repo = sys.argv[1:6]
 path = pathlib.Path("updates/aicc-update.json")
 current = json.loads(path.read_text(encoding="utf-8"))
 updated = {
     "version": version,
     "build": build,
     "minimumSystemVersion": current.get("minimumSystemVersion", "14.0"),
-    "downloadURL": f"https://github.com/easonwong2026-del/AICC/releases/download/v{version}/AICC-{version}.dmg",
-    "releaseNotesURL": f"https://github.com/easonwong2026-del/AICC/releases/tag/v{version}",
+    "downloadURL": f"https://github.com/{owner}/{repo}/releases/download/v{version}/AICC-{version}.dmg",
+    "releaseNotesURL": f"https://github.com/{owner}/{repo}/releases/tag/v{version}",
     "publishedAt": published,
 }
 if updated == current:
