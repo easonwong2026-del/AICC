@@ -6,7 +6,7 @@ AICC 提供 macOS 桌面小组件和 Android 墨水屏的**额度显示**，覆�
 账号登录、模型路由和额度采集都由 [Magpie](https://github.com/yetone/magpie) 负责。AICC 没有菜单栏图标、
 弹出看板或 Web 看板，不启动代理、不读取供应商密钥，也不再自带 Codex / WorkBuddy / DeepSeek 采集器。
 
-当前版本 **2.12.1 / macOS Build 23**，见 [Releases](https://github.com/easonwong2026-del/AICC/releases)。
+当前版本 **2.12.2 / macOS Build 24**，见 [Releases](https://github.com/easonwong2026-del/AICC/releases)。
 Widget 的 kind 标识、共享设置域与既有实例配置保持不变，升级后不用重新添加小组件。
 
 ## 显示什么
@@ -53,6 +53,18 @@ Magpie 的额度接口有三种数据类型，AICC 全部支持，且不按服�
 
 升级 AICC 后如果桌面小组件仍是空白，先把小组件移除再重新添加一次：macOS 会沿用升级前已经启动的
 Widget 扩展进程，旧进程里是旧代码和过期缓存。
+
+**小组件整块纯黑**（一个字都没有）是另一回事：那是 WidgetKit 没加载到扩展，而不是没有数据——真没数据时
+卡片会画「未连接 Magpie」的字。AICC 每次升级后首次启动会自己清掉 App 的隔离属性、重新注册扩展并重启
+`chronod`，正常情况下不需要手动处理。如果仍然纯黑，按顺序验证：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/AICC.app   # 从网上下载会带隔离属性，扩展会被单独拦
+codesign --verify --deep --strict /Applications/AICC.app # 必须 valid on disk
+```
+
+只要 `codesign` 报 `a sealed resource is missing or invalid`，就说明有东西被写进了 App 包内部（历史上是
+`Server/data`），把它移出去后 seal 立即恢复，扩展也就能重新注册。
 
 > 注：本轮沿用静态配置（`StaticConfiguration`）+ 共享设置域，因为当前构建方式下 App Intents 动态配置
 > 无法稳定注册；Widget 种类标识与升级兼容性保持不变。

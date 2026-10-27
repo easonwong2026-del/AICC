@@ -255,6 +255,41 @@ class TransportTests(unittest.TestCase):
         self.assertIsInstance(magpie.REFRESH_SECONDS, int)
 
 
+class DataRootTests(unittest.TestCase):
+    """The bundle must never be written to: it carries the code signature seal."""
+
+    def resolve(self, configured, module_file):
+        env = {} if configured is None else {"EINK_DATA_DIR": configured}
+        with patch.dict(os.environ, env, clear=False), \
+             patch.object(magpie, "__file__", str(module_file)):
+            if configured is None:
+                os.environ.pop("EINK_DATA_DIR", None)
+            return magpie._default_data_root()
+
+    def test_source_checkout_keeps_its_own_data_directory(self):
+        root = Path("/Users/someone/AICC")
+        self.assertEqual(self.resolve(None, root / "collectors/magpie.py"), root / "data")
+
+    def test_an_explicit_directory_always_wins(self):
+        self.assertEqual(self.resolve("/tmp/aicc-data", Path("/Applications/AICC.app/Contents/Resources/Server/collectors/magpie.py")),
+                         Path("/tmp/aicc-data"))
+
+    def test_a_bundle_without_the_environment_variable_is_redirected(self):
+        """Reproduces the shipped 2.12.1 seal failure: no EINK_DATA_DIR, bundle run."""
+        bundle = Path("/Applications/AICC.app/Contents/Resources/Server/collectors/magpie.py")
+        redirected = self.resolve(None, bundle)
+        self.assertFalse(magpie._inside_app_bundle(redirected))
+        self.assertEqual(redirected, Path.home() / "Library/Application Support/AICC-Dashboard/data")
+
+    def test_an_environment_variable_pointing_inside_a_bundle_is_redirected(self):
+        inside = "/Applications/AICC.app/Contents/Resources/Server/data"
+        self.assertFalse(magpie._inside_app_bundle(self.resolve(inside, Path("/tmp/collectors/magpie.py"))))
+
+    def test_inside_app_bundle_recognises_nested_paths_only(self):
+        self.assertTrue(magpie._inside_app_bundle("/Applications/AICC.app/Contents/Resources/Server/data"))
+        self.assertFalse(magpie._inside_app_bundle("/Users/someone/AICC/data"))
+
+
 class ConcurrencyTests(unittest.TestCase):
     def test_a_failing_provider_leaves_the_others_in_place(self):
         """Magpie reports a provider's failure as a row, not as a failed request."""

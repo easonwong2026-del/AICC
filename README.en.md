@@ -5,7 +5,7 @@
 AICC shows the quota Magpie already knows about: a native macOS Widget and an Android e-ink panel covering every
 provider and account in Magpie. Magpie owns authentication, accounts, routing and quota reads. AICC has no status
 item, popover or web dashboard, no vendor collectors of its own, and never reads vendor credential files.
-Current release: **2.12.1 / macOS Build 23** ([Releases](https://github.com/easonwong2026-del/AICC/releases)).
+Current release: **2.12.2 / macOS Build 24** ([Releases](https://github.com/easonwong2026-del/AICC/releases)).
 The widget kind, its shared settings domain and existing instances are unchanged, so upgrading needs no re-adding.
 
 ## What it shows
@@ -45,6 +45,19 @@ While any app window is in front, macOS dims desktop widgets into **accented ren
 and drops the background (*Dim widgets on desktop*, Automatically by default). AICC ships a separate palette for that
 mode (translucent white surfaces, opaque text) so the numbers stay readable; to keep full colour all the time, set
 System Settings → Desktop & Dock → Widgets → **Dim widgets on desktop** to *Never*.
+
+A widget that is **solid black with no text at all** is a different failure: WidgetKit never loaded the extension.
+With no data the tile still draws "未连接 Magpie", so an empty black tile means nothing ran. On the first launch
+after an upgrade AICC clears the App's quarantine flag, re-registers the extension and restarts `chronod` by itself.
+If it is still black, check in this order:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/AICC.app   # a download marks the app, and extensions are judged alone
+codesign --verify --deep --strict /Applications/AICC.app # must say "valid on disk"
+```
+
+`codesign` reporting `a sealed resource is missing or invalid` means something wrote inside the App bundle
+(`Server/data` in 2.12.1); move it out and the seal — and the extension registration — come back immediately.
 
 ## Usage board widget (optional)
 

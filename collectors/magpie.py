@@ -16,6 +16,7 @@ import hashlib
 import json
 import math
 import os
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -23,7 +24,43 @@ from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 SCHEMA_VERSION = 3
-DATA_ROOT = Path(os.environ.get("EINK_DATA_DIR", Path(__file__).resolve().parent.parent / "data"))
+
+
+def _inside_app_bundle(path):
+    """True when `path` sits inside a `.app` bundle.
+
+    Writing there breaks the code signature seal of an ad-hoc signed build:
+    `codesign --verify --deep --strict` then reports "a sealed resource is
+    missing or invalid", macOS refuses to register the Widget extension, and
+    every desktop widget turns into an empty black tile.  A shipped App must
+    never keep its runtime data inside its own bundle.
+    """
+    resolved = Path(path).resolve()
+    return any(parent.suffix == ".app" for parent in resolved.parents)
+
+
+def _default_data_root():
+    """Where the bridge keeps `status.json` and the quota cache.
+
+    `EINK_DATA_DIR` wins: the macOS App points it at
+    `~/Library/Application Support/AICC-Dashboard/data` so an upgrade cannot
+    touch the bundle.  A bare `server.py` run falls back to `../data`, which is
+    correct for a source checkout — but that same fallback used to fire inside
+    an installed App whenever the variable was missing (a server left over from
+    the previous build, a manual run, an interrupted upgrade).  Redirect it
+    instead, so the bundle's seal survives no matter how the server was
+    started.
+    """
+    configured = os.environ.get("EINK_DATA_DIR")
+    candidate = Path(configured) if configured else Path(__file__).resolve().parent.parent / "data"
+    if not _inside_app_bundle(candidate):
+        return candidate
+    redirect = Path.home() / "Library/Application Support/AICC-Dashboard/data"
+    print(f"Refusing to write inside an app bundle; using {redirect}", file=sys.stderr)
+    return redirect
+
+
+DATA_ROOT = _default_data_root()
 
 # One place for the refresh policy: the bridge poll loop, the Widget timeline and
 # the APK refresh interval all read these instead of hard-coding their own.

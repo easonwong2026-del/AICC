@@ -58,4 +58,39 @@ with tempfile.TemporaryDirectory() as directory:
     finally:
         process.terminate()
         process.wait(timeout=5)
+
+# A server started inside the App without EINK_DATA_DIR must not write into the
+# bundle: that breaks the code signature seal and the Widget extension stops
+# loading, which shows up as an empty black desktop widget.  2.12.1 shipped with
+# exactly that failure.
+with socket.socket() as listener:
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+with tempfile.TemporaryDirectory() as home:
+    env = dict(os.environ, HOME=home, EINK_HOST="127.0.0.1", EINK_PORT=str(port),
+               AICC_TOKEN_STDIN="1", AICC_MAGPIE_URL="http://127.0.0.1:1", EINK_DISCOVERY_PORT="0")
+    env.pop("EINK_DATA_DIR", None)
+    process = subprocess.Popen([sys.executable, "-B", str(root / "server.py")], stdin=subprocess.PIPE,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+    try:
+        process.stdin.write((secrets.token_urlsafe(32) + "\n").encode())
+        process.stdin.close()
+        for _ in range(50):
+            if process.poll() is not None:
+                break
+            try:
+                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+                connection.request("GET", "/api/health/live")
+                connection.getresponse().read()
+                connection.close()
+                break
+            except OSError:
+                time.sleep(.1)
+        assert not (root / "data").exists(), "Server wrote runtime data inside the App bundle"
+        assert (Path(home) / "Library/Application Support/AICC-Dashboard/data").is_dir(), \
+            "Server did not redirect its data directory when the bundle was the fallback"
+        print("Bundled bridge: refuses to write runtime data inside the bundle")
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
 PY
