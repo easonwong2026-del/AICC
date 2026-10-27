@@ -23,6 +23,7 @@ let package = Package(
                 "Services/LaunchAtLoginService.swift",
                 "Services/SettingsWindowCoordinator.swift",
                 "Services/SingleInstanceService.swift",
+                "Services/WidgetHealthService.swift",
                 "Settings",
                 "Views",
             ],
@@ -38,6 +39,7 @@ let package = Package(
                 "Services/LogFileLimiter.swift",
                 "Services/ProcessRunner.swift",
                 "Services/UpdateService.swift",
+                "Services/WidgetInstallation.swift",
             ]
         ),
         .testTarget(
@@ -55,6 +57,7 @@ let package = Package(
                 "LegacyLaunchAgentMigrationTests.swift",
                 "UpdateServiceTests.swift",
                 "UsageModelTests.swift",
+                "WidgetInstallationTests.swift",
             ]
         ),
     ]

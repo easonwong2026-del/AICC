@@ -4,6 +4,39 @@
 
 This file summarizes the current and recent public releases. The Chinese changelog contains the older detailed history.
 
+## 2.12.2 - 2026-10-27
+
+### macOS
+
+- **Desktop widgets rendered as a solid black tile.** The bridge wrote its runtime data into
+  `Contents/Resources/Server/data/` inside the App bundle. An ad-hoc signature hashes every file, so two added
+  files (`host_id`, `magpie_last_success.json`) made `codesign --verify --deep --strict` report
+  `a sealed resource is missing or invalid`. With the seal broken macOS stops registering the Widget extension
+  (it disappears from chronod's registry) and Desktop draws the system's empty shell: a black rectangle with no
+  text on it.
+- **Root cause.** With `EINK_DATA_DIR` unset, `collectors/magpie.py` fell back to `data/` beside the script —
+  inside an installed App, the bundle itself. Any resolved directory inside a `.app` is now redirected to
+  `~/Library/Application Support/AICC-Dashboard/data` with one line on stderr. A source checkout still uses
+  `./data` and an explicit `EINK_DATA_DIR` still wins.
+- **Self-healing after an upgrade.** The first launch of a new build recursively clears `com.apple.quarantine`
+  from its own bundle, re-registers the extension with `pluginkit -a`, and restarts `chronod`. Each step logs a
+  line with its exit status to `~/Library/Logs/AICC-Dashboard/widget-health.log`.
+- **The App no longer hangs after an upgrade.** The bridge secret lived in a login-keychain item whose ACL is
+  bound to the signing identity; an ad-hoc rebuild changes cdhash, so `SecItemCopyMatching` waits for an
+  access-authorization dialog that an `LSUIElement` menu-bar App cannot show, parking the App in launch forever.
+  The secret now lives in `~/Library/Application Support/AICC-Dashboard/bridge-token` (0600), and the old item is
+  read at most once during migration under a two-second deadline.
+- **Ship-time guard.** `validate-widget-bundle.sh` asserts no `Server/data` exists inside the bundle and that
+  `codesign --verify --deep --strict` passes; `smoke-test-bundled-server.sh` starts the server inside a `.app`
+  without `EINK_DATA_DIR` and asserts it does not write into the bundle.
+- **Tests.** `DataRootTests` (five cases) added to `tests/test_magpie.py`; `WidgetInstallationTests` (six cases)
+  cover the App Translocation path rules.
+
+### Docs
+
+- Both READMEs now separate "widget is blank after an upgrade" from "widget is solid black" and give the commands
+  to check each.
+
 ## 2.12.1 - 2026-10-26
 
 ### E-ink APK

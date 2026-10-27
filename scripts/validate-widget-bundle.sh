@@ -11,6 +11,13 @@ import sys
 
 app = Path(sys.argv[1])
 widget = app / "Contents/PlugIns/AICCWidget.appex"
+# Runtime data belongs in ~/Library/Application Support.  A `Server/data`
+# directory inside the bundle means a server ran without EINK_DATA_DIR and
+# wrote into the sealed bundle: codesign then fails with "a sealed resource is
+# missing or invalid", macOS drops the Widget extension, and every desktop
+# widget shows as an empty black tile.  That shipped once in 2.12.1.
+stray = app / "Contents/Resources/Server/data"
+assert not stray.exists(), f"Runtime data inside the bundle breaks its seal: {stray}"
 host_info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
 info = plistlib.loads((widget / "Contents/Info.plist").read_bytes())
 assert host_info["CFBundleIdentifier"] == "com.aieink.dashboard.menubar", "Wrong host identity"
@@ -35,5 +42,8 @@ assert entitlements == {
     "com.apple.security.network.client": True,
     "com.apple.security.temporary-exception.shared-preference.read-only": ["com.aieink.dashboard.widget-settings"],
 }, "Widget must retain its sandbox with only network and read-only display settings"
-print("PASS: signed Widget bundle, refresh URL, matching versions and narrow read-only settings permission")
+sealed = subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)],
+                        capture_output=True, text=True)
+assert sealed.returncode == 0, f"Bundle seal is broken: {sealed.stderr.strip()}"
+print("PASS: signed Widget bundle, refresh URL, matching versions, no runtime data inside the bundle")
 PY

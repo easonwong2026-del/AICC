@@ -2,6 +2,34 @@
 
 [English](CHANGELOG.en.md)
 
+## 2.12.2 - 2026-10-27
+
+### macOS
+
+- **修复桌面小组件整块纯黑**：桥接把运行数据写进了 App 包内部的 `Contents/Resources/Server/data/`，
+  ad-hoc 签名是逐文件哈希，多出 `host_id` 与 `magpie_last_success.json` 之后
+  `codesign --verify --deep --strict` 报 `a sealed resource is missing or invalid`。seal 一坏，
+  macOS 就不再登记 Widget 扩展（chronod 注册表里查不到），桌面只剩系统画的空壳黑框，没有任何文字。
+- **根因**：`EINK_DATA_DIR` 未设置时 `collectors/magpie.py` 退回「脚本同级 `data/`」，安装态下就是 App 包。
+  现在解析结果只要落在任意 `.app` 内部就强制改道 `~/Library/Application Support/AICC-Dashboard/data`
+  并记一行 stderr；源码目录仍用 `./data`，显式指定仍优先。
+- **升级后自愈**：构建号变化后的首次启动会递归清掉自身 bundle 的 `com.apple.quarantine`、
+  `pluginkit -a` 重新注册扩展、重启 `chronod`，每步写一行 `~/Library/Logs/AICC-Dashboard/widget-health.log`。
+  只动自己的扩展和用户级 `chronod`。
+- **修复升级后 App 卡死**：桥接密钥原存在登录钥匙串条目里，ACL 绑定签名身份；ad-hoc 重建后 cdhash 变，
+  `SecItemCopyMatching` 会等一个 `LSUIElement` 应用无法显示的授权框，App 于是永久卡在启动阶段。
+  密钥改存 `~/Library/Application Support/AICC-Dashboard/bridge-token`（0600），旧条目只在迁移时读一次
+  且带 2 秒硬超时。
+- **发版自检**：`validate-widget-bundle.sh` 新增「bundle 内不得存在 `Server/data`」与
+  「`codesign --verify --deep --strict` 必须通过」两条断言；`smoke-test-bundled-server.sh`
+  新增「在 `.app` 内不带 `EINK_DATA_DIR` 启动服务器，断言不写进 bundle」。
+- **测试**：`tests/test_magpie.py` 新增 `DataRootTests`（5 项）；`WidgetInstallationTests`（6 项）覆盖
+  App Translocation 路径判定。
+
+### 文档
+
+- 两份 README 补充「小组件纯黑」与「升级后空白」两种故障的区分和排查命令。
+
 ## 2.12.1 - 2026-10-26
 
 ### 墨水屏 APK

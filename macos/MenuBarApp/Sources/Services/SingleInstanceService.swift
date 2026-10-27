@@ -39,9 +39,19 @@ final class SingleInstanceService {
     }
 
     deinit {
+        release()
+    }
+
+    /// Give up the lock so a replacement instance can take over.
+    ///
+    /// A translocated launch hands over to the installed copy; without this the
+    /// newcomer would lose the race, see the dying process as "the" AICC, and
+    /// quit — leaving nothing running at all.
+    func release() {
         guard lockDescriptor >= 0 else { return }
         flock(lockDescriptor, LOCK_UN)
         Darwin.close(lockDescriptor)
+        lockDescriptor = -1
     }
 
     private func activateExistingInstance(bundleID: String) {

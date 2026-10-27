@@ -456,6 +456,11 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        // A downloaded App runs from a read-only translocation copy while it
+        // still carries quarantine, and a build with a new cdhash needs its
+        // Widget extension re-registered.  Either one leaves the Desktop widget
+        // as an empty black tile, so repair both before anything else.
+        WidgetHealthService.repairIfNeeded()
         // Retire exact LaunchAgents from pre-DMG installs before ServerManager
         // checks port 8765 and starts the bundled server.
         LegacyLaunchAgentMigration.run()
