@@ -113,6 +113,15 @@ final class AccountWorkerManager: ObservableObject {
         }
     }
 
+    /// PR2a 只读账号列表。真实数据由 Rust SQLite 返回，不修改账号或客户端凭据。
+    func listAccounts() async throws -> [[String: Any]] {
+        guard let client, client.isRunning else {
+            throw AccountWorkerFailure.notRunning
+        }
+        let result = try await client.call("accounts.list", timeout: 10)
+        return result["accounts"] as? [[String: Any]] ?? []
+    }
+
     func stop() {
         client?.stop()
         client = nil
