@@ -167,31 +167,59 @@ impl SecureStore {
             });
         // 探针必须删掉，不能给用户留垃圾条目。
         let cleanup = self.delete(&account);
-
         let latency_ms = started.elapsed().as_millis() as u64;
-        match result {
-            Ok(()) => json!({
-                "ok": true,
-                "backend": self.backend_name(),
-                "service": self.service_name(),
-                "latencyMs": latency_ms,
-                "cleanupOk": cleanup.is_ok(),
-            }),
-            Err(err) => json!({
-                "ok": false,
-                "backend": self.backend_name(),
-                "service": self.service_name(),
-                "latencyMs": latency_ms,
-                "kind": match err.kind {
-                    SecretErrorKind::NotFound => "not_found",
-                    SecretErrorKind::Denied => "denied",
-                    SecretErrorKind::Unavailable => "unavailable",
-                    SecretErrorKind::Other => "error",
-                },
-                "osStatus": err.os_status,
-                "message": crate::rpc::sanitize(&err.message),
-            }),
-        }
+
+        probe_report(
+            self.backend_name(),
+            self.service_name(),
+            latency_ms,
+            result,
+            cleanup.is_ok(),
+        )
+    }
+}
+
+/// 把探针结果拼成报告。抽成纯函数是为了能覆盖"清理失败但读写成功"这种分支——
+/// 那种情况必须报 `ok: false`，否则界面会显示钥匙串可用而实际写权限有问题。
+fn probe_report(
+    backend: &str,
+    service: Option<&str>,
+    latency_ms: u64,
+    result: Result<(), SecretError>,
+    cleanup_ok: bool,
+) -> Value {
+    match result {
+        Ok(()) if cleanup_ok => json!({
+            "ok": true,
+            "backend": backend,
+            "service": service,
+            "latencyMs": latency_ms,
+            "cleanupOk": true,
+        }),
+        Ok(()) => json!({
+            "ok": false,
+            "backend": backend,
+            "service": service,
+            "latencyMs": latency_ms,
+            "kind": "cleanup_failed",
+            "cleanupOk": false,
+            "message": "探针条目写入成功但删除失败，请检查钥匙串授权",
+        }),
+        Err(err) => json!({
+            "ok": false,
+            "backend": backend,
+            "service": service,
+            "latencyMs": latency_ms,
+            "kind": match err.kind {
+                SecretErrorKind::NotFound => "not_found",
+                SecretErrorKind::Denied => "denied",
+                SecretErrorKind::Unavailable => "unavailable",
+                SecretErrorKind::Other => "error",
+            },
+            "osStatus": err.os_status,
+            "cleanupOk": cleanup_ok,
+            "message": crate::rpc::sanitize(&err.message),
+        }),
     }
 }
 
@@ -241,8 +269,10 @@ mod platform {
     }
 
     pub fn set(service: &str, account: &str, secret: &[u8]) -> Result<(), SecretError> {
-        // 先删再加：set_generic_password 遇到同名条目会报错，而我们要的是"覆盖"。
-        let _ = security_framework::passwords::delete_generic_password(service, account);
+        // 不要"先删再加"：删成功而写失败会把用户的旧凭据永久丢掉。
+        // security-framework 的 set_generic_password 内部就是 SecItemAdd +
+        // 命中 errSecDuplicateItem 时改走 SecItemUpdate，属于原位更新——
+        // 更新失败时旧值保持不动。
         security_framework::passwords::set_generic_password(service, account, secret)
             .map_err(map_error)
     }
@@ -336,6 +366,33 @@ mod tests {
         assert_eq!(report["cleanupOk"], true);
         let account = format!("__probe__{}", std::process::id());
         assert!(store.get(&account).is_err(), "探针条目必须被删除");
+    }
+
+    #[test]
+    fn probe_reports_failure_when_cleanup_fails() {
+        // 读写都成功但删不掉：说明授权有问题，不能报 ok。
+        let report = probe_report("keychain", Some("svc"), 3, Ok(()), false);
+        assert_eq!(report["ok"], false, "{report}");
+        assert_eq!(report["kind"], "cleanup_failed");
+        assert_eq!(report["cleanupOk"], false);
+    }
+
+    #[test]
+    fn probe_reports_ok_only_when_everything_succeeds() {
+        let report = probe_report("keychain", Some("svc"), 3, Ok(()), true);
+        assert_eq!(report["ok"], true, "{report}");
+        assert_eq!(report["cleanupOk"], true);
+    }
+
+    #[test]
+    fn probe_keeps_error_kind_and_cleanup_state() {
+        let err = SecretError::new(SecretErrorKind::Denied, "授权被拒绝").with_status(-25293);
+        let report = probe_report("keychain", Some("svc"), 1, Err(err), true);
+        assert_eq!(report["ok"], false);
+        assert_eq!(report["kind"], "denied");
+        assert_eq!(report["osStatus"], -25293);
+        // 即使清理成功，也不能把失败洗成 ok。
+        assert_eq!(report["cleanupOk"], true);
     }
 
     #[test]

@@ -163,9 +163,22 @@ fn health(app: &App) -> Value {
     let workbuddy = workbuddy::inspect_path(&workbuddy::default_auth_path());
     let qoder = qoder::presence(None);
 
-    let db_ok = db.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    // 数据库能打开不等于数据可用：完整性自检失败必须算 degraded，
+    // 否则界面会显示"正常"，而库其实已经坏了。
+    let db_open = db.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    let db_integrity = db
+        .get("integrityOk")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let db_ok = db_open && db_integrity;
+
     let mut health = app.base_health();
     health["status"] = json!(if db_ok { "ok" } else { "degraded" });
+    if db_open && !db_integrity {
+        health["degradedReason"] = json!("database_integrity_check_failed");
+    } else if !db_open {
+        health["degradedReason"] = json!("database_unavailable");
+    }
     health["database"] = db;
     health["secureStore"] = secure;
     health["providers"] = json!({ "workbuddy": workbuddy, "qoder": qoder });

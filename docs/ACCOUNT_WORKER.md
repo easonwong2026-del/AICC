@@ -43,7 +43,7 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `env.info` | 数据目录、`WB_SWITCH_HOME` 实际值、认证文件位置 | 否 |
 | `worker.shutdown` | 优雅退出 | 否 |
 | `storage.init` / `storage.status` | 迁移、行数、完整性 | 否 |
-| `accounts.list` / `get` / `upsert` / `delete` | 账号库 CRUD | 否 |
+| `accounts.list` / `get` / `upsert` / `delete` | 账号库 CRUD（`upsert` 是补丁语义：没传的字段保持原值） | 否 |
 | `groups.list` / `upsert` | 分组 | 否 |
 | `secure.status` | 钥匙串读写删探针（会触发一次系统授权） | 否 |
 | `secure.set` / `get` / `delete` | 凭据存取，默认只回指纹 | 否 |
@@ -53,7 +53,11 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `providers.qoder.inspect` | 解密 `auth.v1.dat` 并给令牌指纹 | 否 |
 
 `health` **故意不做**钥匙串探针：否则每次启动 App 都会弹一次系统授权框。
-需要验证凭据存储时显式调 `secure.status`（设置页有按钮）。
+需要验证凭据存储时显式调 `secure.status`（设置页有按钮）。探针的读写删三步全成功才报 `ok`，
+清理失败会以 `kind=cleanup_failed` 返回 false——写入成功但删不掉说明授权有问题，不能算通过。
+
+`health.status` 只有在**数据库能打开且完整性自检通过**时才是 `ok`；
+任何一项失败都降级为 `degraded` 并带 `degradedReason`。
 
 Swift 侧的协议常量在 `macos/MenuBarApp/Sources/Models/AccountWorkerProtocol.swift`，
 `protocolVersion` 必须与 `account-worker/src/version.rs` 一致；不一致时 App 拒绝使用该助手。
@@ -82,7 +86,10 @@ AICC 打了 3 行补丁拆开（见 `account-worker/vendor/VENDOR.md`，回归�
 - AICC 自己的凭据进钥匙串，service = `com.aieink.dashboard.menubar.account-worker`。
   SQLite 只存引用，不存明文。
 - 对外只返回**指纹**（sha256 前 8 hex），`secure.get` 要 `reveal: true` 才回明文。
-- 所有日志与错误消息过 `rpc::sanitize`，长度 ≥24 的令牌样字符串一律打码。
+- 所有日志与错误消息过 `rpc::sanitize`：长度 ≥32 且形如令牌的连续串（字母数字与 `. _ ~ + - =`）
+  一律打码。`/` 刻意不算令牌字符，否则整条路径会被打码、日志失去诊断价值。
+- 写凭据用钥匙串的**原位更新**（`SecItemAdd` → 命中重复项改走 `SecItemUpdate`），
+  不再"先删再加"：删除成功而写入失败会永久丢掉旧凭据。
 - 助手是 ad-hoc 签名的嵌套可执行文件，每次重新构建签名都会变，macOS 可能重新询问
   钥匙串授权。返回码区分 `denied` 与 `not_found`，UI 上分别提示。
 - 不读取、不改写 Magpie 的任何凭据；不向 Widget / 墨水屏暴露账号信息。

@@ -41,13 +41,18 @@ pub struct AccountRecord {
     pub updated_at: String,
 }
 
+/// 账号写入参数。**所有可选字段都是"补丁"语义**：
+/// 没出现的字段保持库里原值，不会被重置成默认值。
+///
+/// 注意 `None` 同时表示"没传"和"要清空"——本期只支持前者；
+/// 清空字段留到 PR2，用单独的显式方法，避免一次 typo 洗掉用户的备注或凭据引用。
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountInput {
     pub platform: String,
     pub uid: String,
     #[serde(default)]
-    pub nickname: String,
+    pub nickname: Option<String>,
     #[serde(default)]
     pub email: Option<String>,
     #[serde(default)]
@@ -183,45 +188,71 @@ impl Db {
         }
         let now = now_rfc3339();
         let id = account_id(&input.platform, &input.uid);
-        let auth_status = input
-            .auth_status
-            .clone()
-            .unwrap_or_else(|| "unknown".into());
-        if !["unknown", "valid", "expired", "invalid", "denied"].contains(&auth_status.as_str()) {
-            return Err(RpcError::invalid_params(format!(
-                "auth_status 取值非法：{auth_status}"
-            )));
+        if let Some(status) = input.auth_status.as_deref() {
+            if !["unknown", "valid", "expired", "invalid", "denied"].contains(&status) {
+                return Err(RpcError::invalid_params(format!(
+                    "auth_status 取值非法：{status}"
+                )));
+            }
         }
-        let checkin_enabled = input.checkin_enabled.unwrap_or(false);
 
+        // 第一步：不存在就建行（默认值）。存在则什么都不改。
         self.conn.execute(
             "INSERT INTO accounts (
                  id, platform, uid, nickname, email, group_id, auth_ref, profile_ref,
                  auth_status, checkin_enabled, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
-             ON CONFLICT (platform, uid) DO UPDATE SET
-                 nickname = excluded.nickname,
-                 email = excluded.email,
-                 group_id = excluded.group_id,
-                 auth_ref = excluded.auth_ref,
-                 profile_ref = excluded.profile_ref,
-                 auth_status = excluded.auth_status,
-                 checkin_enabled = excluded.checkin_enabled,
-                 updated_at = excluded.updated_at",
-            params![
-                id,
-                input.platform,
-                input.uid,
-                input.nickname,
-                input.email,
-                input.group_id,
-                input.auth_ref,
-                input.profile_ref,
-                auth_status,
-                if checkin_enabled { 1 } else { 0 },
-                now,
-            ],
+             ) VALUES (?1, ?2, ?3, '', NULL, NULL, NULL, NULL, 'unknown', 0, ?4, ?4)
+             ON CONFLICT (platform, uid) DO NOTHING",
+            params![id, input.platform, input.uid, now],
         )?;
+
+        // 第二步：只更新调用方显式给的字段。
+        // 早前用的是 `ON CONFLICT DO UPDATE SET x = excluded.x`，没传
+        // checkinEnabled 会把签到开关重置成 false、没传 authRef 会把凭据引用清空，
+        // 属于"改备注顺手把账号弄坏"。
+        let mut sets: Vec<&str> = Vec::new();
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(value) = &input.nickname {
+            sets.push("nickname = ?");
+            args.push(Box::new(value.clone()));
+        }
+        if let Some(value) = &input.email {
+            sets.push("email = ?");
+            args.push(Box::new(value.clone()));
+        }
+        if let Some(value) = &input.group_id {
+            sets.push("group_id = ?");
+            args.push(Box::new(value.clone()));
+        }
+        if let Some(value) = &input.auth_ref {
+            sets.push("auth_ref = ?");
+            args.push(Box::new(value.clone()));
+        }
+        if let Some(value) = &input.profile_ref {
+            sets.push("profile_ref = ?");
+            args.push(Box::new(value.clone()));
+        }
+        if let Some(value) = &input.auth_status {
+            sets.push("auth_status = ?");
+            args.push(Box::new(value.clone()));
+        }
+        if let Some(value) = input.checkin_enabled {
+            sets.push("checkin_enabled = ?");
+            args.push(Box::new(if value { 1i64 } else { 0i64 }));
+        }
+        sets.push("updated_at = ?");
+        args.push(Box::new(now));
+
+        args.push(Box::new(input.platform.clone()));
+        args.push(Box::new(input.uid.clone()));
+
+        let sql = format!(
+            "UPDATE accounts SET {} WHERE platform = ? AND uid = ?",
+            sets.join(", ")
+        );
+        let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+        self.conn.execute(&sql, refs.as_slice())?;
 
         self.get_account(&id)?
             .ok_or_else(|| RpcError::new(crate::rpc::E_STORAGE, "写入后读不到账号"))
@@ -387,13 +418,13 @@ mod tests {
         let wb = AccountInput {
             platform: "workbuddy".into(),
             uid: "42".into(),
-            nickname: "WB".into(),
+            nickname: Some("WB".into()),
             ..Default::default()
         };
         let qd = AccountInput {
             platform: "qoder_cn".into(),
             uid: "42".into(),
-            nickname: "QD".into(),
+            nickname: Some("QD".into()),
             ..Default::default()
         };
         let a = db.upsert_account(&wb).unwrap();
@@ -411,11 +442,11 @@ mod tests {
         let mut input = AccountInput {
             platform: "workbuddy".into(),
             uid: "u1".into(),
-            nickname: "旧名字".into(),
+            nickname: Some("旧名字".into()),
             ..Default::default()
         };
         let first = db.upsert_account(&input).unwrap();
-        input.nickname = "新名字".into();
+        input.nickname = Some("新名字".into());
         let second = db.upsert_account(&input).unwrap();
         assert_eq!(first.id, second.id);
         assert_eq!(second.nickname, "新名字");
@@ -423,6 +454,52 @@ mod tests {
             db.list_accounts(&AccountFilter::default()).unwrap().len(),
             1
         );
+    }
+
+    /// 回归：只改备注时，签到开关与凭据引用必须保持原值。
+    /// 早前用 `DO UPDATE SET x = excluded.x`，没传的字段会被重置。
+    #[test]
+    fn patch_semantics_preserve_unspecified_fields() {
+        let (mut db, _dir) = temp_db();
+        let created = db
+            .upsert_account(&AccountInput {
+                platform: "workbuddy".into(),
+                uid: "u-patch".into(),
+                nickname: Some("原名".into()),
+                auth_ref: Some("keychain://wb/u-patch".into()),
+                profile_ref: Some("/tmp/profile-a".into()),
+                auth_status: Some("valid".into()),
+                checkin_enabled: Some(true),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(created.checkin_enabled);
+        assert_eq!(created.auth_status, "valid");
+
+        // 只改备注
+        let patched = db
+            .upsert_account(&AccountInput {
+                platform: "workbuddy".into(),
+                uid: "u-patch".into(),
+                nickname: Some("新备注".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(patched.nickname, "新备注");
+        assert!(patched.checkin_enabled, "签到开关不能因为没传就被重置");
+        assert_eq!(patched.auth_status, "valid", "认证状态不能因为没传就被重置");
+
+        // 显式关掉签到必须生效
+        let disabled = db
+            .upsert_account(&AccountInput {
+                platform: "workbuddy".into(),
+                uid: "u-patch".into(),
+                checkin_enabled: Some(false),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(!disabled.checkin_enabled);
+        assert_eq!(disabled.nickname, "新备注", "没传备注时不能被清空");
     }
 
     #[test]
@@ -447,7 +524,7 @@ mod tests {
             db.upsert_account(&AccountInput {
                 platform: platform.into(),
                 uid: uid.into(),
-                nickname: nickname.into(),
+                nickname: Some(nickname.into()),
                 ..Default::default()
             })
             .unwrap();

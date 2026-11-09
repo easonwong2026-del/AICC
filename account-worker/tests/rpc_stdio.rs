@@ -162,7 +162,7 @@ fn account_lifecycle_over_rpc() {
         .to_string();
     assert_eq!(created["result"]["checkinEnabled"], json!(true));
 
-    // 重复添加同一 platform+uid 必须幂等。
+    // 重复添加同一 platform+uid 必须幂等，且没传的字段要保持原值。
     let again = session.call(
         2,
         "accounts.upsert",
@@ -170,6 +170,11 @@ fn account_lifecycle_over_rpc() {
     );
     assert_eq!(again["result"]["id"], json!(id));
     assert_eq!(again["result"]["nickname"], json!("改名"));
+    assert_eq!(
+        again["result"]["checkinEnabled"],
+        json!(true),
+        "没传 checkinEnabled 不能把签到开关重置成 false"
+    );
 
     let listed = session.call(3, "accounts.list", json!({"platform": "qoder_cn"}));
     assert_eq!(listed["result"]["accounts"].as_array().unwrap().len(), 1);
