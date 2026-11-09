@@ -18,6 +18,7 @@ let package = Package(
             path: "Sources",
             exclude: [
                 "AICCApp.swift",
+                "AccountCenter",
                 "Helpers",
                 "Services/BridgeCredential.swift",
                 "Services/LaunchAtLoginService.swift",
@@ -28,6 +29,7 @@ let package = Package(
                 "Views",
             ],
             sources: [
+                "Models/AccountWorkerProtocol.swift",
                 "Models/QuotaModel.swift",
                 "Models/UsageModel.swift",
                 "Models/WidgetPreferences.swift",
@@ -48,6 +50,7 @@ let package = Package(
             path: "Tests",
             exclude: ["Fixtures"],
             sources: [
+                "AccountWorkerProtocolTests.swift",
                 "AppSettingsTests.swift",
                 "BoardCommandTests.swift",
                 "ProcessRunnerTests.swift",

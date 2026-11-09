@@ -27,3 +27,6 @@ dist/
 # Local acceptance artefacts and tool state
 outputs/
 .workbuddy/
+
+# Rust account worker build output
+account-worker/target/

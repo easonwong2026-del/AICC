@@ -1,0 +1,40 @@
+[package]
+name = "aicc-account-worker"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "AICC 账号与签到辅助进程：JSON-RPC over stdin/stdout，不监听任何端口"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "aicc-account-worker"
+path = "src/main.rs"
+
+[dependencies]
+# 业务核心：上游 wb-switch-core（固定 commit，见 vendor/VENDOR.md）
+wb-switch-core = { path = "vendor/crates/wb-switch-core" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+
+# Qoder CN 本地认证解密：AES-128-CBC + PBKDF2-HMAC-SHA1
+aes = "0.8"
+cbc = "0.1"
+pbkdf2 = "0.12"
+sha1 = "0.10"
+base64 = "0.22"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"

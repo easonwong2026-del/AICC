@@ -173,7 +173,48 @@ xcrun swiftc \
   "${WIDGET_FILES[@]}" \
   -o "$WIDGET_MACOS_DIR/AICCWidget"
 
+echo "=== Building account worker (Rust helper) ==="
+HELPER_NAME="aicc-account-worker"
+HELPERS_DIR="$CONTENTS/Helpers"
+HELPER_BIN="$HELPERS_DIR/$HELPER_NAME"
+HELPER_BUILT=0
+SKIP_RUST_HELPER="${SKIP_RUST_HELPER:-0}"
+
+if [[ "$SKIP_RUST_HELPER" == "1" ]]; then
+  echo "SKIP_RUST_HELPER=1 → 跳过 Rust 助手，本次产物不含账号中心助手（不可用于发布）"
+else
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "ERROR: 缺少 cargo，无法构建 $HELPER_NAME。" >&2
+    echo "       安装 Rust（brew install rust）后重试；仅调 Swift 界面时可设 SKIP_RUST_HELPER=1。" >&2
+    exit 1
+  fi
+  if [[ ! -f "$ROOT/account-worker/Cargo.toml" ]]; then
+    echo "ERROR: 找不到 account-worker/Cargo.toml" >&2
+    exit 1
+  fi
+  mkdir -p "$HELPERS_DIR"
+  # --locked：Cargo.lock 必须被提交，避免 CI 上悄悄升级依赖。
+  cargo build --release --locked \
+    --manifest-path "$ROOT/account-worker/Cargo.toml"
+  cp "$ROOT/account-worker/target/release/$HELPER_NAME" "$HELPER_BIN"
+  chmod 755 "$HELPER_BIN"
+  # 沙箱拷贝可能留下扩展属性，会让后面的签名校验失败。
+  xattr -c "$HELPER_BIN" 2>/dev/null || true
+  HELPER_BUILT=1
+  echo "Helper: $HELPER_BIN"
+fi
+
 echo "=== Signing ==="
+# 嵌套可执行文件必须先签，再签外层 bundle，否则 --deep --strict 会失败。
+if [[ "$HELPER_BUILT" == "1" ]]; then
+  if [[ "$SIGNING_IDENTITY" == "-" ]]; then
+    codesign --force --sign - "$HELPER_BIN"
+  else
+    codesign --force --options runtime --timestamp \
+      --sign "$SIGNING_IDENTITY" "$HELPER_BIN"
+  fi
+  codesign --verify --strict "$HELPER_BIN"
+fi
 if [[ "$SIGNING_IDENTITY" == "-" ]]; then
   codesign --force --sign - --entitlements "$WIDGET_ENTITLEMENTS" "$WIDGET_APP_DIR"
 else
@@ -202,3 +243,6 @@ echo "$WIDGET_APP_DIR"
 
 # Post-build validation
 bash "$ROOT/scripts/validate-widget-bundle.sh" "$APP_DIR"
+if [[ "$HELPER_BUILT" == "1" ]]; then
+  bash "$ROOT/scripts/validate-account-worker-bundle.sh" "$APP_DIR"
+fi

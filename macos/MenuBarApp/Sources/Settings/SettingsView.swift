@@ -13,6 +13,7 @@ struct SettingsView: View {
     @State private var showRevoke = false
     @State private var widgetProviders: [String] = []
     @State private var showSelection = false
+    @StateObject private var accountWorker = AccountWorkerManager()
 
     var body: some View {
         Form {
@@ -72,6 +73,24 @@ struct SettingsView: View {
                 Text(settings.bridgeEnabled ? "关闭窗口后继续为墨水屏同步。" : "仅使用小组件时无需桥接，关闭窗口即退出 AICC。")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section("AI 账号与签到") {
+                HStack {
+                    Text("助手状态")
+                    Spacer()
+                    Text(accountWorkerSummary).foregroundStyle(accountWorkerIsHealthy ? .green : .secondary)
+                    Button("检查助手") { Task { await accountWorker.refresh() } }
+                }
+                HStack {
+                    Text("凭据存储")
+                    Spacer()
+                    Text(accountWorker.secureStoreSummary).foregroundStyle(.secondary)
+                    Button("测试钥匙串") { Task { await accountWorker.checkSecureStore() } }
+                }
+                Text("助手是内嵌在本 App 内的独立可执行文件，只通过本机管道通信，不开放网络端口。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("当前为 PR1a 基础架构：账号库、凭据存储与健康检查已就位，签到与多账号在后续版本接入。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("诊断") {
                 HStack {
                     Button("查看日志") { NSWorkspace.shared.open(AICCPaths.logsDirectory) }
@@ -86,7 +105,10 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(minWidth: 560, minHeight: 520)
-        .onAppear { loginAtLaunch.refresh() }
+        .onAppear {
+            loginAtLaunch.refresh()
+            Task { await accountWorker.refresh() }
+        }
         .onChange(of: settings.bridgeEnabled) { _, enabled in
             pairingCode = ""
             if enabled { server.startMonitoring() } else {
@@ -129,6 +151,20 @@ struct SettingsView: View {
 
     private var selectionSummary: String {
         settings.widgetSelection.isEmpty ? "自动" : "已选 \(settings.widgetSelection.count) 项"
+    }
+
+    private var accountWorkerSummary: String {
+        switch accountWorker.state {
+        case .stopped: return "未启动"
+        case .starting: return "启动中…"
+        case .running(let health): return health.summary
+        case .failed(let message): return message.split(separator: "\n").first.map(String.init) ?? "失败"
+        }
+    }
+
+    private var accountWorkerIsHealthy: Bool {
+        if case .running(let health) = accountWorker.state { return health.isHealthy }
+        return false
     }
 
     private func reloadWidgets() {
