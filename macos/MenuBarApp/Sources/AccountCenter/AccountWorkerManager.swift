@@ -119,7 +119,10 @@ final class AccountWorkerManager: ObservableObject {
             throw AccountWorkerFailure.notRunning
         }
         let result = try await client.call("accounts.list", timeout: 10)
-        return result["accounts"] as? [[String: Any]] ?? []
+        guard let rows = result["accounts"] as? [[String: Any]] else {
+            throw AccountWorkerFailure.malformedLine
+        }
+        return rows
     }
 
     func stop() {
