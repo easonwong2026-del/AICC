@@ -43,7 +43,7 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `env.info` | 数据目录、`WB_SWITCH_HOME` 实际值、认证文件位置 | 否 |
 | `worker.shutdown` | 优雅退出 | 否 |
 | `storage.init` / `storage.status` | 迁移、行数、完整性 | 否 |
-| `accounts.list` / `get` / `upsert` / `delete` | 账号库 CRUD（`upsert` 是补丁语义：没传的字段保持原值） | 否 |
+| `accounts.list` / `get` / `upsert` / `delete` | 账号库 CRUD（`upsert` 是补丁语义：没传的字段保持原值；建行与写字段在同一个事务里，失败整条回滚） | 否 |
 | `groups.list` / `upsert` | 分组 | 否 |
 | `secure.status` | 钥匙串读写删探针（会触发一次系统授权） | 否 |
 | `secure.set` / `get` / `delete` | 凭据存取，默认只回指纹 | 否 |

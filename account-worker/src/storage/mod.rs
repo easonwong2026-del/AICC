@@ -196,8 +196,12 @@ impl Db {
             }
         }
 
+        // 两步写入必须原子：只建行不写字段会留下一条"半成品"账号，
+        // 而调用方已经收到错误、不知道它存在。用同一个事务兜住。
+        let tx = self.conn.transaction()?;
+
         // 第一步：不存在就建行（默认值）。存在则什么都不改。
-        self.conn.execute(
+        tx.execute(
             "INSERT INTO accounts (
                  id, platform, uid, nickname, email, group_id, auth_ref, profile_ref,
                  auth_status, checkin_enabled, created_at, updated_at
@@ -252,7 +256,8 @@ impl Db {
             sets.join(", ")
         );
         let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
-        self.conn.execute(&sql, refs.as_slice())?;
+        tx.execute(&sql, refs.as_slice())?;
+        tx.commit()?;
 
         self.get_account(&id)?
             .ok_or_else(|| RpcError::new(crate::rpc::E_STORAGE, "写入后读不到账号"))
@@ -500,6 +505,32 @@ mod tests {
             .unwrap();
         assert!(!disabled.checkin_enabled);
         assert_eq!(disabled.nickname, "新备注", "没传备注时不能被清空");
+    }
+
+    /// 回归：外键写失败时，第一步的 INSERT 不能留在库里。
+    /// 早前 INSERT 与 UPDATE 不在同一个事务，调用方收到错误但账号已经被创建。
+    #[test]
+    fn failed_write_rolls_back_the_insert() {
+        let (mut db, _dir) = temp_db();
+        let result = db.upsert_account(&AccountInput {
+            platform: "workbuddy".into(),
+            uid: "u-fk".into(),
+            nickname: Some("半条账号".into()),
+            group_id: Some("no-such-group".into()),
+            ..Default::default()
+        });
+        assert!(result.is_err(), "不存在的 group_id 必须报错");
+        assert_eq!(
+            db.list_accounts(&AccountFilter::default()).unwrap().len(),
+            0,
+            "写入失败不能留下半条账号"
+        );
+        assert!(
+            db.get_account(&account_id("workbuddy", "u-fk"))
+                .unwrap()
+                .is_none(),
+            "失败的写入不能按 id 查到"
+        );
     }
 
     #[test]
