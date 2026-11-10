@@ -200,6 +200,14 @@ impl Db {
         Ok(current)
     }
 
+    /// 仅测试用：直接执行一段 SQL，用来注入"写一定会失败"的约束
+    /// （例如给 accounts 加一个 BEFORE UPDATE 触发器），生产构建里不存在。
+    #[cfg(test)]
+    pub fn exec_raw(&mut self, sql: &str) -> RpcResult<()> {
+        self.conn.execute_batch(sql)?;
+        Ok(())
+    }
+
     pub fn schema_version(&self) -> RpcResult<i64> {
         Ok(self
             .conn

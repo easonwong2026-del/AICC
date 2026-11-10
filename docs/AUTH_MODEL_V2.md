@@ -22,8 +22,8 @@ PR #65 只做了「小范围安全修复」：关掉 RPC 明文回传、修好 `
 2. **现有 `accounts.id` 不变**：`sha256(platform \0 uid)[0..16]`。
    于是 `checkin_records` / `travel_states` / `travel_events` / `credit_snapshots`
    的外键一行都不用改，历史签到与旅行记录原样保留。
-3. 选择策略可解释：自有优先、Magpie 兜底、失效才降级。
-4. 迁移可回滚：任何一步失败都不留半个库。
+3. 选择策略可配置、可解释：首选来源默认 **Magpie**，可切成自有；首选不可用时自动兜底。
+4. 迁移可回滚：任何一步失败都不留半个库；自有授权的 refresh 引用必须原样带过去。
 
 ## 3. 表结构
 
@@ -74,19 +74,38 @@ CREATE INDEX idx_auth_account ON account_authorizations (account_id, status);
 ### v5 —— 建表 + 回填（不改 `accounts` 列）
 
 ```sql
--- 每个账号按现有 auth_source 生成一行；auth_ref 里的键直接沿用（暂不换键）。
+-- 每个账号按现有 auth_source 生成一行；access 引用沿用现有 auth_ref。
+-- refresh_ref **只对 own 回填**：自有授权的刷新令牌是账号能不能自动续期的关键，
+-- 回填时置空等于把用户的有效授权降级成"只能用到过期"。
 INSERT OR IGNORE INTO account_authorizations
     (id, account_id, kind, access_ref, refresh_ref, auth_domain, token_expires_at,
      status, source_key, created_at, updated_at)
 SELECT
-    'seed-' || a.id, a.id, COALESCE(NULLIF(a.auth_source, ''), 'own'),
+    'seed-' || a.id,
+    a.id,
+    COALESCE(NULLIF(a.auth_source, ''), 'own'),
     COALESCE(a.auth_ref, 'keychain:workbuddy/' || a.uid || '/access'),
-    NULL, a.auth_domain, a.token_expires_at,
+    CASE
+        WHEN COALESCE(NULLIF(a.auth_source, ''), 'own') = 'own'
+        THEN 'keychain:workbuddy/' || a.uid || '/refresh'
+        ELSE NULL          -- 借用授权永远没有 refresh
+    END,
+    a.auth_domain, a.token_expires_at,
     a.auth_status, NULL,
     strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
 FROM accounts a
 WHERE a.platform = 'workbuddy';
 ```
+
+`refresh_ref` 回填之后由 v6 的搬迁步骤照着引用去**读真实值**，读到才写新键：
+
+| 情况 | 处理 |
+| --- | --- |
+| 读到 refresh | 复制到 `workbuddy/<account_id>/own/refresh`，旧键保留一个版本 |
+| 读不到（用户从没拿到过 / 钥匙串被拒） | **保留 `refresh_ref` 不置空**，该授权标 `denied`，账号仍可用 access 直到过期；不假装"已迁移" |
+| 写入新键失败 | 同上，旧键不动，`health` 报 `credential_migration_failed` |
+
+绝不允许出现「refresh_ref 被清空、账号却显示 valid」——那会让下一次刷新静默失败。
 
 回填的 `id` 先给一个临时确定性值（`seed-<account_id>`），v6 换成正式公式
 `sha256(account_id \0 kind)[0..16]`，保持"可重算、可幂等"。
@@ -104,17 +123,32 @@ WHERE a.platform = 'workbuddy';
 
 ## 6. 选择与失败策略（双模式智能协作）
 
+**首选来源是配置项，不是写死的。** `app_settings` 新增：
+
+| key | 取值 | 默认 |
+| --- | --- | --- |
+| `auth_preferred_source` | `magpie` \| `own` | **`magpie`** |
+
 ```
 候选 = 该账号所有 status = valid 且 token_expires_at > now + 5min 的授权
-排序 = own 优先，其次 last_used_at 更晚的
+排序 = 首选来源在前；同一来源内取 last_used_at 更晚的
+兜底 = 首选来源没有可用授权时，自动用另一份（不写库，只影响这一次取用）
 ```
+
+为什么默认 Magpie 优先：Magpie 自己会做保活与刷新，AICC 只是使用它那份无状态
+access，两边都不碰对方的 refresh，冲突面最小。用户如果想让 AICC 完全接管（例如
+Magpie 要退出），把 `auth_preferred_source` 改成 `own` 即可 —— 不需要重新登录，
+两份授权本来都在。
 
 | 情况 | 处理 |
 | --- | --- |
-| 首选是 own | 401 → 用 own 的 refresh 刷新；刷新失败 → 标 invalid，降到 magpie |
-| 首选是 magpie | 401 → 重新读 `plugin-auth.json` 取最新 access（**不刷新**）；取不到 → 标 expired |
+| 首选是 magpie | 401 → 重新读 `plugin-auth.json` 取最新 access（**不刷新**）；取不到 → 用 own 兜底；两条都不行 → expired |
+| 首选是 own | 401 → 用 own 的 refresh 刷新；刷新失败 → 标 invalid，降级到 magpie |
 | 两条都失效 | 账号 `auth_status = expired`，界面提示"重新扫码，或去 Magpie 登录" |
 | 只有 magpie 且令牌临期 | 不做后台保活；只在使用前检查，过期即提示 |
+| 只有 own 且 refresh 缺失 | 不降级（没有别的来源），标 invalid 等重新登录 |
+
+界面上的 `authSource` 字段返回**当前首选**的 kind，不改协议形状。
 
 降级是**读时**决策，不写库：`auth_source` 不再是账号属性，而是"当前首选授权的 kind"，
 由 `accounts.list` 现算后返回，老界面照样拿到一个字符串。
@@ -139,14 +173,48 @@ WHERE a.platform = 'workbuddy';
 | 回退旧二进制 | v6 之前可直接回退（镜像列还在、旧键还在）；v7 之后需先跑一次"键还原"脚本 |
 | 同一 uid 出现两行账号 | 现有 `UNIQUE(platform, uid)` 防住；删除路径已按 `account_id` 而非 uid 清理（PR #65） |
 
-## 9. 明确不做
+## 9. 通用 `secure.set` / `secure.delete` 的收紧方案
+
+PR #65 只关掉了 `secure.get` 的明文回传。剩下两个通用方法仍然允许调用方
+「用任意键名往钥匙串写任意内容 / 删任意键」——这本身就是一条不该长期存在的通道：
+能写 stdin 的进程可以覆盖 AICC 的凭据，也可以在里面塞东西。
+
+分三步收紧，**都不影响内部逻辑**（内部走 `SecureStore`，不经 RPC）：
+
+### 9.1 立刻（PR #66 一起做）
+
+- 键名白名单：只接受 `workbuddy/<32-64 位 hex 或 uuid>/<access|refresh>`
+  与 `__probe__*`，其余一律 `invalid_params`；
+- 删掉「任意键」语义：`secure.delete` 只允许删白名单内的键；
+- `secure.set` 的返回值不再回 `fingerprint` 以外的任何东西（现状已如此）。
+
+### 9.2 目标态：类型化接口取代通用键值
+
+| 现在 | 改成 |
+| --- | --- |
+| `secure.set {key, value}` | `accounts.credential.write {accountId, kind, access, refresh?}` |
+| `secure.delete {key}` | `accounts.credential.delete {accountId, kind}` |
+| `secure.get {key}` | `accounts.credential.inspect {accountId, kind}`（只回指纹 / 过期时间） |
+
+键名由服务端按授权行生成，调用方**拿不到自由键名**，也就不可能写到别处去。
+`__probe__` 保留为 `secure.status` 的内部实现，不再暴露成通用写接口。
+
+### 9.3 兼容与回归
+
+- 迁移期保留旧的 `secure.*`，但需要 `AICC_ALLOW_SECURE_RPC=1` 才启用；
+  默认关闭时返回 `method_not_found`，界面与内部逻辑都不依赖它；
+- CI 的协议测试改用内存后端 + 新的类型化方法，不再依赖通用键值接口；
+- 回归点：关掉 `secure.*` 之后，导入 / 扫码 / 刷新 / 旅行四条链路必须全部照常
+  （单测里已经有对应的断言，见 PR #65 的 `handlers::tests`）。
+
+## 10. 明确不做
 
 - 不做跨平台账号合并（`qoder_cn` 与 `workbuddy` 仍是两条账号）。
 - 不做 refresh token 集中托管或后台保活。
 - 不改旅行调度的节奏与状态机（PR #64 的语义保持不变）。
 - 不读取、不复制 Magpie 的 refresh token —— 这条在 v2 里依然是硬约束。
 
-## 10. PR #66 的验收清单（预告）
+## 11. PR #66 的验收清单（预告）
 
 1. 迁移在真实库副本上跑通，`accounts.id` 前后一致，签到/旅行记录条数不变。
 2. 同一账号同时存在 own + magpie 两份授权：401 时按策略切换，且钥匙串里两份都在。
