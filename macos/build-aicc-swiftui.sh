@@ -183,8 +183,16 @@ SKIP_RUST_HELPER="${SKIP_RUST_HELPER:-0}"
 if [[ "$SKIP_RUST_HELPER" == "1" ]]; then
   echo "SKIP_RUST_HELPER=1 → 跳过 Rust 助手，本次产物不含账号中心助手（不可用于发布）"
 else
-  if ! command -v cargo >/dev/null 2>&1; then
-    echo "ERROR: 缺少 cargo，无法构建 $HELPER_NAME。" >&2
+  CARGO_BIN="${CARGO_BIN:-}"
+  if [[ -z "$CARGO_BIN" ]]; then
+    if command -v cargo >/dev/null 2>&1; then
+      CARGO_BIN="$(command -v cargo)"
+    elif [[ -x "$HOME/.cargo/bin/cargo" ]]; then
+      CARGO_BIN="$HOME/.cargo/bin/cargo"
+    fi
+  fi
+  if [[ -z "$CARGO_BIN" ]]; then
+    echo "ERROR: 缺少 cargo，无法构建 ${HELPER_NAME}。" >&2
     echo "       安装 Rust（brew install rust）后重试；仅调 Swift 界面时可设 SKIP_RUST_HELPER=1。" >&2
     exit 1
   fi
@@ -194,9 +202,9 @@ else
   fi
   mkdir -p "$HELPERS_DIR"
   # --locked：Cargo.lock 必须被提交，避免 CI 上悄悄升级依赖。
-  cargo build --release --locked \
+  "$CARGO_BIN" build --release --locked \
     --manifest-path "$ROOT/account-worker/Cargo.toml"
-  cp "$ROOT/account-worker/target/release/$HELPER_NAME" "$HELPER_BIN"
+  cp "$ROOT/account-worker/target/release/${HELPER_NAME}" "$HELPER_BIN"
   chmod 755 "$HELPER_BIN"
   # 沙箱拷贝可能留下扩展属性，会让后面的签名校验失败。
   xattr -c "$HELPER_BIN" 2>/dev/null || true
