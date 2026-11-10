@@ -13,8 +13,8 @@ struct SettingsView: View {
     @State private var showRevoke = false
     @State private var widgetProviders: [String] = []
     @State private var showSelection = false
-    @State private var showAccountCenter = false
-    @StateObject private var accountWorker = AccountWorkerManager()
+    // 与主控制台共用同一个助手实例，设置页不再单独起进程。
+    @ObservedObject private var accountWorker = AccountWorkerManager.shared
 
     var body: some View {
         Form {
@@ -75,11 +75,6 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("AI 账号与签到") {
-                Button {
-                    showAccountCenter = true
-                } label: {
-                    Label("打开账号中心（界面预览）", systemImage: "person.crop.rectangle.stack")
-                }
                 HStack {
                     Text("助手状态")
                     Spacer()
@@ -94,7 +89,7 @@ struct SettingsView: View {
                 }
                 Text("助手是内嵌在本 App 内的独立可执行文件，只通过本机管道通信，不开放网络端口。")
                     .font(.caption).foregroundStyle(.secondary)
-                Text("PR2a 界面预览：已可查看真实账号列表；扫码、签到和积分功能将在后续阶段接入。")
+                Text("账号管理已移到主控制台（AI 账号 / 签到任务）。这里只保留助手与凭据的自检。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("诊断") {
@@ -133,9 +128,6 @@ struct SettingsView: View {
         .onChange(of: settings.widgetCards) { _, _ in reloadWidgets() }
         .onChange(of: settings.widgetProvider) { _, _ in reloadWidgets() }
         .onChange(of: settings.widgetSelection) { _, _ in reloadWidgets() }
-        .sheet(isPresented: $showAccountCenter) {
-            AccountCenterView(worker: accountWorker)
-        }
         .sheet(isPresented: $showSelection) {
             QuotaSelectionView(port: settings.magpiePort, selection: $settings.widgetSelection) { picked in
                 settings.widgetSelection = picked
