@@ -13,7 +13,8 @@ struct SettingsView: View {
     @State private var showRevoke = false
     @State private var widgetProviders: [String] = []
     @State private var showSelection = false
-    @StateObject private var accountWorker = AccountWorkerManager()
+    // 与主控制台共用同一个助手实例，设置页不再单独起进程。
+    @ObservedObject private var accountWorker = AccountWorkerManager.shared
 
     var body: some View {
         Form {
@@ -88,7 +89,7 @@ struct SettingsView: View {
                 }
                 Text("助手是内嵌在本 App 内的独立可执行文件，只通过本机管道通信，不开放网络端口。")
                     .font(.caption).foregroundStyle(.secondary)
-                Text("当前为 PR1a 基础架构：账号库、凭据存储与健康检查已就位，签到与多账号在后续版本接入。")
+                Text("账号管理已移到主控制台（AI 账号 / 签到任务）。这里只保留助手与凭据的自检。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("诊断") {
