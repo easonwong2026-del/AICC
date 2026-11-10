@@ -67,6 +67,33 @@ jobs:
           name: poke4s-dashboard-apk
           path: android/poke-dashboard/app/build/outputs/apk/release/*.apk
 
+  rust:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: account-worker
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path account-worker/Cargo.toml --all -- --check
+
+      - name: Type check (lib, bin and tests)
+        run: cargo check --manifest-path account-worker/Cargo.toml --all-targets --locked
+
+      - name: Run unit and integration tests
+        run: cargo test --manifest-path account-worker/Cargo.toml --locked
+
+      - name: Account worker smoke (self-test + JSON-RPC + WB_SWITCH_HOME isolation)
+        run: bash scripts/smoke-test-account-worker.sh account-worker/target/debug/aicc-account-worker
+
   swift-test:
     runs-on: macos-15
     steps:
@@ -112,6 +139,14 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Setup Rust (needed to embed aicc-account-worker)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: account-worker
+
       - name: Static reference check
         run: |
           # Verify that removed symbols do not remain anywhere in the repository.
@@ -148,6 +183,11 @@ jobs:
         run: |
           BUNDLE_SERVER=1 bash macos/build-aicc-swiftui.sh
 
+      - name: Validate account worker bundle
+        run: |
+          bash scripts/validate-account-worker-bundle.sh dist/mac/AICC.app
+          bash scripts/smoke-test-account-worker.sh "dist/mac/AICC.app/Contents/Helpers/aicc-account-worker"
+
       - name: Validate sandboxed Widget bundle
         run: |
           bash scripts/validate-widget-bundle.sh
@@ -169,6 +209,16 @@ jobs:
         run: |
           bash scripts/validate-version.sh --dmg
           hdiutil verify "dist/AICC-$(cat VERSION).dmg"
+
+      - name: Verify the shipped DMG contains a signed account worker
+        run: |
+          MOUNT=/tmp/aicc-dmg
+          hdiutil attach "dist/AICC-$(cat VERSION).dmg" -nobrowse -readonly -mountpoint "$MOUNT"
+          trap 'hdiutil detach "$MOUNT" >/dev/null 2>&1 || true' EXIT
+          HELPER="$MOUNT/AICC.app/Contents/Helpers/aicc-account-worker"
+          test -x "$HELPER"
+          codesign --verify --deep --strict "$MOUNT/AICC.app"
+          "$HELPER" --version | grep -q "protocol"
 
       - name: Upload macOS app
         uses: actions/upload-artifact@v4

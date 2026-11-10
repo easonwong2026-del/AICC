@@ -18,6 +18,8 @@ let package = Package(
             path: "Sources",
             exclude: [
                 "AICCApp.swift",
+                // 只有 Manager 依赖 SwiftUI；Client 是纯 Foundation，进测试目标。
+                "AccountCenter/AccountWorkerManager.swift",
                 "Helpers",
                 "Services/BridgeCredential.swift",
                 "Services/LaunchAtLoginService.swift",
@@ -28,6 +30,8 @@ let package = Package(
                 "Views",
             ],
             sources: [
+                "AccountCenter/AccountWorkerClient.swift",
+                "Models/AccountWorkerProtocol.swift",
                 "Models/QuotaModel.swift",
                 "Models/UsageModel.swift",
                 "Models/WidgetPreferences.swift",
@@ -48,6 +52,8 @@ let package = Package(
             path: "Tests",
             exclude: ["Fixtures"],
             sources: [
+                "AccountWorkerClientTests.swift",
+                "AccountWorkerProtocolTests.swift",
                 "AppSettingsTests.swift",
                 "BoardCommandTests.swift",
                 "ProcessRunnerTests.swift",
