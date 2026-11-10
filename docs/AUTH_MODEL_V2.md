@@ -153,6 +153,20 @@ Magpie 要退出），把 `auth_preferred_source` 改成 `own` 即可 —— 不
 降级是**读时**决策，不写库：`auth_source` 不再是账号属性，而是"当前首选授权的 kind"，
 由 `accounts.list` 现算后返回，老界面照样拿到一个字符串。
 
+## 6.5 PR #65 已经落地的过渡机制（`auth_epoch`）
+
+完整的多授权表还没做，但"旧快照不许覆盖新授权"这条必须先有。PR #65 加了：
+
+| 机制 | 说明 | 在 #66 里怎么延续 |
+| --- | --- | --- |
+| `accounts.auth_epoch`（迁移 v5） | 任何账号/授权写入都 +1，写入前比对，对不上就拒绝（`kind: superseded`） | 变成 `account_authorizations.version`，粒度从"账号"细化到"某一份授权" |
+| `AUTH_WRITE_LOCK`（进程内互斥） | 扫码落库 / 导入 / resync / refresh / 删除 串行执行 | 保留；跨进程（如果将来拆进程）再换成文件锁或 DB 行锁 |
+| `CredentialSnapshot` 失败即中止 | 快照读不出来（`Denied` 等）就不写，只有 `NotFound` 才算"没有旧值" | 不变 |
+
+这是"最小可用"的版本校验：不引入新表、不改 RPC 形状，但已经能挡住
+"自动旅行用旧快照把扫码结果写回去"这类真实竞态（回归用例
+`stale_travel_snapshot_cannot_overwrite_a_new_own_login`）。
+
 ## 7. 兼容性与影响面
 
 | 项 | 影响 |

@@ -170,6 +170,19 @@ AICC 的取法是**只读文件、只借 access**：
 运行态落在 `travel_states` / `travel_events` 两张表（迁移 v4），开关是
 `accounts.travel_enabled`，与 `checkin_enabled` 互相独立。
 
+### 凭据写入的互斥与版本（迁移 v5）
+
+`accounts.auth_epoch` 是凭据版本号，`upsert_account` / `set_auth_state` 每次都会 +1。
+所有写凭据的路径（扫码落库、Magpie 导入、401 重同步、刷新轮换、删除账号）先拿进程内
+`AUTH_WRITE_LOCK`，再按 id 重读一次账号：
+
+- 来源变了（magpie ↔ own）→ 拒绝，`kind: not_magpie_source`；
+- 版本对不上（其间被别人写过）→ 拒绝，`kind: superseded`。
+
+自动旅行拿着几秒前的账号快照去做 resync 时，这两种情况都会被拦下，不会覆盖用户
+刚扫码拿到的自有授权。`superseded` 在旅行侧不算失败：直接用手上现有的令牌继续，
+下一轮自然读到新账号。
+
 ## 6. PR1a 交付范围
 
 已交付：

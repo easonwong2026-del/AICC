@@ -4,7 +4,7 @@
 
 use serde_json::{json, Value};
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::app::App;
 use crate::providers::{magpie, qoder, workbuddy, workbuddy_auth};
@@ -105,6 +105,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
 
         "accounts.delete" => {
             let id = require_str(params, "id")?;
+            // 与导入 / resync / refresh 串行：否则删除刚完成，在途的 resync 又会把令牌写回去。
+            let _guard = auth_write_guard();
             let existing = app.with_db(|db| db.get_account(&id))?;
             let deleted = app.with_db(|db| db.delete_account(&id))?;
             // 账号删掉后令牌没有主人了，必须一起清，避免钥匙串里留孤儿凭据。
@@ -322,6 +324,37 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
 /// AICC 自有授权：扫码拿到、AICC 自己持有 refresh token。
 const OWN_SOURCE: &str = "own";
 
+/// 凭据写入的进程内互斥。
+///
+/// 会改凭据的路径不止一条：扫码落库、Magpie 导入、401 重同步、刷新轮换、删除账号。
+/// worker 是单进程，一把锁就够保证「同一时刻只有一个写入者」，配合 `auth_epoch`
+/// 的版本比对，即便写入者拿的是几秒前的账号快照，也不会覆盖掉别人刚写好的授权。
+static AUTH_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+fn auth_write_guard() -> MutexGuard<'static, ()> {
+    // 上一个持锁者 panic 过也继续：这把锁保护的是"别同时写"，不是被保护的数据本身。
+    AUTH_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// 快照已经过期（账号换了授权 / 其间被别的路径写过）。**不是错误，是拒绝写入**。
+fn superseded(reason: &str) -> RpcError {
+    RpcError::new(
+        crate::rpc::E_AUTH,
+        "账号授权已变更，已放弃这次基于旧快照的写入",
+    )
+    .with_data(json!({ "kind": "superseded", "reason": reason }))
+}
+
+pub(crate) fn is_superseded(err: &RpcError) -> bool {
+    err.data
+        .as_ref()
+        .and_then(|data| data.get("kind"))
+        .and_then(Value::as_str)
+        == Some("superseded")
+}
+
 fn log_note(message: &str) {
     eprintln!("[aicc-account-worker] {}", crate::rpc::sanitize(message));
 }
@@ -437,13 +470,22 @@ async fn workbuddy_account_status(app: &App, id: &str) -> RpcResult<Value> {
     if status.get("ok").and_then(Value::as_bool) != Some(true)
         && account.auth_source == magpie::SOURCE_MAGPIE
     {
-        if let Ok(synced) = resync_magpie_access(app, &account) {
-            if synced.get("state").and_then(Value::as_str) == Some("valid") {
+        match resync_magpie_access(app, &account) {
+            Ok(synced) if synced.get("state").and_then(Value::as_str) == Some("valid") => {
                 if let Ok(bytes) = app.secure.get(&access_key) {
                     payload["access_token"] = json!(String::from_utf8_lossy(&bytes).to_string());
                     status = wb_switch_core::modules::checkin::get_checkin_status(&payload).await;
                 }
             }
+            Ok(_) => {}
+            Err(err) if is_superseded(&err) => {
+                // 这期间账号被换成了自有授权：不改任何状态，让界面重新读一次账号就行。
+                return Ok(json!({
+                    "state": "superseded",
+                    "error": { "kind": "superseded", "message": err.message },
+                }));
+            }
+            Err(_) => {}
         }
     }
 
@@ -540,10 +582,24 @@ fn import_logins(app: &App, logins: Vec<magpie::MagpieLogin>, keys: &[String]) -
             }
         }
 
+        // 每个账号的"拍快照 → 写钥匙串 → 写库"必须在锁里完成。
+        let _guard = auth_write_guard();
         let (access_key, refresh_key) = workbuddy_auth::secret_keys(&login.uid);
         // 写之前先拍快照：后面任何一步失败都要把钥匙串恢复原样，
         // 否则会留下"令牌换了、账号状态没换"的不一致（或覆盖掉原有凭据）。
-        let snapshot = CredentialSnapshot::capture(app, &login.uid);
+        // 拍不出来（读被拒 / 后端异常）就不敢写：不知道旧值是什么，覆盖就是赌博。
+        let snapshot = match CredentialSnapshot::capture(app, &login.uid) {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                skipped.push(json!({
+                    "key": login.key,
+                    "uid": login.uid,
+                    "reason": "snapshot_unreadable",
+                    "message": crate::rpc::sanitize(&err.message),
+                }));
+                continue;
+            }
+        };
         if let Err(err) = app.secure.set(&access_key, login.access_token.as_bytes()) {
             skipped.push(json!({
                 "key": login.key,
@@ -559,11 +615,11 @@ fn import_logins(app: &App, logins: Vec<magpie::MagpieLogin>, keys: &[String]) -
             Ok(_) => {}
             Err(err) if err.kind == SecretErrorKind::NotFound => {}
             Err(err) => {
-                snapshot.restore(app);
+                let restored = snapshot.restore(app);
                 skipped.push(json!({
                     "key": login.key,
                     "uid": login.uid,
-                    "reason": "refresh_not_cleared",
+                    "reason": if restored { "refresh_not_cleared" } else { "rollback_incomplete" },
                     "message": crate::rpc::sanitize(&err.message),
                 }));
                 continue;
@@ -605,11 +661,11 @@ fn import_logins(app: &App, logins: Vec<magpie::MagpieLogin>, keys: &[String]) -
             Err(err) => {
                 // 库里没记住 = 这次导入没有发生。钥匙串也回到导入前，
                 // 不能出现"有令牌、账号却还是旧状态"的组合。
-                snapshot.restore(app);
+                let restored = snapshot.restore(app);
                 skipped.push(json!({
                     "key": login.key,
                     "uid": login.uid,
-                    "reason": "storage",
+                    "reason": if restored { "storage" } else { "rollback_incomplete" },
                     "message": crate::rpc::sanitize(&err.message),
                 }));
             }
@@ -636,13 +692,23 @@ pub(crate) fn resync_magpie_access(
     app: &App,
     account: &crate::storage::AccountRecord,
 ) -> RpcResult<Value> {
-    if account.auth_source != magpie::SOURCE_MAGPIE {
+    let _guard = auth_write_guard();
+    // 调用方可能拿着几秒前的快照（自动旅行就是这样）。先按 id 重新读一次库：
+    // 来源变了、版本变了，都说明"我手上这份已经不是现在这个账号"，直接放弃。
+    let current = app
+        .with_db(|db| db.get_account(&account.id))?
+        .ok_or_else(|| RpcError::not_found("账号已不存在，放弃重同步"))?;
+    if current.auth_source != magpie::SOURCE_MAGPIE {
         return Err(RpcError::new(
             crate::rpc::E_AUTH,
             "该账号使用 AICC 自有授权，不能从 Magpie 覆盖凭据",
         )
         .with_data(json!({ "kind": "not_magpie_source" })));
     }
+    if current.auth_epoch != account.auth_epoch {
+        return Err(superseded("epoch_changed"));
+    }
+    let account = &current;
     let id = account.id.as_str();
     let logins = magpie::read_logins().unwrap_or_default();
     let now = magpie::now_ms();
@@ -740,14 +806,19 @@ struct CredentialSnapshot {
 }
 
 impl CredentialSnapshot {
-    fn capture(app: &App, uid: &str) -> Self {
+    /// 拍快照。**只有 `NotFound` 才算"本来就没有"**：
+    /// `Denied`（用户点了不允许）、后端不可用、读取出错时，我们并不知道旧值是什么，
+    /// 这时候继续写就等于在信息不全的情况下覆盖用户凭据 —— 必须直接中止。
+    fn capture(app: &App, uid: &str) -> RpcResult<Self> {
         let (access_key, refresh_key) = workbuddy_auth::secret_keys(uid);
-        Self {
-            access: app.secure.get(&access_key).ok(),
-            refresh: app.secure.get(&refresh_key).ok(),
+        let access = read_optional(app, &access_key, "access")?;
+        let refresh = read_optional(app, &refresh_key, "refresh")?;
+        Ok(Self {
+            access,
+            refresh,
             access_key,
             refresh_key,
-        }
+        })
     }
 
     /// 恢复到快照状态。返回 false 表示没恢复干净（旧的也写不回去了），必须留痕。
@@ -761,6 +832,21 @@ impl CredentialSnapshot {
     }
 }
 
+fn read_optional(app: &App, key: &str, stage: &str) -> RpcResult<Option<Vec<u8>>> {
+    match app.secure.get(key) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(err) if err.kind == SecretErrorKind::NotFound => Ok(None),
+        Err(err) => Err(RpcError::new(
+            crate::rpc::E_SECURESTORE,
+            format!(
+                "读取旧凭据失败（{stage}），为避免覆盖未知状态已中止：{}",
+                err.message
+            ),
+        )
+        .with_data(json!({ "kind": "snapshot_unreadable", "stage": stage }))),
+    }
+}
+
 fn restore_one(app: &App, key: &str, old: Option<&[u8]>) -> bool {
     match old {
         Some(bytes) => app.secure.set(key, bytes).is_ok(),
@@ -769,6 +855,19 @@ fn restore_one(app: &App, key: &str, old: Option<&[u8]>) -> bool {
             Err(err) => err.kind == SecretErrorKind::NotFound,
         },
     }
+}
+
+/// 回滚并合成最终错误。回滚不干净必须**如实**说出来 —— 不能一边恢复失败，
+/// 一边告诉调用方"已经完整回滚"。
+fn rollback(app: &App, snapshot: &CredentialSnapshot, cause: RpcError) -> RpcError {
+    if snapshot.restore(app) {
+        return cause;
+    }
+    RpcError::new(
+        cause.code,
+        format!("{}（并且旧凭据未能完整恢复，请重新登录）", cause.message),
+    )
+    .with_data(json!({ "kind": "rollback_incomplete", "cause": cause.data }))
 }
 
 fn credential_error(err: crate::securestore::SecretError, stage: &str) -> RpcError {
@@ -793,30 +892,31 @@ fn store_own_credentials(
     access: &str,
     refresh: Option<&str>,
 ) -> RpcResult<CredentialSnapshot> {
-    let snapshot = CredentialSnapshot::capture(app, uid);
+    let snapshot = CredentialSnapshot::capture(app, uid)?;
 
     if let Err(err) = app.secure.set(&snapshot.access_key, access.as_bytes()) {
-        snapshot.restore(app);
-        return Err(credential_error(err, "access"));
+        return Err(rollback(app, &snapshot, credential_error(err, "access")));
     }
 
     match refresh {
         Some(token) => {
             if let Err(err) = app.secure.set(&snapshot.refresh_key, token.as_bytes()) {
-                snapshot.restore(app);
-                return Err(credential_error(err, "refresh"));
+                return Err(rollback(app, &snapshot, credential_error(err, "refresh")));
             }
         }
         None => match app.secure.delete(&snapshot.refresh_key) {
             Ok(_) => {}
             Err(err) if err.kind == SecretErrorKind::NotFound => {}
             Err(err) => {
-                snapshot.restore(app);
-                return Err(RpcError::new(
-                    crate::rpc::E_SECURESTORE,
-                    format!("旧的刷新令牌删不掉（{}），本次登录已回滚", err.message),
-                )
-                .with_data(json!({ "kind": "stale_refresh_not_cleared" })));
+                return Err(rollback(
+                    app,
+                    &snapshot,
+                    RpcError::new(
+                        crate::rpc::E_SECURESTORE,
+                        format!("旧的刷新令牌删不掉（{}），本次登录已回滚", err.message),
+                    )
+                    .with_data(json!({ "kind": "stale_refresh_not_cleared" })),
+                ));
             }
         },
     }
@@ -845,6 +945,9 @@ fn read_secret(app: &App, key: &str) -> RpcResult<String> {
 /// 回滚策略：入库失败时**恢复登录前的钥匙串**，而不是清空。老的实现直接
 /// `purge_workbuddy_secrets`，会把用户原本有效的那套凭据一起删掉。
 fn persist_login(app: &App, payload: &workbuddy_auth::TokenPayload) -> RpcResult<Value> {
+    // 整个落库过程都在锁里：钥匙串写入 + 数据库写入必须成对出现，
+    // 否则并发的 resync / refresh 会看到中间态。
+    let _guard = auth_write_guard();
     let snapshot = store_own_credentials(
         app,
         &payload.profile.uid,
@@ -854,10 +957,7 @@ fn persist_login(app: &App, payload: &workbuddy_auth::TokenPayload) -> RpcResult
 
     match write_login_row(app, payload) {
         Ok(value) => Ok(value),
-        Err(err) => {
-            snapshot.restore(app);
-            Err(err)
-        }
+        Err(err) => Err(rollback(app, &snapshot, err)),
     }
 }
 
@@ -897,15 +997,39 @@ fn write_login_row(app: &App, payload: &workbuddy_auth::TokenPayload) -> RpcResu
 /// "失败就恢复快照"——那会把一个死令牌写回去，让账号看起来还能刷新。
 /// 正确做法：尽量保住新的 access；refresh 落不下去就标失效、把死令牌删掉，
 /// 明确告诉用户要重新登录。
+#[allow(clippy::too_many_arguments)]
 fn persist_rotated_tokens(
     app: &App,
     id: &str,
+    expected_epoch: i64,
     access_key: &str,
     refresh_key: &str,
     access: &str,
     refresh: Option<&str>,
     expires: Option<&str>,
 ) -> RpcResult<Value> {
+    let _guard = auth_write_guard();
+    // 刷新是一次网络往返：出发时读的账号，回来时可能已经被扫码换成了自有授权。
+    // 版本对不上就什么都不写 —— 那份新令牌属于"上一个授权"，写下去就是覆盖。
+    let current = match app.with_db(|db| db.get_account(id))? {
+        Some(record) => record,
+        None => {
+            return Ok(json!({
+                "state": "superseded",
+                "reason": "account_deleted",
+            }))
+        }
+    };
+    if current.auth_source != OWN_SOURCE || current.auth_epoch != expected_epoch {
+        return Ok(json!({
+            "state": "superseded",
+            "reason": if current.auth_source != OWN_SOURCE {
+                "source_changed"
+            } else {
+                "epoch_changed"
+            },
+        }));
+    }
     // 两个键**分别**尝试：access 写不进去时，新的 refresh 仍然是有效令牌，
     // 留住它，下一次刷新还能把账号救回来（写死"先 access 后 refresh 一起失败"会把这份也丢掉）。
     let access_saved = app.secure.set(access_key, access.as_bytes());
@@ -998,6 +1122,7 @@ async fn refresh_account(app: &App, id: &str) -> RpcResult<Value> {
             persist_rotated_tokens(
                 app,
                 id,
+                account.auth_epoch,
                 &access_key,
                 &refresh_key,
                 &access_token,
@@ -1332,12 +1457,12 @@ mod tests {
     /// access 写进去了、refresh 写失败：必须回到原来那套，不能被"半套新凭据"顶掉。
     #[test]
     fn refresh_write_failure_keeps_the_old_pair() {
-        let (app, _dir) = test_app(SecureStore::faulty(&["/refresh"], &[]));
+        let (app, _dir) = test_app(SecureStore::faulty_on_value("boom"));
         let uid = "6f1c2d94-aaaa-0001-0002-000000000001";
         seed_pair(&app, uid, "old-access", "old-refresh");
         app.secure.arm();
 
-        let err = persist_login(&app, &payload(uid, "new-access", Some("new-refresh")))
+        let err = persist_login(&app, &payload(uid, "new-access", Some("new-refresh-boom")))
             .expect_err("refresh 写不进去就该失败");
         assert_eq!(err.data.as_ref().unwrap()["stage"], json!("refresh"));
 
@@ -1354,12 +1479,12 @@ mod tests {
     /// 连 access 都写不进去时同样要回滚（这条路径原来是"写一半就停"）。
     #[test]
     fn access_write_failure_keeps_the_old_pair() {
-        let (app, _dir) = test_app(SecureStore::faulty(&["/access"], &[]));
+        let (app, _dir) = test_app(SecureStore::faulty_on_value("boom"));
         let uid = "6f1c2d94-aaaa-0001-0002-000000000002";
         seed_pair(&app, uid, "old-access", "old-refresh");
         app.secure.arm();
 
-        let err = persist_login(&app, &payload(uid, "new-access", Some("new-refresh")))
+        let err = persist_login(&app, &payload(uid, "new-access-boom", Some("new-refresh")))
             .expect_err("access 写不进去就该失败");
         assert_eq!(err.data.as_ref().unwrap()["stage"], json!("access"));
         assert_eq!(read(&app, uid).as_deref(), Some("old-access"));
@@ -1439,10 +1564,14 @@ mod tests {
         app.secure.arm();
 
         let (access_key, refresh_key) = workbuddy_auth::secret_keys(uid);
-        let id = crate::storage::account_id("workbuddy", uid);
+        let current = app
+            .with_db(|db| db.find_account("workbuddy", uid))
+            .unwrap()
+            .expect("account");
         let out = persist_rotated_tokens(
             &app,
-            &id,
+            &current.id,
+            current.auth_epoch,
             &access_key,
             &refresh_key,
             "new-access",
@@ -1489,10 +1618,14 @@ mod tests {
         app.secure.arm();
 
         let (access_key, refresh_key) = workbuddy_auth::secret_keys(uid);
-        let id = crate::storage::account_id("workbuddy", uid);
+        let current = app
+            .with_db(|db| db.find_account("workbuddy", uid))
+            .unwrap()
+            .expect("account");
         let out = persist_rotated_tokens(
             &app,
-            &id,
+            &current.id,
+            current.auth_epoch,
             &access_key,
             &refresh_key,
             "new-access",
@@ -1543,12 +1676,12 @@ mod tests {
 
         let out = import_logins(&app, vec![magpie_login(uid, "magpie-access")], &[]).unwrap();
         assert_eq!(out["imported"], json!(0), "{out}");
+        // 删都删不掉时回滚同样删不掉，所以这里必须是"回滚不完整"而不是"已清理"。
         assert_eq!(
             out["skipped"][0]["reason"],
-            json!("refresh_not_cleared"),
+            json!("rollback_incomplete"),
             "{out}"
         );
-        assert!(read(&app, uid).is_none(), "回滚后不能留令牌");
     }
 
     /// 归属查询失败（数据库坏了）时必须保守：不删。
@@ -1570,5 +1703,145 @@ mod tests {
             Some("still-in-use"),
             "查不出归属就不能删"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // 快照读不出来 / 回滚不完整 / 旧快照与扫码登录抢写
+    // -----------------------------------------------------------------------
+
+    /// 拍不到快照（`Denied`）时必须中止写入：不知道旧值是什么，覆盖就是赌博。
+    #[test]
+    fn snapshot_read_failure_aborts_the_login() {
+        let (app, _dir) = test_app(SecureStore::faulty_on_read());
+        let uid = "6f1c2d94-dddd-0001-0002-000000000001";
+        seed_pair(&app, uid, "old-access", "old-refresh");
+        app.secure.arm();
+
+        let err = persist_login(&app, &payload(uid, "new-access", Some("new-refresh")))
+            .expect_err("读不到旧凭据就不能写");
+        assert_eq!(
+            err.data.as_ref().unwrap()["kind"],
+            json!("snapshot_unreadable")
+        );
+
+        app.secure.disarm();
+        assert_eq!(
+            read(&app, uid).as_deref(),
+            Some("old-access"),
+            "什么都没被写"
+        );
+        assert_eq!(read_refresh(&app, uid).as_deref(), Some("old-refresh"));
+    }
+
+    /// 回滚本身失败时必须报 `rollback_incomplete`，不能声称"已完整回滚"。
+    #[test]
+    fn rollback_failure_is_reported_as_incomplete() {
+        // 这个后端对 `/access` 的写入一律拒绝 —— 新值写不进，旧值也读不回去。
+        let (app, _dir) = test_app(SecureStore::faulty(&["/access"], &[]));
+        let uid = "6f1c2d94-dddd-0001-0002-000000000002";
+        seed_pair(&app, uid, "old-access", "old-refresh");
+        app.secure.arm();
+
+        let err = persist_login(&app, &payload(uid, "new-access", Some("new-refresh")))
+            .expect_err("写不进去就该失败");
+        assert_eq!(
+            err.data.as_ref().unwrap()["kind"],
+            json!("rollback_incomplete"),
+            "{err:?}"
+        );
+        assert!(
+            err.message.contains("未能完整恢复"),
+            "文案要如实说明没恢复干净：{}",
+            err.message
+        );
+    }
+
+    /// 自动旅行拿着旧快照去做 resync，而这期间用户扫码换成了自有授权：
+    /// 旧快照必须被拒绝，own 凭据一个字节都不能变。
+    #[test]
+    fn stale_travel_snapshot_cannot_overwrite_a_new_own_login() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-eeee-0001-0002-000000000001";
+        // 旅行开始时读到的账号快照（magpie 来源）
+        let stale = seed_magpie_account(&app, uid);
+        let (access_key, _) = workbuddy_auth::secret_keys(uid);
+        app.secure
+            .set(&access_key, b"borrowed-access")
+            .expect("seed borrowed access");
+
+        // 用户扫码：账号变成 own，钥匙串换成自己的令牌
+        persist_login(&app, &payload(uid, "own-access", Some("own-refresh"))).expect("login");
+
+        // 旅行那一轮拿着旧快照继续走 401 分支
+        let err = resync_magpie_access(&app, &stale).expect_err("旧快照必须被拒绝");
+        let kind = err.data.as_ref().unwrap()["kind"].as_str().unwrap_or("");
+        assert!(
+            kind == "not_magpie_source" || kind == "superseded",
+            "拒绝理由要明确，实际：{kind}"
+        );
+
+        assert_eq!(
+            read(&app, uid).as_deref(),
+            Some("own-access"),
+            "own 凭据必须原样保留"
+        );
+        assert_eq!(read_refresh(&app, uid).as_deref(), Some("own-refresh"));
+        let record = app
+            .with_db(|db| db.find_account("workbuddy", uid))
+            .unwrap()
+            .expect("account");
+        assert_eq!(record.auth_source, OWN_SOURCE);
+    }
+
+    /// 来源没变、但账号被别人写过（版本号变了）：同样拒绝。
+    #[test]
+    fn resync_rejects_a_snapshot_whose_epoch_changed() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-eeee-0001-0002-000000000002";
+        let stale = seed_magpie_account(&app, uid);
+
+        // 任何一次账号写入都会推进版本号（这里用改昵称模拟"别人写过这一行"）
+        app.with_db(|db| {
+            db.upsert_account(&AccountInput {
+                platform: "workbuddy".to_string(),
+                uid: uid.to_string(),
+                nickname: Some("刚改过".to_string()),
+                ..Default::default()
+            })
+        })
+        .expect("touch");
+
+        let err = resync_magpie_access(&app, &stale).expect_err("版本对不上就该拒绝");
+        assert_eq!(err.data.as_ref().unwrap()["kind"], json!("superseded"));
+    }
+
+    /// 刷新是一次网络往返：回来时账号已经换成别的授权，就不许把新令牌写进去。
+    #[test]
+    fn rotation_is_dropped_when_the_account_switched_sources_mid_flight() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-eeee-0001-0002-000000000003";
+        let stale = seed_magpie_account(&app, uid);
+        persist_login(&app, &payload(uid, "own-access", Some("own-refresh"))).expect("login");
+
+        let (access_key, refresh_key) = workbuddy_auth::secret_keys(uid);
+        let out = persist_rotated_tokens(
+            &app,
+            &stale.id,
+            stale.auth_epoch,
+            &access_key,
+            &refresh_key,
+            "rotated-access",
+            Some("rotated-refresh"),
+            None,
+        )
+        .expect("应当返回 superseded 而不是报错");
+
+        assert_eq!(out["state"], json!("superseded"), "{out}");
+        assert_eq!(
+            read(&app, uid).as_deref(),
+            Some("own-access"),
+            "凭据不能被覆盖"
+        );
+        assert_eq!(read_refresh(&app, uid).as_deref(), Some("own-refresh"));
     }
 }

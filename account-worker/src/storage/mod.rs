@@ -65,15 +65,27 @@ CREATE TABLE IF NOT EXISTS travel_events (\
 );\
 CREATE INDEX IF NOT EXISTS idx_travel_events_account ON travel_events (account_id, created_at DESC);";
 
+/// v5：凭据版本号（PR #65 第二轮）。
+///
+/// 后台任务（自动旅行）可能拿着几秒前的账号快照去做 401 重同步，而这期间用户
+/// 扫码把账号换成了自有授权。写凭据之前先比对这个版本号：对不上就说明
+/// "我读到的账号已经不是现在这个账号了"，直接放弃，不许覆盖。
+///
+/// 每次 `upsert_account` / `set_auth_state` 都会 +1 —— 宁可保守地让在途操作作废，
+/// 也不能让旧快照把新授权写坏。
+const MIGRATION_V5: &str = "\
+ALTER TABLE accounts ADD COLUMN auth_epoch INTEGER NOT NULL DEFAULT 0;";
+
 /// 迁移清单：按 version 升序，只追加不修改。
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, SCHEMA_V1),
     (2, MIGRATION_V2),
     (3, MIGRATION_V3),
     (4, MIGRATION_V4),
+    (5, MIGRATION_V5),
 ];
 
-pub const LATEST_VERSION: i64 = 4;
+pub const LATEST_VERSION: i64 = 5;
 
 pub struct Db {
     conn: Connection,
@@ -102,6 +114,8 @@ pub struct AccountRecord {
     pub auth_source: String,
     /// 该账号是否允许自动派 Buddy 旅行。默认关闭，与签到开关互不影响。
     pub travel_enabled: bool,
+    /// 凭据版本号。任何一次账号/授权写入都会 +1，用来让在途的旧快照作废。
+    pub auth_epoch: i64,
 }
 
 /// 账号写入参数。**所有可选字段都是"补丁"语义**：
@@ -342,6 +356,8 @@ impl Db {
             sets.push("travel_enabled = ?");
             args.push(Box::new(i64::from(value)));
         }
+        // 任何字段的写入都推进凭据版本：在途的旧快照就此作废（见 MIGRATION_V5）。
+        sets.push("auth_epoch = auth_epoch + 1");
         sets.push("updated_at = ?");
         args.push(Box::new(now));
 
@@ -364,7 +380,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, platform, uid, nickname, email, group_id, auth_status,
                     checkin_enabled, last_checkin_at, last_result, updated_at,
-                    token_expires_at, auth_domain, auth_source, travel_enabled
+                    token_expires_at, auth_domain, auth_source, travel_enabled, auth_epoch
              FROM accounts WHERE id = ?1",
         )?;
         let row = stmt.query_row(params![id], map_account).optional()?;
@@ -387,6 +403,7 @@ impl Db {
             "UPDATE accounts
                 SET auth_status = ?1,
                     token_expires_at = COALESCE(?2, token_expires_at),
+                    auth_epoch = auth_epoch + 1,
                     updated_at = ?3
               WHERE id = ?4",
             params![status, token_expires_at, now_rfc3339(), id],
@@ -398,7 +415,7 @@ impl Db {
         let mut sql = String::from(
             "SELECT id, platform, uid, nickname, email, group_id, auth_status,
                     checkin_enabled, last_checkin_at, last_result, updated_at,
-                    token_expires_at, auth_domain, auth_source, travel_enabled
+                    token_expires_at, auth_domain, auth_source, travel_enabled, auth_epoch
              FROM accounts WHERE 1 = 1",
         );
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -505,6 +522,7 @@ fn map_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRecord> {
             .get::<_, Option<String>>(13)?
             .unwrap_or_else(|| "own".into()),
         travel_enabled: row.get::<_, Option<i64>>(14)?.unwrap_or(0) != 0,
+        auth_epoch: row.get::<_, Option<i64>>(15)?.unwrap_or(0),
     })
 }
 

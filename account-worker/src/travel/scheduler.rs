@@ -65,17 +65,25 @@ impl Tokens for AppTokens<'_> {
         if account.auth_source != crate::providers::magpie::SOURCE_MAGPIE {
             return Err("该账号是独立扫码授权，请重新扫码登录".to_string());
         }
-        let report =
-            crate::handlers::resync_magpie_access(self.app, account).map_err(|err| err.message)?;
-        if report.get("state").and_then(Value::as_str) != Some("valid") {
-            return Err(report
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("Magpie 里的令牌也已过期")
-                .to_string());
+        match crate::handlers::resync_magpie_access(self.app, account) {
+            Ok(report) => {
+                if report.get("state").and_then(Value::as_str) != Some("valid") {
+                    return Err(report
+                        .get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("Magpie 里的令牌也已过期")
+                        .to_string());
+                }
+                <Self as Tokens>::access(self, account)
+            }
+            // 手上这份账号快照已经过期（用户刚好扫码换成了自有授权）：worker 拒绝写入，
+            // 我们也不该报错——直接用手上现在的令牌继续，下一轮会读到新账号。
+            Err(err) if crate::handlers::is_superseded(&err) => {
+                <Self as Tokens>::access(self, account)
+            }
+            Err(err) => Err(err.message),
         }
-        <Self as Tokens>::access(self, account)
     }
 }
 
