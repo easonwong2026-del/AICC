@@ -7,6 +7,13 @@ import SwiftUI
 /// 所以这里**不**接管 `ServerManager` / `AICCAppDelegate` 的生命周期。
 @MainActor
 final class AccountWorkerManager: ObservableObject {
+    /// 整个 App 只有一个助手进程：主控制台和设置页共用这一个实例。
+    /// 每个页面各建一个会让 `health` 探针重复起进程（PRD §七.2）。
+    ///
+    /// `nonisolated(unsafe)`：实例是常量，所有可变状态仍然只在主线程读写
+    /// （方法全在 `@MainActor` 上），这里只是让 SwiftUI 的属性初始化器能拿到它。
+    nonisolated(unsafe) static let shared = AccountWorkerManager()
+
     enum State: Equatable {
         case stopped
         case starting
@@ -111,6 +118,18 @@ final class AccountWorkerManager: ObservableObject {
         } catch {
             secureStoreSummary = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
+    }
+
+    /// PR2a 只读账号列表。真实数据由 Rust SQLite 返回，不修改账号或客户端凭据。
+    func listAccounts() async throws -> [[String: Any]] {
+        guard let client, client.isRunning else {
+            throw AccountWorkerFailure.notRunning
+        }
+        let result = try await client.call("accounts.list", timeout: 10)
+        guard let rows = result["accounts"] as? [[String: Any]] else {
+            throw AccountWorkerFailure.malformedLine
+        }
+        return rows
     }
 
     func stop() {

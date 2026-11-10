@@ -442,9 +442,11 @@ final class ServerManager: ObservableObject {
 class AICCAppDelegate: NSObject, NSApplicationDelegate {
     private let singleInstance = SingleInstanceService.shared
     private let serverManager = ServerManager.shared
+    private var consoleCoordinator: ConsoleWindowCoordinator?
+    private var consoleStore: ConsoleStore?
     private var settingsWindowCoordinator: SettingsWindowCoordinator?
     private var hasStartedShutdown = false
-    private var hasPresentedSettings = false
+    private var hasPresentedMainWindow = false
     private var widgetRefreshTask: Task<Void, Never>?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -472,6 +474,17 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
             loginAtLaunch: LaunchAtLoginService.shared,
             onClose: { [weak self] in self?.finishBackgroundRefresh() }
         )
+        // 主控制台与设置共用同一个账号助手实例，避免一个 App 起两个 worker。
+        let store = ConsoleStore(worker: .shared, settings: .shared)
+        consoleStore = store
+        consoleCoordinator = ConsoleWindowCoordinator(
+            settings: AppSettings.shared,
+            server: ServerManager.shared,
+            loginAtLaunch: LaunchAtLoginService.shared,
+            store: store,
+            openSettings: { [weak self] in self?.presentSettings() },
+            onClose: { [weak self] in self?.finishBackgroundRefresh() }
+        )
 
         if AppSettings.shared.bridgeEnabled { serverManager.startMonitoring() }
         let loginLaunch = NSAppleEventManager.shared().currentAppleEvent?
@@ -485,17 +498,19 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
                 && event.eventID == AEEventID(kAEGetURL)
         }()
         if loginLaunch || urlLaunch {
-            hasPresentedSettings = true
+            hasPresentedMainWindow = true
             if !AppSettings.shared.bridgeEnabled && loginLaunch { requestQuit() }
         } else if notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? Bool == false {
-            hasPresentedSettings = true
-        } else if NSApp.isActive && !hasPresentedSettings {
-            presentSettings()
+            hasPresentedMainWindow = true
+        } else if !hasPresentedMainWindow {
+            // 不再要求 NSApp.isActive：accessory 应用从 Finder / open 启动时
+            // 这一刻还没被激活，以前那样判断会导致"点了图标什么都不出现"。
+            presentConsole()
         }
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        if settingsWindowCoordinator != nil && !hasPresentedSettings { presentSettings() }
+        if consoleCoordinator != nil && !hasPresentedMainWindow { presentConsole() }
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -504,12 +519,12 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
         for url in urls where url.scheme == "aicc-widget" {
             if url.host == "board" {
                 guard let step = AICCWidgetMetadata.boardStep(fromPath: url.path) else { continue }
-                hasPresentedSettings = true
+                hasPresentedMainWindow = true
                 WidgetPreferences.requestBoardStep(step)
                 WidgetCenter.shared.reloadTimelines(ofKind: AICCWidgetMetadata.boardKind)
                 finishBackgroundRefresh()
             } else {
-                hasPresentedSettings = true
+                hasPresentedMainWindow = true
                 refreshWidgets()
             }
         }
@@ -527,16 +542,24 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// 主入口：启动、重新激活、点击 Dock 图标都走这里。
+    private func presentConsole() {
+        hasPresentedMainWindow = true
+        consoleCoordinator?.present()
+    }
+
+    /// 右上角齿轮进入设置。设置不再作为默认首页。
     private func presentSettings() {
-        hasPresentedSettings = true
         settingsWindowCoordinator?.present()
     }
 
     func finishBackgroundRefresh() {
         guard !AppSettings.shared.bridgeEnabled,
+              consoleCoordinator?.hasVisibleWindow != true,
               settingsWindowCoordinator?.hasVisibleWindow != true else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            guard self?.settingsWindowCoordinator?.hasVisibleWindow != true,
+            guard self?.consoleCoordinator?.hasVisibleWindow != true,
+                  self?.settingsWindowCoordinator?.hasVisibleWindow != true,
                   !AppSettings.shared.bridgeEnabled else { return }
             self?.requestQuit()
         }
@@ -547,7 +570,7 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        presentSettings()
+        presentConsole()
         return true
     }
 
@@ -567,6 +590,9 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
     private func shutDownForTermination() {
         guard !hasStartedShutdown else { return }
         hasStartedShutdown = true
+        consoleCoordinator?.tearDown()
+        consoleCoordinator = nil
+        consoleStore = nil
         settingsWindowCoordinator?.tearDown()
         settingsWindowCoordinator = nil
         serverManager.stopMonitoring()
