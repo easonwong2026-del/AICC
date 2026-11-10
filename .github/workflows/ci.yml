@@ -2,9 +2,12 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
+    # 允许"堆叠 PR"：base 是 feature/* 的 PR 也要跑检查。
+    branches: [main, "feature/**"]
   push:
     branches: [main]
+  # 手动重跑：堆叠 PR 的 base 分支若还没带上这条触发器，用 dispatch 也能跑。
+  workflow_dispatch:
 
 jobs:
   test:
