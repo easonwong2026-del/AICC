@@ -102,6 +102,161 @@ final class ConsoleModelsTests: XCTestCase {
         XCTAssertTrue(stats.isEmpty)
     }
 
+    // MARK: WorkBuddy 扫码登录
+
+    func testLoginStartParsesVerificationUri() throws {
+        let start = try XCTUnwrap(WorkbuddyLoginStart.parse([
+            "loginId": "wb1b_abc",
+            "verificationUri": "https://www.codebuddy.cn/login?state=1",
+            "expiresIn": 600,
+        ]))
+        XCTAssertEqual(start.loginId, "wb1b_abc")
+        XCTAssertEqual(start.expiresIn, 600)
+        XCTAssertTrue(start.verificationUri.contains("codebuddy.cn"))
+    }
+
+    func testLoginStartRejectsIncompletePayload() {
+        XCTAssertNil(WorkbuddyLoginStart.parse(["loginId": "x"]))
+        XCTAssertNil(WorkbuddyLoginStart.parse(["verificationUri": "https://x"]))
+        XCTAssertNil(WorkbuddyLoginStart.parse(["loginId": "", "verificationUri": "https://x"]))
+    }
+
+    func testLoginPhaseMapping() {
+        XCTAssertEqual(WorkbuddyLoginPhase.parse(["state": "pending"]), .pending)
+        XCTAssertEqual(WorkbuddyLoginPhase.parse(["state": "success", "reused": true]), .success(reused: true))
+        XCTAssertEqual(WorkbuddyLoginPhase.parse(["state": "success"]), .success(reused: false))
+        XCTAssertEqual(WorkbuddyLoginPhase.parse(["state": "cancelled"]), .cancelled)
+        XCTAssertEqual(WorkbuddyLoginPhase.parse(["state": "expired"]), .expired)
+        XCTAssertEqual(WorkbuddyLoginPhase.parse(["state": "finished"]), .finished)
+    }
+
+    func testLoginFailureKeepsKindAndMessage() {
+        let phase = WorkbuddyLoginPhase.parse([
+            "state": "failed",
+            "error": ["kind": "domain_mismatch", "message": "档位不符"],
+        ])
+        XCTAssertEqual(phase, .failed(kind: "domain_mismatch", message: "档位不符"))
+    }
+
+    func testTerminalFlag() {
+        XCTAssertFalse(WorkbuddyLoginPhase.pending.isTerminal)
+        XCTAssertTrue(WorkbuddyLoginPhase.cancelled.isTerminal)
+        XCTAssertTrue(WorkbuddyLoginPhase.success(reused: false).isTerminal)
+    }
+
+    func testExpiredTokenOverridesValidStatus() throws {
+        let account = try XCTUnwrap(ConsoleAccount(json: row([
+            "authStatus": "valid",
+            "tokenExpiresAt": "2020-01-01T00:00:00Z",
+        ])))
+        XCTAssertTrue(account.isTokenExpired())
+        XCTAssertEqual(account.displayAuthLabel, "已过期")
+        XCTAssertEqual(account.displayAuthTone, .error)
+    }
+
+    func testFutureTokenKeepsValidStatus() throws {
+        let account = try XCTUnwrap(ConsoleAccount(json: row([
+            "authStatus": "valid",
+            "tokenExpiresAt": "2099-01-01T00:00:00Z",
+        ])))
+        XCTAssertFalse(account.isTokenExpired())
+        XCTAssertEqual(account.displayAuthLabel, "认证有效")
+    }
+
+    func testMissingExpiryDoesNotFakeExpiry() throws {
+        let account = try XCTUnwrap(ConsoleAccount(json: row(["authStatus": "valid"])))
+        XCTAssertFalse(account.isTokenExpired())
+        XCTAssertEqual(account.displayAuthLabel, "认证有效")
+    }
+
+    // MARK: Magpie 导入
+
+    func testBorrowedAccountIsMarkedAndLabelled() throws {
+        let account = try XCTUnwrap(ConsoleAccount(json: row([
+            "authStatus": "valid",
+            "authSource": "magpie",
+        ])))
+        XCTAssertTrue(account.isBorrowed)
+        XCTAssertEqual(account.sourceLabel, "Magpie")
+
+        let own = try XCTUnwrap(ConsoleAccount(json: row(["authStatus": "valid"])))
+        XCTAssertFalse(own.isBorrowed)
+        XCTAssertNil(own.sourceLabel, "独立授权的账号不该有来源标签")
+    }
+
+    func testMagpieCandidateParsing() throws {
+        let candidate = try XCTUnwrap(MagpieAccountCandidate.parse([
+            "key": "workbuddy#2ntprc",
+            "uid": "0a9b8c7d-aaaa-bbbb-cccc-ddddeeeeffff",
+            "nickname": "一锅端",
+            "expiresInHours": 385.6,
+            "expired": false,
+            "imported": false,
+        ]))
+        XCTAssertEqual(candidate.nickname, "一锅端")
+        XCTAssertTrue(candidate.isAvailable)
+        XCTAssertEqual(candidate.statusText, "约 16 天后过期")
+    }
+
+    func testMagpieCandidateStates() throws {
+        let imported = try XCTUnwrap(MagpieAccountCandidate.parse([
+            "key": "workbuddy", "uid": "u", "imported": true, "importedSource": "own",
+        ]))
+        XCTAssertFalse(imported.isAvailable)
+        XCTAssertEqual(imported.statusText, "已独立授权")
+
+        let expired = try XCTUnwrap(MagpieAccountCandidate.parse([
+            "key": "workbuddy", "uid": "u", "expired": true, "expiresInHours": -3.0,
+        ]))
+        XCTAssertFalse(expired.isAvailable)
+        XCTAssertEqual(expired.statusText, "令牌已过期")
+
+        let soon = try XCTUnwrap(MagpieAccountCandidate.parse([
+            "key": "workbuddy", "uid": "u", "expiresInHours": 5.4,
+        ]))
+        XCTAssertEqual(soon.statusText, "约 5 小时后过期")
+    }
+
+    func testMagpieCandidateRejectsIncompleteRows() {
+        XCTAssertNil(MagpieAccountCandidate.parse(["uid": "u"]))
+        XCTAssertNil(MagpieAccountCandidate.parse(["key": "workbuddy"]))
+        XCTAssertNil(MagpieAccountCandidate.parse(["key": "", "uid": "u"]))
+    }
+
+    func testMagpiePreviewFiltersImportable() {
+        let preview = MagpiePreview.parse([
+            "available": true,
+            "accounts": [
+                ["key": "workbuddy", "uid": "u1", "nickname": "甲"],
+                ["key": "workbuddy#a", "uid": "u2", "nickname": "乙", "imported": true],
+                ["key": "workbuddy#b", "uid": "u3", "nickname": "丙", "expired": true],
+            ],
+        ])
+        XCTAssertTrue(preview.available)
+        XCTAssertEqual(preview.candidates.count, 3)
+        XCTAssertEqual(preview.importable.map(\.nickname), ["甲"])
+    }
+
+    func testMagpiePreviewWithoutMagpie() {
+        let preview = MagpiePreview.parse([
+            "available": false,
+            "message": "没有找到 Magpie 的登录数据",
+            "accounts": [],
+        ])
+        XCTAssertFalse(preview.available)
+        XCTAssertTrue(preview.importable.isEmpty)
+        XCTAssertEqual(preview.message, "没有找到 Magpie 的登录数据")
+    }
+
+    func testImportResultParsing() {
+        let result = MagpieImportResult.parse([
+            "imported": 3,
+            "skipped": [["key": "workbuddy", "reason": "already_authorized"]],
+        ])
+        XCTAssertEqual(result.imported, 3)
+        XCTAssertEqual(result.skipped, 1)
+    }
+
     func testQuotaSummaryWithoutSnapshotIsEmpty() {
         let summary = ConsoleQuotaSummary(snapshot: nil)
         XCTAssertTrue(summary.isEmpty)

@@ -35,7 +35,10 @@ fn main() {
             );
         }
         Some("--help") | Some("-h") => print_help(),
-        Some("--self-test") => std::process::exit(self_test()),
+        Some("--self-test") => {
+            let runtime = runtime();
+            std::process::exit(runtime.block_on(self_test()))
+        }
         Some(other) if other.starts_with('-') => {
             eprintln!("未知参数：{other}");
             print_help();
@@ -62,7 +65,16 @@ fn print_help() {
     );
 }
 
+/// 单线程 runtime：RPC 逐条处理，登录轮询是短请求，够用且省资源。
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime")
+}
+
 fn serve() {
+    let runtime = runtime();
     let paths = Paths::resolve();
     if let Err(err) = paths.ensure_dirs() {
         log(&format!("数据目录创建失败：{err}"));
@@ -109,7 +121,7 @@ fn serve() {
             id, method, params, ..
         } = payload;
         let id_is_null = id.is_none();
-        let result = handlers::dispatch(&app, &method, &params);
+        let result = runtime.block_on(handlers::dispatch(&app, &method, &params));
 
         // 通知（没有 id）不回包，避免给调用方制造"多出来的响应"。
         if !is_notification && !id_is_null {
@@ -165,7 +177,7 @@ fn log(message: &str) {
 }
 
 /// 自检：不联网、不碰真实钥匙串、不影响用户数据目录。
-fn self_test() -> i32 {
+async fn self_test() -> i32 {
     let dir = std::env::temp_dir().join(format!("aicc-worker-selftest-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::env::set_var(paths::DATA_DIR_ENV, &dir);
@@ -185,7 +197,7 @@ fn self_test() -> i32 {
         checks.push(json!({ "name": name, "ok": ok, "detail": detail }));
     };
 
-    match handlers::dispatch(&app, "storage.init", &json!({})) {
+    match handlers::dispatch(&app, "storage.init", &json!({})).await {
         Ok(v) => push("storage.init", true, v),
         Err(err) => push("storage.init", false, json!(err.to_string())),
     }
@@ -194,14 +206,15 @@ fn self_test() -> i32 {
         &app,
         "accounts.upsert",
         &json!({ "platform": "workbuddy", "uid": "selftest", "nickname": "自检账号", "checkinEnabled": true }),
-    );
+    )
+    .await;
     push(
         "accounts.upsert",
         upsert.is_ok(),
         upsert.unwrap_or_else(|e| json!(e.to_string())),
     );
 
-    let list = handlers::dispatch(&app, "accounts.list", &json!({}));
+    let list = handlers::dispatch(&app, "accounts.list", &json!({})).await;
     let count = list
         .as_ref()
         .ok()
@@ -211,7 +224,7 @@ fn self_test() -> i32 {
         .unwrap_or(0);
     push("accounts.list", count == 1, json!({ "count": count }));
 
-    let probe = handlers::dispatch(&app, "secure.status", &json!({}));
+    let probe = handlers::dispatch(&app, "secure.status", &json!({})).await;
     let probe_ok = probe
         .as_ref()
         .ok()
@@ -224,7 +237,7 @@ fn self_test() -> i32 {
         probe.unwrap_or_else(|e| json!(e.to_string())),
     );
 
-    let health = handlers::dispatch(&app, "health", &json!({}));
+    let health = handlers::dispatch(&app, "health", &json!({})).await;
     let health_ok = health
         .as_ref()
         .ok()

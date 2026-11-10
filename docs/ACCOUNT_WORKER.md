@@ -51,6 +51,11 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `providers.workbuddy.oauth` | OAuth 能力说明（PR1a 未接线） | 否 |
 | `providers.qoder.presence` | 只查配置目录/文件，不碰钥匙串 | 否 |
 | `providers.qoder.inspect` | 解密 `auth.v1.dat` 并给令牌指纹 | 否 |
+| `auth.workbuddy.start` / `poll` / `cancel` | 官方 OAuth 扫码：发起、轮询、取消（PR1b-1） | 是 |
+| `auth.workbuddy.refresh` | 刷新令牌；`auth_source=magpie` 的账号改为重新同步 | 是 |
+| `auth.workbuddy.status` | 用钥匙串里的令牌查一次真实登录态（只读） | 是 |
+| `providers.magpie.accounts` | 列出 Magpie 里已登录的 WorkBuddy 账号（**不含令牌**） | 否 |
+| `auth.magpie.import` | 把 Magpie 的 access token 搬进 AICC 钥匙串 | 否 |
 
 `health` **故意不做**钥匙串探针：否则每次启动 App 都会弹一次系统授权框。
 需要验证凭据存储时显式调 `secure.status`（设置页有按钮）。探针的读写删三步全成功才报 `ok`，
@@ -92,7 +97,9 @@ AICC 打了 3 行补丁拆开（见 `account-worker/vendor/VENDOR.md`，回归�
   不再"先删再加"：删除成功而写入失败会永久丢掉旧凭据。
 - 助手是 ad-hoc 签名的嵌套可执行文件，每次重新构建签名都会变，macOS 可能重新询问
   钥匙串授权。返回码区分 `denied` 与 `not_found`，UI 上分别提示。
-- 不读取、不改写 Magpie 的任何凭据；不向 Widget / 墨水屏暴露账号信息。
+- **会读 Magpie 的 `access`，但绝不读 / 不写它的 `refresh`**（见 §5.5）。理由不是洁癖：
+  refresh 是单份有状态凭据，AICC 与 Magpie 各自刷新会互相把对方踢下线。
+- 不向 Widget / 墨水屏暴露账号信息。
 
 ## 5. 与 PRD 不一致、已按实际能力修正的三处
 
@@ -109,6 +116,36 @@ AICC 打了 3 行补丁拆开（见 `account-worker/vendor/VENDOR.md`，回归�
 这对 PR2 的账号模型有直接影响：添加账号可能不需要自己造一套"独立 profile"，
 而是要么走 OAuth 拿新令牌，要么按客户端已有的列表做切换。PR1a 只把这个结构记下来，
 并要求 `providers.workbuddy.inspect` 报出 `accountsArrayCount`，不做任何写入。
+
+## 5.5 借用 Magpie 的登录态（PR1b-1）
+
+Magpie 自己完成了 WorkBuddy OAuth，把结果明文放在 `~/.config/magpie/plugin-auth.json`：
+每个账号一条 `access` / `refresh` / `uid` / `domain` / `expires`。昵称不在这个文件里，
+在 `plugin-providers.json` 的 `accounts[].accountId`（按 `key` 对齐，如 `workbuddy#2ntprc`）。
+
+AICC 的取法是**只读文件、只借 access**：
+
+| 项 | 处理 |
+| --- | --- |
+| `access` | 复制进 AICC 钥匙串（`workbuddy/<uid>/access`） |
+| `refresh` | **不读、不存**。AICC 不做 refresh，过期后重新从 Magpie 读一次 |
+| `uid` / `domain` / `expires` | 落库（`token_expires_at` / `auth_domain`） |
+| 账号来源 | `auth_source = 'magpie'`，界面卡片上标 `Magpie` |
+
+这样两边共用的是无状态 access token（多端同时用是正常行为），不会出现"谁刷新谁把对方踢掉"。
+代价是：Magpie 里删了账号，AICC 这条只能在令牌过期后变成"已过期"，不会立刻消失——这是刻意的，
+不给 Magpie 增加任何耦合。
+
+`auth.magpie.import` 的边界：
+
+- 已存在且 `auth_source = 'own'` 的账号**跳转不覆盖**（不能把独立授权降级成借用）；
+- 令牌已过期的跳过；
+- 写入失败（钥匙串拒绝）只跳过该条，不整批失败；
+- 返回值里没有任何令牌。
+
+> 钥匙串条目的 ACL 绑定创建它的二进制。AICC 是 ad-hoc 签名，**每次重新构建签名都会变**，
+> 所以升级后第一次读凭据 macOS 可能弹一次授权框，点"始终允许"即可。也因此导入动作
+> 必须由 App 自己做（由 App 创建条目），命令行跑助手会触发一次额外授权。
 
 ## 6. PR1a 交付范围
 

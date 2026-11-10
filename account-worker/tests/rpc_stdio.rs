@@ -14,21 +14,66 @@ struct Session {
     stdin: Option<std::process::ChildStdin>,
     stdout: BufReader<std::process::ChildStdout>,
     _data_dir: tempfile::TempDir,
+    _magpie_dir: Option<tempfile::TempDir>,
 }
 
 impl Session {
     fn start() -> Self {
+        Self::spawn(None)
+    }
+
+    /// 带一份假的 Magpie 配置启动：`plugin-auth.json` + `plugin-providers.json`。
+    fn with_magpie() -> Self {
+        let magpie = tempfile::tempdir().expect("magpie tempdir");
+        std::fs::write(
+            magpie.path().join("plugin-auth.json"),
+            json!({
+                "codex": {"access": "codex-token", "uid": "codex-uid"},
+                "workbuddy": {
+                    "access": "a".repeat(1620),
+                    "refresh": "r".repeat(1622),
+                    "uid": "6f1c2d94-1111-2222-3333-444455556666",
+                    "domain": "www.workbuddy.cn",
+                    "expires": 1_795_354_934_547i64
+                }
+            })
+            .to_string(),
+        )
+        .expect("写 plugin-auth");
+        std::fs::write(
+            magpie.path().join("plugin-providers.json"),
+            json!([{
+                "id": "workbuddy",
+                "signedIn": true,
+                "accounts": [{"key": "workbuddy", "accountId": "卡里"}]
+            }])
+            .to_string(),
+        )
+        .expect("写 plugin-providers");
+        Self::spawn(Some(magpie))
+    }
+
+    fn spawn(magpie: Option<tempfile::TempDir>) -> Self {
         let data_dir = tempfile::tempdir().expect("tempdir");
-        let mut child = Command::new(BIN)
+        let mut command = Command::new(BIN);
+        command
             // 刻意不传 WB_SWITCH_HOME：助手应自行把它收进数据目录。
             .env_remove("WB_SWITCH_HOME")
             .env("AICC_ACCOUNT_DATA_DIR", data_dir.path())
             .env("AICC_VERSION", "2.12.2-test")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("启动助手失败");
+            .stderr(Stdio::null());
+        match &magpie {
+            Some(dir) => {
+                command.env("MAGPIE_CONFIG_DIR", dir.path());
+            }
+            None => {
+                // 别读到开发机自己的 Magpie 数据。
+                command.env("MAGPIE_CONFIG_DIR", data_dir.path().join("no-magpie"));
+            }
+        }
+        let mut child = command.spawn().expect("启动助手失败");
         let stdin = child.stdin.take().expect("stdin");
         let stdout = BufReader::new(child.stdout.take().expect("stdout"));
         Self {
@@ -36,6 +81,7 @@ impl Session {
             stdin: Some(stdin),
             stdout,
             _data_dir: data_dir,
+            _magpie_dir: magpie,
         }
     }
 
@@ -87,7 +133,11 @@ fn health_round_trip_over_stdio() {
         result["database"]["ok"].as_bool().unwrap_or(false),
         "数据库应初始化成功"
     );
-    assert_eq!(result["database"]["schemaVersion"], json!(1));
+    // 断言与 health 自报的 latestSchemaVersion 一致，避免每次加迁移都要改数字。
+    assert_eq!(
+        result["database"]["schemaVersion"], result["database"]["latestSchemaVersion"],
+        "schema 迁移要跟到最新版本"
+    );
     assert_eq!(
         result["paths"]["wbSwitchHomeOwned"],
         json!(true),
@@ -204,4 +254,41 @@ fn notifications_get_no_response() {
     session.send(json!({"jsonrpc": "2.0", "method": "ping", "params": {}}));
     let ping = session.call(7, "ping", json!({}));
     assert_eq!(ping["id"], json!(7));
+}
+
+/// Magpie 导入的预览：能列出账号、带昵称，但**绝不能**把令牌带出来。
+#[test]
+fn magpie_preview_over_stdio_never_leaks_tokens() {
+    let mut session = Session::with_magpie();
+
+    let reply = session.call(1, "providers.magpie.accounts", json!({}));
+    let result = &reply["result"];
+    assert_eq!(result["available"], json!(true), "{reply}");
+    let accounts = result["accounts"].as_array().expect("accounts 数组");
+    assert_eq!(accounts.len(), 1, "codex 那条不算 WorkBuddy");
+    assert_eq!(accounts[0]["nickname"], json!("卡里"));
+    assert_eq!(accounts[0]["imported"], json!(false));
+    assert_eq!(accounts[0]["expired"], json!(false));
+
+    let text = reply.to_string();
+    assert!(
+        !text.contains(&"a".repeat(64)),
+        "access token 泄漏到 RPC：{text}"
+    );
+    assert!(
+        !text.contains(&"r".repeat(64)),
+        "refresh token 泄漏到 RPC：{text}"
+    );
+
+    session.call(2, "worker.shutdown", json!({}));
+}
+
+/// 没有 Magpie 时必须给出可读原因，而不是报错崩掉。
+#[test]
+fn magpie_preview_without_magpie_is_unavailable() {
+    let mut session = Session::start();
+    let reply = session.call(1, "providers.magpie.accounts", json!({}));
+    assert_eq!(reply["result"]["available"], json!(false), "{reply}");
+    assert_eq!(reply["result"]["kind"], json!("not_installed"));
+    session.call(2, "worker.shutdown", json!({}));
 }

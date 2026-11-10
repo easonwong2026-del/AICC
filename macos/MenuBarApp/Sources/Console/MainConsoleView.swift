@@ -46,8 +46,10 @@ struct MainConsoleView: View {
     init(store: ConsoleStore, openSettings: @escaping () -> Void) {
         self.store = store
         self.openSettings = openSettings
-        // QA 钩子：截图脚本用 AICC_CONSOLE_PAGE 指定初始分页，正常启动不带这个变量。
-        let requested = ProcessInfo.processInfo.environment["AICC_CONSOLE_PAGE"]
+        // QA 钩子：截图/验收脚本用 `open --args -AICCConsolePage accounts` 指定初始分页。
+        // 同时兼容环境变量，方便直接跑二进制。
+        let requested = UserDefaults.standard.string(forKey: "AICCConsolePage")
+            ?? ProcessInfo.processInfo.environment["AICC_CONSOLE_PAGE"]
         _page = State(initialValue: ConsolePage(rawValue: requested ?? "") ?? .overview)
     }
 

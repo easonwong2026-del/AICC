@@ -5,7 +5,7 @@
 use serde_json::{json, Value};
 
 use crate::app::App;
-use crate::providers::{qoder, workbuddy};
+use crate::providers::{magpie, qoder, workbuddy, workbuddy_auth};
 use crate::rpc::{RpcError, RpcResult};
 use crate::storage::{AccountFilter, AccountInput};
 use crate::version;
@@ -32,9 +32,21 @@ pub const METHODS: &[&str] = &[
     "providers.workbuddy.oauth",
     "providers.qoder.presence",
     "providers.qoder.inspect",
+    "auth.workbuddy.start",
+    "auth.workbuddy.poll",
+    "auth.workbuddy.cancel",
+    "auth.workbuddy.refresh",
+    "providers.magpie.accounts",
+    "auth.magpie.import",
+    "auth.workbuddy.status",
 ];
 
-pub fn dispatch(app: &App, method: &str, params: &Value) -> RpcResult<Value> {
+pub async fn dispatch(app: &App, method: &str, params: &Value) -> RpcResult<Value> {
+    // JSON-RPC 允许整个省略 `params`（键不存在时是 null）。统一当空对象，
+    // 免得每个方法都各自判一次 null。
+    let empty = json!({});
+    let params = if params.is_null() { &empty } else { params };
+
     match method {
         "ping" => Ok(json!({
             "pong": true,
@@ -80,7 +92,15 @@ pub fn dispatch(app: &App, method: &str, params: &Value) -> RpcResult<Value> {
 
         "accounts.delete" => {
             let id = require_str(params, "id")?;
-            app.with_db(|db| Ok(json!({ "deleted": db.delete_account(&id)? })))
+            let existing = app.with_db(|db| db.get_account(&id))?;
+            let deleted = app.with_db(|db| db.delete_account(&id))?;
+            // 账号删掉后令牌没有主人了，必须一起清，避免钥匙串里留孤儿凭据。
+            if deleted {
+                if let Some(account) = existing {
+                    purge_workbuddy_secrets(app, &account.uid);
+                }
+            }
+            Ok(json!({ "deleted": deleted }))
         }
 
         "groups.list" => app.with_db(|db| Ok(json!({ "groups": db.list_groups()? }))),
@@ -152,6 +172,84 @@ pub fn dispatch(app: &App, method: &str, params: &Value) -> RpcResult<Value> {
             Ok(qoder::inspect(dir))
         }
 
+        // ---- WorkBuddy 扫码登录（PR1b-1）----
+        "auth.workbuddy.start" => {
+            let info = workbuddy_auth::start(WbVariant::Cn)
+                .await
+                .map_err(auth_rpc_error)?;
+            Ok(json!({
+                "platform": "workbuddy",
+                "loginId": info.login_id,
+                "verificationUri": info.verification_uri,
+                "expiresIn": info.expires_in,
+                // 前端自己渲染二维码，这里只给要编码的字符串。
+                "qrPayload": info.verification_uri,
+            }))
+        }
+
+        "auth.workbuddy.poll" => {
+            let login_id = require_str(params, "loginId")?;
+            match workbuddy_auth::poll(&login_id).await {
+                workbuddy_auth::Polled::Pending => Ok(json!({ "state": "pending" })),
+                workbuddy_auth::Polled::Failed(err) => Ok(json!({
+                    "state": poll_state(&err.kind),
+                    "error": { "kind": err.kind, "message": err.message },
+                })),
+                workbuddy_auth::Polled::Token(payload) => match persist_login(app, &payload) {
+                    Ok(result) => {
+                        workbuddy_auth::complete(&login_id, result.clone());
+                        Ok(result)
+                    }
+                    Err(err) => {
+                        workbuddy_auth::fail(
+                            &login_id,
+                            workbuddy_auth::KIND_NETWORK,
+                            err.message.clone(),
+                        );
+                        Ok(json!({
+                            "state": "failed",
+                            "error": { "kind": "storage", "message": err.message },
+                        }))
+                    }
+                },
+            }
+        }
+
+        "auth.workbuddy.cancel" => {
+            let login_id = require_str(params, "loginId")?;
+            Ok(json!({ "cancelled": workbuddy_auth::cancel(&login_id) }))
+        }
+
+        "auth.workbuddy.refresh" => {
+            let id = require_str(params, "id")?;
+            refresh_account(app, &id).await
+        }
+
+        // ---- 从 Magpie 借用登录态（PR1b-1）----
+        //
+        // 只读 Magpie 的 access token，不碰 refresh：refresh 是有状态的单份凭据，
+        // 两边各自刷新会互相踢下线。过期后用 `auth.magpie.import` 重新同步。
+        "providers.magpie.accounts" => Ok(magpie_preview(app)),
+
+        "auth.workbuddy.status" => {
+            let id = require_str(params, "id")?;
+            workbuddy_account_status(app, &id).await
+        }
+
+        "auth.magpie.import" => {
+            let keys: Vec<String> = params
+                .get("keys")
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            import_magpie_accounts(app, &keys)
+        }
+
         other => Err(RpcError::method_not_found(other)),
     }
 }
@@ -214,6 +312,345 @@ fn env_info(app: &App) -> Value {
 
 fn config_home_env() -> &'static str {
     crate::paths::WB_HOME_ENV
+}
+
+// ---------------------------------------------------------------------------
+// WorkBuddy 登录辅助
+// ---------------------------------------------------------------------------
+
+/// 用库里存着的 access token 查一次真实登录态（只读）。
+///
+/// 这是"验证令牌确实能用"的唯一诚实方式：不查这一步，`auth_status` 只是
+/// 我们自己写进去的乐观值。请求失败时顺手把账号标成 invalid/expired，
+/// 界面就不会再显示一个骗人的"认证有效"。
+async fn workbuddy_account_status(app: &App, id: &str) -> RpcResult<Value> {
+    let account = app
+        .with_db(|db| db.get_account(id))?
+        .ok_or_else(|| RpcError::not_found(format!("账号不存在：{id}")))?;
+    if account.platform != "workbuddy" {
+        return Err(RpcError::invalid_params("目前只支持查询 WorkBuddy 账号"));
+    }
+
+    let (access_key, _) = workbuddy_auth::secret_keys(&account.uid);
+    let access = match app.secure.get(&access_key) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+        Err(err) => {
+            return Ok(json!({
+                "state": "missing_credential",
+                "error": {
+                    "kind": "missing_credential",
+                    "message": crate::rpc::sanitize(&err.message),
+                },
+            }));
+        }
+    };
+
+    let mut payload = json!({
+        "access_token": access,
+        "uid": account.uid,
+        "domain": account.auth_domain.clone().unwrap_or_default(),
+        "variant": "cn",
+    });
+    let mut status = wb_switch_core::modules::checkin::get_checkin_status(&payload).await;
+
+    // Magpie 借来的令牌过期时，先重新同步一次再判定失败，避免误报"账号失效"。
+    if status.get("ok").and_then(Value::as_bool) != Some(true)
+        && account.auth_source == magpie::SOURCE_MAGPIE
+    {
+        if let Ok(synced) = resync_magpie_account(app, id, &account).await {
+            if synced.get("state").and_then(Value::as_str) == Some("valid") {
+                if let Ok(bytes) = app.secure.get(&access_key) {
+                    payload["access_token"] = json!(String::from_utf8_lossy(&bytes).to_string());
+                    status = wb_switch_core::modules::checkin::get_checkin_status(&payload).await;
+                }
+            }
+        }
+    }
+
+    let ok = status.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    if ok {
+        app.with_db(|db| db.set_auth_state(id, "valid", None))?;
+    } else if status.get("statusUnsupported").is_none() {
+        app.with_db(|db| db.set_auth_state(id, "invalid", None))?;
+    }
+
+    Ok(json!({
+        "state": if ok { "valid" } else { "invalid" },
+        "todayCheckedIn": status.get("todayCheckedIn").cloned().unwrap_or(Value::Null),
+        "streakDays": status.get("raw").and_then(|r| r.get("streak_days")).cloned().unwrap_or(Value::Null),
+        "dailyCredit": status.get("raw").and_then(|r| r.get("daily_credit")).cloned().unwrap_or(Value::Null),
+        "todayCredit": status.get("raw").and_then(|r| r.get("today_credit")).cloned().unwrap_or(Value::Null),
+        "statusUnsupported": status.get("statusUnsupported").cloned().unwrap_or(Value::Null),
+        "error": status.get("error").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+/// 列出 Magpie 里的 WorkBuddy 账号，并标出哪些已经在 AICC 账号库里。
+fn magpie_preview(app: &App) -> Value {
+    let mut report = magpie::preview();
+    if report.get("available").and_then(Value::as_bool) != Some(true) {
+        return report;
+    }
+    let known: std::collections::HashMap<String, (String, String)> = app
+        .with_db(|db| {
+            db.list_accounts(&AccountFilter {
+                platform: Some("workbuddy".to_string()),
+                ..Default::default()
+            })
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .map(|a| (a.uid, (a.auth_source, a.id)))
+        .collect();
+
+    if let Some(accounts) = report.get_mut("accounts").and_then(Value::as_array_mut) {
+        for item in accounts.iter_mut() {
+            let uid = item.get("uid").and_then(Value::as_str).unwrap_or_default();
+            let hit = known.get(uid);
+            item["imported"] = json!(hit.is_some());
+            item["importedSource"] = json!(hit.map(|(source, _)| source.clone()));
+            item["accountId"] = json!(hit.map(|(_, id)| id.clone()));
+        }
+    }
+    report
+}
+
+/// 把 Magpie 的账号搬进 AICC：access token 进钥匙串，账号进 SQLite。
+///
+/// 永远不会用 refresh token，也永远不会覆盖一个 `own`（独立扫码授权）的账号。
+fn import_magpie_accounts(app: &App, keys: &[String]) -> RpcResult<Value> {
+    let logins = magpie::read_logins().map_err(|err| {
+        RpcError::new(crate::rpc::E_AUTH, err.message()).with_data(json!({ "kind": err.kind() }))
+    })?;
+    let now = magpie::now_ms();
+
+    let mut imported: Vec<Value> = Vec::new();
+    let mut skipped: Vec<Value> = Vec::new();
+
+    for login in logins {
+        if !keys.is_empty() && !keys.iter().any(|k| k == &login.key) {
+            continue;
+        }
+        if login.expires_at_ms.map(|at| at <= now).unwrap_or(false) {
+            skipped.push(json!({ "key": login.key, "reason": "token_expired" }));
+            continue;
+        }
+
+        // 已有的独立授权不能被"降级"成借用。
+        let existing = app.with_db(|db| db.find_account("workbuddy", &login.uid))?;
+        if let Some(record) = &existing {
+            if record.auth_source == "own" {
+                skipped.push(json!({
+                    "key": login.key,
+                    "uid": login.uid,
+                    "reason": "already_authorized",
+                }));
+                continue;
+            }
+        }
+
+        let (access_key, _) = workbuddy_auth::secret_keys(&login.uid);
+        if let Err(err) = app.secure.set(&access_key, login.access_token.as_bytes()) {
+            skipped.push(json!({
+                "key": login.key,
+                "uid": login.uid,
+                "reason": "keychain",
+                "message": crate::rpc::sanitize(&err.message),
+            }));
+            continue;
+        }
+
+        let expires_at = login.expires_at_ms.and_then(workbuddy_auth::ms_to_rfc3339);
+        let nickname = login
+            .nickname
+            .clone()
+            .unwrap_or_else(|| magpie::short_uid(&login.uid));
+        let record = app.with_db(|db| {
+            db.upsert_account(&AccountInput {
+                platform: "workbuddy".to_string(),
+                uid: login.uid.clone(),
+                nickname: Some(nickname),
+                auth_ref: Some(format!("keychain:{access_key}")),
+                auth_status: Some("valid".to_string()),
+                token_expires_at: expires_at.clone(),
+                auth_domain: Some(login.domain.clone()).filter(|d| !d.is_empty()),
+                auth_source: Some(magpie::SOURCE_MAGPIE.to_string()),
+                ..Default::default()
+            })
+        })?;
+        imported.push(json!(record));
+    }
+
+    Ok(json!({
+        "imported": imported.len(),
+        "skipped": skipped,
+        "accounts": imported,
+        "source": magpie::SOURCE_MAGPIE,
+    }))
+}
+
+/// Magpie 账号不用 refresh token，改为"重新从 Magpie 同步一次 access token"。
+async fn resync_magpie_account(
+    app: &App,
+    id: &str,
+    account: &crate::storage::AccountRecord,
+) -> RpcResult<Value> {
+    let logins = magpie::read_logins().unwrap_or_default();
+    let now = magpie::now_ms();
+    let hit = logins
+        .into_iter()
+        .find(|l| l.uid == account.uid && l.expires_at_ms.map(|at| at > now).unwrap_or(true));
+
+    let Some(login) = hit else {
+        app.with_db(|db| db.set_auth_state(id, "expired", None))?;
+        return Ok(json!({
+            "state": "expired",
+            "error": {
+                "kind": "magpie_token_expired",
+                "message": "Magpie 里的令牌也已过期。请在 Magpie 重新登录，或改用扫码授权。",
+            },
+        }));
+    };
+
+    let (access_key, _) = workbuddy_auth::secret_keys(&account.uid);
+    app.secure.set(&access_key, login.access_token.as_bytes())?;
+    let expires = login.expires_at_ms.and_then(workbuddy_auth::ms_to_rfc3339);
+    app.with_db(|db| db.set_auth_state(id, "valid", expires.as_deref()))?;
+    Ok(json!({
+        "state": "valid",
+        "resynced": true,
+        "tokenExpiresAt": expires,
+        "source": magpie::SOURCE_MAGPIE,
+    }))
+}
+
+fn auth_rpc_error(err: workbuddy_auth::AuthError) -> RpcError {
+    RpcError::new(crate::rpc::E_AUTH, err.message).with_data(json!({ "kind": err.kind }))
+}
+
+/// 把内部错误分类翻译成界面状态。会话已结束的都归到 `finished`，
+/// 前端据此回到"刷新账号列表"，而不是继续轮询。
+fn poll_state(kind: &str) -> &'static str {
+    match kind {
+        workbuddy_auth::KIND_CANCELLED => "cancelled",
+        workbuddy_auth::KIND_EXPIRED => "expired",
+        workbuddy_auth::KIND_FINISHED | workbuddy_auth::KIND_UNKNOWN_LOGIN => "finished",
+        _ => "failed",
+    }
+}
+
+fn purge_workbuddy_secrets(app: &App, uid: &str) {
+    let (access, refresh) = workbuddy_auth::secret_keys(uid);
+    let _ = app.secure.delete(&access);
+    let _ = app.secure.delete(&refresh);
+}
+
+fn read_secret(app: &App, key: &str) -> RpcResult<String> {
+    let bytes = app.secure.get(key).map_err(|err| {
+        RpcError::new(
+            crate::rpc::E_SECURESTORE,
+            format!("读取凭据失败（{}），请重新登录", err.message),
+        )
+        .with_data(json!({ "kind": "missing_credential", "key": key }))
+    })?;
+    String::from_utf8(bytes)
+        .map_err(|_| RpcError::new(crate::rpc::E_SECURESTORE, "凭据不是 UTF-8，请重新登录"))
+}
+
+/// 登录成功后落库：令牌进钥匙串，账号进 SQLite，返回值里没有任何令牌。
+fn persist_login(app: &App, payload: &workbuddy_auth::TokenPayload) -> RpcResult<Value> {
+    let uid = payload.profile.uid.clone();
+    let (access_key, refresh_key) = workbuddy_auth::secret_keys(&uid);
+
+    // 先写钥匙串：写不进去就不入库，避免出现"账号在、令牌丢了"的半残状态。
+    app.secure
+        .set(&access_key, payload.access_token.as_bytes())?;
+    if let Some(refresh) = &payload.refresh_token {
+        app.secure.set(&refresh_key, refresh.as_bytes())?;
+    }
+
+    let expires_at = payload
+        .expires_at_ms
+        .and_then(workbuddy_auth::ms_to_rfc3339);
+    let build = |db: &mut crate::storage::Db| {
+        let existed = db.find_account("workbuddy", &uid)?.is_some();
+        let record = db.upsert_account(&AccountInput {
+            platform: "workbuddy".to_string(),
+            uid: uid.clone(),
+            nickname: payload.profile.nickname.clone(),
+            email: payload.profile.email.clone(),
+            auth_ref: Some(format!("keychain:{access_key}")),
+            auth_status: Some("valid".to_string()),
+            token_expires_at: expires_at.clone(),
+            auth_domain: Some(payload.domain.clone()).filter(|d| !d.is_empty()),
+            ..Default::default()
+        })?;
+        Ok((existed, record))
+    };
+
+    match app.with_db(build) {
+        Ok((existed, record)) => Ok(json!({
+            "state": "success",
+            "reused": existed,
+            "account": record,
+        })),
+        Err(err) => {
+            // 入库失败就把刚写进去的令牌撤掉，别留孤儿凭据。
+            purge_workbuddy_secrets(app, &uid);
+            Err(err)
+        }
+    }
+}
+
+/// 用 refresh token 换新令牌；失败就标成 invalid，让界面提示重新登录。
+async fn refresh_account(app: &App, id: &str) -> RpcResult<Value> {
+    let account = app
+        .with_db(|db| db.get_account(id))?
+        .ok_or_else(|| RpcError::not_found(format!("账号不存在：{id}")))?;
+    if account.platform != "workbuddy" {
+        return Err(RpcError::invalid_params("目前只支持刷新 WorkBuddy 账号"));
+    }
+    // 借用 Magpie 的账号没有 refresh token，重新同步一次 access 即可。
+    if account.auth_source == magpie::SOURCE_MAGPIE {
+        return resync_magpie_account(app, id, &account).await;
+    }
+
+    let (access_key, refresh_key) = workbuddy_auth::secret_keys(&account.uid);
+    let access = read_secret(app, &access_key)?;
+    let refresh = match app.secure.get(&refresh_key) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+        Err(_) => {
+            app.with_db(|db| db.set_auth_state(id, "invalid", None))?;
+            return Ok(json!({
+                "state": "invalid",
+                "error": { "kind": "missing_credential", "message": "钥匙串里没有刷新令牌，请重新登录" },
+            }));
+        }
+    };
+
+    let domain = account.auth_domain.clone().unwrap_or_default();
+    match workbuddy_auth::refresh(WbVariant::Cn, &access, &refresh, &account.uid, &domain).await {
+        workbuddy_auth::Refreshed::Valid {
+            access_token,
+            refresh_token,
+            expires_at_ms,
+        } => {
+            app.secure.set(&access_key, access_token.as_bytes())?;
+            if let Some(next) = refresh_token {
+                app.secure.set(&refresh_key, next.as_bytes())?;
+            }
+            let expires = expires_at_ms.and_then(workbuddy_auth::ms_to_rfc3339);
+            app.with_db(|db| db.set_auth_state(id, "valid", expires.as_deref()))?;
+            Ok(json!({ "state": "valid", "tokenExpiresAt": expires }))
+        }
+        workbuddy_auth::Refreshed::Invalid(err) => {
+            app.with_db(|db| db.set_auth_state(id, "invalid", None))?;
+            Ok(json!({
+                "state": "invalid",
+                "error": { "kind": err.kind, "message": err.message },
+            }))
+        }
+    }
 }
 
 fn require_str(params: &Value, key: &str) -> RpcResult<String> {

@@ -132,6 +132,89 @@ final class AccountWorkerManager: ObservableObject {
         return rows
     }
 
+    // MARK: - WorkBuddy 扫码登录（PR1b-1）
+
+    /// 发起一次扫码登录。助手没起会先拉起来；启动失败时抛出。
+    func startWorkbuddyLogin() async throws -> WorkbuddyLoginStart {
+        if case .running = state {} else {
+            await refresh()
+        }
+        guard case .running = state, let client, client.isRunning else {
+            throw AccountWorkerFailure.notRunning
+        }
+        let result = try await client.call("auth.workbuddy.start", timeout: 20)
+        guard let start = WorkbuddyLoginStart.parse(result) else {
+            throw AccountWorkerFailure.malformedLine
+        }
+        return start
+    }
+
+    /// 轮询一次。返回 `pending` 时调用方应继续等。
+    func pollWorkbuddyLogin(_ loginId: String) async throws -> WorkbuddyLoginPhase {
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        let result = try await client.call(
+            "auth.workbuddy.poll",
+            params: ["loginId": loginId],
+            timeout: 20
+        )
+        return WorkbuddyLoginPhase.parse(result)
+    }
+
+    // MARK: - 从 Magpie 导入（PR1b-1）
+
+    /// 读取 Magpie 里已登录的 WorkBuddy 账号（只读，不含令牌）。
+    func magpiePreview() async throws -> MagpiePreview {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        let result = try await client.call("providers.magpie.accounts", timeout: 15)
+        return MagpiePreview.parse(result)
+    }
+
+    /// 把选中的账号搬进 AICC：助手侧只复制 access token，不碰 refresh。
+    func importMagpieAccounts(keys: [String]) async throws -> MagpieImportResult {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        let result = try await client.call(
+            "auth.magpie.import",
+            params: keys.isEmpty ? [:] : ["keys": keys],
+            timeout: 30
+        )
+        return MagpieImportResult.parse(result)
+    }
+
+    /// 用库里的令牌核一次真实登录态。失败返回 `.invalid` 之类的状态，不抛。
+    func workbuddyStatus(accountId: String) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call("auth.workbuddy.status", params: ["id": accountId], timeout: 20)
+    }
+
+    private func ensureRunning() async throws {
+        if case .running = state { return }
+        await refresh()
+        if case .running = state { return }
+        // refresh() 期间可能正好在启动，给它一点时间落定。
+        for _ in 0..<15 {
+            if case .starting = state {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                continue
+            }
+            break
+        }
+        if case .running = state { return }
+        throw AccountWorkerFailure.notRunning
+    }
+
+    /// 取消是一次性通知，失败也不该打断界面。
+    func cancelWorkbuddyLogin(_ loginId: String) async {
+        guard let client, client.isRunning else { return }
+        _ = try? await client.call(
+            "auth.workbuddy.cancel",
+            params: ["loginId": loginId],
+            timeout: 5
+        )
+    }
+
     func stop() {
         client?.stop()
         client = nil

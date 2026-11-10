@@ -18,6 +18,9 @@ wb-switch-core = { path = "vendor/crates/wb-switch-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# 登录流程要跑异步 HTTP：一个 current-thread runtime 足够（RPC 本来就是串行的）。
+tokio = { version = "1", features = ["rt", "time", "net", "io-util", "macros"] }
+uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 
