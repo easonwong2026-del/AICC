@@ -98,7 +98,9 @@ AICC 打了 3 行补丁拆开（见 `account-worker/vendor/VENDOR.md`，回归�
 
 - AICC 自己的凭据进钥匙串，service = `com.aieink.dashboard.menubar.account-worker`。
   SQLite 只存引用，不存明文。
-- 对外只返回**指纹**（sha256 前 8 hex），`secure.get` 要 `reveal: true` 才回明文。
+- 对外只返回**指纹**（sha256 前 8 hex）与长度。**`secure.get` 不再回明文**
+  （PR #65 关掉了 `reveal`）：能写 stdin 的进程就能读钥匙串，这个能力不该出现在协议里。
+  需要明文的内部调用（查登录态 / 刷新 / 旅行）是 Rust 里直接 `app.secure.get()`，不经过 RPC。
 - 所有日志与错误消息过 `rpc::sanitize`：长度 ≥32 且形如令牌的连续串（字母数字与 `. _ ~ + - =`）
   一律打码。`/` 刻意不算令牌字符，否则整条路径会被打码、日志失去诊断价值。
 - 写凭据用钥匙串的**原位更新**（`SecItemAdd` → 命中重复项改走 `SecItemUpdate`），

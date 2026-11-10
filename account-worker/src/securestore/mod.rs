@@ -70,8 +70,13 @@ impl From<SecretError> for RpcError {
 }
 
 enum Backend {
-    Keychain { service: String },
+    Keychain {
+        service: String,
+    },
     Memory(Mutex<HashMap<String, Vec<u8>>>),
+    /// 只在测试里构造：每次读写都失败，用来验证「钥匙串写不进去时不留半残账号」。
+    #[cfg(test)]
+    Failing,
 }
 
 pub struct SecureStore {
@@ -103,10 +108,20 @@ impl SecureStore {
         }
     }
 
+    /// 仅测试用：所有操作都返回 `denied`，模拟用户在系统弹框里点了"不允许"。
+    #[cfg(test)]
+    pub fn failing() -> Self {
+        Self {
+            backend: Backend::Failing,
+        }
+    }
+
     pub fn backend_name(&self) -> &'static str {
         match self.backend {
             Backend::Keychain { .. } => "keychain",
             Backend::Memory(_) => "memory",
+            #[cfg(test)]
+            Backend::Failing => "failing",
         }
     }
 
@@ -114,6 +129,8 @@ impl SecureStore {
         match &self.backend {
             Backend::Keychain { service } => Some(service.as_str()),
             Backend::Memory(_) => None,
+            #[cfg(test)]
+            Backend::Failing => None,
         }
     }
 
@@ -127,6 +144,11 @@ impl SecureStore {
                     .insert(account.to_string(), secret.to_vec());
                 Ok(())
             }
+            #[cfg(test)]
+            Backend::Failing => Err(SecretError::new(
+                SecretErrorKind::Denied,
+                "测试后端：钥匙串写入被拒绝",
+            )),
         }
     }
 
@@ -140,6 +162,11 @@ impl SecureStore {
                 .get(account)
                 .cloned()
                 .ok_or_else(|| SecretError::new(SecretErrorKind::NotFound, "凭据不存在")),
+            #[cfg(test)]
+            Backend::Failing => Err(SecretError::new(
+                SecretErrorKind::Denied,
+                "测试后端：钥匙串读取被拒绝",
+            )),
         }
     }
 
@@ -148,6 +175,8 @@ impl SecureStore {
         match &self.backend {
             Backend::Keychain { service } => platform::delete(service, account),
             Backend::Memory(map) => Ok(map.lock().expect("memory store").remove(account).is_some()),
+            #[cfg(test)]
+            Backend::Failing => Ok(false),
         }
     }
 
