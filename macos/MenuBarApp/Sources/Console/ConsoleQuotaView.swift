@@ -124,7 +124,7 @@ struct ConsoleQuotaView: View {
                     }
                 }
 
-                if card.isBalance, !card.balanceParts.isEmpty {
+                if card.isBalance {
                     balanceRows(card)
                 } else if card.items.isEmpty {
                     Text("该账号没有可显示的额度窗口")
