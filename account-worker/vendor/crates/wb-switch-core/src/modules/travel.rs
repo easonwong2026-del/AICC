@@ -86,7 +86,7 @@ fn build_travel_headers(account: &Value) -> HashMap<String, String> {
     headers
 }
 
-fn is_unauthorized(resp: &Value) -> bool {
+pub fn is_unauthorized(resp: &Value) -> bool {
     let code = resp.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
     if code == 401 || code == 403 {
         return true;
@@ -133,7 +133,7 @@ fn resp_error(resp: &Value, fallback_code: i64) -> String {
         .unwrap_or_else(|| format!("code={fallback_code}"))
 }
 
-fn parse_travel_state(raw: Option<&str>) -> Option<&'static str> {
+pub fn parse_travel_state(raw: Option<&str>) -> Option<&'static str> {
     let normalized = raw.map(|s| s.trim().to_ascii_lowercase())?;
     KNOWN_STATES
         .iter()
@@ -179,7 +179,10 @@ fn has_retryable_results(results: &Map<String, Value>) -> bool {
 }
 
 /// 读取旅行配置（地点列表等）。返回 `{ ok, enabled, locations: [{ id, name }] }`。
-async fn fetch_travel_config(account: &Value) -> Value {
+///
+/// AICC 补丁：改为 `pub`，供 AICC 的账号级旅行编排（`account-worker/src/travel`）
+/// 直接复用同一份接口封装，不再另抄一遍请求与错误分类。
+pub async fn fetch_travel_config(account: &Value) -> Value {
     let resp = travel_request(&format!("{TRAVEL_API_PREFIX}/config"), "GET", None, account).await;
     let code = resp.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
     if code == 0 || code == 200 {
@@ -206,6 +209,9 @@ async fn fetch_travel_config(account: &Value) -> Value {
     }
     json!({
         "ok": false,
+        // AICC 补丁：保留 HTTP 码。上层要用它区分 401（重新取 access）与
+        // 429（限流退避）；只留一句 error 文案，两者会被迫按字符串猜。
+        "code": code,
         "error": resp_error(&resp, code),
     })
 }
@@ -214,7 +220,7 @@ async fn fetch_travel_config(account: &Value) -> Value {
 ///
 /// 官方以 `data.state` + `data.daily_limit_reached` 判断能否派出：
 /// arrived → 领奖；traveling → 等待；idle 且未达每日上限 → 可 depart。
-async fn fetch_travel_status(account: &Value) -> Value {
+pub async fn fetch_travel_status(account: &Value) -> Value {
     let resp = travel_request(&format!("{TRAVEL_API_PREFIX}/status"), "GET", None, account).await;
     let code = resp.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
     if code == 0 || code == 200 {
@@ -223,6 +229,9 @@ async fn fetch_travel_status(account: &Value) -> Value {
         let Some(state) = parse_travel_state(raw_state) else {
             return json!({
                 "ok": false,
+                // AICC 补丁：`-3` = 「响应结构不认识」。上层据此把它当解析错误，
+                // 而不是当成网络错误去退避重试。
+                "code": -3,
                 "error": match raw_state {
                     Some(value) if !value.trim().is_empty() => format!("unknown travel state: {value}"),
                     _ => "missing travel state".to_string(),
@@ -253,12 +262,15 @@ async fn fetch_travel_status(account: &Value) -> Value {
     }
     json!({
         "ok": false,
+        // AICC 补丁：保留 HTTP 码。上层要用它区分 401（重新取 access）与
+        // 429（限流退避）；只留一句 error 文案，两者会被迫按字符串猜。
+        "code": code,
         "error": resp_error(&resp, code),
     })
 }
 
 /// 派猫猫旅行（depart）。返回 `{ ok, state }` 或 `{ ok:false, message }`。
-async fn depart_travel(account: &Value, location_id: &Value) -> Value {
+pub async fn depart_travel(account: &Value, location_id: &Value) -> Value {
     let resp = travel_request(
         &format!("{TRAVEL_API_PREFIX}/depart"),
         "POST",
@@ -282,7 +294,7 @@ async fn depart_travel(account: &Value, location_id: &Value) -> Value {
 }
 
 /// 领取旅行奖励（state==='arrived' 时调用）。返回 `{ ok, rewardCredit }` 或 `{ ok:false, message }`。
-async fn claim_travel(account: &Value, record_id: i64) -> Value {
+pub async fn claim_travel(account: &Value, record_id: i64) -> Value {
     let payload = if record_id > 0 {
         json!({ "record_id": record_id })
     } else {
@@ -335,7 +347,7 @@ fn depart_result(
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum DepartClass {
+pub enum DepartClass {
     AlreadyTraveling,
     DailyLimit,
     NoBuddy,
@@ -343,8 +355,8 @@ enum DepartClass {
     Other,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum TravelAction {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TravelAction {
     Claim,
     WaitTraveling,
     SkipDailyLimit,
@@ -354,7 +366,7 @@ enum TravelAction {
 
 /// 与官方网页同一套判断：先看 state，再看 daily_limit_reached。
 /// idle + daily_limit_reached 即官网「累了，明天再来吧」。
-fn decide_travel_action(state: &str, daily_limit_reached: bool) -> TravelAction {
+pub fn decide_travel_action(state: &str, daily_limit_reached: bool) -> TravelAction {
     match state {
         "arrived" => TravelAction::Claim,
         "traveling" => TravelAction::WaitTraveling,
@@ -365,7 +377,7 @@ fn decide_travel_action(state: &str, daily_limit_reached: bool) -> TravelAction 
 }
 
 /// HTTP 429 是限流，不是「今日已派」。只有文案明确 daily limit 才算当日完成。
-fn classify_depart_error(_code: i64, message: &str) -> DepartClass {
+pub fn classify_depart_error(_code: i64, message: &str) -> DepartClass {
     let raw = message.to_lowercase();
     if raw.contains("already traveling") {
         DepartClass::AlreadyTraveling

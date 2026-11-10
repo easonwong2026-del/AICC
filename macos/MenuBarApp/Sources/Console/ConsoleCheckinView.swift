@@ -13,6 +13,8 @@ struct ConsoleCheckinView: View {
         let detail: String
         let symbol: String
         let platform: String
+        /// 已经接线的任务才能点；没接线的按钮保持置灰，不假装能跑。
+        var wired: Bool = false
     }
 
     private let tasks: [TaskDefinition] = [
@@ -20,8 +22,8 @@ struct ConsoleCheckinView: View {
               symbol: "calendar.badge.checkmark", platform: "WorkBuddy"),
         .init(id: "wb-growth", title: "成长中心任务", detail: "任务奖励、盲盒与抽奖",
               symbol: "sparkles", platform: "WorkBuddy"),
-        .init(id: "wb-travel", title: "Buddy 旅行", detail: "派出、返回与礼物领取",
-              symbol: "airplane", platform: "WorkBuddy"),
+        .init(id: "wb-travel", title: "Buddy 旅行", detail: "派出、到达与奖励领取",
+              symbol: "airplane", platform: "WorkBuddy", wired: true),
         .init(id: "qoder-credits", title: "Qoder CN 每日 Credits", detail: "每天 100 Credits，10:00 刷新",
               symbol: "circle.dotted.circle", platform: "Qoder CN"),
     ]
@@ -32,6 +34,7 @@ struct ConsoleCheckinView: View {
         VStack(alignment: .leading, spacing: 18) {
             notice
             taskSection
+            ConsoleTravelSection(store: store)
             accountSection
         }
     }
@@ -40,7 +43,7 @@ struct ConsoleCheckinView: View {
         HStack(spacing: 9) {
             Image(systemName: "info.circle")
                 .font(.system(size: 11))
-            Text("签到与领取尚未接入：本页不会发送任何请求，也不会显示虚构的执行结果。接入后由调度器按北京时间执行。")
+            Text("签到与成长中心任务尚未接入，本页不会为它们发送请求。Buddy 旅行已接入：只在你点按钮或开启自动开关后才会请求服务端。")
                 .font(.system(size: 11))
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
@@ -56,7 +59,7 @@ struct ConsoleCheckinView: View {
 
     private var taskSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ConsoleSectionTitle(title: "任务", detail: "共 \(tasks.count) 项 · 全部待接入")
+            ConsoleSectionTitle(title: "任务", detail: "共 \(tasks.count) 项 · 1 项已接入")
             ConsoleCard(padding: 0) {
                 VStack(spacing: 0) {
                     ForEach(Array(tasks.enumerated()), id: \.element.id) { index, task in
@@ -94,13 +97,18 @@ struct ConsoleCheckinView: View {
                 .foregroundStyle(ConsoleTheme.tertiaryText)
                 .frame(width: 78, alignment: .trailing)
 
-            ConsoleBadge(text: "待接入", tint: ConsoleTheme.tertiaryText)
-                .frame(width: 56, alignment: .trailing)
+            ConsoleBadge(
+                text: task.wired ? "已接入" : "待接入",
+                tint: task.wired ? ConsoleTheme.accent : ConsoleTheme.tertiaryText
+            )
+            .frame(width: 56, alignment: .trailing)
 
-            Button("立即执行") {}
-                .buttonStyle(ConsoleSecondaryButtonStyle())
-                .disabled(true)
-                .help("PR1b 联调后开放")
+            Button(task.wired ? "查看" : "立即执行") {
+                Task { await store.loadTravel() }
+            }
+            .buttonStyle(ConsoleSecondaryButtonStyle())
+            .disabled(!task.wired)
+            .help(task.wired ? "跳到下方的 Buddy 旅行区域" : "后续版本接入")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 11)

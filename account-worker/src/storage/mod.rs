@@ -13,6 +13,8 @@ use sha2::{Digest, Sha256};
 use crate::clock::now_rfc3339;
 use crate::rpc::{RpcError, RpcResult};
 
+pub mod travel;
+
 const SCHEMA_V1: &str = include_str!("schema.sql");
 
 /// v2：登录态需要的两列。SQLite 的 ALTER TABLE 只能追加列，正好够用。
@@ -25,10 +27,53 @@ ALTER TABLE accounts ADD COLUMN auth_domain TEXT;";
 const MIGRATION_V3: &str = "\
 ALTER TABLE accounts ADD COLUMN auth_source TEXT NOT NULL DEFAULT 'own';";
 
-/// 迁移清单：按 version 升序，只追加不修改。
-const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA_V1), (2, MIGRATION_V2), (3, MIGRATION_V3)];
+/// v4：Buddy 旅行（PR1c）。开关放在账号上（每账号独立、默认关闭），
+/// 运行态单独一张表，事件另记一张，方便回答「谁在什么时候派出/领取了什么」。
+const MIGRATION_V4: &str = "\
+ALTER TABLE accounts ADD COLUMN travel_enabled INTEGER NOT NULL DEFAULT 0;\
+CREATE TABLE IF NOT EXISTS travel_states (\
+    account_id           TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,\
+    label                TEXT NOT NULL DEFAULT 'unknown',\
+    server_state         TEXT NOT NULL DEFAULT '',\
+    location_id          INTEGER,\
+    location_name        TEXT NOT NULL DEFAULT '',\
+    depart_at            INTEGER NOT NULL DEFAULT 0,\
+    arrive_at            INTEGER NOT NULL DEFAULT 0,\
+    record_id            INTEGER NOT NULL DEFAULT 0,\
+    daily_limit_reached  INTEGER NOT NULL DEFAULT 0,\
+    claimed              INTEGER NOT NULL DEFAULT 0,\
+    reward_credits       INTEGER,\
+    claimed_at           TEXT,\
+    claimed_record_id    INTEGER NOT NULL DEFAULT 0,\
+    depart_date          TEXT,\
+    last_checked_at      TEXT,\
+    last_depart_attempt_at TEXT,\
+    failures             INTEGER NOT NULL DEFAULT 0,\
+    retry_after          TEXT,\
+    last_error           TEXT,\
+    conflict             TEXT,\
+    updated_at           TEXT NOT NULL\
+);\
+CREATE TABLE IF NOT EXISTS travel_events (\
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,\
+    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,\
+    kind       TEXT NOT NULL,\
+    status     TEXT NOT NULL,\
+    message    TEXT,\
+    credits    INTEGER,\
+    created_at TEXT NOT NULL\
+);\
+CREATE INDEX IF NOT EXISTS idx_travel_events_account ON travel_events (account_id, created_at DESC);";
 
-pub const LATEST_VERSION: i64 = 3;
+/// 迁移清单：按 version 升序，只追加不修改。
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, SCHEMA_V1),
+    (2, MIGRATION_V2),
+    (3, MIGRATION_V3),
+    (4, MIGRATION_V4),
+];
+
+pub const LATEST_VERSION: i64 = 4;
 
 pub struct Db {
     conn: Connection,
@@ -55,6 +100,8 @@ pub struct AccountRecord {
     pub auth_domain: Option<String>,
     /// `own`（独立授权）或 `magpie`（借用 Magpie 的 access token）。
     pub auth_source: String,
+    /// 该账号是否允许自动派 Buddy 旅行。默认关闭，与签到开关互不影响。
+    pub travel_enabled: bool,
 }
 
 /// 账号写入参数。**所有可选字段都是"补丁"语义**：
@@ -87,6 +134,8 @@ pub struct AccountInput {
     pub auth_domain: Option<String>,
     #[serde(default)]
     pub auth_source: Option<String>,
+    #[serde(default)]
+    pub travel_enabled: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -175,6 +224,8 @@ impl Db {
             "checkin_records",
             "credit_snapshots",
             "app_settings",
+            "travel_states",
+            "travel_events",
         ] {
             let sql = format!("SELECT COUNT(*) FROM {table}");
             let n: i64 = self.conn.query_row(&sql, [], |row| row.get(0))?;
@@ -279,6 +330,10 @@ impl Db {
             sets.push("auth_source = ?");
             args.push(Box::new(value.clone()));
         }
+        if let Some(value) = input.travel_enabled {
+            sets.push("travel_enabled = ?");
+            args.push(Box::new(i64::from(value)));
+        }
         sets.push("updated_at = ?");
         args.push(Box::new(now));
 
@@ -301,7 +356,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, platform, uid, nickname, email, group_id, auth_status,
                     checkin_enabled, last_checkin_at, last_result, updated_at,
-                    token_expires_at, auth_domain, auth_source
+                    token_expires_at, auth_domain, auth_source, travel_enabled
              FROM accounts WHERE id = ?1",
         )?;
         let row = stmt.query_row(params![id], map_account).optional()?;
@@ -335,7 +390,7 @@ impl Db {
         let mut sql = String::from(
             "SELECT id, platform, uid, nickname, email, group_id, auth_status,
                     checkin_enabled, last_checkin_at, last_result, updated_at,
-                    token_expires_at, auth_domain, auth_source
+                    token_expires_at, auth_domain, auth_source, travel_enabled
              FROM accounts WHERE 1 = 1",
         );
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -441,6 +496,7 @@ fn map_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRecord> {
         auth_source: row
             .get::<_, Option<String>>(13)?
             .unwrap_or_else(|| "own".into()),
+        travel_enabled: row.get::<_, Option<i64>>(14)?.unwrap_or(0) != 0,
     })
 }
 

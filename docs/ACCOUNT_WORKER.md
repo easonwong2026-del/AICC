@@ -56,6 +56,14 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `auth.workbuddy.status` | 用钥匙串里的令牌查一次真实登录态（只读） | 是 |
 | `providers.magpie.accounts` | 列出 Magpie 里已登录的 WorkBuddy 账号（**不含令牌**） | 否 |
 | `auth.magpie.import` | 把 Magpie 的 access token 搬进 AICC 钥匙串 | 否 |
+| `travel.summary` | 旅行快照汇总（账号 + 开关 + 运行信息），**只读本地库** | 否 |
+| `travel.events` | 某账号的旅行事件日志（派出 / 领取 / 失败） | 否 |
+| `travel.setEnabled` | 每账号的自动旅行开关（默认关） | 否 |
+| `travel.refresh` | 查一次真实旅行状态；**纯只读**，看到「已到达」也不领取 | 是 |
+| `travel.depart` | 手动派出（服务端每日上限仍然生效） | 是 |
+| `travel.claim` | 手动领取奖励（只有 arrived 才提交） | 是 |
+| `travel.auto.status` | 调度器信息：承载进程、间隔、上次 tick | 否 |
+| `travel.auto.tick` | 立刻跑一轮自动检查（调试 / 手动触发） | 是 |
 
 `health` **故意不做**钥匙串探针：否则每次启动 App 都会弹一次系统授权框。
 需要验证凭据存储时显式调 `secure.status`（设置页有按钮）。探针的读写删三步全成功才报 `ok`，
@@ -146,6 +154,19 @@ AICC 的取法是**只读文件、只借 access**：
 > 钥匙串条目的 ACL 绑定创建它的二进制。AICC 是 ad-hoc 签名，**每次重新构建签名都会变**，
 > 所以升级后第一次读凭据 macOS 可能弹一次授权框，点"始终允许"即可。也因此导入动作
 > 必须由 App 自己做（由 App 创建条目），命令行跑助手会触发一次额外授权。
+
+## 5.6 Buddy 旅行（PR1c）
+
+细节见 [`docs/BUDDY_TRAVEL.md`](BUDDY_TRAVEL.md)，这里只记与助手相关的三条：
+
+- 调度器**在助手进程里**（60 秒 tick，15 分钟查/领、30 分钟派出窗口）。助手是 `AICC.app`
+  的子进程，所以 **App 退出 = 自动旅行停止**；`travel.auto.status` 与界面都如实这么写。
+- 只管 access：payload 只有 `access_token` / `uid` / `domain` / `variant`；401 时只重新从
+  Magpie 取一份 access（一次机会），不调用 refresh。
+- 三个手动动作互不越界：`refresh` 只读、`depart` 只派、`claim` 只领。避免「点刷新顺手把奖领了」。
+
+运行态落在 `travel_states` / `travel_events` 两张表（迁移 v4），开关是
+`accounts.travel_enabled`，与 `checkin_enabled` 互相独立。
 
 ## 6. PR1a 交付范围
 

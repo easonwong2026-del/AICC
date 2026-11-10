@@ -216,7 +216,11 @@ struct MainConsoleView: View {
         switch page {
         case .overview, .quota:
             await store.refreshAll()
-        case .accounts, .checkin:
+        case .checkin:
+            async let accounts: Void = store.refreshAccounts()
+            async let travel: Void = store.loadTravel()
+            _ = await (accounts, travel)
+        case .accounts:
             await store.refreshAccounts()
         }
     }

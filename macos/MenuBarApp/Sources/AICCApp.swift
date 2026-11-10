@@ -487,6 +487,9 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
         )
 
         if AppSettings.shared.bridgeEnabled { serverManager.startMonitoring() }
+        // 自动旅行跑在账号助手进程里。上次退出前有账号开着自动旅行的话，
+        // 这里就要把助手提前拉起来 —— 否则用户不打开控制台就没人调 tick。
+        TravelAutomationService.shared.startIfNeeded(worker: .shared)
         let loginLaunch = NSAppleEventManager.shared().currentAppleEvent?
             .paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
         // A footer tap on the widget launches us with a URL.  That is a page

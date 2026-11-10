@@ -79,6 +79,15 @@ pub struct SecureStore {
 }
 
 impl SecureStore {
+    /// 按环境变量挑后端。只给测试用：`AICC_SECURE_STORE=memory` 时完全不碰
+    /// 真实钥匙串，集成测试才能并行跑、也不会在开发机钥匙串里留假令牌。
+    pub fn from_env() -> Self {
+        match std::env::var("AICC_SECURE_STORE").as_deref() {
+            Ok("memory") => Self::memory(),
+            _ => Self::keychain(),
+        }
+    }
+
     pub fn keychain() -> Self {
         Self {
             backend: Backend::Keychain {

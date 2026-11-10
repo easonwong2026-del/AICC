@@ -189,6 +189,42 @@ final class AccountWorkerManager: ObservableObject {
         return try await client.call("auth.workbuddy.status", params: ["id": accountId], timeout: 20)
     }
 
+    // MARK: - Buddy 旅行（PR1c）
+
+    /// 本地快照，**不打接口**。界面轮询用这个，几秒一次也不会有网络开销。
+    func travelSummary() async throws -> TravelSummary {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        let result = try await client.call("travel.summary", timeout: 10)
+        return TravelSummary.parse(result)
+    }
+
+    /// 真的查一次服务端状态。`depart` / `claim` 会真的提交，只在用户点按钮时调。
+    func travelSync(_ method: TravelMethod, accountId: String) async throws -> TravelSyncResult {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        // 一次同步最坏要串四五个 HTTP 请求（含 20 秒超时），给足余量。
+        let result = try await client.call(method.rawValue, params: ["id": accountId], timeout: 90)
+        return TravelSyncResult.parse(result)
+    }
+
+    func travelSetEnabled(accountId: String, enabled: Bool) async throws {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        _ = try await client.call(
+            "travel.setEnabled",
+            params: ["id": accountId, "enabled": enabled],
+            timeout: 10
+        )
+    }
+
+    /// 自动旅行的运行信息（承载进程、间隔、上次检查）。
+    func travelAutoStatus() async throws -> TravelAutoStatus? {
+        guard let client, client.isRunning else { return nil }
+        let result = try await client.call("travel.auto.status", timeout: 8)
+        return TravelAutoStatus(json: result)
+    }
+
     private func ensureRunning() async throws {
         if case .running = state { return }
         await refresh()

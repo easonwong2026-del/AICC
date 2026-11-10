@@ -18,6 +18,8 @@ pub const E_SECURESTORE: i64 = 1002;
 /// 登录流程失败（网络 / 档位不符 / 资料缺失）。
 pub const E_AUTH: i64 = 1006;
 pub const E_NOT_FOUND: i64 = 1003;
+/// Buddy 旅行正在执行（自动一轮或手动一次还未结束）。
+pub const E_TRAVEL_BUSY: i64 = 1007;
 
 #[derive(Debug, Deserialize)]
 pub struct Request {

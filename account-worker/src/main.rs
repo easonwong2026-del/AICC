@@ -12,6 +12,7 @@ mod providers;
 mod rpc;
 mod securestore;
 mod storage;
+mod travel;
 mod version;
 
 use std::io::{BufRead, Write};
@@ -87,61 +88,115 @@ fn serve() {
         app.paths.data_dir.display()
     ));
 
-    let stdin = std::io::stdin();
-    let mut input = stdin.lock();
+    // stdin 的读取放在独立线程：主线程要同时等「协议请求」和「调度心跳」，
+    // 阻塞式 read_line 会把心跳饿死（自动旅行就成了摆设）。
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let reader = std::thread::Builder::new()
+        .name("aicc-stdin".to_string())
+        .spawn(move || {
+            let stdin = std::io::stdin();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match stdin.lock().read_line(&mut line) {
+                    Ok(0) => break, // 上游关掉了管道 → 正常退出
+                    Ok(_) => {
+                        if tx.send(line.clone()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        log(&format!("读取 stdin 失败：{err}"));
+                        break;
+                    }
+                }
+            }
+        })
+        .ok();
+
     let stdout = std::io::stdout();
     let mut output = std::io::BufWriter::new(stdout.lock());
-    let mut line = String::new();
 
-    loop {
-        line.clear();
-        match input.read_line(&mut line) {
-            Ok(0) => break, // 上游关掉了管道 → 正常退出
-            Ok(_) => {}
-            Err(err) => {
-                log(&format!("读取 stdin 失败：{err}"));
-                break;
-            }
-        }
+    runtime.block_on(async {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
+            travel::service::TICK_INTERVAL_SECS,
+        ));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // interval 的第一次 tick 立刻返回；先消费掉，让第一轮检查在一个周期之后。
+        ticker.tick().await;
 
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let (payload, is_notification) = match parse_request(trimmed) {
-            Ok(v) => v,
-            Err(err) => {
-                write_line(&mut output, &rpc::response_err(None, &err));
-                continue;
-            }
-        };
-
-        let Request {
-            id, method, params, ..
-        } = payload;
-        let id_is_null = id.is_none();
-        let result = runtime.block_on(handlers::dispatch(&app, &method, &params));
-
-        // 通知（没有 id）不回包，避免给调用方制造"多出来的响应"。
-        if !is_notification && !id_is_null {
-            let response = match result {
-                Ok(value) => rpc::response_ok(id, value),
-                Err(err) => {
-                    log(&format!("{method} 失败：{err}"));
-                    rpc::response_err(id, &err)
+        loop {
+            tokio::select! {
+                incoming = rx.recv() => {
+                    let Some(line) = incoming else { break };
+                    if handle_line(&app, &line, &mut output).await {
+                        break;
+                    }
                 }
-            };
-            write_line(&mut output, &response);
+                _ = ticker.tick() => {
+                    // 放到独立任务里跑：一轮检查可能要几十秒，不能把 RPC 卡住。
+                    let app = Arc::clone(&app);
+                    tokio::task::spawn(async move {
+                        let report = travel::scheduler::run_tick(&app).await;
+                        let status = report.get("status").and_then(Value::as_str).unwrap_or("?");
+                        if status == "ok" {
+                            log(&format!(
+                                "旅行检查完成：{} 个账号，实际检查 {}",
+                                report.get("accounts").and_then(Value::as_i64).unwrap_or(0),
+                                report.get("checked").and_then(Value::as_i64).unwrap_or(0)
+                            ));
+                        }
+                    });
+                }
+            }
         }
-
-        if method == "worker.shutdown" {
-            log("收到 worker.shutdown，正常退出");
-            break;
-        }
-    }
+    });
 
     let _ = output.flush();
+    if let Some(handle) = reader {
+        // 不等它：stdin 可能还阻塞着 read_line，进程退出会一并回收。
+        drop(handle);
+    }
+}
+
+/// 处理一行输入。返回 true 表示该退出了。
+async fn handle_line<W: Write>(app: &Arc<App>, line: &str, output: &mut W) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let (payload, is_notification) = match parse_request(trimmed) {
+        Ok(v) => v,
+        Err(err) => {
+            write_line(output, &rpc::response_err(None, &err));
+            return false;
+        }
+    };
+
+    let Request {
+        id, method, params, ..
+    } = payload;
+    let id_is_null = id.is_none();
+    let result = handlers::dispatch(app, &method, &params).await;
+
+    // 通知（没有 id）不回包，避免给调用方制造"多出来的响应"。
+    if !is_notification && !id_is_null {
+        let response = match result {
+            Ok(value) => rpc::response_ok(id, value),
+            Err(err) => {
+                log(&format!("{method} 失败：{err}"));
+                rpc::response_err(id, &err)
+            }
+        };
+        write_line(output, &response);
+    }
+
+    if method == "worker.shutdown" {
+        log("收到 worker.shutdown，正常退出");
+        return true;
+    }
+    false
 }
 
 fn parse_request(line: &str) -> Result<(Request, bool), RpcError> {
@@ -190,7 +245,7 @@ async fn self_test() -> i32 {
         );
         return 1;
     }
-    let app = App::with_secure(paths, securestore::SecureStore::memory());
+    let app = Arc::new(App::with_secure(paths, securestore::SecureStore::memory()));
 
     let mut checks: Vec<Value> = Vec::new();
     let mut push = |name: &str, ok: bool, detail: Value| {
@@ -223,6 +278,22 @@ async fn self_test() -> i32 {
         .map(|a| a.len())
         .unwrap_or(0);
     push("accounts.list", count == 1, json!({ "count": count }));
+
+    // 旅行：不联网，只验证迁移、开关与快照结构（自动旅行是否真的跑起来要靠联调）。
+    let travel = handlers::dispatch(&app, "travel.summary", &json!({})).await;
+    let travel_has_auto = travel
+        .as_ref()
+        .ok()
+        .and_then(|v| v.get("auto"))
+        .and_then(|a| a.get("owner"))
+        .and_then(Value::as_str)
+        .map(|owner| owner.contains("aicc-account-worker"))
+        .unwrap_or(false);
+    push(
+        "travel.summary",
+        travel_has_auto,
+        travel.unwrap_or_else(|e| json!(e.to_string())),
+    );
 
     let probe = handlers::dispatch(&app, "secure.status", &json!({})).await;
     let probe_ok = probe
