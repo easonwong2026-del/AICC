@@ -194,10 +194,47 @@ impl super::Db {
         Ok(())
     }
 
-    pub fn touch_authorization_used(&self, id: &str) -> RpcResult<()> {
+    /// 同步账号的兼容镜像列（G6）。
+    ///
+    /// `auth_mirror_auth_id` 与四个字段一起写：镜像必须能追溯回具体的授权行，
+    /// 否则"来源 own、凭据却指向 magpie"这种组合就无法被发现。
+    /// 这里**不推进 `auth_epoch`**：镜像是派生值，不是新的授权事实。
+    pub fn set_account_mirror(
+        &self,
+        account_id: &str,
+        auth_id: &str,
+        kind: &str,
+        status: &str,
+        token_expires_at: Option<&str>,
+        auth_ref: Option<&str>,
+    ) -> RpcResult<()> {
         self.conn.execute(
-            "UPDATE account_authorizations SET last_used_at = ?1 WHERE id = ?2",
-            params![now_rfc3339(), id],
+            "UPDATE accounts
+                SET auth_mirror_auth_id = ?1,
+                    auth_source = ?2,
+                    auth_status = ?3,
+                    token_expires_at = COALESCE(?4, token_expires_at),
+                    auth_ref = COALESCE(?5, auth_ref),
+                    updated_at = ?6
+              WHERE id = ?7",
+            params![
+                auth_id,
+                kind,
+                status,
+                token_expires_at,
+                auth_ref,
+                now_rfc3339(),
+                account_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 记一条授权级错误（迁移 / 别名同步 / 删除失败）。内容必须已脱敏。
+    pub fn set_authorization_error(&self, id: &str, message: &str) -> RpcResult<()> {
+        self.conn.execute(
+            "UPDATE account_authorizations SET last_error = ?1, updated_at = ?2 WHERE id = ?3",
+            params![message, now_rfc3339(), id],
         )?;
         Ok(())
     }
@@ -277,18 +314,6 @@ impl super::Db {
             params![key, value, now_rfc3339()],
         )?;
         Ok(())
-    }
-
-    pub fn list_settings(&self) -> RpcResult<Vec<(String, String)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT key, value FROM app_settings ORDER BY key ASC")?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
-        }
-        Ok(out)
     }
 }
 

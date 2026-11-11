@@ -13,3 +13,5 @@
 pub mod broker;
 pub mod ids;
 pub mod migrate;
+pub mod probe;
+pub mod service;

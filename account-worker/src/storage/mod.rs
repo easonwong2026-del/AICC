@@ -489,25 +489,6 @@ impl Db {
         self.get_account(&account_id(platform, uid))
     }
 
-    /// 只更新登录态相关字段，不动用户填的备注/分组。
-    pub fn set_auth_state(
-        &self,
-        id: &str,
-        status: &str,
-        token_expires_at: Option<&str>,
-    ) -> RpcResult<()> {
-        self.conn.execute(
-            "UPDATE accounts
-                SET auth_status = ?1,
-                    token_expires_at = COALESCE(?2, token_expires_at),
-                    auth_epoch = auth_epoch + 1,
-                    updated_at = ?3
-              WHERE id = ?4",
-            params![status, token_expires_at, now_rfc3339(), id],
-        )?;
-        Ok(())
-    }
-
     pub fn list_accounts(&self, filter: &AccountFilter) -> RpcResult<Vec<AccountRecord>> {
         let mut sql = String::from(
             "SELECT id, platform, uid, nickname, email, group_id, auth_status,
@@ -705,7 +686,7 @@ mod tests {
         let path = legacy_db(dir.path(), 5);
         seed_history(&path);
 
-        let mut db = Db::open(&path).expect("open");
+        let db = Db::open(&path).expect("open");
         assert_eq!(db.schema_version().unwrap(), 7);
 
         assert_eq!(count(&db, "accounts"), 3, "账号一行都不能少");
@@ -767,7 +748,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = legacy_db(dir.path(), 4);
         seed_history(&path);
-        let mut db = Db::open(&path).expect("open");
+        let db = Db::open(&path).expect("open");
         assert_eq!(db.schema_version().unwrap(), 7);
         assert_eq!(count(&db, "accounts"), 3);
         assert_eq!(count(&db, "account_authorizations"), 2);

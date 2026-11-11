@@ -31,7 +31,6 @@ pub struct Resolved {
     pub authorization_id: String,
     pub kind: String,
     pub access: String,
-    pub expires_at: Option<String>,
     /// 首选不可用、这次用了兜底时说明原因；正常取用为 None。
     pub degraded: Option<String>,
 }
@@ -63,6 +62,14 @@ pub fn set_preferred_source(app: &App, value: &str) -> RpcResult<()> {
     app.with_db(|db| db.set_setting(PREFERRED_SETTING, value))
 }
 
+/// 读设置项当前生效值。目前只有首选来源一项。
+pub fn read_setting(app: &App, key: &str) -> RpcResult<Option<String>> {
+    match key {
+        PREFERRED_SETTING => Ok(Some(preferred_source(app))),
+        other => Err(RpcError::invalid_params(format!("未知设置项：{other}"))),
+    }
+}
+
 /// 取一份可用授权。**只读**：不写库、不改状态、不写 last_used_at。
 pub fn resolve(app: &App, account: &AccountRecord) -> RpcResult<Outcome> {
     let rows = app.with_db(|db| db.list_authorizations(&account.id))?;
@@ -87,7 +94,6 @@ pub fn resolve(app: &App, account: &AccountRecord) -> RpcResult<Outcome> {
                     authorization_id: row.id.clone(),
                     kind: row.kind.clone(),
                     access,
-                    expires_at: row.token_expires_at.clone(),
                     degraded: (index > 0)
                         .then(|| format!("首选 {preferred} 不可用，已兜底到 {}", row.kind)),
                 }));

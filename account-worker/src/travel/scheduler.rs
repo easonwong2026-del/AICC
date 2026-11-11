@@ -51,19 +51,26 @@ pub struct AppTokens<'a> {
 }
 
 impl Tokens for AppTokens<'_> {
+    /// 取令牌走 Broker：默认 Magpie 优先、失败时读时兜底到自有授权（G1 / G6）。
+    ///
+    /// 这里不再自己拼钥匙串键 —— 键名多了三个之后，任何一处自己拼都会漏掉一种来源。
     fn access(&self, account: &AccountRecord) -> Result<String, String> {
-        let (key, _) = crate::providers::workbuddy_auth::secret_keys(&account.uid);
-        let bytes = self.app.secure.get(&key).map_err(|err| err.message)?;
-        let token = String::from_utf8(bytes).map_err(|_| "凭据不是 UTF-8".to_string())?;
-        if token.trim().is_empty() {
-            return Err("钥匙串里的访问令牌为空，请重新登录".to_string());
+        match crate::auth::broker::resolve(self.app, account) {
+            Ok(crate::auth::broker::Outcome::Resolved(resolved)) => Ok(resolved.access),
+            Ok(crate::auth::broker::Outcome::Unavailable { detail, .. }) => Err(detail),
+            Err(err) => Err(err.message),
         }
-        Ok(token)
     }
 
     fn resync(&self, account: &AccountRecord) -> Result<String, String> {
-        if account.auth_source != crate::providers::magpie::SOURCE_MAGPIE {
-            return Err("该账号是独立扫码授权，请重新扫码登录".to_string());
+        let has_magpie = self
+            .app
+            .with_db(|db| db.find_authorization(&account.id, crate::auth::ids::KIND_MAGPIE))
+            .ok()
+            .flatten()
+            .is_some();
+        if !has_magpie {
+            return Err("该账号没有 Magpie 授权，请重新扫码登录".to_string());
         }
         match crate::handlers::resync_magpie_access(self.app, account) {
             Ok(report) => {
