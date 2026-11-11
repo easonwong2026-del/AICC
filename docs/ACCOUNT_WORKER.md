@@ -98,7 +98,9 @@ AICC 打了 3 行补丁拆开（见 `account-worker/vendor/VENDOR.md`，回归�
 
 - AICC 自己的凭据进钥匙串，service = `com.aieink.dashboard.menubar.account-worker`。
   SQLite 只存引用，不存明文。
-- 对外只返回**指纹**（sha256 前 8 hex），`secure.get` 要 `reveal: true` 才回明文。
+- 对外只返回**指纹**（sha256 前 8 hex）与长度。**`secure.get` 不再回明文**
+  （PR #65 关掉了 `reveal`）：能写 stdin 的进程就能读钥匙串，这个能力不该出现在协议里。
+  需要明文的内部调用（查登录态 / 刷新 / 旅行）是 Rust 里直接 `app.secure.get()`，不经过 RPC。
 - 所有日志与错误消息过 `rpc::sanitize`：长度 ≥32 且形如令牌的连续串（字母数字与 `. _ ~ + - =`）
   一律打码。`/` 刻意不算令牌字符，否则整条路径会被打码、日志失去诊断价值。
 - 写凭据用钥匙串的**原位更新**（`SecItemAdd` → 命中重复项改走 `SecItemUpdate`），
@@ -167,6 +169,27 @@ AICC 的取法是**只读文件、只借 access**：
 
 运行态落在 `travel_states` / `travel_events` 两张表（迁移 v4），开关是
 `accounts.travel_enabled`，与 `checkin_enabled` 互相独立。
+
+### 凭据写入的互斥与版本（迁移 v5）
+
+`accounts.auth_epoch` 是凭据版本号，`upsert_account` / `set_auth_state` 每次都会 +1。
+所有写凭据的路径（扫码落库、Magpie 导入、401 重同步、刷新轮换、删除账号）先拿进程内
+`AUTH_WRITE_LOCK`，再按 id 重读一次账号：
+
+- 来源变了（magpie ↔ own）→ 拒绝，`kind: not_magpie_source`；
+- 版本对不上（其间被别人写过）→ 拒绝，`kind: superseded`。
+
+自动旅行拿着几秒前的账号快照去做 resync 时，这两种情况都会被拦下，不会覆盖用户
+刚扫码拿到的自有授权。`superseded` 与 `not_magpie_source` 在旅行侧都算"旧快照"，
+不算失败：直接用手上现有的令牌继续，下一轮自然读到新账号，不会给账号打 6 小时冷却。
+
+两条容易被忽略的细节：
+
+- **Magpie 导入的"来源判断"在锁内**：放到锁外读，检查与写入之间就能挤进一次扫码登录，
+  于是导入仍按旧的 magpie 来源把刚拿到的自有授权覆盖掉（回归用例
+  `import_rechecks_the_source_after_oauth_lands_mid_flight` 用测试钩子复现这个窗口）。
+- **写 `auth_status` 前要比对来源与版本**：登录态查询和刷新都是网络往返，回来时账号可能
+  已经换成别的授权，旧结果不许把新授权标成 invalid（`set_auth_state_if_current`）。
 
 ## 6. PR1a 交付范围
 

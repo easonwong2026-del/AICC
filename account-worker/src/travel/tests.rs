@@ -169,6 +169,7 @@ fn account() -> AccountRecord {
         auth_domain: Some("www.workbuddy.cn".to_string()),
         auth_source: "magpie".to_string(),
         travel_enabled: true,
+        auth_epoch: 0,
     }
 }
 

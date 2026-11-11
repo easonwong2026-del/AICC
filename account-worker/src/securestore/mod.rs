@@ -70,8 +70,27 @@ impl From<SecretError> for RpcError {
 }
 
 enum Backend {
-    Keychain { service: String },
+    Keychain {
+        service: String,
+    },
     Memory(Mutex<HashMap<String, Vec<u8>>>),
+    /// 只在测试里构造：每次读写都失败，用来验证「钥匙串写不进去时不留半残账号」。
+    #[cfg(test)]
+    Failing,
+    /// 只在测试里构造：按 key 注入写入 / 删除失败，用来验证回滚。
+    /// 读永远正常 —— 回滚本身要先读得到旧值。
+    #[cfg(test)]
+    Faulty {
+        map: Mutex<HashMap<String, Vec<u8>>>,
+        fail_set: Vec<String>,
+        fail_delete: Vec<String>,
+        /// 命中秘密内容里的标记就让写入失败。用来区分「写新令牌失败、但回滚写旧令牌成功」。
+        fail_values: Vec<String>,
+        /// 武装时读也失败：用来验证「拍不到快照就不许写」。
+        fail_reads: bool,
+        /// 默认不生效：测试要先把「旧凭据」写进去，再 `arm()` 打开故障注入。
+        armed: std::sync::atomic::AtomicBool,
+    },
 }
 
 pub struct SecureStore {
@@ -103,10 +122,87 @@ impl SecureStore {
         }
     }
 
+    /// 仅测试用：所有操作都返回 `denied`，模拟用户在系统弹框里点了"不允许"。
+    #[cfg(test)]
+    pub fn failing() -> Self {
+        Self {
+            backend: Backend::Failing,
+        }
+    }
+
+    /// 仅测试用：`fail_set` / `fail_delete` 里的子串命中 key 时，对应操作返回 `denied`。
+    /// 读不受影响，这样才能验证「写失败之后回滚成原来的值」。
+    #[cfg(test)]
+    pub fn faulty(fail_set: &[&str], fail_delete: &[&str]) -> Self {
+        Self {
+            backend: Backend::Faulty {
+                map: Mutex::new(HashMap::new()),
+                fail_set: fail_set.iter().map(|s| s.to_string()).collect(),
+                fail_delete: fail_delete.iter().map(|s| s.to_string()).collect(),
+                fail_values: Vec::new(),
+                fail_reads: false,
+                armed: std::sync::atomic::AtomicBool::new(false),
+            },
+        }
+    }
+
+    /// 仅测试用：秘密内容里含 `marker` 时写入失败。
+    ///
+    /// 和按 key 注入的区别很关键：按 key 注入会让**回滚写入同一个 key** 也失败，
+    /// 于是测的其实是"回滚不完整"；按内容注入才能覆盖"新的写不进、旧的回滚成功"。
+    #[cfg(test)]
+    pub fn faulty_on_value(marker: &str) -> Self {
+        Self {
+            backend: Backend::Faulty {
+                map: Mutex::new(HashMap::new()),
+                fail_set: Vec::new(),
+                fail_delete: Vec::new(),
+                fail_values: vec![marker.to_string()],
+                fail_reads: false,
+                armed: std::sync::atomic::AtomicBool::new(false),
+            },
+        }
+    }
+
+    /// 仅测试用：武装时读取也失败（模拟 `Denied`）。
+    #[cfg(test)]
+    pub fn faulty_on_read() -> Self {
+        Self {
+            backend: Backend::Faulty {
+                map: Mutex::new(HashMap::new()),
+                fail_set: Vec::new(),
+                fail_delete: Vec::new(),
+                fail_values: Vec::new(),
+                fail_reads: true,
+                armed: std::sync::atomic::AtomicBool::new(false),
+            },
+        }
+    }
+
+    /// 仅测试用：关掉故障注入（用来在注入失败后检查真实内容）。
+    #[cfg(test)]
+    pub fn disarm(&self) {
+        if let Backend::Faulty { armed, .. } = &self.backend {
+            armed.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// 仅测试用：打开故障注入。先写旧值、再 arm，顺序反了就种不进去。
+    #[cfg(test)]
+    pub fn arm(&self) {
+        if let Backend::Faulty { armed, .. } = &self.backend {
+            armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     pub fn backend_name(&self) -> &'static str {
         match self.backend {
             Backend::Keychain { .. } => "keychain",
             Backend::Memory(_) => "memory",
+            #[cfg(test)]
+            Backend::Failing => "failing",
+            #[cfg(test)]
+            Backend::Faulty { .. } => "faulty",
         }
     }
 
@@ -114,6 +210,10 @@ impl SecureStore {
         match &self.backend {
             Backend::Keychain { service } => Some(service.as_str()),
             Backend::Memory(_) => None,
+            #[cfg(test)]
+            Backend::Failing => None,
+            #[cfg(test)]
+            Backend::Faulty { .. } => None,
         }
     }
 
@@ -124,6 +224,35 @@ impl SecureStore {
             Backend::Memory(map) => {
                 map.lock()
                     .expect("memory store")
+                    .insert(account.to_string(), secret.to_vec());
+                Ok(())
+            }
+            #[cfg(test)]
+            Backend::Failing => Err(SecretError::new(
+                SecretErrorKind::Denied,
+                "测试后端：钥匙串写入被拒绝",
+            )),
+            #[cfg(test)]
+            Backend::Faulty {
+                map,
+                fail_set,
+                fail_values,
+                armed,
+                ..
+            } => {
+                let value_hit = fail_values
+                    .iter()
+                    .any(|p| String::from_utf8_lossy(secret).contains(p.as_str()));
+                if armed.load(std::sync::atomic::Ordering::SeqCst)
+                    && (value_hit || fail_set.iter().any(|p| account.contains(p.as_str())))
+                {
+                    return Err(SecretError::new(
+                        SecretErrorKind::Denied,
+                        format!("测试后端：注入写入失败（{account}）"),
+                    ));
+                }
+                map.lock()
+                    .expect("faulty store")
                     .insert(account.to_string(), secret.to_vec());
                 Ok(())
             }
@@ -140,6 +269,30 @@ impl SecureStore {
                 .get(account)
                 .cloned()
                 .ok_or_else(|| SecretError::new(SecretErrorKind::NotFound, "凭据不存在")),
+            #[cfg(test)]
+            Backend::Failing => Err(SecretError::new(
+                SecretErrorKind::Denied,
+                "测试后端：钥匙串读取被拒绝",
+            )),
+            #[cfg(test)]
+            Backend::Faulty {
+                map,
+                armed,
+                fail_reads,
+                ..
+            } => {
+                if *fail_reads && armed.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(SecretError::new(
+                        SecretErrorKind::Denied,
+                        format!("测试后端：注入读取失败（{account}）"),
+                    ));
+                }
+                map.lock()
+                    .expect("faulty store")
+                    .get(account)
+                    .cloned()
+                    .ok_or_else(|| SecretError::new(SecretErrorKind::NotFound, "凭据不存在"))
+            }
         }
     }
 
@@ -148,6 +301,25 @@ impl SecureStore {
         match &self.backend {
             Backend::Keychain { service } => platform::delete(service, account),
             Backend::Memory(map) => Ok(map.lock().expect("memory store").remove(account).is_some()),
+            #[cfg(test)]
+            Backend::Failing => Ok(false),
+            #[cfg(test)]
+            Backend::Faulty {
+                map,
+                fail_delete,
+                armed,
+                ..
+            } => {
+                if armed.load(std::sync::atomic::Ordering::SeqCst)
+                    && fail_delete.iter().any(|p| account.contains(p.as_str()))
+                {
+                    return Err(SecretError::new(
+                        SecretErrorKind::Denied,
+                        format!("测试后端：注入删除失败（{account}）"),
+                    ));
+                }
+                Ok(map.lock().expect("faulty store").remove(account).is_some())
+            }
         }
     }
 

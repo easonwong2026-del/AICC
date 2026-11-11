@@ -372,3 +372,167 @@ fn travel_tick_without_enabled_accounts_is_idle() {
     assert_eq!(reply["result"]["reason"], json!("no_enabled_accounts"));
     session.call(2, "worker.shutdown", json!({}));
 }
+
+// ---------------------------------------------------------------------------
+// PR #65：凭据归属与 RPC 脱敏
+// ---------------------------------------------------------------------------
+
+/// 假 Magpie 里的 uid，与 `Session::with_magpie` 写死的一致。
+const MAGPIE_UID: &str = "6f1c2d94-1111-2222-3333-444455556666";
+
+fn access_key(uid: &str) -> String {
+    format!("workbuddy/{uid}/access")
+}
+
+/// `secure.get` 只回指纹：就算调用方明确要 `reveal`，也不能拿到明文。
+#[test]
+fn secure_get_never_reveals_plaintext() {
+    let mut session = Session::start();
+    let secret = "super-secret-access-token-value";
+
+    let set = session.call(
+        1,
+        "secure.set",
+        json!({"key": "probe/key", "value": secret}),
+    );
+    assert_eq!(set["result"]["stored"], json!(true), "{set}");
+
+    let plain = session.call(2, "secure.get", json!({"key": "probe/key"}));
+    assert_eq!(plain["result"]["exists"], json!(true));
+    assert_eq!(plain["result"]["length"], json!(secret.len()));
+
+    let asked = session.call(3, "secure.get", json!({"key": "probe/key", "reveal": true}));
+    assert_eq!(asked["result"]["revealed"], json!(false), "{asked}");
+    assert!(
+        asked["result"].get("value").is_none(),
+        "reveal 不能再回明文：{asked}"
+    );
+    let text = asked.to_string();
+    assert!(!text.contains(secret), "响应里出现了明文：{text}");
+
+    session.call(4, "worker.shutdown", json!({}));
+}
+
+/// 重复导入：不新增账号、不产生第二行，第二次仍然更新同一个账号。
+#[test]
+fn repeated_magpie_import_is_idempotent() {
+    let mut session = Session::with_magpie();
+
+    let first = session.call(1, "auth.magpie.import", json!({}));
+    assert_eq!(first["result"]["imported"], json!(1), "{first}");
+    let second = session.call(2, "auth.magpie.import", json!({}));
+    assert_eq!(second["result"]["imported"], json!(1), "{second}");
+
+    let list = session.call(3, "accounts.list", json!({}));
+    assert_eq!(list["result"]["accounts"].as_array().unwrap().len(), 1);
+    let account = &list["result"]["accounts"][0];
+    assert_eq!(account["authSource"], json!("magpie"));
+    assert_eq!(account["uid"], json!(MAGPIE_UID));
+
+    session.call(4, "worker.shutdown", json!({}));
+}
+
+/// 自有授权的账号不能被 Magpie 导入"降级"成借用。
+#[test]
+fn own_account_is_not_downgraded_by_import() {
+    let mut session = Session::with_magpie();
+
+    let created = session.call(
+        1,
+        "accounts.upsert",
+        json!({
+            "platform": "workbuddy",
+            "uid": MAGPIE_UID,
+            "nickname": "我自己登录的",
+            "authStatus": "valid",
+            "authSource": "own",
+        }),
+    );
+    assert_eq!(created["result"]["authSource"], json!("own"), "{created}");
+
+    let imported = session.call(2, "auth.magpie.import", json!({}));
+    assert_eq!(imported["result"]["imported"], json!(0), "{imported}");
+    let skipped = imported["result"]["skipped"].as_array().unwrap();
+    assert_eq!(
+        skipped[0]["reason"],
+        json!("already_authorized"),
+        "{imported}"
+    );
+
+    let list = session.call(3, "accounts.list", json!({}));
+    let account = &list["result"]["accounts"][0];
+    assert_eq!(account["authSource"], json!("own"), "来源不能被改写");
+    assert_eq!(account["nickname"], json!("我自己登录的"), "昵称不能被覆盖");
+
+    session.call(4, "worker.shutdown", json!({}));
+}
+
+/// 只有 access、没有 refresh 时，刷新必须明确报「要重新登录」，而不是假装成功。
+#[test]
+fn refresh_without_refresh_token_reports_missing_credential() {
+    let mut session = Session::with_magpie();
+    session.call(1, "auth.magpie.import", json!({}));
+
+    // 换成 own 来源：模拟"扫码过但刷新令牌丢了"，并把 access 留在钥匙串里。
+    let list = session.call(2, "accounts.list", json!({}));
+    let id = list["result"]["accounts"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    session.call(
+        3,
+        "accounts.upsert",
+        json!({"platform": "workbuddy", "uid": MAGPIE_UID, "authSource": "own"}),
+    );
+    session.call(
+        4,
+        "secure.set",
+        json!({"key": access_key(MAGPIE_UID), "value": "access-only"}),
+    );
+
+    let refreshed = session.call(5, "auth.workbuddy.refresh", json!({"id": id}));
+    assert_eq!(
+        refreshed["result"]["state"],
+        json!("invalid"),
+        "{refreshed}"
+    );
+    assert_eq!(
+        refreshed["result"]["error"]["kind"],
+        json!("missing_credential"),
+        "缺 refresh 要如实说，不能静默成功"
+    );
+
+    // 账号状态被标成失效，access 不能被顺手删掉（用户可能还想用它只读查询）。
+    let after = session.call(6, "accounts.get", json!({"id": id}));
+    assert_eq!(after["result"]["authStatus"], json!("invalid"));
+    let still = session.call(7, "secure.get", json!({"key": access_key(MAGPIE_UID)}));
+    assert_eq!(still["result"]["exists"], json!(true), "{still}");
+
+    session.call(8, "worker.shutdown", json!({}));
+}
+
+/// 删除账号时要把它自己的凭据清干净。
+#[test]
+fn deleting_an_account_purges_its_credentials() {
+    let mut session = Session::with_magpie();
+    session.call(1, "auth.magpie.import", json!({}));
+
+    let before = session.call(2, "secure.get", json!({"key": access_key(MAGPIE_UID)}));
+    assert_eq!(before["result"]["exists"], json!(true), "{before}");
+
+    let list = session.call(3, "accounts.list", json!({}));
+    let id = list["result"]["accounts"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    session.call(4, "accounts.delete", json!({"id": id}));
+
+    let after = session.call(5, "secure.get", json!({"key": access_key(MAGPIE_UID)}));
+    assert_eq!(
+        after["error"]["code"],
+        json!(1002),
+        "凭据应该跟着账号一起删掉：{after}"
+    );
+
+    session.call(6, "worker.shutdown", json!({}));
+}
