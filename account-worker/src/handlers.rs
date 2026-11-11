@@ -73,28 +73,40 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
 
         "worker.shutdown" => Ok(json!({ "shuttingDown": true })),
 
-        "storage.init" => app.with_db(|db| {
-            let version = db.migrate()?;
+        "storage.init" => {
+            let (version, path) =
+                app.with_db(|db| Ok((db.migrate()?, db.path().to_string_lossy().to_string())))?;
+            // 迁移失败（钥匙串被拒等）不阻断：读凭据会自动退回旧键，这里只把状态报出来。
+            let report = crate::auth::migrate::run(app).ok();
             Ok(json!({
                 "schemaVersion": version,
-                "path": db.path().to_string_lossy(),
+                "path": path,
+                "credentialMigration": report.map(|r| json!({
+                    "moved": r.moved,
+                    "unchanged": r.unchanged,
+                    "failed": r.failed,
+                    "errorKind": r.error_kind,
+                })),
             }))
-        }),
+        }
 
         "storage.status" => app.with_db(|db| db.status()),
 
         "accounts.list" => {
             let filter: AccountFilter = serde_json::from_value(params.clone())
                 .map_err(|e| RpcError::invalid_params(format!("筛选参数非法：{e}")))?;
-            app.with_db(|db| Ok(json!({ "accounts": db.list_accounts(&filter)? })))
+            let accounts = app.with_db(|db| db.list_accounts(&filter))?;
+            Ok(json!({ "accounts": with_authorizations(app, accounts)? }))
         }
 
         "accounts.get" => {
             let id = require_str(params, "id")?;
-            app.with_db(|db| match db.get_account(&id)? {
-                Some(record) => Ok(json!(record)),
-                None => Err(RpcError::not_found(format!("账号不存在：{id}"))),
-            })
+            let record = app
+                .with_db(|db| db.get_account(&id))?
+                .ok_or_else(|| RpcError::not_found(format!("账号不存在：{id}")))?;
+            let mut value = json!(record);
+            value["authorizations"] = json!(crate::auth::broker::describe(app, &id)?);
+            Ok(value)
         }
 
         "accounts.upsert" => {
@@ -443,9 +455,41 @@ fn health(app: &App) -> Value {
     }
     health["database"] = db;
     health["secureStore"] = secure;
+    health["credentialMigration"] = crate::auth::migrate::health(app);
+    health["authorizations"] = authorization_fleet(app);
     health["providers"] = json!({ "workbuddy": workbuddy, "qoder": qoder });
     health["methods"] = json!(METHODS);
     health
+}
+
+/// 账号列表带上每份授权（不含令牌）。查询在 `with_db` 外面做，避免嵌套锁。
+fn with_authorizations(
+    app: &App,
+    accounts: Vec<crate::storage::AccountRecord>,
+) -> RpcResult<Vec<Value>> {
+    let mut out = Vec::with_capacity(accounts.len());
+    for account in accounts {
+        let mut value = json!(account);
+        value["authorizations"] = json!(crate::auth::broker::describe(app, &account.id)?);
+        out.push(value);
+    }
+    Ok(out)
+}
+
+/// `health` 里的授权汇总：按 kind × status 计数，不含账号与令牌。
+fn authorization_fleet(app: &App) -> Value {
+    let counts = app
+        .with_db(|db| db.authorization_status_counts())
+        .unwrap_or_default();
+    let mut rows = Vec::new();
+    let mut usable = 0;
+    for (kind, status, n) in counts {
+        if status == "valid" {
+            usable += n;
+        }
+        rows.push(json!({ "kind": kind, "status": status, "count": n }));
+    }
+    json!({ "usable": usable, "rows": rows, "preferred": crate::auth::broker::preferred_source(app) })
 }
 
 fn env_info(app: &App) -> Value {

@@ -5,6 +5,7 @@
 //! 不监听任何 TCP 端口（PRD §9.3）。
 
 mod app;
+mod auth;
 mod clock;
 mod handlers;
 mod paths;
@@ -87,6 +88,17 @@ fn serve() {
         version::PROTOCOL_VERSION,
         app.paths.data_dir.display()
     ));
+
+    // 启动时把库迁到最新（v6 建表回填 + v7 镜像），再尝试搬运旧钥匙串凭据。
+    // 失败只记日志、不拦启动：迁移没完成时读凭据会自动退回旧键（见 auth::broker）。
+    match auth::migrate::run(&app) {
+        Ok(report) if report.moved + report.failed + report.unchanged > 0 => log(&format!(
+            "凭据迁移：搬移 {}，无需搬移 {}，失败 {}",
+            report.moved, report.unchanged, report.failed
+        )),
+        Ok(_) => {}
+        Err(err) => log(&format!("凭据迁移未完成：{err}")),
+    }
 
     // stdin 的读取放在独立线程：主线程要同时等「协议请求」和「调度心跳」，
     // 阻塞式 read_line 会把心跳饿死（自动旅行就成了摆设）。

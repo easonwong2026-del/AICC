@@ -170,6 +170,7 @@ fn account() -> AccountRecord {
         auth_source: "magpie".to_string(),
         travel_enabled: true,
         auth_epoch: 0,
+        auth_mirror_auth_id: None,
     }
 }
 
