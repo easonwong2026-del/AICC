@@ -6,6 +6,8 @@ struct ConsoleAccountsView: View {
 
     @State private var filter: ConsolePlatformFilter = .all
     @State private var query = ""
+    @State private var showAdd = false
+    @State private var showMagpie = false
 
     private var visibleAccounts: [ConsoleAccount] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -21,6 +23,26 @@ struct ConsoleAccountsView: View {
                 errorBanner(error)
             }
             content
+        }
+        .task {
+            // QA 钩子：`open --args -AICCOpenAddAccount 1` 直接拉起扫码面板。
+            if UserDefaults.standard.bool(forKey: "AICCOpenAddAccount")
+                || ProcessInfo.processInfo.environment["AICC_OPEN_ADD_ACCOUNT"] == "1" {
+                showAdd = true
+            }
+            // 同理：`open --args -AICCOpenMagpieImport 1` 直接拉起 Magpie 导入面板。
+            if UserDefaults.standard.bool(forKey: "AICCOpenMagpieImport")
+                || ProcessInfo.processInfo.environment["AICC_OPEN_MAGPIE_IMPORT"] == "1" {
+                showMagpie = true
+            }
+        }
+        .sheet(isPresented: $showAdd) {
+            AddWorkbuddyAccountSheet(store: store) {
+                Task { await store.refreshAccounts() }
+            }
+        }
+        .sheet(isPresented: $showMagpie) {
+            MagpieImportSheet(store: store)
         }
     }
 
@@ -68,10 +90,13 @@ struct ConsoleAccountsView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(ConsoleTheme.secondaryText)
 
-            Button("添加账号") {}
-                .buttonStyle(ConsolePrimaryButtonStyle(enabled: false))
-                .disabled(true)
-                .help("扫码登录在 PR1b 完成真实账号验证后开放")
+            Button("从 Magpie 导入") { showMagpie = true }
+                .buttonStyle(ConsoleSecondaryButtonStyle())
+                .help("复用 Magpie 已登录的 WorkBuddy 账号（只复制访问令牌）")
+
+            Button("扫码添加") { showAdd = true }
+                .buttonStyle(ConsolePrimaryButtonStyle())
+                .help("用手机 WorkBuddy 扫码授权")
         }
     }
 
@@ -101,10 +126,16 @@ struct ConsoleAccountsView: View {
                     symbol: "person.crop.rectangle.stack",
                     title: "还没有添加账号",
                     message: store.accountsError == nil
-                        ? "账号库当前为空。扫码登录与多账号导入在 PR1b 接入后开放，现在不会显示任何演示数据。"
+                        ? "账号库当前为空。可以用手机扫码授权，也可以直接复用 Magpie 里已经登录的 WorkBuddy 账号。"
                         : "账号库读取失败，先处理上面的错误再重试。",
-                    actionTitle: "重新读取",
-                    action: { Task { await store.refreshAccounts() } }
+                    actionTitle: store.accountsError == nil ? "扫码添加 WorkBuddy 账号" : "重新读取",
+                    action: {
+                        if store.accountsError == nil {
+                            showAdd = true
+                        } else {
+                            Task { await store.refreshAccounts() }
+                        }
+                    }
                 )
             }
         } else if visibleAccounts.isEmpty {
@@ -121,7 +152,7 @@ struct ConsoleAccountsView: View {
                 spacing: ConsoleTheme.cardSpacing
             ) {
                 ForEach(visibleAccounts) { account in
-                    ConsoleAccountCard(account: account)
+                    ConsoleAccountCard(account: account, onRelogin: { showAdd = true })
                 }
             }
         }
@@ -130,6 +161,7 @@ struct ConsoleAccountsView: View {
 
 private struct ConsoleAccountCard: View {
     let account: ConsoleAccount
+    let onRelogin: () -> Void
 
     var body: some View {
         ConsoleCard {
@@ -146,16 +178,26 @@ private struct ConsoleAccountCard: View {
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(ConsoleTheme.text)
                             .lineLimit(1)
-                        Text(account.platformName)
-                            .font(.system(size: 10))
-                            .foregroundStyle(ConsoleTheme.secondaryText)
+                        HStack(spacing: 5) {
+                            Text(account.platformName)
+                                .font(.system(size: 10))
+                                .foregroundStyle(ConsoleTheme.secondaryText)
+                            if let source = account.sourceLabel {
+                                Text(source)
+                                    .font(.system(size: 9, weight: .medium))
+                                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 1)
+                                    .background(ConsoleTheme.cardSubtle, in: RoundedRectangle(cornerRadius: 3))
+                            }
+                        }
                     }
 
                     Spacer(minLength: 6)
 
                     ConsoleBadge(
-                        text: account.authLabel,
-                        tint: ConsoleTheme.tone(account.authTone)
+                        text: account.displayAuthLabel,
+                        tint: ConsoleTheme.tone(account.displayAuthTone)
                     )
                 }
 
@@ -186,6 +228,7 @@ private struct ConsoleAccountCard: View {
                 NSPasteboard.general.setString(account.uid, forType: .string)
             }
             Button("修改备注") {}.disabled(true)
+            Button("重新登录", action: onRelogin)
             Button("删除账号") {}.disabled(true)
         }
     }

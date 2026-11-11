@@ -15,6 +15,8 @@ pub const INTERNAL_ERROR: i64 = -32603;
 /// 业务错误码：错误分类要能直接进任务日志，不能只有一句话。
 pub const E_STORAGE: i64 = 1001;
 pub const E_SECURESTORE: i64 = 1002;
+/// 登录流程失败（网络 / 档位不符 / 资料缺失）。
+pub const E_AUTH: i64 = 1006;
 pub const E_NOT_FOUND: i64 = 1003;
 
 #[derive(Debug, Deserialize)]

@@ -67,7 +67,8 @@ open ~/Applications/AICC.app
 
 1. 启动即出主控制台，"总览"选中；
 2. 左侧四页都能点，内容随页切换，助手进程不重启（设置里"检查助手"仍显示同一份状态）；
-3. 账号为空时是空状态，不是假数据；
+3. 账号为空时是空状态，不是假数据；「从 Magpie 导入」只搬 access token，
+   卡片上会标 `Magpie`，`own`（扫码授权）的账号不会被覆盖；
 4. 额度页数字与桌面 Widget 一致，点"刷新额度"两处同步变化；
 5. 齿轮进设置，原有 Magpie 端口 / Widget 选择 / 墨水屏桥接 / 配对码都在；
 6. 桥接开启时关窗口，墨水屏仍能同步；未开启时关窗口即退出。
@@ -75,7 +76,9 @@ open ~/Applications/AICC.app
 ## 6. 截图用的 QA 钩子
 
 `AICC_CONSOLE_PAGE=overview|accounts|quota|checkin` 指定初始分页，
-只为截图/回归脚本服务，正常启动不带这个变量：
+`AICC_OPEN_ADD_ACCOUNT=1` / `AICC_OPEN_MAGPIE_IMPORT=1` 直接拉起对应的添加面板。
+都只为截图/回归脚本服务，正常启动不带这些变量（也不会自动执行任何动作，
+导入仍然要人点「导入全部」）：
 
 ```bash
 AICC_CONSOLE_PAGE=quota open -n ~/Applications/AICC.app

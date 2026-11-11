@@ -65,6 +65,8 @@ dependencies = [
  "sha1",
  "sha2",
  "tempfile",
+ "tokio",
+ "uuid",
  "wb-switch-core",
 ]
 

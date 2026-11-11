@@ -46,6 +46,21 @@ final class ConsoleStore: ObservableObject {
         _ = await (accountsTask, quotaTask)
     }
 
+    // MARK: - Magpie 导入
+
+    func magpiePreview() async throws -> MagpiePreview {
+        try await worker.magpiePreview()
+    }
+
+    func importMagpieAccounts(keys: [String]) async throws -> MagpieImportResult {
+        try await worker.importMagpieAccounts(keys: keys)
+    }
+
+    /// 用真实接口核一次登录态（只读）。
+    func workbuddyStatus(accountId: String) async throws -> [String: Any] {
+        try await worker.workbuddyStatus(accountId: accountId)
+    }
+
     func refreshAccounts() async {
         guard !loadingAccounts else { return }
         loadingAccounts = true
@@ -54,6 +69,15 @@ final class ConsoleStore: ObservableObject {
         // 助手没起就起一次；起不来时把原因原样带到界面上。
         if case .running = worker.state {} else {
             await worker.refresh()
+        }
+        // 另一个页面可能正在拉起助手，`refresh()` 会立刻返回 .starting。
+        // 这种情况等它落定，别把"启动中"当成错误甩给用户。
+        if case .starting = worker.state {
+            for _ in 0..<20 {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                if case .starting = worker.state { continue }
+                break
+            }
         }
         guard case .running = worker.state else {
             accountsError = workerFailureText

@@ -15,10 +15,20 @@ use crate::rpc::{RpcError, RpcResult};
 
 const SCHEMA_V1: &str = include_str!("schema.sql");
 
-/// 迁移清单：按 version 升序，只追加不修改。
-const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA_V1)];
+/// v2：登录态需要的两列。SQLite 的 ALTER TABLE 只能追加列，正好够用。
+const MIGRATION_V2: &str = "\
+ALTER TABLE accounts ADD COLUMN token_expires_at TEXT;\
+ALTER TABLE accounts ADD COLUMN auth_domain TEXT;";
 
-pub const LATEST_VERSION: i64 = 1;
+/// v3：登录来源。`own` = AICC 自己扫码/导入的独立授权；`magpie` = 从 Magpie 借用
+/// 的 access token（不再刷新，过期后重新同步）。
+const MIGRATION_V3: &str = "\
+ALTER TABLE accounts ADD COLUMN auth_source TEXT NOT NULL DEFAULT 'own';";
+
+/// 迁移清单：按 version 升序，只追加不修改。
+const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA_V1), (2, MIGRATION_V2), (3, MIGRATION_V3)];
+
+pub const LATEST_VERSION: i64 = 3;
 
 pub struct Db {
     conn: Connection,
@@ -39,6 +49,12 @@ pub struct AccountRecord {
     pub last_checkin_at: Option<String>,
     pub last_result: Option<String>,
     pub updated_at: String,
+    /// 访问令牌到期时间（RFC3339）。令牌本身在钥匙串，这里只有时间。
+    pub token_expires_at: Option<String>,
+    /// 登录时响应里的 domain，刷新令牌要带上。
+    pub auth_domain: Option<String>,
+    /// `own`（独立授权）或 `magpie`（借用 Magpie 的 access token）。
+    pub auth_source: String,
 }
 
 /// 账号写入参数。**所有可选字段都是"补丁"语义**：
@@ -65,6 +81,12 @@ pub struct AccountInput {
     pub auth_status: Option<String>,
     #[serde(default)]
     pub checkin_enabled: Option<bool>,
+    #[serde(default)]
+    pub token_expires_at: Option<String>,
+    #[serde(default)]
+    pub auth_domain: Option<String>,
+    #[serde(default)]
+    pub auth_source: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -245,6 +267,18 @@ impl Db {
             sets.push("checkin_enabled = ?");
             args.push(Box::new(if value { 1i64 } else { 0i64 }));
         }
+        if let Some(value) = &input.token_expires_at {
+            sets.push("token_expires_at = ?");
+            args.push(Box::new(value.clone()));
+        }
+        if let Some(value) = &input.auth_domain {
+            sets.push("auth_domain = ?");
+            args.push(Box::new(value.clone()));
+        }
+        if let Some(value) = &input.auth_source {
+            sets.push("auth_source = ?");
+            args.push(Box::new(value.clone()));
+        }
         sets.push("updated_at = ?");
         args.push(Box::new(now));
 
@@ -266,17 +300,42 @@ impl Db {
     pub fn get_account(&self, id: &str) -> RpcResult<Option<AccountRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, platform, uid, nickname, email, group_id, auth_status,
-                    checkin_enabled, last_checkin_at, last_result, updated_at
+                    checkin_enabled, last_checkin_at, last_result, updated_at,
+                    token_expires_at, auth_domain, auth_source
              FROM accounts WHERE id = ?1",
         )?;
         let row = stmt.query_row(params![id], map_account).optional()?;
         Ok(row)
     }
 
+    /// 按 platform + uid 查账号。登录去重与刷新都用它。
+    pub fn find_account(&self, platform: &str, uid: &str) -> RpcResult<Option<AccountRecord>> {
+        self.get_account(&account_id(platform, uid))
+    }
+
+    /// 只更新登录态相关字段，不动用户填的备注/分组。
+    pub fn set_auth_state(
+        &self,
+        id: &str,
+        status: &str,
+        token_expires_at: Option<&str>,
+    ) -> RpcResult<()> {
+        self.conn.execute(
+            "UPDATE accounts
+                SET auth_status = ?1,
+                    token_expires_at = COALESCE(?2, token_expires_at),
+                    updated_at = ?3
+              WHERE id = ?4",
+            params![status, token_expires_at, now_rfc3339(), id],
+        )?;
+        Ok(())
+    }
+
     pub fn list_accounts(&self, filter: &AccountFilter) -> RpcResult<Vec<AccountRecord>> {
         let mut sql = String::from(
             "SELECT id, platform, uid, nickname, email, group_id, auth_status,
-                    checkin_enabled, last_checkin_at, last_result, updated_at
+                    checkin_enabled, last_checkin_at, last_result, updated_at,
+                    token_expires_at, auth_domain, auth_source
              FROM accounts WHERE 1 = 1",
         );
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -377,6 +436,11 @@ fn map_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRecord> {
         last_checkin_at: row.get(8)?,
         last_result: row.get(9)?,
         updated_at: row.get(10)?,
+        token_expires_at: row.get(11)?,
+        auth_domain: row.get(12)?,
+        auth_source: row
+            .get::<_, Option<String>>(13)?
+            .unwrap_or_else(|| "own".into()),
     })
 }
 
