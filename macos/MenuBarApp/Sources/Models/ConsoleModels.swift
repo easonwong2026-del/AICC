@@ -195,7 +195,9 @@ struct ConsoleAccount: Identifiable, Equatable {
         if let error = authorizations.compactMap(\.lastError).first, !error.isEmpty {
             return error
         }
-        if !authorizations.isEmpty && authorizations.allSatisfy({ !$0.status.contains("valid") && $0.status != "unknown" }) {
+        // 注意不要用 `contains("valid")` 判断：`"invalid"` 里也有 "valid"。
+        let unusable: Set<String> = ["invalid", "expired", "denied"]
+        if !authorizations.isEmpty && authorizations.allSatisfy({ unusable.contains($0.status) }) {
             return "两份授权都不可用，请重新扫码或去 Magpie 登录"
         }
         return nil
