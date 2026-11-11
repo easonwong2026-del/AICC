@@ -77,9 +77,10 @@ impl Tokens for AppTokens<'_> {
                 }
                 <Self as Tokens>::access(self, account)
             }
-            // 手上这份账号快照已经过期（用户刚好扫码换成了自有授权）：worker 拒绝写入，
-            // 我们也不该报错——直接用手上现在的令牌继续，下一轮会读到新账号。
-            Err(err) if crate::handlers::is_superseded(&err) => {
+            // 手上这份账号快照已经过期（用户刚好扫码换成了自有授权，或者账号刚被写过）：
+            // worker 拒绝写入，我们也不该把它当失败——那会给账号打上 6 小时冷却。
+            // 直接用手上现在的令牌继续，下一轮自然读到新账号。
+            Err(err) if crate::handlers::is_stale_snapshot(&err) => {
                 <Self as Tokens>::access(self, account)
             }
             Err(err) => Err(err.message),

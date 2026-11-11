@@ -348,11 +348,62 @@ fn superseded(reason: &str) -> RpcError {
 }
 
 pub(crate) fn is_superseded(err: &RpcError) -> bool {
+    err_kind(err) == Some("superseded")
+}
+
+/// 旧快照冲突的两种表现，调用方按同一种情况处理：
+/// - `superseded`：来源没变、但账号被别人写过（版本号对不上）；
+/// - `not_magpie_source`：来源已经变成自有授权，就更不该再用 Magpie 的令牌。
+///
+/// 旅行侧尤其要认这两种：它们不代表失败，只代表"我手上这份账号已经过时"，
+/// 不能因此把账号打进 6 小时冷却。
+pub(crate) fn is_stale_snapshot(err: &RpcError) -> bool {
+    matches!(
+        err_kind(err),
+        Some("superseded") | Some("not_magpie_source")
+    )
+}
+
+fn err_kind(err: &RpcError) -> Option<&str> {
     err.data
         .as_ref()
         .and_then(|data| data.get("kind"))
         .and_then(Value::as_str)
-        == Some("superseded")
+}
+
+/// 统一的"旧快照，本次结果作废"返回体。
+fn superseded_value(reason: &str) -> Value {
+    json!({
+        "state": "superseded",
+        "reason": reason,
+        "error": {
+            "kind": "superseded",
+            "message": "账号授权已变更，本次结果作废；请重新读取账号",
+        },
+    })
+}
+
+/// 只有账号还是"当初那个授权"时才写认证状态。
+///
+/// 查询 / 刷新都是网络往返，回来时账号可能已经被扫码换成了自有授权。拿旧请求的
+/// 结果去写 `auth_status`，会把刚登录好的账号标成 invalid —— 这正是要挡的。
+/// 返回 `true` 表示写成功，`false` 表示快照已过期（调用方据此返回 superseded）。
+fn set_auth_state_if_current(
+    app: &App,
+    id: &str,
+    expected_source: &str,
+    expected_epoch: i64,
+    status: &str,
+) -> RpcResult<bool> {
+    let _guard = auth_write_guard();
+    let Some(current) = app.with_db(|db| db.get_account(id))? else {
+        return Ok(false);
+    };
+    if current.auth_source != expected_source || current.auth_epoch != expected_epoch {
+        return Ok(false);
+    }
+    app.with_db(|db| db.set_auth_state(id, status, None))?;
+    Ok(true)
 }
 
 fn log_note(message: &str) {
@@ -444,6 +495,11 @@ async fn workbuddy_account_status(app: &App, id: &str) -> RpcResult<Value> {
         return Err(RpcError::invalid_params("目前只支持查询 WorkBuddy 账号"));
     }
 
+    // 记下"这次查询针对的是哪一份授权"。查询过程中账号可能被换成别的授权，
+    // 那时候这次结果就不该再写回账号状态。
+    let mut expected_source = account.auth_source.clone();
+    let mut expected_epoch = account.auth_epoch;
+
     let (access_key, _) = workbuddy_auth::secret_keys(&account.uid);
     let access = match app.secure.get(&access_key) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
@@ -476,6 +532,11 @@ async fn workbuddy_account_status(app: &App, id: &str) -> RpcResult<Value> {
                     payload["access_token"] = json!(String::from_utf8_lossy(&bytes).to_string());
                     status = wb_switch_core::modules::checkin::get_checkin_status(&payload).await;
                 }
+                // resync 成功会推进版本号，后续写状态要以新的为准。
+                if let Ok(Some(fresh)) = app.with_db(|db| db.get_account(id)) {
+                    expected_source = fresh.auth_source;
+                    expected_epoch = fresh.auth_epoch;
+                }
             }
             Ok(_) => {}
             Err(err) if is_superseded(&err) => {
@@ -490,10 +551,20 @@ async fn workbuddy_account_status(app: &App, id: &str) -> RpcResult<Value> {
     }
 
     let ok = status.get("ok").and_then(Value::as_bool).unwrap_or(false);
-    if ok {
-        app.with_db(|db| db.set_auth_state(id, "valid", None))?;
-    } else if status.get("statusUnsupported").is_none() {
-        app.with_db(|db| db.set_auth_state(id, "invalid", None))?;
+    // 写状态前比对来源与版本：查询是网络往返，回来时账号可能已经被扫码换掉了。
+    let applied = if ok || status.get("statusUnsupported").is_none() {
+        set_auth_state_if_current(
+            app,
+            id,
+            &expected_source,
+            expected_epoch,
+            if ok { "valid" } else { "invalid" },
+        )?
+    } else {
+        true
+    };
+    if !applied {
+        return Ok(superseded_value("epoch_changed"));
     }
 
     Ok(json!({
@@ -552,6 +623,35 @@ fn import_magpie_accounts(app: &App, keys: &[String]) -> RpcResult<Value> {
     import_logins(app, logins, keys)
 }
 
+/// 测试钩子：在"来源检查之前"插入一次外部动作（比如扫码登录落库）。
+///
+/// 生产构建里是空函数，编译器直接内联掉；只有 `cfg(test)` 才存在那个静态槽位。
+#[cfg(test)]
+type ImportRaceHook = (String, Box<dyn FnOnce() + Send>);
+
+#[cfg(test)]
+static IMPORT_RACE_HOOK: Mutex<Option<ImportRaceHook>> = Mutex::new(None);
+
+/// 按 uid 匹配：测试是并行跑的，钩子只能影响设它的那个用例。
+#[cfg(test)]
+fn run_import_race_hook(uid: &str) {
+    let mut slot = IMPORT_RACE_HOOK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let matches = slot
+        .as_ref()
+        .map(|(target, _)| target == uid)
+        .unwrap_or(false);
+    if matches {
+        if let Some((_, hook)) = slot.take() {
+            hook();
+        }
+    }
+}
+
+#[cfg(not(test))]
+fn run_import_race_hook(_uid: &str) {}
+
 /// 真正的导入循环。把"读文件"和"搬账号"拆开，测试才能直接喂一份登录列表，
 /// 不用去改 `MAGPIE_CONFIG_DIR`（那玩意是环境变量，并行测试里会互相打架）。
 fn import_logins(app: &App, logins: Vec<magpie::MagpieLogin>, keys: &[String]) -> RpcResult<Value> {
@@ -569,7 +669,16 @@ fn import_logins(app: &App, logins: Vec<magpie::MagpieLogin>, keys: &[String]) -
             continue;
         }
 
-        // 已有的独立授权不能被"降级"成借用。
+        // 这一行是给测试用的：模拟"检查之前 / 检查之后"发生了一次扫码登录。
+        // 生产构建里是空函数，编译期就没了。
+        run_import_race_hook(&login.uid);
+
+        // 每个账号的"拍快照 → 写钥匙串 → 写库"必须在锁里完成，
+        // **来源判断也必须在锁里**：放在锁外读，检查与写入之间就能挤进一次 OAuth 登录，
+        // 于是导入仍按旧的 magpie 来源把刚拿到的自有授权覆盖掉。
+        let _guard = auth_write_guard();
+
+        // 已有的独立授权不能被"降级"成借用（锁内重读，不留窗口）。
         let existing = app.with_db(|db| db.find_account("workbuddy", &login.uid))?;
         if let Some(record) = &existing {
             if record.auth_source == OWN_SOURCE {
@@ -581,9 +690,6 @@ fn import_logins(app: &App, logins: Vec<magpie::MagpieLogin>, keys: &[String]) -
                 continue;
             }
         }
-
-        // 每个账号的"拍快照 → 写钥匙串 → 写库"必须在锁里完成。
-        let _guard = auth_write_guard();
         let (access_key, refresh_key) = workbuddy_auth::secret_keys(&login.uid);
         // 写之前先拍快照：后面任何一步失败都要把钥匙串恢复原样，
         // 否则会留下"令牌换了、账号状态没换"的不一致（或覆盖掉原有凭据）。
@@ -1103,11 +1209,22 @@ async fn refresh_account(app: &App, id: &str) -> RpcResult<Value> {
     let refresh = match app.secure.get(&refresh_key) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
         Err(_) => {
-            app.with_db(|db| db.set_auth_state(id, "invalid", None))?;
-            return Ok(json!({
-                "state": "invalid",
-                "error": { "kind": "missing_credential", "message": "钥匙串里没有刷新令牌，请重新登录" },
-            }));
+            // 标失效前先确认账号没在这期间换了授权：旧请求不许把新的自有授权写坏。
+            let applied = set_auth_state_if_current(
+                app,
+                id,
+                &account.auth_source,
+                account.auth_epoch,
+                "invalid",
+            )?;
+            return Ok(if applied {
+                json!({
+                    "state": "invalid",
+                    "error": { "kind": "missing_credential", "message": "钥匙串里没有刷新令牌，请重新登录" },
+                })
+            } else {
+                superseded_value("epoch_changed")
+            });
         }
     };
 
@@ -1131,7 +1248,17 @@ async fn refresh_account(app: &App, id: &str) -> RpcResult<Value> {
             )
         }
         workbuddy_auth::Refreshed::Invalid(err) => {
-            app.with_db(|db| db.set_auth_state(id, "invalid", None))?;
+            // 同上：网络结果回来时账号可能已经换成别的授权，旧的失败不能盖掉新的成功。
+            let applied = set_auth_state_if_current(
+                app,
+                id,
+                &account.auth_source,
+                account.auth_epoch,
+                "invalid",
+            )?;
+            if !applied {
+                return Ok(superseded_value("epoch_changed"));
+            }
             Ok(json!({
                 "state": "invalid",
                 "error": { "kind": err.kind, "message": err.message },
@@ -1843,5 +1970,127 @@ mod tests {
             "凭据不能被覆盖"
         );
         assert_eq!(read_refresh(&app, uid).as_deref(), Some("own-refresh"));
+    }
+    // -----------------------------------------------------------------------
+    // 收尾：导入的锁内重读、旧快照分类、状态写入守卫
+    // -----------------------------------------------------------------------
+
+    /// 导入在"检查来源"和"拿锁写入"之间被一次扫码登录插队：
+    /// 锁内重读必须看见 own，从而跳过，绝不能把新授权覆盖成 magpie。
+    #[test]
+    fn import_rechecks_the_source_after_oauth_lands_mid_flight() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-ffff-0001-0002-000000000001";
+        seed_magpie_account(&app, uid);
+
+        // 模拟"检查之后、写入之前"用户完成了扫码登录。
+        let app_for_hook = Arc::clone(&app);
+        let uid_for_hook = uid.to_string();
+        *IMPORT_RACE_HOOK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some((
+            uid.to_string(),
+            Box::new(move || {
+                persist_login(
+                    &app_for_hook,
+                    &payload(&uid_for_hook, "own-access", Some("own-refresh")),
+                )
+                .expect("oauth login");
+            }),
+        ));
+
+        let out = import_logins(&app, vec![magpie_login(uid, "magpie-access")], &[]).unwrap();
+        assert_eq!(out["imported"], json!(0), "{out}");
+        assert_eq!(
+            out["skipped"][0]["reason"],
+            json!("already_authorized"),
+            "锁内应该看见 own 并跳过：{out}"
+        );
+        assert_eq!(
+            read(&app, uid).as_deref(),
+            Some("own-access"),
+            "own 凭据不能被 magpie 令牌覆盖"
+        );
+        let record = app
+            .with_db(|db| db.find_account("workbuddy", uid))
+            .unwrap()
+            .expect("account");
+        assert_eq!(record.auth_source, OWN_SOURCE);
+    }
+
+    /// 旅行侧：来源变成 own 属于"旧快照"，按手上现有令牌继续，不当失败。
+    #[test]
+    fn travel_resync_falls_back_when_the_account_switched_to_own() {
+        use crate::travel::scheduler::AppTokens;
+        use crate::travel::service::Tokens;
+
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-ffff-0001-0002-000000000002";
+        let stale = seed_magpie_account(&app, uid);
+        persist_login(&app, &payload(uid, "own-access", Some("own-refresh"))).expect("login");
+
+        let tokens = AppTokens { app: &app };
+        let result = tokens.resync(&stale);
+        assert_eq!(
+            result.as_deref(),
+            Ok("own-access"),
+            "旧快照不该报错，应当直接用手上现有的令牌"
+        );
+    }
+
+    /// 两种拒绝都算"旧快照"；别的错误不算。
+    #[test]
+    fn stale_snapshot_covers_both_rejection_kinds() {
+        assert!(super::is_stale_snapshot(&superseded("epoch_changed")));
+        assert!(super::is_stale_snapshot(
+            &RpcError::new(crate::rpc::E_AUTH, "own")
+                .with_data(json!({ "kind": "not_magpie_source" }))
+        ));
+        assert!(!super::is_stale_snapshot(
+            &RpcError::new(crate::rpc::E_AUTH, "magpie 令牌过期")
+                .with_data(json!({ "kind": "magpie_token_expired" }))
+        ));
+        assert!(!super::is_stale_snapshot(&RpcError::internal("boom")));
+    }
+
+    /// 状态写入守卫：快照过期时什么都不写。
+    #[test]
+    fn auth_state_write_is_skipped_when_the_account_moved_on() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-ffff-0001-0002-000000000003";
+        persist_login(&app, &payload(uid, "access-1", Some("refresh-1"))).expect("login");
+        let first = app
+            .with_db(|db| db.find_account("workbuddy", uid))
+            .unwrap()
+            .expect("account");
+
+        // 用户又登录了一次：版本号前进。
+        persist_login(&app, &payload(uid, "access-2", Some("refresh-2"))).expect("login again");
+
+        let applied =
+            set_auth_state_if_current(&app, &first.id, OWN_SOURCE, first.auth_epoch, "invalid")
+                .expect("guard");
+        assert!(!applied, "旧版本不该再写状态");
+        let record = app
+            .with_db(|db| db.get_account(&first.id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.auth_status, "valid", "新登录的成功不能被旧请求抹掉");
+
+        // 拿当前版本写就应当成功。
+        let applied = set_auth_state_if_current(
+            &app,
+            &record.id,
+            &record.auth_source,
+            record.auth_epoch,
+            "invalid",
+        )
+        .expect("guard");
+        assert!(applied);
+        let after = app
+            .with_db(|db| db.get_account(&first.id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.auth_status, "invalid");
     }
 }

@@ -69,9 +69,12 @@ CREATE INDEX idx_auth_account ON account_authorizations (account_id, status);
 
 ## 5. 迁移步骤
 
-沿用现有 `PRAGMA user_version` + 事务机制（`storage/mod.rs::MIGRATIONS`），分三次提交：
+沿用现有 `PRAGMA user_version` + 事务机制（`storage/mod.rs::MIGRATIONS`），分三次提交。
 
-### v5 —— 建表 + 回填（不改 `accounts` 列）
+> **版本号已被 PR #65 占到 v5**（`accounts.auth_epoch`）。所以 #66 的迁移从 **v6** 开始，
+> 依次 v6（建表回填）→ v7（双写）→ v8（收尾）。不要再用 v5，否则与已合并的迁移撞号。
+
+### v6 —— 建表 + 回填（不改 `accounts` 列）
 
 ```sql
 -- 每个账号按现有 auth_source 生成一行；access 引用沿用现有 auth_ref。
@@ -97,7 +100,7 @@ FROM accounts a
 WHERE a.platform = 'workbuddy';
 ```
 
-`refresh_ref` 回填之后由 v6 的搬迁步骤照着引用去**读真实值**，读到才写新键：
+`refresh_ref` 回填之后由 v7 的搬迁步骤照着引用去**读真实值**，读到才写新键：
 
 | 情况 | 处理 |
 | --- | --- |
@@ -107,16 +110,16 @@ WHERE a.platform = 'workbuddy';
 
 绝不允许出现「refresh_ref 被清空、账号却显示 valid」——那会让下一次刷新静默失败。
 
-回填的 `id` 先给一个临时确定性值（`seed-<account_id>`），v6 换成正式公式
+回填的 `id` 先给一个临时确定性值（`seed-<account_id>`），v7 换成正式公式
 `sha256(account_id \0 kind)[0..16]`，保持"可重算、可幂等"。
 
-### v6 —— 双写期
+### v7 —— 双写期
 
 - 读写全部走 `account_authorizations`；钥匙串写新键（复制，不删旧键）。
 - `accounts.auth_source` / `auth_ref` / `token_expires_at` 降级成**只读镜像**：
   每次授权变化时同步写一次，供旧版本回退时仍能看到"大致正确"的状态。
 
-### v7 —— 收尾
+### v8 —— 收尾
 
 - 删掉镜像列（或标 `deprecated` 保留一版）。
 - 删除旧钥匙串键（`workbuddy/<uid>/access|refresh`），只在确认新键存在时执行。
@@ -184,7 +187,7 @@ Magpie 要退出），把 `auth_preferred_source` 改成 `own` 即可 —— 不
 | 回填时 `auth_ref` 为空（早期数据） | 回填用 `COALESCE` 兜底成旧键规范；仍取不到就建行但标 `status = unknown`，不阻塞迁移 |
 | 钥匙串写入在新键上失败 | 保留旧键、该授权标 `denied`，账号降级为"仅旧键可用"，`health` 报 degraded 原因 |
 | 迁移中断 | 沿用事务 + `user_version`，失败整体回滚 |
-| 回退旧二进制 | v6 之前可直接回退（镜像列还在、旧键还在）；v7 之后需先跑一次"键还原"脚本 |
+| 回退旧二进制 | v7 之前可直接回退（镜像列还在、旧键还在）；v8 之后需先跑一次"键还原"脚本 |
 | 同一 uid 出现两行账号 | 现有 `UNIQUE(platform, uid)` 防住；删除路径已按 `account_id` 而非 uid 清理（PR #65） |
 
 ## 9. 通用 `secure.set` / `secure.delete` 的收紧方案
@@ -233,5 +236,5 @@ PR #65 只关掉了 `secure.get` 的明文回传。剩下两个通用方法仍�
 1. 迁移在真实库副本上跑通，`accounts.id` 前后一致，签到/旅行记录条数不变。
 2. 同一账号同时存在 own + magpie 两份授权：401 时按策略切换，且钥匙串里两份都在。
 3. 导入不再覆盖 own；扫码不再覆盖 magpie 的刷新令牌；删除只删自己那条。
-4. 回退测试：用 v5/v6 的二进制打开 v6 数据库仍可用（镜像列未删）。
+4. 回退测试：用 v6/v7 的二进制打开 v7 数据库仍可用（镜像列未删）。
 5. 不联网的 Mock 测试覆盖选择策略的全部分支。
