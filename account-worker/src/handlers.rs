@@ -4,10 +4,13 @@
 
 use serde_json::{json, Value};
 
+use std::sync::Arc;
+
 use crate::app::App;
 use crate::providers::{magpie, qoder, workbuddy, workbuddy_auth};
 use crate::rpc::{RpcError, RpcResult};
 use crate::storage::{AccountFilter, AccountInput};
+use crate::travel::{scheduler as travel_scheduler, service::EventDraft};
 use crate::version;
 use wb_switch_core::modules::{config as wb_config, variant::WbVariant};
 
@@ -39,9 +42,18 @@ pub const METHODS: &[&str] = &[
     "providers.magpie.accounts",
     "auth.magpie.import",
     "auth.workbuddy.status",
+    // ---- Buddy 旅行（PR1c）----
+    "travel.summary",
+    "travel.events",
+    "travel.refresh",
+    "travel.depart",
+    "travel.claim",
+    "travel.setEnabled",
+    "travel.auto.status",
+    "travel.auto.tick",
 ];
 
-pub async fn dispatch(app: &App, method: &str, params: &Value) -> RpcResult<Value> {
+pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult<Value> {
     // JSON-RPC 允许整个省略 `params`（键不存在时是 null）。统一当空对象，
     // 免得每个方法都各自判一次 null。
     let empty = json!({});
@@ -236,6 +248,55 @@ pub async fn dispatch(app: &App, method: &str, params: &Value) -> RpcResult<Valu
             workbuddy_account_status(app, &id).await
         }
 
+        // ---- Buddy 旅行（PR1c）----
+        //
+        // 三段式：`summary` 只看本地快照（界面轮询用它，不打接口）；
+        // `refresh` 查一次真实状态；`depart` / `claim` 是用户显式点的动作。
+        "travel.summary" => Ok(travel_summary(app)),
+
+        "travel.events" => {
+            let id = require_str(params, "id")?;
+            let limit = params
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(20)
+                .min(200) as u32;
+            app.with_db(|db| Ok(json!({ "events": db.travel_events(&id, limit)? })))
+        }
+
+        "travel.setEnabled" => {
+            let id = require_str(params, "id")?;
+            let enabled = require_bool(params, "enabled")?;
+            app.with_db(|db| {
+                if db.get_account(&id)?.is_none() {
+                    return Err(RpcError::not_found(format!("账号不存在：{id}")));
+                }
+                db.set_travel_enabled(&id, enabled)?;
+                Ok(json!({ "id": id, "travelEnabled": enabled }))
+            })
+        }
+
+        // 刷新是**纯只读**：只查状态，看到「已到达」也不提交领取。
+        "travel.refresh" => {
+            let id = require_str(params, "id")?;
+            travel_sync(app, &id, SyncIntent::Observe).await
+        }
+
+        // 每个按钮只做一件事：派出不顺手领奖，领奖不顺手派出。
+        "travel.depart" => {
+            let id = require_str(params, "id")?;
+            travel_sync(app, &id, SyncIntent::Depart).await
+        }
+
+        "travel.claim" => {
+            let id = require_str(params, "id")?;
+            travel_sync(app, &id, SyncIntent::Claim).await
+        }
+
+        "travel.auto.status" => Ok(travel_scheduler::auto_status(app)),
+
+        "travel.auto.tick" => Ok(travel_scheduler::run_tick(app).await),
+
         "auth.magpie.import" => {
             let keys: Vec<String> = params
                 .get("keys")
@@ -357,7 +418,7 @@ async fn workbuddy_account_status(app: &App, id: &str) -> RpcResult<Value> {
     if status.get("ok").and_then(Value::as_bool) != Some(true)
         && account.auth_source == magpie::SOURCE_MAGPIE
     {
-        if let Ok(synced) = resync_magpie_account(app, id, &account).await {
+        if let Ok(synced) = resync_magpie_access(app, &account) {
             if synced.get("state").and_then(Value::as_str) == Some("valid") {
                 if let Ok(bytes) = app.secure.get(&access_key) {
                     payload["access_token"] = json!(String::from_utf8_lossy(&bytes).to_string());
@@ -490,11 +551,14 @@ fn import_magpie_accounts(app: &App, keys: &[String]) -> RpcResult<Value> {
 }
 
 /// Magpie 账号不用 refresh token，改为"重新从 Magpie 同步一次 access token"。
-async fn resync_magpie_account(
+///
+/// 同步函数：只做「读 Magpie 文件 → 写钥匙串 → 更新账号状态」，没有任何 await。
+/// 旅行调度器也要在非 async 的凭据钩子里调它，所以不能挂在 async fn 上。
+pub(crate) fn resync_magpie_access(
     app: &App,
-    id: &str,
     account: &crate::storage::AccountRecord,
 ) -> RpcResult<Value> {
+    let id = account.id.as_str();
     let logins = magpie::read_logins().unwrap_or_default();
     let now = magpie::now_ms();
     let hit = logins
@@ -612,7 +676,7 @@ async fn refresh_account(app: &App, id: &str) -> RpcResult<Value> {
     }
     // 借用 Magpie 的账号没有 refresh token，重新同步一次 access 即可。
     if account.auth_source == magpie::SOURCE_MAGPIE {
-        return resync_magpie_account(app, id, &account).await;
+        return resync_magpie_access(app, &account);
     }
 
     let (access_key, refresh_key) = workbuddy_auth::secret_keys(&account.uid);
@@ -651,6 +715,105 @@ async fn refresh_account(app: &App, id: &str) -> RpcResult<Value> {
             }))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Buddy 旅行
+// ---------------------------------------------------------------------------
+
+/// 本地快照汇总，**不发任何请求**。
+///
+/// 界面轮询这个（几秒一次也不会打接口），要更新状态时显式调 `travel.refresh`。
+fn travel_summary(app: &App) -> Value {
+    let accounts = app
+        .with_db(|db| {
+            db.list_accounts(&AccountFilter {
+                platform: Some("workbuddy".to_string()),
+                ..Default::default()
+            })
+        })
+        .unwrap_or_default();
+    let states = app.with_db(|db| db.travel_states()).unwrap_or_default();
+    let by_id: std::collections::HashMap<&str, &crate::storage::travel::TravelState> =
+        states.iter().map(|s| (s.account_id.as_str(), s)).collect();
+
+    let rows: Vec<Value> = accounts
+        .iter()
+        .map(|account| {
+            let state = by_id.get(account.id.as_str()).map(|s| (*s).clone());
+            json!({
+                "accountId": account.id,
+                "uid": account.uid,
+                "nickname": account.nickname,
+                "authStatus": account.auth_status,
+                "authSource": account.auth_source,
+                "travelEnabled": account.travel_enabled,
+                "tokenExpiresAt": account.token_expires_at,
+                "travel": state,
+            })
+        })
+        .collect();
+
+    json!({
+        "today": crate::clock::beijing_date(),
+        "auto": travel_scheduler::auto_status(app),
+        "accounts": rows,
+    })
+}
+
+/// 一次手动同步的意图。三个动作互不越界，避免「点刷新却把奖励领了」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncIntent {
+    /// 只查状态，不派出、不领取。
+    Observe,
+    /// 派出（是否真的能派由服务端每日上限决定）。
+    Depart,
+    /// 领取（只有 arrived 会真的提交）。
+    Claim,
+}
+
+impl SyncIntent {
+    fn flags(self) -> (bool, bool) {
+        match self {
+            Self::Observe => (false, false),
+            Self::Depart => (true, false),
+            Self::Claim => (false, true),
+        }
+    }
+}
+
+/// 单账号执行一次（查询 / 派出 / 领取）。
+///
+/// 返回值只含快照与事件，**不含令牌**；事件文案在写库前已经过 `sanitize`。
+async fn travel_sync(app: &Arc<App>, account_id: &str, intent: SyncIntent) -> RpcResult<Value> {
+    let (allow_depart, allow_claim) = intent.flags();
+    let outcome =
+        travel_scheduler::sync_one(app, account_id, allow_depart, allow_claim, true).await?;
+    let events: Vec<Value> = outcome
+        .events
+        .iter()
+        .map(|event: &EventDraft| {
+            json!({
+                "kind": event.kind,
+                "status": event.status,
+                "message": event.message,
+                "credits": event.credits,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "accountId": account_id,
+        "travel": outcome.state,
+        "events": events,
+        "auto": travel_scheduler::auto_status(app),
+    }))
+}
+
+fn require_bool(params: &Value, key: &str) -> RpcResult<bool> {
+    params
+        .get(key)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| RpcError::invalid_params(format!("缺少布尔参数 {key}")))
 }
 
 fn require_str(params: &Value, key: &str) -> RpcResult<String> {

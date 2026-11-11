@@ -27,7 +27,7 @@ impl App {
     pub fn new(paths: Paths) -> Self {
         Self {
             paths,
-            secure: SecureStore::keychain(),
+            secure: SecureStore::from_env(),
             started_at: Instant::now(),
             db: Mutex::new(None),
             db_last_error: Mutex::new(None),

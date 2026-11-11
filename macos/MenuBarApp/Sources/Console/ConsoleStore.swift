@@ -19,6 +19,16 @@ final class ConsoleStore: ObservableObject {
     @Published private(set) var lastAccountsRefresh: Date?
     @Published private(set) var lastQuotaRefresh: Date?
 
+    /// Buddy 旅行的本地快照 + 运行信息。
+    @Published private(set) var travelRows: [TravelAccountRow] = []
+    @Published private(set) var travelAuto: TravelAutoStatus?
+    @Published private(set) var travelError: String?
+    @Published private(set) var travelLoading = false
+    /// 正在执行动作的账号 id，用来禁用该行按钮并显示进度。
+    @Published private(set) var travelActing: String?
+    /// 最近一次动作的一句话结果（成功/失败都给一句），显示在区域底部。
+    @Published private(set) var travelNotice: String?
+
     let worker: AccountWorkerManager
     private let settings: AppSettings
 
@@ -108,6 +118,58 @@ final class ConsoleStore: ObservableObject {
             ? "没有读到额度。确认 Magpie 正在运行（端口 \(settings.magpiePort)）。"
             : nil
         lastQuotaRefresh = Date()
+    }
+
+    // MARK: - Buddy 旅行
+
+    /// 拉一次本地快照。不发旅行接口，便宜到可以 5 秒轮询一次。
+    func loadTravel() async {
+        guard !travelLoading else { return }
+        travelLoading = true
+        defer { travelLoading = false }
+        do {
+            let summary = try await worker.travelSummary()
+            travelRows = summary.rows
+            travelAuto = summary.auto
+            travelError = nil
+            // 记一个「有没有开自动旅行」的标记：App 下次启动要靠它决定
+            // 要不要提前把助手拉起来（否则用户设了自动、重启后没人跑）。
+            TravelAutomationService.remember(summary.automationRunning)
+            if !summary.automationRunning {
+                TravelAutomationService.shared.stopIfIdle()
+            }
+        } catch {
+            travelRows = []
+            travelAuto = nil
+            travelError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    func setTravelEnabled(_ row: TravelAccountRow, enabled: Bool) async {
+        travelActing = row.accountId
+        defer { travelActing = nil }
+        do {
+            try await worker.travelSetEnabled(accountId: row.accountId, enabled: enabled)
+            travelNotice = enabled ? "已开启 \(row.nickname) 的自动旅行" : "已关闭 \(row.nickname) 的自动旅行"
+            await loadTravel()
+            TravelAutomationService.shared.startIfNeeded(worker: worker)
+        } catch {
+            travelNotice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    /// 手动派出 / 领取 / 只查状态。
+    func runTravel(_ method: TravelMethod, row: TravelAccountRow) async {
+        travelActing = row.accountId
+        defer { travelActing = nil }
+        do {
+            let result = try await worker.travelSync(method, accountId: row.accountId)
+            travelNotice = result.summaryText ?? "\(row.nickname) 已更新"
+            await loadTravel()
+        } catch {
+            travelNotice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            await loadTravel()
+        }
     }
 
     private var workerFailureText: String {

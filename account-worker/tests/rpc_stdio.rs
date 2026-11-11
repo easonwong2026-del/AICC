@@ -61,6 +61,8 @@ impl Session {
             .env_remove("WB_SWITCH_HOME")
             .env("AICC_ACCOUNT_DATA_DIR", data_dir.path())
             .env("AICC_VERSION", "2.12.2-test")
+            // 测试不碰真实钥匙串：并行跑不互相抢，也不在开发机上留假令牌。
+            .env("AICC_SECURE_STORE", "memory")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -290,5 +292,83 @@ fn magpie_preview_without_magpie_is_unavailable() {
     let reply = session.call(1, "providers.magpie.accounts", json!({}));
     assert_eq!(reply["result"]["available"], json!(false), "{reply}");
     assert_eq!(reply["result"]["kind"], json!("not_installed"));
+    session.call(2, "worker.shutdown", json!({}));
+}
+
+/// 旅行汇总：只读本地快照，带出账号与开关，且**不含令牌**。
+/// 顺手把开关（默认关闭 → 打开 → 关闭）一起验了，两次导入会互相抢钥匙串。
+#[test]
+fn travel_summary_is_local_and_token_free() {
+    let mut session = Session::with_magpie();
+    let imported = session.call(1, "auth.magpie.import", json!({}));
+    assert_eq!(imported["result"]["imported"], json!(1), "{imported}");
+
+    let reply = session.call(2, "travel.summary", json!({}));
+    let result = &reply["result"];
+    let accounts = result["accounts"].as_array().expect("accounts 数组");
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0]["travelEnabled"], json!(false), "默认必须关闭");
+    assert_eq!(accounts[0]["travel"], json!(null), "没查过就没有快照");
+    assert_eq!(
+        result["auto"]["runsOnlyWhileAppRunning"],
+        json!(true),
+        "必须如实说明调度依赖 AICC.app 常驻"
+    );
+    assert!(
+        result["auto"]["owner"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("aicc-account-worker"),
+        "要说清承载进程：{reply}"
+    );
+    assert_eq!(result["auto"]["departIntervalSecs"], json!(1800));
+    assert_eq!(result["auto"]["claimIntervalSecs"], json!(900));
+
+    let text = reply.to_string();
+    assert!(
+        !text.contains(&"a".repeat(64)),
+        "access token 泄漏到旅行汇总：{text}"
+    );
+
+    session.call(3, "worker.shutdown", json!({}));
+}
+
+/// 开关：不存在的账号要报 not_found，存在则真的落库。
+#[test]
+fn travel_toggle_requires_an_existing_account() {
+    let mut session = Session::with_magpie();
+    let missing = session.call(
+        1,
+        "travel.setEnabled",
+        json!({"id": "nope", "enabled": true}),
+    );
+    assert_eq!(missing["error"]["code"], json!(1003), "{missing}");
+
+    session.call(2, "auth.magpie.import", json!({}));
+    let summary = session.call(3, "travel.summary", json!({}));
+    let id = summary["result"]["accounts"][0]["accountId"]
+        .as_str()
+        .expect("accountId")
+        .to_string();
+
+    let toggled = session.call(4, "travel.setEnabled", json!({"id": id, "enabled": true}));
+    assert_eq!(toggled["result"]["travelEnabled"], json!(true), "{toggled}");
+
+    let after = session.call(5, "travel.summary", json!({}));
+    assert_eq!(after["result"]["accounts"][0]["travelEnabled"], json!(true));
+    assert_eq!(after["result"]["auto"]["enabledAccounts"], json!(1));
+
+    let off = session.call(6, "travel.setEnabled", json!({"id": id, "enabled": false}));
+    assert_eq!(off["result"]["travelEnabled"], json!(false));
+    session.call(7, "worker.shutdown", json!({}));
+}
+
+/// 没有任何账号开自动旅行时，一轮检查必须立刻返回 idle，不发请求。
+#[test]
+fn travel_tick_without_enabled_accounts_is_idle() {
+    let mut session = Session::start();
+    let reply = session.call(1, "travel.auto.tick", json!({}));
+    assert_eq!(reply["result"]["status"], json!("idle"), "{reply}");
+    assert_eq!(reply["result"]["reason"], json!("no_enabled_accounts"));
     session.call(2, "worker.shutdown", json!({}));
 }

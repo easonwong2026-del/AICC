@@ -34,6 +34,7 @@ let package = Package(
                 "AccountCenter/AccountWorkerClient.swift",
                 "Models/AccountWorkerProtocol.swift",
                 "Models/ConsoleModels.swift",
+                "Models/TravelModels.swift",
                 "Models/QuotaModel.swift",
                 "Models/UsageModel.swift",
                 "Models/WidgetPreferences.swift",
