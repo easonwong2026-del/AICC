@@ -187,6 +187,17 @@ pending ──► migrating ──► ready        读到旧凭据并写成功
 | `workbuddy/<uid>/access` | `workbuddy/<account_id>/magpie/access` | 该行 `kind = magpie` |
 | `workbuddy/<uid>/refresh` | **不迁移** | magpie 永不持有 refresh |
 
+**"搬完了"的判定必须可信**（评审 P0）：
+
+| 情况 | 结果 |
+| --- | --- |
+| 旧键有内容 → 写新键成功 | `ready` |
+| 旧键没有、新键已有相同内容 | `ready`（幂等重跑） |
+| 旧键没有、新键也没有，且授权标 `valid` / `unknown` | **`failed` + `credential_missing`**：不允许显示成"迁移完成" |
+| 旧键没有、新键也没有，授权本来就是 `expired` / `invalid` / `denied` | `ready`（本来就不该有凭据） |
+| 读新键被拒 / 后端异常 | **中止，不写**（不知道现状就不盲写） |
+| 新键已有内容但与旧键不同 | **`failed` + `conflict`**，不覆盖（来源无法确认） |
+
 四条硬规则：
 
 1. **只复制已存在的授权，不凭空创建第二套凭据。** 旧键里没有 refresh，就不去造一个；
@@ -203,9 +214,13 @@ pending ──► migrating ──► ready        读到旧凭据并写成功
 "credentialMigration": {
   "pending": 0, "migrating": 0, "ready": 4, "failed": 0,
   "lastError": null,
-  "retryable": true
+  "failures": [],
+  "retryable": false
 }
 ```
+
+`failures` 按失败原因分组（`[{message, count}]`）：光有 `failed: 1` 分不清是
+"钥匙串被拒"还是"两边都没有凭据"，而这两种情况的处理动作完全不同。
 
 失败时 `lastError.kind` 取 `denied` / `unavailable` / `mismatch` / `write_failed` 之一，
 `message` 过 `rpc::sanitize`，不含键内容。
@@ -339,6 +354,10 @@ pub struct ProbeReport {
 | 429 / 5xx / 超时 / 连接错误 / `code = -1` | `Transient` | 否 |
 | 其它 4xx | `Transient`（保守） | 否 |
 
+**判定顺序**：传输失败（`status = 0`）→ 429 → 5xx → 401 → 403 → 2xx 业务码 → 其它。
+429 / 5xx 先于响应体里的 `code = 401`：限流响应即使 body 写了 401，说的也是
+"这次没问出来"，不是"令牌不能用"。
+
 - **403 必须依据 WorkBuddy 的真实响应语义分类，不能默认视为认证失败。** WorkBuddy 的 403
   既可能是"令牌无权 / 失效"，也可能是网关指纹拦截（`10085`）或活动未开放。判定依据是响应体里的
   业务码与文案（`is_unauthorized` 等上游已有判据），不是 HTTP 码本身。分类不出来时**归为
@@ -465,6 +484,8 @@ workbuddy/<16hex>/magpie/access
 | 首选是 magpie，探测 `Unauthorized` | 重新读 Magpie 的 `plugin-auth.json` 取最新 access（**不刷新**）；取不到 → own 兜底；两条都不行 → `expired` |
 | 首选是 own，探测 `Unauthorized` | 用 own 的 refresh 刷新；刷新失败 → 该行 `invalid`，降级到 magpie |
 | 探测 `Transient`（429 / 5xx / 超时 / 403 无法归类） | 不改状态、不切源，只记 `last_error`；任务侧按既有退避处理，不重复执行 |
+| 旅行 / 签到拿到 401 | 按**当前选中的来源**恢复一次：own → refresh，magpie → 重新读文件；主路明确失败后**只读**地试另一份仍在有效期内的 access，不再发第二次请求 |
+| 旅行 / 签到拿到 429 / 5xx / 超时 | 不换源、不进 6 小时令牌冷却，按普通退避重试；不重复派出 / 领取 |
 | 两条都失效 | 账号 `expired`，界面提示"重新扫码，或去 Magpie 登录" |
 | 只有 magpie 且令牌临期 | 不做后台保活；使用前检查，过期即提示 |
 | 只有 own 且 refresh 缺失 | 不降级（没有别的来源），标 `invalid` 等重新登录 |

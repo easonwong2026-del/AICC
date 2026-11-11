@@ -1162,7 +1162,7 @@ fn clear_dead_refresh(app: &App, key: &str) -> bool {
 /// 用 refresh token 换新令牌；失败就标成 invalid，让界面提示重新登录。
 ///
 /// 没有 own 授权（只有借用）时走 Magpie 重同步：借用授权永远不刷新。
-async fn refresh_account(app: &App, id: &str) -> RpcResult<Value> {
+pub(crate) async fn refresh_account(app: &App, id: &str) -> RpcResult<Value> {
     let account = app
         .with_db(|db| db.get_account(id))?
         .ok_or_else(|| RpcError::not_found(format!("账号不存在：{id}")))?;
@@ -1972,6 +1972,91 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.status, "invalid");
+    }
+
+    /// P0：Magpie 的 access 写进钥匙串了、授权行却写不进去 —— 必须把钥匙串恢复原样。
+    /// 否则会留下"新令牌在钥匙串、库里还是旧状态"的组合。
+    #[test]
+    fn magpie_db_failure_restores_the_keychain() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-7777-0001-0002-000000000001";
+        import_logins(&app, vec![magpie_login(uid, "borrowed-1")], &[]).expect("import");
+        let acc = account(&app, uid);
+
+        app.with_db(|db| {
+            db.exec_raw(
+                "CREATE TRIGGER no_auth_update BEFORE UPDATE ON account_authorizations
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+        })
+        .expect("install trigger");
+
+        let err = match service::save_magpie(&app, &acc.id, uid, "borrowed-2", None, None) {
+            Ok(_) => panic!("库里写不进去就该失败"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code, crate::rpc::E_STORAGE);
+        assert_eq!(
+            magpie_access(&app, &acc.id).as_deref(),
+            Some("borrowed-1"),
+            "钥匙串必须回到写入前的内容"
+        );
+    }
+
+    /// 旅行侧：选中的是自有授权但刷新不成（没有 refresh），要兜底到另一份现成的 access。
+    /// 这条路径不发网络请求，所以能在单测里跑。
+    #[test]
+    fn travel_resync_falls_back_to_the_other_authorization() {
+        use crate::travel::scheduler::AppTokens;
+        use crate::travel::service::Tokens;
+
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-7777-0001-0002-000000000002";
+        import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
+        // 自有授权有 access、没有 refresh：refresh 一定失败，且不需要联网
+        persist_login(&app, &payload(uid, "own-access", None)).expect("login");
+        broker::set_preferred_source(&app, "own").expect("prefer own");
+        let acc = account(&app, uid);
+
+        let tokens = AppTokens { app: &app };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let result = runtime.block_on(tokens.resync(&acc));
+
+        assert_eq!(result.as_deref(), Ok("borrowed"), "主路失败要兜底到另一份");
+        assert_eq!(
+            magpie_access(&app, &acc.id).as_deref(),
+            Some("borrowed"),
+            "兜底只读，不许改另一份"
+        );
+        let own = app
+            .with_db(|db| db.find_authorization(&acc.id, "own"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(own.status, "invalid", "自有授权缺 refresh 应标失效");
+    }
+
+    /// 两份都拿不出来时才报错，不会无限重试。
+    #[test]
+    fn travel_resync_reports_when_both_sources_are_unusable() {
+        use crate::travel::scheduler::AppTokens;
+        use crate::travel::service::Tokens;
+
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-7777-0001-0002-000000000003";
+        persist_login(&app, &payload(uid, "own-access", None)).expect("login");
+        broker::set_preferred_source(&app, "own").expect("prefer own");
+        let acc = account(&app, uid);
+
+        let tokens = AppTokens { app: &app };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let result = runtime.block_on(tokens.resync(&acc));
+        assert!(result.is_err(), "没有可用来源就该报错，而不是返回空令牌");
     }
 
     // -----------------------------------------------------------------------

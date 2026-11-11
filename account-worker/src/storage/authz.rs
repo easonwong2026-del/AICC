@@ -285,6 +285,24 @@ impl super::Db {
         Ok(stmt.query_row([], |row| row.get(0)).optional()?)
     }
 
+    /// `health` 用：迁移失败原因分组（`failed` 行按 last_error 聚合）。
+    ///
+    /// 光有 "failed: 1" 说不清是"钥匙串被拒"还是"两边都没有凭据"，
+    /// 而这两种情况要采取的动作完全不同。
+    pub fn migration_failures(&self) -> RpcResult<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COALESCE(last_error, '未知原因'), COUNT(*) FROM account_authorizations
+              WHERE key_migration_state = 'failed'
+              GROUP BY last_error ORDER BY COUNT(*) DESC",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// 需要搬运的授权（`pending` / `migrating` / `failed`）。
     pub fn authorizations_pending_key_migration(&self) -> RpcResult<Vec<AuthorizationRecord>> {
         let mut stmt = self.conn.prepare(&format!(

@@ -79,6 +79,10 @@ pub fn run(app: &App) -> RpcResult<Report> {
 }
 
 /// 搬一份授权：access 必搬，refresh 只搬 own 的。
+///
+/// 「必搬」的含义是：**旧键和新键都没有内容时不能算完成**。旧实现把这种情况记成
+/// `Copy::Nothing` 然后标 `ready`，于是 `health` 显示"迁移完毕"，实际上一个可用的
+/// 令牌都没有 —— 迁移状态必须能被信任，宁可报 `failed` 也不许假成功。
 fn move_one(
     app: &App,
     uid: &str,
@@ -93,6 +97,17 @@ fn move_one(
     };
 
     let mut outcome = copy_key(app, &legacy_access, &target_access)?;
+    if matches!(outcome, Copy::Nothing) {
+        // 两边都读不到。只有"这份授权本来就该是失效/过期"时才算完成；
+        // 自称可用却没有任何凭据，属于迁移没做成，必须报出来。
+        if row.status == "valid" || row.status == "unknown" {
+            return Err((
+                "credential_missing".to_string(),
+                "旧键与新键都没有访问令牌，但授权标着可用".to_string(),
+            ));
+        }
+        return Ok(Copy::Nothing);
+    }
 
     // magpie 永远没有 refresh：这一段代码里根本没有它的分支，
     // 表上的 CHECK 也只能拦住"写了引用"，拦不住"读了 refresh"。
@@ -100,6 +115,7 @@ fn move_one(
         if let Some(target_refresh) = row.refresh_key() {
             match copy_key(app, &legacy_refresh, &target_refresh)? {
                 Copy::Copied => outcome = Copy::Copied,
+                // 没有 refresh 是合法状态（登录时服务端就没发），不算迁移失败。
                 Copy::AlreadyThere | Copy::Nothing => {}
             }
         }
@@ -107,15 +123,24 @@ fn move_one(
     Ok(outcome)
 }
 
+/// 复制一条凭据。
+///
+/// 三条规矩：
+/// 1. 旧键没有内容时，目标有就 `AlreadyThere`，没有就 `Nothing`（由调用方判断能不能算完成）；
+/// 2. **目标读不出来（被拒 / 后端异常）就中止** —— 不知道目标现状时写下去就是盲写；
+/// 3. 目标已有内容且与旧键不同时不覆盖：来源无法确认，记冲突让人来看。
 fn copy_key(app: &App, from: &str, to: &str) -> Result<Copy, (String, String)> {
     let source = match app.secure.get(from) {
         Ok(bytes) => bytes,
         Err(err) if err.kind == SecretErrorKind::NotFound => {
-            // 旧键没有内容：目标已经有就直接算完成，没有也算完成（本来就没什么可搬）。
             return match app.secure.get(to) {
                 Ok(_) => Ok(Copy::AlreadyThere),
                 Err(err) if err.kind == SecretErrorKind::NotFound => Ok(Copy::Nothing),
-                Err(err) => Err((error_kind(&err.kind).to_string(), sanitized(&err.message))),
+                // 旧键没有、目标却读不出来：同样不能假设它是空的。
+                Err(err) => Err((
+                    error_kind(&err.kind).to_string(),
+                    format!("读取目标键失败，未写入：{}", sanitized(&err.message)),
+                )),
             };
         }
         // 读被拒不是"没有"：进 failed 等下次重试，绝不能标 ready。
@@ -124,15 +149,22 @@ fn copy_key(app: &App, from: &str, to: &str) -> Result<Copy, (String, String)> {
         }
     };
 
-    if let Ok(existing) = app.secure.get(to) {
-        if existing == source {
-            return Ok(Copy::AlreadyThere);
-        }
+    match app.secure.get(to) {
+        Ok(existing) if existing == source => Ok(Copy::AlreadyThere),
+        Ok(_) => Err((
+            "conflict".to_string(),
+            "目标键已有不同内容且来源无法确认，未覆盖".to_string(),
+        )),
+        Err(err) if err.kind == SecretErrorKind::NotFound => app
+            .secure
+            .set(to, &source)
+            .map(|_| Copy::Copied)
+            .map_err(|err| (error_kind(&err.kind).to_string(), sanitized(&err.message))),
+        Err(err) => Err((
+            error_kind(&err.kind).to_string(),
+            format!("读取目标键失败，未写入：{}", sanitized(&err.message)),
+        )),
     }
-    app.secure
-        .set(to, &source)
-        .map(|_| Copy::Copied)
-        .map_err(|err| (error_kind(&err.kind).to_string(), sanitized(&err.message)))
 }
 
 fn error_kind(kind: &SecretErrorKind) -> &'static str {
@@ -169,6 +201,13 @@ pub fn health(app: &App) -> Value {
         .ok()
         .flatten()
         .map(|text| json!({ "message": text }));
+    // 失败原因分类：调用方据此决定"重试"还是"去看钥匙串"。
+    let failures: Vec<Value> = app
+        .with_db(|db| db.migration_failures())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(message, count)| json!({ "message": message, "count": count }))
+        .collect();
 
     json!({
         "pending": pending,
@@ -176,6 +215,7 @@ pub fn health(app: &App) -> Value {
         "ready": ready,
         "failed": failed,
         "lastError": last_error,
+        "failures": failures,
         // 有 fail / pending 就说明还可以重试：下次启动或调用 storage.init 会再跑一轮。
         "retryable": failed > 0 || pending > 0 || migrating > 0,
     })
@@ -362,10 +402,115 @@ mod tests {
         assert_eq!(app.secure.get(&legacy_access).unwrap(), b"a");
     }
 
+    /// P0：旧键和新键都没有内容时，不能把「自称可用」的授权标成 ready。
+    /// 否则 health 显示迁移完成，账号却一个能用的令牌都没有。
+    #[test]
+    fn missing_credentials_are_not_marked_ready() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let account = seed_legacy_account(&app, "uid-empty", "own");
+        // 一条凭据都不写：模拟"钥匙串被清空 / 从来没写成"
+
+        let report = run(&app).expect("run");
+        assert_eq!(report.failed, 1, "{report:?}");
+        assert_eq!(report.error_kind.as_deref(), Some("credential_missing"));
+
+        let id = ids::auth_id(&account.id, "own");
+        assert_eq!(state_of(&app, &id), "failed");
+        let health = health(&app);
+        assert_eq!(health["failed"], json!(1));
+        assert_eq!(health["ready"], json!(0), "不许假成功");
+        assert_eq!(health["retryable"], json!(true));
+        assert!(
+            health["lastError"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("没有访问令牌"),
+            "{health}"
+        );
+        assert_eq!(health["failures"][0]["count"], json!(1), "{health}");
+        assert!(
+            health["failures"][0]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("没有访问令牌"),
+            "health 要能区分「没凭据」和「没搬」：{health}"
+        );
+    }
+
+    /// 已经过期 / 失效的授权本来就不该有凭据，这种情况允许直接 ready。
+    #[test]
+    fn expired_authorization_without_credentials_can_be_ready() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let account = seed_legacy_account(&app, "uid-expired", "own");
+        let id = ids::auth_id(&account.id, "own");
+        app.with_db(|db| db.set_authorization_status(&id, 0, "expired", None, None))
+            .unwrap()
+            .then_some(())
+            .expect("state update");
+
+        let report = run(&app).expect("run");
+        assert_eq!(report.failed, 0, "{report:?}");
+        assert_eq!(state_of(&app, &id), "ready");
+    }
+
+    /// 旧键读得到、目标键读不出来：必须中止，不许盲写。
+    #[test]
+    fn unreadable_target_aborts_without_writing() {
+        let (app, _dir) = test_app(SecureStore::faulty_on_read_keys(&["/own/access"]));
+        let account = seed_legacy_account(&app, "uid-blind", "own");
+        let (legacy_access, _) = ids::legacy_keys(&account.uid);
+        app.secure.set(&legacy_access, b"old-access").unwrap();
+        app.secure.arm();
+
+        let report = run(&app).expect("run");
+        assert_eq!(report.failed, 1, "{report:?}");
+        assert_eq!(report.error_kind.as_deref(), Some("denied"));
+
+        let id = ids::auth_id(&account.id, "own");
+        assert_eq!(state_of(&app, &id), "failed");
+
+        app.secure.disarm();
+        assert!(
+            app.secure
+                .get(&ids::access_key(&account.id, "own"))
+                .is_err(),
+            "读不出目标时一个字节都不该写进去"
+        );
+        assert_eq!(app.secure.get(&legacy_access).unwrap(), b"old-access");
+    }
+
+    /// 目标键已有不同内容（例如迁移失败后用户又登录了一次）：不覆盖，记冲突。
+    #[test]
+    fn conflicting_target_is_not_overwritten() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let account = seed_legacy_account(&app, "uid-conflict", "own");
+        let (legacy_access, _) = ids::legacy_keys(&account.uid);
+        app.secure.set(&legacy_access, b"old-access").unwrap();
+        app.secure
+            .set(&ids::access_key(&account.id, "own"), b"newer-access")
+            .unwrap();
+
+        let report = run(&app).expect("run");
+        assert_eq!(report.failed, 1, "{report:?}");
+        assert_eq!(report.error_kind.as_deref(), Some("conflict"));
+        assert_eq!(
+            app.secure
+                .get(&ids::access_key(&account.id, "own"))
+                .unwrap(),
+            b"newer-access",
+            "来源无法确认时不许拿旧值覆盖新值"
+        );
+        assert_eq!(app.secure.get(&legacy_access).unwrap(), b"old-access");
+    }
+
     #[test]
     fn health_reports_counts_without_secrets() {
         let (app, _dir) = test_app(SecureStore::memory());
-        seed_legacy_account(&app, "uid-h", "own");
+        let account = seed_legacy_account(&app, "uid-h", "own");
+        // 有凭据才算"待搬运"；没有凭据的情况见 missing_credentials_are_not_marked_ready。
+        app.secure
+            .set(&ids::legacy_keys(&account.uid).0, b"access")
+            .unwrap();
         let before = health(&app);
         assert_eq!(before["pending"], json!(1));
         assert_eq!(before["retryable"], json!(true));

@@ -136,7 +136,7 @@ fn order_for<'a>(
 ///
 /// `token_expires_at` 为空时按"可用"处理：没有到期信息不等于已过期，
 /// 真的失效会由探测接口（M2）判出来。
-fn is_usable(row: &crate::storage::AuthorizationRecord) -> bool {
+pub(crate) fn is_usable(row: &crate::storage::AuthorizationRecord) -> bool {
     if ["invalid", "expired", "denied"].contains(&row.status.as_str()) {
         return false;
     }

@@ -21,7 +21,8 @@ use crate::storage::AccountRecord;
 
 use super::api::{self, Transport};
 use super::state::{
-    self, Action, Label, Prior, ServerStatus, StatusError, TOKEN_INVALID_COOLDOWN_SECS,
+    self, is_auth_failure, Action, Label, Prior, ServerStatus, StatusError,
+    TOKEN_INVALID_COOLDOWN_SECS,
 };
 
 /// 派出检查间隔：每 30 分钟看一次能不能派。
@@ -47,10 +48,14 @@ impl Default for Config {
 }
 
 /// 凭据来源。线上实现读钥匙串 + 必要时从 Magpie 重新同步。
+#[allow(async_fn_in_trait)]
 pub trait Tokens {
     fn access(&self, account: &AccountRecord) -> Result<String, String>;
-    /// 只允许「重新取一份 access」。返回新 access。
-    fn resync(&self, account: &AccountRecord) -> Result<String, String>;
+    /// 401 之后重新取一份 access。
+    ///
+    /// 是 async 的：自有授权要走 refresh，那是一次网络往返。实现方负责按
+    /// "当前选中的来源"选路径，并且只做一次恢复（不循环）。
+    async fn resync(&self, account: &AccountRecord) -> Result<String, String>;
 }
 
 #[derive(Debug, Clone)]
@@ -200,8 +205,8 @@ pub async fn sync_account<T: Transport, K: Tokens>(
     // ---- 查状态（先查再做，绝不凭本地记忆直接提交）----
     let mut payload = api::build_payload(&account.uid, &domain, &access);
     let mut resp = transport.status(&payload).await;
-    if wb_switch_core::modules::travel::is_unauthorized(&resp) {
-        match tokens.resync(account) {
+    if is_auth_failure(&resp) {
+        match tokens.resync(account).await {
             Ok(fresh) => {
                 payload = api::build_payload(&account.uid, &domain, &fresh);
                 resp = transport.status(&payload).await;
@@ -336,8 +341,8 @@ async fn do_claim<T: Transport, K: Tokens>(
     let mut resp = transport.claim(&payload, status.record_id).await;
 
     // 401：只重同步一次，然后重试一次。仍失败就交给退避，不循环。
-    if wb_switch_core::modules::travel::is_unauthorized(&resp) {
-        match tokens.resync(account) {
+    if is_auth_failure(&resp) {
+        match tokens.resync(account).await {
             Ok(fresh) => {
                 payload = api::build_payload(&account.uid, domain, &fresh);
                 resp = transport.claim(&payload, status.record_id).await;
@@ -497,8 +502,8 @@ async fn do_depart<T: Transport, K: Tokens>(
     let mut payload = payload.clone();
 
     let config = transport.config(&payload).await;
-    if wb_switch_core::modules::travel::is_unauthorized(&config) {
-        if let Ok(fresh) = tokens.resync(account) {
+    if is_auth_failure(&config) {
+        if let Ok(fresh) = tokens.resync(account).await {
             payload = api::build_payload(&account.uid, domain, &fresh);
         }
     }

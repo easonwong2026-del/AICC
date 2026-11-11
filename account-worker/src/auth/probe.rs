@@ -90,6 +90,10 @@ pub async fn probe(variant: WbVariant, access: &str, uid: &str, domain: &str) ->
 }
 
 /// 纯函数：HTTP 状态 + 响应体 → 分类。抽出来是为了能离线覆盖每个分支。
+///
+/// **顺序很重要**：传输失败、429、5xx 先判。它们表达的是"这次没问出来"，
+/// 不是"这份令牌不能用"。如果先看响应体里的 `code == 401`，一个限流响应
+/// 只要 body 里带了 401 就会被当成认证失败，直接切源 —— 这正是要避免的误判。
 pub fn classify(status: u16, body: &str) -> ProbeReport {
     let parsed: Option<Value> = serde_json::from_str(body).ok();
     let code = parsed
@@ -103,70 +107,75 @@ pub fn classify(status: u16, body: &str) -> ProbeReport {
         .unwrap_or("")
         .to_lowercase();
 
-    // 传输层失败：`http_request_raw` 用 0 表示没拿到响应。
+    // 1) 传输层失败：`http_request_raw` 用 0 表示没拿到响应。
     if status == 0 {
         return ProbeReport::new(Probe::Transient, None, code, Some("网络错误或超时"));
     }
-
-    // 业务码有时比 HTTP 码更准（网关会回 200 + code=401）。
-    if code == Some(401) {
-        return ProbeReport::new(Probe::Unauthorized, Some(status), code, Some("业务码 401"));
+    // 2) 限流与服务端错误：无论 body 写了什么，都不是认证结论。
+    if status == 429 {
+        return ProbeReport::new(Probe::Transient, Some(status), code, Some("限流 429"));
     }
-    if code == Some(10085) {
-        // 网关指纹拦截：不是授权问题，重试或换网络才有用。
+    if (500..=599).contains(&status) {
+        return ProbeReport::new(Probe::Transient, Some(status), code, Some("服务端 5xx"));
+    }
+    // 3) 明确的认证失败。
+    if status == 401 {
+        return ProbeReport::new(Probe::Unauthorized, Some(status), code, Some("HTTP 401"));
+    }
+    if status == 403 {
+        // 403 不等于"令牌失效"。只有响应本身在说"未授权 / 登录失效"时才算。
+        let auth_like = ["unauthorized", "forbidden token", "登录", "失效", "token"]
+            .iter()
+            .any(|needle| message.contains(needle));
+        return if auth_like {
+            ProbeReport::new(
+                Probe::Unauthorized,
+                Some(status),
+                code,
+                Some("HTTP 403 + 鉴权文案"),
+            )
+        } else {
+            ProbeReport::new(
+                Probe::Transient,
+                Some(status),
+                code,
+                Some("HTTP 403（语义不足以判定为认证失败）"),
+            )
+        };
+    }
+
+    // 4) 2xx：业务码可能比 HTTP 码更准（网关会回 200 + code=401）。
+    if (200..=299).contains(&status) {
+        if code == Some(401) {
+            return ProbeReport::new(Probe::Unauthorized, Some(status), code, Some("业务码 401"));
+        }
+        if code == Some(10085) {
+            // 网关指纹拦截：不是授权问题，重试或换网络才有用。
+            return ProbeReport::new(
+                Probe::Transient,
+                Some(status),
+                code,
+                Some("网关拦截（10085）"),
+            );
+        }
+        if matches!(code, Some(0) | Some(200)) || code.is_none() {
+            return ProbeReport::new(Probe::Valid, Some(status), code, None);
+        }
         return ProbeReport::new(
             Probe::Transient,
             Some(status),
             code,
-            Some("网关拦截（10085）"),
+            Some("2xx 但业务码异常"),
         );
     }
 
-    match status {
-        200..=299 => {
-            if matches!(code, Some(0) | Some(200)) || code.is_none() {
-                ProbeReport::new(Probe::Valid, Some(status), code, None)
-            } else {
-                // 2xx 但业务码异常：语义不明，保守归暂时性。
-                ProbeReport::new(
-                    Probe::Transient,
-                    Some(status),
-                    code,
-                    Some("2xx 但业务码异常"),
-                )
-            }
-        }
-        401 => ProbeReport::new(Probe::Unauthorized, Some(status), code, Some("HTTP 401")),
-        403 => {
-            // 403 不等于"令牌失效"。只有响应本身在说"未授权 / 登录失效"时才算。
-            let auth_like = ["unauthorized", "forbidden token", "登录", "失效", "token"]
-                .iter()
-                .any(|needle| message.contains(needle));
-            if auth_like {
-                ProbeReport::new(
-                    Probe::Unauthorized,
-                    Some(status),
-                    code,
-                    Some("HTTP 403 + 鉴权文案"),
-                )
-            } else {
-                ProbeReport::new(
-                    Probe::Transient,
-                    Some(status),
-                    code,
-                    Some("HTTP 403（语义不足以判定为认证失败）"),
-                )
-            }
-        }
-        429 => ProbeReport::new(Probe::Transient, Some(status), code, Some("限流 429")),
-        500..=599 => ProbeReport::new(Probe::Transient, Some(status), code, Some("服务端 5xx")),
-        _ => ProbeReport::new(
-            Probe::Transient,
-            Some(status),
-            code,
-            Some("其它状态码，保守归暂时性"),
-        ),
-    }
+    // 5) 其它 4xx（400/404/405 等）：语义不明，保守归暂时性。
+    ProbeReport::new(
+        Probe::Transient,
+        Some(status),
+        code,
+        Some("其它状态码，保守归暂时性"),
+    )
 }
 
 #[cfg(test)]
@@ -227,6 +236,36 @@ mod tests {
             Probe::Transient
         );
         assert_eq!(classify(0, "").outcome, Probe::Transient);
+    }
+
+    /// 限流 / 服务端错误即使 body 里写着 code=401，也不能判成认证失败。
+    /// 它们说的是"这次没问出来"，不是"这份令牌不能用"。
+    #[test]
+    fn rate_limit_wins_over_a_body_code_401() {
+        let report = classify(429, r#"{"code":401,"message":"too many requests"}"#);
+        assert_eq!(report.outcome, Probe::Transient, "{report:?}");
+        assert_eq!(report.http_status, Some(429));
+    }
+
+    #[test]
+    fn server_error_wins_over_a_body_code_401() {
+        for status in [500u16, 502, 503, 504] {
+            let report = classify(status, r#"{"code":401,"message":"token 校验服务不可用"}"#);
+            assert_eq!(report.outcome, Probe::Transient, "{status}: {report:?}");
+        }
+    }
+
+    /// 404 / 400 这类"路径也许不对"的响应同样不构成认证结论。
+    #[test]
+    fn other_client_errors_are_transient() {
+        assert_eq!(
+            classify(404, r#"{"code":404,"message":"not found"}"#).outcome,
+            Probe::Transient
+        );
+        assert_eq!(
+            classify(400, r#"{"code":401,"message":"登录参数错误"}"#).outcome,
+            Probe::Transient
+        );
     }
 
     #[test]

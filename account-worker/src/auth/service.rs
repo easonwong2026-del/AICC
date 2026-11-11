@@ -283,7 +283,11 @@ pub fn save_magpie(
     row.status = "valid".to_string();
     row.key_migration_state = KEY_STATE_READY.to_string();
     row.last_error = None;
-    app.with_db(|db| db.replace_authorization(&row))?;
+    // 钥匙串已经写好了，库写不进去就必须把凭据恢复原样：
+    // 留下"新令牌在钥匙串、库里还是旧状态"的组合，下次读会拿到一份没被记账的凭据。
+    if let Err(err) = app.with_db(|db| db.replace_authorization(&row)) {
+        return Err(rollback(app, &snapshot, err));
+    }
 
     let degraded = sync_mirror(app, account_id).ok().and_then(|r| r.error);
     let fresh = app
