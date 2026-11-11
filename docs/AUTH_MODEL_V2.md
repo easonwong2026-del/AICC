@@ -1,7 +1,7 @@
 # 授权模型 v2：一账号多来源授权（PR #66 设计稿）
 
-> 状态：**M0 设计稿，已定稿**。实现分 M1（迁移 + 只读 Broker）/ M2（双写 + 探测 + 删除）/
-> M3（设置、UI、RPC 收口）三步落地，全部提交在 PR #66 里。
+> 状态：**M0 设计稿已定稿；M1 / M2 / M3 已按本文实现**（迁移 + 只读 Broker、双写 + 探测 + 删除、
+> 设置 / UI / RPC 收口），全部提交在 PR #66 里。v8 仍留给后续独立 PR。
 >
 > 基线：`main` @ `72e6426`（PR #63 / #64 / #65 已合并）。
 > 范围：**只做 WorkBuddy**。Qoder 不接；Buddy 旅行状态机（PR #64）不动；不执行真实签到 / 派出 / 领奖。
@@ -450,6 +450,8 @@ workbuddy/<16hex>/magpie/access
 | 方法 | 变化 |
 | --- | --- |
 | `accounts.list` / `accounts.get` | 新增 `authorizations: [{ id, kind, status, tokenExpiresAt, sourceKey, keyMigrationState, lastUsedAt, lastError }]`；`authSource` 保留（改为派生值） |
+| `accounts.upsert` | 忽略调用方传来的 `authStatus` / `authSource` / 授权引用：它们是派生镜像，只由服务写（G6） |
+| `auth.workbuddy.status` | 返回 `authSource` / `authorizationId` / `probe.{outcome,httpStatus,businessCode}`；暂时性失败返回 `state: "transient"` 且不写状态 |
 | `settings.get` / `settings.set` | 新增 |
 | `auth.authorization.delete` | 新增（类型化删除） |
 | `secure.set/get/delete` | 默认关闭；启用时键名白名单 |

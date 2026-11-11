@@ -43,17 +43,19 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `env.info` | 数据目录、`WB_SWITCH_HOME` 实际值、认证文件位置 | 否 |
 | `worker.shutdown` | 优雅退出 | 否 |
 | `storage.init` / `storage.status` | 迁移、行数、完整性 | 否 |
-| `accounts.list` / `get` / `upsert` / `delete` | 账号库 CRUD（`upsert` 是补丁语义：没传的字段保持原值；建行与写字段在同一个事务里，失败整条回滚） | 否 |
+| `accounts.list` / `get` / `upsert` / `delete` | 账号库 CRUD（`upsert` 是补丁语义：没传的字段保持原值；建行与写字段在同一个事务里，失败整条回滚）。`list`/`get` 额外带 `authorizations`；授权字段是派生镜像，`upsert` 传了也不生效 | 否 |
 | `groups.list` / `upsert` | 分组 | 否 |
 | `secure.status` | 钥匙串读写删探针（会触发一次系统授权） | 否 |
-| `secure.set` / `get` / `delete` | 凭据存取，默认只回指纹 | 否 |
+| `secure.set` / `get` / `delete` | **默认关闭**（`method_not_found`）。`AICC_ALLOW_SECURE_RPC=1` 才启用，且只接受 `workbuddy/<16 hex>/{own/access,own/refresh,magpie/access}` | 否 |
+| `settings.get` / `settings.set` | 全局设置；目前只有 `auth_preferred_source`（`magpie` \| `own`，默认 `magpie`） | 否 |
+| `auth.authorization.delete` | 删除**一份**授权（`{accountId, kind}`），只清它自己的键与记录 | 否 |
 | `providers.workbuddy.inspect` | 读认证文件并**如实**报告能否解密 | 否 |
 | `providers.workbuddy.oauth` | OAuth 能力说明（PR1a 未接线） | 否 |
 | `providers.qoder.presence` | 只查配置目录/文件，不碰钥匙串 | 否 |
 | `providers.qoder.inspect` | 解密 `auth.v1.dat` 并给令牌指纹 | 否 |
 | `auth.workbuddy.start` / `poll` / `cancel` | 官方 OAuth 扫码：发起、轮询、取消（PR1b-1） | 是 |
 | `auth.workbuddy.refresh` | 刷新令牌；`auth_source=magpie` 的账号改为重新同步 | 是 |
-| `auth.workbuddy.status` | 用钥匙串里的令牌查一次真实登录态（只读） | 是 |
+| `auth.workbuddy.status` | 用当前选用的授权探测一次登录态（只读）：先 `Valid/Unauthorized/Transient` 分类，再过 401 才切源 | 是 |
 | `providers.magpie.accounts` | 列出 Magpie 里已登录的 WorkBuddy 账号（**不含令牌**） | 否 |
 | `auth.magpie.import` | 把 Magpie 的 access token 搬进 AICC 钥匙串 | 否 |
 | `travel.summary` | 旅行快照汇总（账号 + 开关 + 运行信息），**只读本地库** | 否 |
@@ -98,6 +100,14 @@ AICC 打了 3 行补丁拆开（见 `account-worker/vendor/VENDOR.md`，回归�
 
 - AICC 自己的凭据进钥匙串，service = `com.aieink.dashboard.menubar.account-worker`。
   SQLite 只存引用，不存明文。
+- 一个 WorkBuddy 账号可以有两份授权（PR #66），键按来源分开：
+  `workbuddy/<account_id>/own/access`、`…/own/refresh`、`…/magpie/access`。
+  **`magpie/refresh` 这个键不存在**，也不允许被创建；`magpie` 授权在表上有
+  `CHECK (kind <> 'magpie' OR refresh_ref IS NULL)`。旧的 `workbuddy/<uid>/access|refresh`
+  只作为兼容别名继续同步，等 v8 的独立 PR 再删。
+- 通用 `secure.*` 默认不挂载：能写 stdin 的进程本来就能覆盖凭据，这条通道不该长期存在。
+  受控开发 / 迁移时设 `AICC_ALLOW_SECURE_RPC=1`，并且仍受键名白名单约束（旧 UID 键、
+  `magpie/refresh`、探针键都拒绝）。
 - 对外只返回**指纹**（sha256 前 8 hex）与长度。**`secure.get` 不再回明文**
   （PR #65 关掉了 `reveal`）：能写 stdin 的进程就能读钥匙串，这个能力不该出现在协议里。
   需要明文的内部调用（查登录态 / 刷新 / 旅行）是 Rust 里直接 `app.secure.get()`，不经过 RPC。
@@ -170,26 +180,27 @@ AICC 的取法是**只读文件、只借 access**：
 运行态落在 `travel_states` / `travel_events` 两张表（迁移 v4），开关是
 `accounts.travel_enabled`，与 `checkin_enabled` 互相独立。
 
-### 凭据写入的互斥与版本（迁移 v5）
+### 凭据写入的互斥与版本（迁移 v5 → v6/v7）
 
-`accounts.auth_epoch` 是凭据版本号，`upsert_account` / `set_auth_state` 每次都会 +1。
-所有写凭据的路径（扫码落库、Magpie 导入、401 重同步、刷新轮换、删除账号）先拿进程内
-`AUTH_WRITE_LOCK`，再按 id 重读一次账号：
+`accounts.auth_epoch` 是账号级凭据版本号（v5）；v6 起真正的粒度落到了
+`account_authorizations.version`（**单份授权**）。两者都保留，写入前都校验：
 
-- 来源变了（magpie ↔ own）→ 拒绝，`kind: not_magpie_source`；
-- 版本对不上（其间被别人写过）→ 拒绝，`kind: superseded`。
+- 扫码登录、导入、resync、刷新轮换、删除都在进程内 `AUTH_WRITE_LOCK` 里；
+- 写入前按 id 重读账号与授权行，`auth_epoch` / `version` 任一不符 → 拒绝（`superseded`）；
+- 该账号没有 magpie 授权时，resync 拒绝（`not_magpie_source`）。
 
 自动旅行拿着几秒前的账号快照去做 resync 时，这两种情况都会被拦下，不会覆盖用户
 刚扫码拿到的自有授权。`superseded` 与 `not_magpie_source` 在旅行侧都算"旧快照"，
 不算失败：直接用手上现有的令牌继续，下一轮自然读到新账号，不会给账号打 6 小时冷却。
 
-两条容易被忽略的细节：
+其余细节见 `docs/AUTH_MODEL_V2.md`：
 
-- **Magpie 导入的"来源判断"在锁内**：放到锁外读，检查与写入之间就能挤进一次扫码登录，
-  于是导入仍按旧的 magpie 来源把刚拿到的自有授权覆盖掉（回归用例
-  `import_rechecks_the_source_after_oauth_lands_mid_flight` 用测试钩子复现这个窗口）。
-- **写 `auth_status` 前要比对来源与版本**：登录态查询和刷新都是网络往返，回来时账号可能
-  已经换成别的授权，旧结果不许把新授权标成 invalid（`set_auth_state_if_current`）。
+- 旧键 → 新键的搬运是 Rust 状态机（`pending/migrating/ready/failed`），
+  `ready` 之前读旧键，所以迁移没完成时签到 / 旅行照常；
+- 兼容镜像（`accounts.auth_status/auth_source/token_expires_at/auth_ref`）与
+  `auth_mirror_auth_id` 一起写，并且旧别名键同步指向同一份授权；
+- 探测用 `Valid / Unauthorized / Transient` 三分类，只有明确的 401 触发切源，
+  429 / 5xx / 超时 / 判不出来的 403 不改状态。
 
 ## 6. PR1a 交付范围
 

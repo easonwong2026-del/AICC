@@ -1,5 +1,73 @@
 import Foundation
 
+/// 一份授权的只读视图（`account_authorizations` 的一行）。
+///
+/// 一个 WorkBuddy 账号可以同时有 `own`（AICC 自己扫码）与 `magpie`（从 Magpie 借用）
+/// 两份授权，界面要能把它们分开显示：谁已授权、各自什么时候到期、哪一份正在被使用。
+/// 这里只有状态与时间，**没有令牌**。
+struct ConsoleAuthorization: Identifiable, Equatable {
+    let id: String
+    let kind: String
+    let status: String
+    let tokenExpiresAt: String?
+    let keyMigrationState: String
+    let lastError: String?
+
+    init?(
+        id: String,
+        kind: String,
+        status: String,
+        tokenExpiresAt: String? = nil,
+        keyMigrationState: String = "ready",
+        lastError: String? = nil
+    ) {
+        guard !id.isEmpty, kind == "own" || kind == "magpie" else { return nil }
+        self.id = id
+        self.kind = kind
+        self.status = status
+        self.tokenExpiresAt = tokenExpiresAt
+        self.keyMigrationState = keyMigrationState
+        self.lastError = lastError
+    }
+
+    init?(json: [String: Any]) {
+        guard let id = json["id"] as? String, let kind = json["kind"] as? String else { return nil }
+        self.init(
+            id: id,
+            kind: kind,
+            status: json["status"] as? String ?? "unknown",
+            tokenExpiresAt: json["tokenExpiresAt"] as? String,
+            keyMigrationState: json["keyMigrationState"] as? String ?? "ready",
+            lastError: json["lastError"] as? String
+        )
+    }
+
+    var isOwn: Bool { kind == "own" }
+    var kindLabel: String { isOwn ? "自有" : "Magpie" }
+
+    var authLabel: String {
+        switch status {
+        case "valid": return "已授权"
+        case "expired": return "已过期"
+        case "invalid": return "已失效"
+        case "denied": return "钥匙串被拒"
+        default: return "待验证"
+        }
+    }
+
+    var tone: ConsoleAccount.AuthTone {
+        switch status {
+        case "valid": return .ok
+        case "expired", "invalid", "denied": return .error
+        case "unknown": return .neutral
+        default: return .warning
+        }
+    }
+
+    /// 迁移还没搬完时旧键仍可用，界面不该把它显示成故障。
+    var isMigrating: Bool { keyMigrationState != "ready" }
+}
+
 /// 主控制台用的账号视图模型。
 ///
 /// 只做**解析与派生**，不碰网络和进程，所以能进 `swift test`。
@@ -31,7 +99,11 @@ struct ConsoleAccount: Identifiable, Equatable {
     /// 访问令牌到期时间（RFC3339）。没有登录态时为 nil。
     let tokenExpiresAt: String?
     /// `own` = AICC 自己扫码授权；`magpie` = 从 Magpie 借用的 access token。
+    ///
+    /// 这是**派生值**：助手按首选来源与各授权状态算出"当前使用哪一份"，界面直接显示即可。
     let authSource: String
+    /// 这个账号持有的全部授权（0～2 份）。
+    let authorizations: [ConsoleAuthorization]
 
     init(
         id: String,
@@ -42,7 +114,8 @@ struct ConsoleAccount: Identifiable, Equatable {
         checkinEnabled: Bool = false,
         updatedAt: String? = nil,
         tokenExpiresAt: String? = nil,
-        authSource: String = "own"
+        authSource: String = "own",
+        authorizations: [ConsoleAuthorization] = []
     ) {
         self.id = id
         self.platform = platform
@@ -54,6 +127,7 @@ struct ConsoleAccount: Identifiable, Equatable {
         self.updatedAt = updatedAt
         self.tokenExpiresAt = tokenExpiresAt
         self.authSource = authSource
+        self.authorizations = authorizations
     }
 
     /// 助手返回的是 camelCase（见 `AccountRecord` 的 serde 配置）。
@@ -70,7 +144,9 @@ struct ConsoleAccount: Identifiable, Equatable {
             checkinEnabled: json["checkinEnabled"] as? Bool ?? false,
             updatedAt: json["updatedAt"] as? String,
             tokenExpiresAt: json["tokenExpiresAt"] as? String,
-            authSource: json["authSource"] as? String ?? "own"
+            authSource: json["authSource"] as? String ?? "own",
+            authorizations: (json["authorizations"] as? [[String: Any]] ?? [])
+                .compactMap(ConsoleAuthorization.init(json:))
         )
     }
 
@@ -103,6 +179,27 @@ struct ConsoleAccount: Identifiable, Equatable {
 
     /// 来自 Magpie 的借用授权：令牌不在 AICC 手里刷新，过期要回 Magpie 同步。
     var isBorrowed: Bool { authSource == "magpie" }
+
+    func authorization(kind: String) -> ConsoleAuthorization? {
+        authorizations.first { $0.kind == kind }
+    }
+
+    var ownAuthorization: ConsoleAuthorization? { authorization(kind: "own") }
+    var magpieAuthorization: ConsoleAuthorization? { authorization(kind: "magpie") }
+
+    /// 当前使用的来源，给卡片底部那行说明用。
+    var activeSourceLabel: String { isBorrowed ? "Magpie" : "自有" }
+
+    /// 两份都不可用时的原因（写进卡片，别让用户猜）。
+    var authorizationProblem: String? {
+        if let error = authorizations.compactMap(\.lastError).first, !error.isEmpty {
+            return error
+        }
+        if !authorizations.isEmpty && authorizations.allSatisfy({ !$0.status.contains("valid") && $0.status != "unknown" }) {
+            return "两份授权都不可用，请重新扫码或去 Magpie 登录"
+        }
+        return nil
+    }
 
     /// 卡片右上角的来源标签；独立授权的账号不显示。
     var sourceLabel: String? { isBorrowed ? "Magpie" : nil }

@@ -14,6 +14,14 @@ public enum AccountWorkerProtocol {
     public static let methodStorageInit = "storage.init"
     public static let methodSecureStatus = "secure.status"
     public static let methodShutdown = "worker.shutdown"
+    /// 全局设置读写（PR #66）：目前只有首选授权来源。
+    public static let methodSettingsGet = "settings.get"
+    public static let methodSettingsSet = "settings.set"
+    /// 单份授权删除（类型化接口，界面暂不提供按钮）。
+    public static let methodDeleteAuthorization = "auth.authorization.delete"
+
+    /// `app_settings` 里的键名，与 Rust 侧 `auth::broker::PREFERRED_SETTING` 一致。
+    public static let settingPreferredAuthSource = "auth_preferred_source"
 
     /// 助手在 bundle 里的相对路径。
     public static let helperRelativePath = "Contents/Helpers/aicc-account-worker"
