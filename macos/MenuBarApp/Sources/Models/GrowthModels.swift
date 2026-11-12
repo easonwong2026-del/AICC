@@ -362,6 +362,192 @@ struct GrowthScanResult: Equatable {
     static let empty = GrowthScanResult(json: [:])
 }
 
+// MARK: - 自动管理（PR #68）
+
+/// 自动管理的运行状态。**`continuesAfterQuit` 恒为 false**，
+/// 界面上要如实说明"App 退出就停"，不能让用户以为有常驻服务。
+struct GrowthAutoStatus: Equatable {
+    var enabled = false
+    var intervalSeconds = 180
+    var running = false
+    var lastTickAt: Date?
+    var nextTickAt: Date?
+    var lastResult: String?
+    var owner = "AICC 的账号助手进程"
+    var continuesAfterQuit = false
+
+    init(json: [String: Any]?) {
+        guard let json else { return }
+        enabled = json["enabled"] as? Bool ?? false
+        intervalSeconds = (json["intervalSeconds"] as? NSNumber)?.intValue ?? 180
+        running = json["running"] as? Bool ?? false
+        lastTickAt = Self.date(fromRFC3339: json["lastTickAt"] as? String)
+        nextTickAt = Self.date(fromRFC3339: json["nextTickAt"] as? String)
+        lastResult = str(json["lastResult"])
+        owner = str(json["owner"]) ?? owner
+        continuesAfterQuit = json["continuesAfterQuit"] as? Bool ?? false
+    }
+
+    /// "每 3 分钟""每 1 小时"这类文案。180 秒不写成"180 秒"。
+    var intervalText: String {
+        if intervalSeconds % 3600 == 0 {
+            return "每 \(intervalSeconds / 3600) 小时"
+        }
+        if intervalSeconds % 60 == 0 {
+            let minutes = intervalSeconds / 60
+            return minutes == 1 ? "每分钟" : "每 \(minutes) 分钟"
+        }
+        return "每 \(intervalSeconds) 秒"
+    }
+
+    var nextTickText: String {
+        guard let nextTickAt else { return enabled ? "等待第一轮" : "未开启" }
+        if nextTickAt <= Date() { return "即将检查" }
+        return "下次 \(Self.timeFormatter.string(from: nextTickAt))"
+    }
+
+    var lastTickText: String {
+        guard let lastTickAt else { return "还没检查过" }
+        return "上次 \(Self.timeFormatter.string(from: lastTickAt))"
+    }
+
+    static func date(fromRFC3339 raw: String?) -> Date? {
+        guard let raw = str(raw) else { return nil }
+        return ISO8601DateFormatter().date(from: raw)
+    }
+
+    static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM-dd HH:mm"
+        return formatter
+    }()
+}
+
+/// 一条执行记录（`growth_runs`）。
+struct GrowthRunRecord: Identifiable, Equatable {
+    enum Action: String {
+        case accept
+        case claim
+
+        var title: String {
+            self == .accept ? "接单" : "领奖"
+        }
+    }
+
+    enum Outcome: String {
+        case ok
+        case already
+        case rejected
+        case unknown
+        case failed
+
+        var title: String {
+            switch self {
+            case .ok: return "成功"
+            case .already: return "已领过"
+            case .rejected: return "被拒绝"
+            case .unknown: return "未确认"
+            case .failed: return "失败"
+            }
+        }
+
+        /// 需要在界面上标红的：拒了、失败、没确认。`already` 不算问题。
+        var isProblem: Bool {
+            self == .rejected || self == .failed || self == .unknown
+        }
+    }
+
+    let id: Int
+    let accountId: String
+    let taskCode: String
+    let action: Action
+    let outcome: Outcome
+    let credit: Int?
+    let energy: Int?
+    let errorKind: String?
+    let errorDetail: String?
+    let executedAt: Date?
+
+    init?(json: [String: Any]) {
+        guard let taskCode = str(json["taskCode"]) else { return nil }
+        id = (json["id"] as? NSNumber)?.intValue ?? 0
+        accountId = str(json["accountId"]) ?? ""
+        self.taskCode = taskCode
+        action = Action(rawValue: str(json["action"]) ?? "") ?? .claim
+        outcome = Outcome(rawValue: str(json["outcome"]) ?? "") ?? .unknown
+        credit = (json["credit"] as? NSNumber)?.intValue
+        energy = (json["energy"] as? NSNumber)?.intValue
+        errorKind = str(json["errorKind"])
+        errorDetail = str(json["errorDetail"])
+        executedAt = GrowthAutoStatus.date(fromRFC3339: json["executedAt"] as? String)
+    }
+
+    /// 任务行上的一句话："上次 领奖 · 成功 +100" / "上次 接单 · 被拒绝：prerequisite…"。
+    var summary: String {
+        var parts = ["上次 \(action.title) · \(outcome.title)"]
+        if let credit, credit > 0 { parts.append("+\(credit) 积分") }
+        if let energy, energy > 0 { parts.append("+\(energy) 能量") }
+        if outcome.isProblem, let errorDetail {
+            parts.append(errorDetail)
+        }
+        return parts.joined(separator: " ")
+    }
+
+    var timeText: String {
+        guard let executedAt else { return "" }
+        return GrowthAutoStatus.timeFormatter.string(from: executedAt)
+    }
+}
+
+/// 一个账号的执行记录汇总。
+struct GrowthRuns: Equatable {
+    var latestByTask: [String: GrowthRunRecord] = [:]
+    var recent: [GrowthRunRecord] = []
+    var grantedCredit = 0
+    var grantedEnergy = 0
+
+    init(json: [String: Any]?) {
+        guard let json else { return }
+        let latest = (json["latestByTask"] as? [[String: Any]] ?? [])
+            .compactMap(GrowthRunRecord.init(json:))
+        for record in latest {
+            latestByTask[record.taskCode] = record
+        }
+        recent = (json["recent"] as? [[String: Any]] ?? []).compactMap(GrowthRunRecord.init(json:))
+        grantedCredit = (json["grantedCredit"] as? NSNumber)?.intValue ?? 0
+        grantedEnergy = (json["grantedEnergy"] as? NSNumber)?.intValue ?? 0
+    }
+}
+
+/// `growth.auto.tick` 的返回。
+struct GrowthTickResult: Equatable {
+    /// `disabled` / `not_due` / `already_running` / nil（真的跑了）
+    let skipped: String?
+    let summary: String?
+    let readOnly: Bool
+
+    init(json: [String: Any]?) {
+        guard let json else {
+            skipped = nil
+            summary = nil
+            readOnly = true
+            return
+        }
+        skipped = str(json["skipped"])
+        summary = str(json["summary"])
+        readOnly = json["readOnly"] as? Bool ?? true
+    }
+
+    var skippedText: String? {
+        switch skipped {
+        case "disabled": return "自动管理未开启"
+        case "not_due": return "还没到检查时间"
+        case "already_running": return "上一轮还在跑"
+        default: return nil
+        }
+    }
+}
+
 /// 读一个"可能有也可能没有"的字符串。服务端用 "" 表示没有，这里统一成 nil。
 ///
 /// 不复用 `TravelModels` 里的 `nonEmpty`：那个是 `fileprivate`，跨文件用不了；

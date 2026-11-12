@@ -163,12 +163,21 @@ pub fn headers(payload: &Value) -> HashMap<String, String> {
 }
 
 /// 试一条路径。返回响应原文（成功与业务错误都返回，由调用方分类）。
-async fn get_once(payload: &Value, prefix: &str, suffix: &str) -> Result<Value, GrowthError> {
+///
+/// 超时被单独识别成 `Network`：调用方必须据此区分"请求可能已经在服务端生效"与
+/// "请求根本没发出去"。写操作（accept / claim）尤其依赖这个区分。
+async fn send_once(
+    payload: &Value,
+    prefix: &str,
+    suffix: &str,
+    method: &str,
+    body: Option<Value>,
+) -> Result<Value, GrowthError> {
     let url = format!("{WORKBUDDY_API_ENDPOINT}{prefix}{suffix}");
     let headers = headers(payload);
     match tokio::time::timeout(
         REQUEST_TIMEOUT,
-        http_request(&url, "GET", None, Some(&headers)),
+        http_request(&url, method, body, Some(&headers)),
     )
     .await
     {
@@ -182,12 +191,9 @@ async fn get_once(payload: &Value, prefix: &str, suffix: &str) -> Result<Value, 
     }
 }
 
-/// GET 一个成长中心接口，自动在两种路径形态之间退让。
-///
-/// 返回 `(响应, 生效前缀)`。带上前缀是为了让扫描结果能记录"这个账号实际走哪条路"，
-/// 线上出问题时不用再猜一遍。
-pub async fn get(payload: &Value, suffix: &str) -> Result<(Value, &'static str), GrowthError> {
-    // 空 Bearer 是构造错误，不是服务端的错：直接拒绝，别发出去。
+/// 令牌为空的请求一律拒绝：发出去就是一个空 `Bearer`，服务端回 401，
+/// 然后可能被误判成"授权失效"去换源 —— 一次构造错误变成一次状态污染。
+fn guard_token(payload: &Value) -> Result<(), GrowthError> {
     let empty = payload
         .get("access_token")
         .and_then(Value::as_str)
@@ -200,10 +206,24 @@ pub async fn get(payload: &Value, suffix: &str) -> Result<(Value, &'static str),
             "没有可用的访问令牌",
         ));
     }
+    Ok(())
+}
+
+/// 在两种路径形态之间退让的通用发送器。
+///
+/// **只对 `RouteMissing` 退让**。写操作也走这里：404 意味着这条路径什么都没发生，
+/// 换一条再试是安全的；而 401 / 403 / 429 / 5xx 是真实答复，重发只会重复提交。
+async fn send(
+    payload: &Value,
+    suffix: &str,
+    method: &str,
+    body: Option<Value>,
+) -> Result<(Value, &'static str), GrowthError> {
+    guard_token(payload)?;
 
     let mut last: Option<GrowthError> = None;
     for prefix in PREFIXES {
-        let response = get_once(payload, prefix, suffix).await?;
+        let response = send_once(payload, prefix, suffix, method, body.clone()).await?;
         match classify(&response) {
             Ok(()) => return Ok((response, prefix)),
             Err(err) if err.kind == ErrorKind::RouteMissing => {
@@ -214,6 +234,26 @@ pub async fn get(payload: &Value, suffix: &str) -> Result<(Value, &'static str),
         }
     }
     Err(last.unwrap_or_else(|| GrowthError::new(ErrorKind::RouteMissing, "路由不存在")))
+}
+
+/// GET 一个成长中心接口，自动在两种路径形态之间退让。
+///
+/// 返回 `(响应, 生效前缀)`。带上前缀是为了让扫描结果能记录"这个账号实际走哪条路"，
+/// 线上出问题时不用再猜一遍。
+pub async fn get(payload: &Value, suffix: &str) -> Result<(Value, &'static str), GrowthError> {
+    send(payload, suffix, "GET", None).await
+}
+
+/// POST 一个成长中心写接口。
+///
+/// 会改服务端状态，所以调用方必须自己保证幂等：**不要在这里重试**。
+/// 唯一的自动退让是 `RouteMissing`（404 表示那条路径什么都没发生）。
+pub async fn post(
+    payload: &Value,
+    suffix: &str,
+    body: Value,
+) -> Result<(Value, &'static str), GrowthError> {
+    send(payload, suffix, "POST", Some(body)).await
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +303,74 @@ impl ReadOnlyEndpoints {
     /// 旅行状态由 `travel` 模块负责调度，这里只借它的只读接口填界面。
     pub async fn buddy_travel_status(&self) -> Result<(Value, &'static str), GrowthError> {
         get(&self.payload, "/buddy/travel/status").await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 写接口（只有接单与领奖）
+// ---------------------------------------------------------------------------
+
+/// task_code 会直接进 URL 路径。只放行字母数字与 `_ . -`，
+/// 别的一律拒绝 —— 少一个编码依赖，也堵住路径注入。
+fn safe_task_code(code: &str) -> Option<&str> {
+    let trimmed = code.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        return None;
+    }
+    trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        .then_some(trimmed)
+}
+
+/// 一批最多 20 条：服务端上限，超了会被拒或拆开，我们按上限自己分批。
+pub const ACCEPT_BATCH: usize = 20;
+
+/// 会改服务端状态的接口。**这就是全部两个**：接单、领奖。
+pub struct WriteEndpoints {
+    pub payload: Value,
+}
+
+impl WriteEndpoints {
+    pub fn new(access: &str, uid: &str, domain: &str) -> Self {
+        Self {
+            payload: json!({
+                "access_token": access,
+                "uid": uid,
+                "domain": domain,
+                "variant": "cn",
+            }),
+        }
+    }
+
+    /// 批量接单。请求体是**复数** `task_codes`（旧的单数形态服务端一律 400）。
+    pub async fn accept(&self, codes: &[String]) -> Result<(Value, &'static str), GrowthError> {
+        if codes.is_empty() {
+            return Err(GrowthError::new(ErrorKind::Business, "没有待接单的任务"));
+        }
+        if codes.len() > ACCEPT_BATCH {
+            return Err(GrowthError::new(
+                ErrorKind::Business,
+                format!("一次最多接 {ACCEPT_BATCH} 个任务"),
+            ));
+        }
+        post(
+            &self.payload,
+            "/tasks/accept",
+            json!({ "task_codes": codes }),
+        )
+        .await
+    }
+
+    /// 单个任务领奖。路径带 code，请求体是空对象。
+    pub async fn claim(&self, code: &str) -> Result<(Value, &'static str), GrowthError> {
+        let Some(code) = safe_task_code(code) else {
+            return Err(GrowthError::new(
+                ErrorKind::Business,
+                "task_code 含有不允许的字符",
+            ));
+        };
+        post(&self.payload, &format!("/tasks/{code}/claim"), json!({})).await
     }
 }
 

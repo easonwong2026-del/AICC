@@ -8,8 +8,11 @@
 
 pub mod api;
 pub mod catalog;
+pub mod manager;
 pub mod models;
+pub mod rewards;
 pub mod scanner;
+pub mod scheduler;
 
 use std::sync::Arc;
 

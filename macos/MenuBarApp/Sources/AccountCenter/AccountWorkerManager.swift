@@ -292,6 +292,48 @@ final class AccountWorkerManager: ObservableObject {
         )
     }
 
+    // MARK: - 成长中心自动管理（PR #68）
+
+    /// 开关状态与下次检查时间。只读。
+    func growthAutoStatus() async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call("growth.auto.status", timeout: 10)
+    }
+
+    func setGrowthAutoEnabled(_ enabled: Bool) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call(
+            "growth.auto.setEnabled",
+            params: ["enabled": enabled],
+            timeout: 15
+        )
+    }
+
+    /// 跑一轮。`force` 只跳过间隔判断，开关关着时仍然是只读检查。
+    /// 一轮可能要接单 + 领若干个奖，每个请求 15 秒上限，给足时间。
+    func growthTick(force: Bool = false) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call(
+            "growth.auto.tick",
+            params: force ? ["force": true] : [:],
+            timeout: 180
+        )
+    }
+
+    /// 执行记录：每个任务最近一条 + 累计到账。
+    func growthRuns(accountId: String, limit: Int = 50) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call(
+            "growth.runs",
+            params: ["accountId": accountId, "limit": limit],
+            timeout: 15
+        )
+    }
+
     private func ensureRunning() async throws {
         if case .running = state { return }
         await refresh()

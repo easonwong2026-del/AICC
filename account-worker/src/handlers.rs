@@ -57,6 +57,11 @@ pub const METHODS: &[&str] = &[
     "travel.auto.tick",
     // ---- 成长中心（PR #67：只读）----
     "growth.scan",
+    // ---- 成长中心自动管理（PR #68）----
+    "growth.auto.status",
+    "growth.auto.setEnabled",
+    "growth.auto.tick",
+    "growth.runs",
 ];
 
 pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult<Value> {
@@ -456,6 +461,53 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                 "scannedAt": crate::clock::now_rfc3339(),
                 "readOnly": true,
             }))
+        }
+
+        // ---- 成长中心自动管理（PR #68）----
+        //
+        // 只有三个方法，而且开关默认关闭：没打开时 tick 连只读都不做。
+        "growth.auto.status" => Ok(crate::growth::scheduler::auto_status(app)),
+
+        "growth.auto.setEnabled" => {
+            let enabled = require_bool(params, "enabled")?;
+            crate::growth::scheduler::set_enabled(app, enabled)?;
+            log_note(&format!(
+                "成长中心自动管理{}",
+                if enabled { "已开启" } else { "已关闭" }
+            ));
+            Ok(crate::growth::scheduler::auto_status(app))
+        }
+
+        // `force`：用户点「立即检查」时传 true，绕过间隔判断。
+        // 但写操作仍受总开关约束：开关关着就是一次只读检查。
+        "growth.auto.tick" => {
+            let force = params
+                .get("force")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let result = crate::growth::scheduler::run_tick(app, force).await;
+            Ok(result)
+        }
+
+        // 执行记录：每个任务取最近一条 + 累计到账。
+        "growth.runs" => {
+            let id = require_str(params, "accountId")?;
+            let limit = params
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(50)
+                .min(200) as u32;
+            app.with_db(|db| {
+                let latest = db.latest_growth_run_per_task(&id)?;
+                let (credit, energy) = db.growth_totals(&id)?;
+                Ok(json!({
+                    "accountId": id,
+                    "latestByTask": latest,
+                    "recent": db.growth_runs(&id, limit)?,
+                    "grantedCredit": credit,
+                    "grantedEnergy": energy,
+                }))
+            })
         }
 
         "auth.magpie.import" => {

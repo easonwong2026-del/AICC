@@ -14,6 +14,7 @@ use crate::clock::now_rfc3339;
 use crate::rpc::{RpcError, RpcResult};
 
 pub mod authz;
+pub mod growth;
 pub mod travel;
 
 pub use authz::AuthorizationRecord;
@@ -117,6 +118,31 @@ CREATE INDEX IF NOT EXISTS idx_auth_pending ON account_authorizations (key_migra
 const MIGRATION_V7_SQL: &str = "\
 ALTER TABLE accounts ADD COLUMN auth_mirror_auth_id TEXT;";
 
+/// v9：成长中心执行记录（PR #68）。
+///
+/// 只记"AICC 做了什么、服务端怎么回的"，**不缓存任务状态**：任务是否完成
+/// 永远以 `/tasks` 为准，这张表只用于界面上的"最近执行结果"与事后排查。
+///
+/// 为什么不复用 `task_executions`：那张表一条记录对应"一次任务运行"，
+/// 没有 `task_code` 与 `energy` 两列，塞进去要么丢信息要么靠拼接字符串。
+///
+/// v8 是 #66 规划的"删旧钥匙串键"，刻意还没做，所以这里直接跳到 9。
+const MIGRATION_V9_SQL: &str = "\
+CREATE TABLE IF NOT EXISTS growth_runs (\
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,\
+    account_id   TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,\
+    task_code    TEXT NOT NULL,\
+    action       TEXT NOT NULL CHECK (action IN ('accept', 'claim')),\
+    outcome      TEXT NOT NULL CHECK (outcome IN ('ok', 'already', 'rejected', 'unknown', 'failed')),\
+    credit       INTEGER,\
+    energy       INTEGER,\
+    error_kind   TEXT,\
+    error_detail TEXT,\
+    executed_at  TEXT NOT NULL\
+);\
+CREATE INDEX IF NOT EXISTS idx_growth_runs_account ON growth_runs (account_id, executed_at DESC);\
+CREATE INDEX IF NOT EXISTS idx_growth_runs_task ON growth_runs (account_id, task_code, executed_at DESC);";
+
 /// 一次迁移里的一步：纯 SQL，或者需要 Rust 参与的数据迁移。
 enum MigrationStep {
     Sql(&'static str),
@@ -168,9 +194,14 @@ const MIGRATIONS: &[Migration] = &[
             MigrationStep::Rust(authz::seed_mirror_v7),
         ],
     },
+    // v8 预留（#66 的旧钥匙串清理），刻意未实施，所以版本号直接排到 9。
+    Migration {
+        version: 9,
+        steps: &[MigrationStep::Sql(MIGRATION_V9_SQL)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 7;
+pub const LATEST_VERSION: i64 = 9;
 
 pub struct Db {
     conn: Connection,
@@ -678,16 +709,16 @@ mod tests {
             .expect("count")
     }
 
-    /// v5 → v6/v7：账号 ID、签到、旅行事件一行不改，授权行按确定公式生成，
+    /// v5 → 最新：账号 ID、签到、旅行事件一行不改，授权行按确定公式生成，
     /// 镜像指向同一行（G2 / G3 / G5 / G6）。
     #[test]
-    fn v5_upgrades_to_v7_and_keeps_history() {
+    fn v5_upgrade_keeps_history() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = legacy_db(dir.path(), 5);
         seed_history(&path);
 
         let db = Db::open(&path).expect("open");
-        assert_eq!(db.schema_version().unwrap(), 7);
+        assert_eq!(db.schema_version().unwrap(), LATEST_VERSION);
 
         assert_eq!(count(&db, "accounts"), 3, "账号一行都不能少");
         assert_eq!(count(&db, "checkin_records"), 1);
@@ -742,23 +773,23 @@ mod tests {
         assert!(qoder.auth_mirror_auth_id.is_none(), "Qoder 不参与多授权");
     }
 
-    /// v4 → v5 → v6/v7：跨两级升级同样不丢数据。
+    /// v4 → 最新：跨多级升级同样不丢数据。
     #[test]
-    fn v4_upgrades_to_v7() {
+    fn v4_upgrade_lands_on_latest() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = legacy_db(dir.path(), 4);
         seed_history(&path);
         let db = Db::open(&path).expect("open");
-        assert_eq!(db.schema_version().unwrap(), 7);
+        assert_eq!(db.schema_version().unwrap(), LATEST_VERSION);
         assert_eq!(count(&db, "accounts"), 3);
         assert_eq!(count(&db, "account_authorizations"), 2);
     }
 
-    /// 空库直接建到 v7：不产生任何授权行，也不报错。
+    /// 空库直接建到最新版本：不产生任何授权行，也不报错。
     #[test]
-    fn empty_database_lands_on_v7_without_rows() {
+    fn empty_database_lands_on_latest_without_rows() {
         let (db, _dir) = temp_db();
-        assert_eq!(db.schema_version().unwrap(), 7);
+        assert_eq!(db.schema_version().unwrap(), LATEST_VERSION);
         assert_eq!(count(&db, "account_authorizations"), 0);
     }
 
@@ -774,7 +805,7 @@ mod tests {
         drop(first);
         let second = Db::open(&path).expect("second");
         assert_eq!(count(&second, "account_authorizations"), 2);
-        assert_eq!(second.schema_version().unwrap(), 7);
+        assert_eq!(second.schema_version().unwrap(), LATEST_VERSION);
     }
 
     /// 删账号连带删授权行（外键级联），不留孤儿。
