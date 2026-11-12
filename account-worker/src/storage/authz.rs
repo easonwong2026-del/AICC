@@ -230,6 +230,25 @@ impl super::Db {
         Ok(())
     }
 
+    /// 清空兼容镜像列：账号一份授权都不剩时用。
+    ///
+    /// 不能只把 `auth_mirror_auth_id` 置 NULL 了事：`auth_source` / `auth_status`
+    /// 是界面的直接输入，留着旧值就会显示一个不存在的可用授权。
+    /// `auth_source` 有 NOT NULL 约束且默认 `own`，这里回到默认值。
+    pub fn clear_account_mirror(&self, account_id: &str) -> RpcResult<()> {
+        self.conn.execute(
+            "UPDATE accounts
+                SET auth_mirror_auth_id = NULL,
+                    auth_source = 'own',
+                    auth_status = 'unknown',
+                    token_expires_at = NULL,
+                    updated_at = ?1
+              WHERE id = ?2",
+            params![now_rfc3339(), account_id],
+        )?;
+        Ok(())
+    }
+
     /// 记一条授权级错误（迁移 / 别名同步 / 删除失败）。内容必须已脱敏。
     pub fn set_authorization_error(&self, id: &str, message: &str) -> RpcResult<()> {
         self.conn.execute(

@@ -83,6 +83,10 @@ pub fn run(app: &App) -> RpcResult<Report> {
 /// 「必搬」的含义是：**旧键和新键都没有内容时不能算完成**。旧实现把这种情况记成
 /// `Copy::Nothing` 然后标 `ready`，于是 `health` 显示"迁移完毕"，实际上一个可用的
 /// 令牌都没有 —— 迁移状态必须能被信任，宁可报 `failed` 也不许假成功。
+///
+/// access 与 refresh **各自独立判定**：一台机器上 access 可能已经被清掉（过期回收、
+/// 用户手动删了那一项），而 refresh 还在。此时必须先搬 refresh —— 否则一次"access 缺失"
+/// 就把唯一还能救回登录的凭据永久留在旧键里，`ready` 之后再也读不到。
 fn move_one(
     app: &App,
     uid: &str,
@@ -96,8 +100,23 @@ fn move_one(
         ));
     };
 
-    let mut outcome = copy_key(app, &legacy_access, &target_access)?;
-    if matches!(outcome, Copy::Nothing) {
+    let access = copy_key(app, &legacy_access, &target_access)?;
+
+    // magpie 永远没有 refresh：这一段代码里根本没有它的分支，
+    // 表上的 CHECK 也只能拦住"写了引用"，拦不住"读了 refresh"。
+    let refresh = if row.kind == ids::KIND_OWN {
+        match row.refresh_key() {
+            Some(target_refresh) => Some(copy_key(app, &legacy_refresh, &target_refresh)?),
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    let copied = matches!(access, Copy::Copied) || matches!(refresh, Some(Copy::Copied));
+    let nothing = matches!(access, Copy::Nothing) && matches!(refresh, None | Some(Copy::Nothing));
+
+    if nothing {
         // 两边都读不到。只有"这份授权本来就该是失效/过期"时才算完成；
         // 自称可用却没有任何凭据，属于迁移没做成，必须报出来。
         if row.status == "valid" || row.status == "unknown" {
@@ -109,18 +128,12 @@ fn move_one(
         return Ok(Copy::Nothing);
     }
 
-    // magpie 永远没有 refresh：这一段代码里根本没有它的分支，
-    // 表上的 CHECK 也只能拦住"写了引用"，拦不住"读了 refresh"。
-    if row.kind == ids::KIND_OWN {
-        if let Some(target_refresh) = row.refresh_key() {
-            match copy_key(app, &legacy_refresh, &target_refresh)? {
-                Copy::Copied => outcome = Copy::Copied,
-                // 没有 refresh 是合法状态（登录时服务端就没发），不算迁移失败。
-                Copy::AlreadyThere | Copy::Nothing => {}
-            }
-        }
-    }
-    Ok(outcome)
+    // 没有 refresh 是合法状态（登录时服务端就没发），也不算迁移失败。
+    Ok(if copied {
+        Copy::Copied
+    } else {
+        Copy::AlreadyThere
+    })
 }
 
 /// 复制一条凭据。
@@ -501,6 +514,66 @@ mod tests {
             "来源无法确认时不许拿旧值覆盖新值"
         );
         assert_eq!(app.secure.get(&legacy_access).unwrap(), b"old-access");
+    }
+
+    /// access 已经没了（被系统回收 / 用户手动清了那一项），refresh 还在：
+    /// 必须把 refresh 搬过去 —— 否则一次 access 缺失就把唯一还能救回登录的凭据
+    /// 永远留在旧键里，而这一行已经 `ready`，再也不会被读到。
+    #[test]
+    fn own_refresh_is_moved_even_when_access_is_gone() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let account = seed_legacy_account(&app, "uid-refresh-only", "own");
+        let (_, legacy_refresh) = ids::legacy_keys(&account.uid);
+        app.secure.set(&legacy_refresh, b"refresh-1").unwrap();
+
+        let report = run(&app).expect("run");
+        assert_eq!(report.failed, 0, "{report:?}");
+        assert_eq!(report.moved, 1, "搬到了 refresh 就算搬到了内容");
+        assert_eq!(state_of(&app, &ids::auth_id(&account.id, "own")), "ready");
+        assert_eq!(
+            app.secure
+                .get(&ids::refresh_key(&account.id, "own"))
+                .unwrap(),
+            b"refresh-1"
+        );
+    }
+
+    /// 反过来：access 在、refresh 已被清掉，属于合法状态，照常完成。
+    #[test]
+    fn own_access_without_refresh_still_migrates() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let account = seed_legacy_account(&app, "uid-access-only", "own");
+        let (legacy_access, _) = ids::legacy_keys(&account.uid);
+        app.secure.set(&legacy_access, b"access-1").unwrap();
+
+        let report = run(&app).expect("run");
+        assert_eq!(report.failed, 0, "{report:?}");
+        assert_eq!(state_of(&app, &ids::auth_id(&account.id, "own")), "ready");
+    }
+
+    /// 已过期的 own 授权：access 与 refresh 都在时，refresh 同样要搬完 ——
+    /// 过期只是"要重新换令牌"，不是"凭据不需要了"。
+    #[test]
+    fn expired_own_authorization_still_moves_its_refresh() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let account = seed_legacy_account(&app, "uid-expired-refresh", "own");
+        let id = ids::auth_id(&account.id, "own");
+        app.with_db(|db| db.set_authorization_status(&id, 0, "expired", None, None))
+            .unwrap()
+            .then_some(())
+            .expect("state update");
+        let (_, legacy_refresh) = ids::legacy_keys(&account.uid);
+        app.secure.set(&legacy_refresh, b"refresh-1").unwrap();
+
+        let report = run(&app).expect("run");
+        assert_eq!(report.failed, 0, "{report:?}");
+        assert_eq!(
+            app.secure
+                .get(&ids::refresh_key(&account.id, "own"))
+                .unwrap(),
+            b"refresh-1"
+        );
+        assert_eq!(state_of(&app, &id), "ready");
     }
 
     #[test]

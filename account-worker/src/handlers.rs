@@ -231,13 +231,24 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
             let key = require_str(params, "key")?;
             let value = require_str(params, "value")?;
             require_setting_key(&key)?;
+            let mut mirror_errors: Vec<Value> = Vec::new();
             match key.as_str() {
                 crate::auth::broker::PREFERRED_SETTING => {
+                    // 与授权写入串行：切首选来源的同时在跑 resync，镜像会来回翻。
+                    let _guard = auth_write_guard();
                     crate::auth::broker::set_preferred_source(app, &value)?;
+                    // 首选变了，旧版兼容镜像必须跟着换。失败不回滚设置本身 ——
+                    // 设置是用户意图，镜像是派生值，报出来比悄悄不一致好。
+                    mirror_errors = crate::auth::service::resync_all_mirrors(app)?
+                        .into_iter()
+                        .map(|(account_id, message)| {
+                            json!({ "accountId": account_id, "message": message })
+                        })
+                        .collect();
                 }
                 other => return Err(RpcError::invalid_params(format!("未知设置项：{other}"))),
             }
-            Ok(json!({ "key": key, "value": value }))
+            Ok(json!({ "key": key, "value": value, "mirrorErrors": mirror_errors }))
         }
 
         // ---- 单份授权删除（M2）----
@@ -2105,6 +2116,97 @@ mod tests {
         assert!(magpie_access(&app, &acc.id).is_none());
         assert!(legacy_access(&app, uid).is_none());
         assert!(read_key(&app, &ids::legacy_keys(uid).1).is_none());
+    }
+
+    /// 删掉最后一份授权：旧别名键必须一起清，镜像列必须一起空。
+    /// 否则这个 uid 下次重新导入时会读到上一轮的令牌，界面上也还显示着"可用"。
+    #[test]
+    fn deleting_the_last_authorization_purges_the_legacy_alias() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-9999-0001-0002-000000000004";
+        import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
+        let acc = account(&app, uid);
+        assert_eq!(legacy_access(&app, uid).as_deref(), Some("borrowed"));
+
+        let report = service::delete_authorization(&app, &acc.id, "magpie").expect("delete");
+        assert!(report.record_deleted, "{:?}", report.failed_keys);
+        assert!(
+            report
+                .removed_keys
+                .iter()
+                .any(|key| key.ends_with("/access") && key.contains(uid)),
+            "旧别名 access 应在删除范围内：{:?}",
+            report.removed_keys
+        );
+        assert!(legacy_access(&app, uid).is_none(), "旧别名 access 必须清掉");
+        assert!(
+            read_key(&app, &ids::legacy_keys(uid).1).is_none(),
+            "旧别名 refresh 必须清掉"
+        );
+        assert!(magpie_access(&app, &acc.id).is_none());
+
+        let acc = account(&app, uid);
+        assert!(
+            acc.auth_mirror_auth_id.is_none(),
+            "一份授权都不剩时镜像必须清空"
+        );
+        assert_eq!(acc.auth_status, "unknown", "不能让界面以为还有可用授权");
+    }
+
+    /// 只剩一份时删它才算"最后一份"；删的是两份里的一份，别名要留给另一份。
+    #[test]
+    fn deleting_one_of_two_keeps_the_legacy_alias() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-9999-0001-0002-000000000005";
+        import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
+        persist_login(&app, &payload(uid, "own-access", Some("own-refresh"))).expect("login");
+        let acc = account(&app, uid);
+
+        service::delete_authorization(&app, &acc.id, "own").expect("delete");
+        assert_eq!(
+            legacy_access(&app, uid).as_deref(),
+            Some("borrowed"),
+            "镜像应切到还活着的那份，而不是把别名删掉"
+        );
+        assert!(
+            read_key(&app, &ids::legacy_keys(uid).1).is_none(),
+            "镜像是借用授权，别名下不能留 refresh"
+        );
+    }
+
+    /// 改全局首选来源必须当场同步所有账号的兼容镜像，
+    /// 不能等到下一次登录 / 导入才生效 —— 否则界面说 own、旧版二进制还在用 magpie。
+    #[tokio::test]
+    async fn changing_the_preferred_source_resyncs_every_mirror() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-9999-0001-0002-000000000006";
+        import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
+        persist_login(&app, &payload(uid, "own-access", Some("own-refresh"))).expect("login");
+        let acc = account(&app, uid);
+        assert_eq!(acc.auth_source, "magpie");
+        assert_eq!(legacy_access(&app, uid).as_deref(), Some("borrowed"));
+
+        // 走真正的 RPC 路径：settings.set 而不是直接改 broker
+        let out = dispatch(
+            &app,
+            "settings.set",
+            &json!({ "key": "auth_preferred_source", "value": "own" }),
+        )
+        .await
+        .expect("settings.set");
+        assert_eq!(out["mirrorErrors"], json!([]), "{out}");
+
+        let acc = account(&app, uid);
+        assert_eq!(acc.auth_source, "own", "镜像列要立刻跟着换");
+        assert_eq!(
+            legacy_access(&app, uid).as_deref(),
+            Some("own-access"),
+            "旧别名键也要立刻跟着换"
+        );
+        assert_eq!(
+            read_key(&app, &ids::legacy_keys(uid).1).as_deref(),
+            Some("own-refresh")
+        );
     }
 
     /// 删不掉的键必须如实报出来（不吞错），并且记录留着以便重试。

@@ -407,6 +407,9 @@ pub struct MirrorReport {
 pub fn sync_mirror(app: &App, account_id: &str) -> RpcResult<MirrorReport> {
     let rows = app.with_db(|db| db.list_authorizations(account_id))?;
     if rows.is_empty() {
+        // 一份授权都不剩：镜像列必须清掉。留着旧值会让界面显示"来源 magpie、状态 valid"，
+        // 而实际上一份可用授权都没有 —— 镜像的全部意义就是可追溯。
+        app.with_db(|db| db.clear_account_mirror(account_id))?;
         return Ok(MirrorReport { error: None });
     }
     let preferred = broker::preferred_source(app);
@@ -458,7 +461,18 @@ pub fn sync_mirror(app: &App, account_id: &str) -> RpcResult<MirrorReport> {
                         }
                     }
                     Ok(None) => {
-                        let _ = app.secure.delete(&legacy_refresh);
+                        // 这份 own 授权没有 refresh：旧别名下也不能留旧的，
+                        // 否则库里"无 refresh"与钥匙串里"有 refresh"长期不一致。
+                        match app.secure.delete(&legacy_refresh) {
+                            Ok(_) => {}
+                            Err(err) if err.kind == SecretErrorKind::NotFound => {}
+                            Err(err) => {
+                                error = Some(format!(
+                                    "旧的刷新令牌清理失败：{}",
+                                    crate::rpc::sanitize(&err.message)
+                                ))
+                            }
+                        }
                     }
                     Err(err) => {
                         error = Some(format!("旧别名刷新令牌同步失败：{}", err.message));
@@ -521,11 +535,18 @@ pub struct DeleteReport {
     pub record_deleted: bool,
     pub removed_keys: Vec<String>,
     pub failed_keys: Vec<String>,
+    /// 删完之后兼容镜像没同步成功的原因（记录已经删掉了，只提示不阻断）。
+    pub mirror_error: Option<String>,
 }
 
 /// 删一份授权：只删它自己的键与记录，不碰另一份、不碰账号历史。
 ///
+/// 删的是**最后一份**时，旧别名键（`workbuddy/<uid>/access|refresh`）也要一起清：
+/// 那是 PR #65 及更早版本的读取路径，留着就是一份没有主人的令牌，下次这个 uid 重新
+/// 导入时会读到上一轮的凭据。
+///
 /// 删除失败时**保留记录**：记录留着才能重试，删掉就再也找不到那次失败了。
+/// 也正因如此，别名键必须在删记录**之前**删 —— 记录没了，重试就没有抓手了。
 pub fn delete_authorization(app: &App, account_id: &str, kind: &str) -> RpcResult<DeleteReport> {
     if !ids::is_known_kind(kind) {
         return Err(RpcError::invalid_params(format!("授权类型非法：{kind}")));
@@ -535,11 +556,25 @@ pub fn delete_authorization(app: &App, account_id: &str, kind: &str) -> RpcResul
             "账号 {account_id} 没有 {kind} 授权"
         )));
     };
+    let account = app.with_db(|db| db.get_account(account_id))?;
 
     let keys = keys_for(account_id, kind);
     let mut targets = vec![keys.access];
     if let Some(refresh) = keys.refresh {
         targets.push(refresh);
+    }
+
+    // 最后一份？是的话旧别名键属于这次删除的范围。
+    let is_last = app
+        .with_db(|db| db.list_authorizations(account_id))?
+        .iter()
+        .all(|other| other.id == row.id);
+    if is_last {
+        if let Some(account) = &account {
+            let (legacy_access, legacy_refresh) = ids::legacy_keys(&account.uid);
+            targets.push(legacy_access);
+            targets.push(legacy_refresh);
+        }
     }
 
     let mut removed = Vec::new();
@@ -566,16 +601,40 @@ pub fn delete_authorization(app: &App, account_id: &str, kind: &str) -> RpcResul
         false
     };
 
-    // 镜像可能指向刚被删掉的那份：重新选一次。
+    // 镜像可能指向刚被删掉的那份：重新选一次（没有授权了就连镜像一起清空）。
+    let mut mirror_error = None;
     if record_deleted {
-        let _ = sync_mirror(app, account_id);
+        if let Ok(report) = sync_mirror(app, account_id) {
+            mirror_error = report.error;
+        }
     }
 
     Ok(DeleteReport {
         record_deleted,
         removed_keys: removed,
         failed_keys: failed,
+        mirror_error,
     })
+}
+
+/// 改完全局首选来源后，把所有账号的兼容镜像重新对齐一遍。
+///
+/// 不做这件事的后果很具体：界面上写着"首选 own"，PR #65 的二进制还在用旧别名键里的
+/// magpie 令牌 —— 两套读法给出两个答案。返回每个没同步成功的账号及原因（已脱敏）。
+pub fn resync_all_mirrors(app: &App) -> RpcResult<Vec<(String, String)>> {
+    let accounts = app.with_db(|db| db.list_accounts(&Default::default()))?;
+    let mut failures = Vec::new();
+    for account in accounts {
+        match sync_mirror(app, &account.id) {
+            Ok(report) => {
+                if let Some(error) = report.error {
+                    failures.push((account.id, error));
+                }
+            }
+            Err(err) => failures.push((account.id, err.message)),
+        }
+    }
+    Ok(failures)
 }
 
 /// 完整账号删除时清 5 条键：3 条新键 + 2 条旧别名。返回删不掉的键名（不含值）。
