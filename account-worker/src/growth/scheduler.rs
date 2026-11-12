@@ -19,10 +19,18 @@ use crate::rpc::RpcResult;
 
 use super::manager::{self, Options};
 
-/// 检查间隔：3 分钟。任务状态变化不频繁，而每次 tick 只发 1 个 `/tasks`。
-pub const DEFAULT_INTERVAL_SECS: i64 = 180;
+/// 检查间隔：**一天一次**。
+///
+/// 任务完成是由用户正常使用 WorkBuddy 触发的，一天一看足够；每次 tick 只发
+/// 一个 `/tasks`，四个账号一天四个请求，不会有任何限流风险。
+pub const DEFAULT_INTERVAL_SECS: i64 = 86_400;
 /// 允许的最小间隔。再小就变成刷接口了。
 pub const MIN_INTERVAL_SECS: i64 = 60;
+/// 旧版本的默认值（3 分钟）。
+///
+/// 库里存着这个数只可能是"从来没被显式设置过、只是用过旧默认值"——
+/// 界面不提供修改间隔的入口。所以见到它就当没设过，否则升级后永远停在 3 分钟。
+const LEGACY_DEFAULT_INTERVAL_SECS: i64 = 180;
 
 /// 设置项：总开关。**默认关闭**，用户显式开启后才有写操作。
 pub const SETTING_ENABLED: &str = "growth_auto_enabled";
@@ -58,12 +66,29 @@ pub fn set_enabled(app: &App, enabled: bool) -> RpcResult<()> {
 }
 
 pub fn interval_secs(app: &App) -> i64 {
-    app.with_db(|db| db.get_setting(SETTING_INTERVAL))
+    let stored = app
+        .with_db(|db| db.get_setting(SETTING_INTERVAL))
         .ok()
         .flatten()
-        .and_then(|raw| raw.trim().parse::<i64>().ok())
-        .map(|secs| secs.max(MIN_INTERVAL_SECS))
-        .unwrap_or(DEFAULT_INTERVAL_SECS)
+        .and_then(|raw| raw.trim().parse::<i64>().ok());
+    match stored {
+        Some(secs) if secs == LEGACY_DEFAULT_INTERVAL_SECS => DEFAULT_INTERVAL_SECS,
+        Some(secs) => secs.max(MIN_INTERVAL_SECS),
+        None => DEFAULT_INTERVAL_SECS,
+    }
+}
+
+/// 到点没有。抽成纯函数，测试可以不碰时钟也不发请求。
+pub fn is_due(
+    last: Option<chrono::DateTime<chrono::Utc>>,
+    interval_secs: i64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    match last {
+        // 从没跑过：立刻跑。开关刚打开时不该等一个周期。
+        None => true,
+        Some(last) => now >= last + chrono::Duration::seconds(interval_secs),
+    }
 }
 
 fn last_tick_at(app: &App) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -104,17 +129,14 @@ pub async fn run_tick(app: &std::sync::Arc<App>, force: bool) -> Value {
     if !enabled(app) && !force {
         return json!({ "skipped": "disabled" });
     }
-    if !force {
-        let interval = interval_secs(app);
-        if let Some(last) = last_tick_at(app) {
-            let due = last + chrono::Duration::seconds(interval);
-            if chrono::Utc::now() < due {
-                return json!({
-                    "skipped": "not_due",
-                    "nextTickAt": due.to_rfc3339(),
-                });
-            }
-        }
+    let interval = interval_secs(app);
+    let last = last_tick_at(app);
+    if !force && !is_due(last, interval, chrono::Utc::now()) {
+        return json!({
+            "skipped": "not_due",
+            "nextTickAt": last
+                .map(|at| (at + chrono::Duration::seconds(interval)).to_rfc3339()),
+        });
     }
     if TICK_RUNNING
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -177,8 +199,13 @@ pub async fn run_tick(app: &std::sync::Arc<App>, force: bool) -> Value {
     }
 
     let summary = summarize(&runs);
-    let _ = app.with_db(|db| db.set_setting(SETTING_LAST_TICK, &now_rfc3339()));
-    let _ = app.with_db(|db| db.set_setting(SETTING_LAST_RESULT, &summary));
+    // **只有真正允许写的那一轮才推进时间戳。**
+    // 关闭状态下手动点的只读检查不推进：否则用户打开开关后要再等一整天
+    // 才会跑第一轮。
+    if options.accept || options.claim {
+        let _ = app.with_db(|db| db.set_setting(SETTING_LAST_TICK, &now_rfc3339()));
+        let _ = app.with_db(|db| db.set_setting(SETTING_LAST_RESULT, &summary));
+    }
 
     TICK_RUNNING.store(false, Ordering::SeqCst);
     json!({
@@ -295,6 +322,50 @@ mod tests {
         assert_eq!(interval_secs(&app), MIN_INTERVAL_SECS);
     }
 
+    /// 旧版本的默认值 180 不能被当成"用户设置过"：否则升级后永远停在 3 分钟。
+    #[test]
+    fn legacy_default_interval_is_ignored() {
+        let (app, _dir) = test_app();
+        app.with_db(|db| db.set_setting(SETTING_INTERVAL, "180"))
+            .expect("stamp");
+        assert_eq!(
+            interval_secs(&app),
+            DEFAULT_INTERVAL_SECS,
+            "旧默认值要退化成新的 24 小时"
+        );
+    }
+
+    /// 用户显式设的其它值仍然生效。
+    #[test]
+    fn explicit_interval_is_respected() {
+        let (app, _dir) = test_app();
+        app.with_db(|db| db.set_setting(SETTING_INTERVAL, "7200"))
+            .expect("stamp");
+        assert_eq!(interval_secs(&app), 7200);
+    }
+
+    /// 从没跑过就该立刻跑：开关刚打开时不该再等一个周期。
+    #[test]
+    fn first_run_is_due_immediately() {
+        assert!(is_due(None, DEFAULT_INTERVAL_SECS, chrono::Utc::now()));
+    }
+
+    /// 24 小时周期：23 小时前跑过不到点，25 小时前跑过就到点。
+    #[test]
+    fn daily_period_is_respected() {
+        let now = chrono::Utc::now();
+        assert!(!is_due(
+            Some(now - chrono::Duration::hours(23)),
+            DEFAULT_INTERVAL_SECS,
+            now
+        ));
+        assert!(is_due(
+            Some(now - chrono::Duration::hours(25)),
+            DEFAULT_INTERVAL_SECS,
+            now
+        ));
+    }
+
     /// 关着的时候 tick 什么都不做 —— 不发请求、不写库、不改时间戳。
     /// 这就是"关闭自动管理后不再执行自动写操作"的那条测试。
     #[tokio::test]
@@ -323,17 +394,41 @@ mod tests {
         assert!(result["nextTickAt"].is_string());
     }
 
-    /// 上次运行时间是很久以前（App 关了再开）：应该立刻认为到点。
+    /// 上次运行时间超过一个周期（App 关了再开）：应该立刻认为到点。
     #[test]
     fn a_long_gap_means_it_is_due() {
         let (app, _dir) = test_app();
         set_enabled(&app, true).expect("on");
-        let long_ago = (chrono::Utc::now() - chrono::Duration::hours(6)).to_rfc3339();
+        let long_ago = (chrono::Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
         app.with_db(|db| db.set_setting(SETTING_LAST_TICK, &long_ago))
             .expect("stamp");
 
         let last = last_tick_at(&app).expect("parsed");
-        let due = last + chrono::Duration::seconds(interval_secs(&app));
-        assert!(chrono::Utc::now() >= due, "六小时前跑过，现在就该跑");
+        assert!(
+            is_due(Some(last), interval_secs(&app), chrono::Utc::now()),
+            "25 小时前跑过，现在就该跑"
+        );
+    }
+
+    /// 关闭状态下手动点的只读检查**不推进时间戳**：否则用户打开开关后
+    /// 要再等一整天才有第一轮。
+    ///
+    /// 用空账号库跑，保证不发任何请求。
+    #[tokio::test]
+    async fn a_forced_read_only_tick_does_not_advance_the_timestamp() {
+        let (app, _dir) = test_app();
+        // 开关是关的，force 只跳过间隔判断 → 只读
+        let result = run_tick(&app, true).await;
+        assert_eq!(
+            result["readOnly"].as_bool(),
+            Some(true),
+            "开关关着时 force 也只能只读：{result}"
+        );
+        assert!(
+            app.with_db(|db| db.get_setting(SETTING_LAST_TICK))
+                .unwrap()
+                .is_none(),
+            "只读检查不许推进 last_tick"
+        );
     }
 }

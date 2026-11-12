@@ -368,7 +368,7 @@ struct GrowthScanResult: Equatable {
 /// 界面上要如实说明"App 退出就停"，不能让用户以为有常驻服务。
 struct GrowthAutoStatus: Equatable {
     var enabled = false
-    var intervalSeconds = 180
+    var intervalSeconds = 86_400
     var running = false
     var lastTickAt: Date?
     var nextTickAt: Date?
@@ -379,7 +379,7 @@ struct GrowthAutoStatus: Equatable {
     init(json: [String: Any]?) {
         guard let json else { return }
         enabled = json["enabled"] as? Bool ?? false
-        intervalSeconds = (json["intervalSeconds"] as? NSNumber)?.intValue ?? 180
+        intervalSeconds = (json["intervalSeconds"] as? NSNumber)?.intValue ?? 86_400
         running = json["running"] as? Bool ?? false
         lastTickAt = Self.date(fromRFC3339: json["lastTickAt"] as? String)
         nextTickAt = Self.date(fromRFC3339: json["nextTickAt"] as? String)
@@ -388,8 +388,9 @@ struct GrowthAutoStatus: Equatable {
         continuesAfterQuit = json["continuesAfterQuit"] as? Bool ?? false
     }
 
-    /// "每 3 分钟""每 1 小时"这类文案。180 秒不写成"180 秒"。
+    /// 间隔文案。默认 24 小时直接说"每天检查一次"，比"每 24 小时"更像人话。
     var intervalText: String {
+        if intervalSeconds == 86_400 { return "每天检查一次" }
         if intervalSeconds % 3600 == 0 {
             return "每 \(intervalSeconds / 3600) 小时"
         }

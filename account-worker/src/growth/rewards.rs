@@ -14,6 +14,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
+use super::api::GrowthError;
 use super::models::{GrowthTask, TaskStatus};
 
 // ---------------------------------------------------------------------------
@@ -57,14 +58,17 @@ pub fn decide(task: &GrowthTask) -> Action {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AcceptOutcome {
+    /// `status == "ok"`。**只是"服务端受理了"**，最终算不算成功要回查 `/tasks`。
     pub accepted: Vec<String>,
-    /// `(task_code, message)`。服务端逐条给原因，原样保留。
+    /// `status == "error"`。`(task_code, message)`，服务端原话保留。
     pub rejected: Vec<(String, String)>,
-    /// 响应里根本没有 `results` 数组：不知道成没成，交给调用方回查。
-    pub unknown: bool,
+    /// status 缺失、取值没见过的、或者响应里根本没提到这条任务。
+    ///
+    /// 这三类都**不算成功**：把未知当成功，等于替服务端宣布一条任务已经报上名。
+    pub unknown: Vec<String>,
+    /// 整个 `results` 数组都不在：连逐条判断的材料都没有。
+    pub missing_results: bool,
 }
-
-impl AcceptOutcome {}
 
 /// `results` 可能在 `data.results` 或顶层 `results`（两种都见过）。
 fn locate_results(response: &Value) -> Option<&Vec<Value>> {
@@ -80,50 +84,53 @@ fn locate_results(response: &Value) -> Option<&Vec<Value>> {
 /// 解析接单响应。
 ///
 /// `requested` 是这次发出去的任务码，用来在响应残缺时判断"哪些没被提到"——
-/// 没被提到的**不算成功**，也不硬算失败，直接归入 rejected 并写明"响应里没有这条"。
+/// 没被提到的一律进 `unknown`，**不硬算成功也不硬算失败**。
 pub fn parse_accept(response: &Value, requested: &[String]) -> AcceptOutcome {
     let Some(results) = locate_results(response) else {
         return AcceptOutcome {
             accepted: Vec::new(),
             rejected: Vec::new(),
-            unknown: true,
+            unknown: requested.to_vec(),
+            missing_results: true,
         };
     };
 
     let mut accepted = Vec::new();
     let mut rejected = Vec::new();
+    let mut unknown = Vec::new();
     for item in results {
         let Some(code) = item.get("task_code").and_then(Value::as_str) else {
             continue;
         };
-        let status = item.get("status").and_then(Value::as_str).unwrap_or("");
-        if status == "error" {
-            let message = item
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("未说明原因");
-            rejected.push((code.to_string(), message.to_string()));
-        } else {
-            // 服务端只会给 ok / error；别的值当成功是赌，当失败是误报。
-            // 这里按"成功"处理但保留原始 status 的依据：`results` 里出现的条目
-            // 本身就是服务端对这条任务的答复，非 error 即已受理。
-            accepted.push(code.to_string());
+        match item.get("status").and_then(Value::as_str) {
+            Some("ok") => accepted.push(code.to_string()),
+            Some("error") => {
+                let message = item
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("未说明原因");
+                rejected.push((code.to_string(), message.to_string()));
+            }
+            // 服务端只承诺过 ok / error 两种。别的一律不认 —— 猜成成功会
+            // 让界面显示"已接单"，而服务端其实什么都没发生。
+            _ => unknown.push(code.to_string()),
         }
     }
 
     for code in requested {
-        if !results
+        let mentioned = results
             .iter()
-            .any(|item| item.get("task_code").and_then(Value::as_str) == Some(code.as_str()))
-        {
-            rejected.push((code.clone(), "响应中没有这条任务的结果".to_string()));
+            .any(|item| item.get("task_code").and_then(Value::as_str) == Some(code.as_str()));
+        if !mentioned && !unknown.contains(code) {
+            unknown.push(code.clone());
         }
     }
 
     AcceptOutcome {
         accepted,
         rejected,
-        unknown: false,
+        unknown,
+        missing_results: false,
     }
 }
 
@@ -142,6 +149,17 @@ pub enum ClaimOutcome {
     Rejected { message: String },
     /// 响应缺关键字段：不知道发没发。调用方必须回查任务状态，不许重发。
     Unknown { message: String },
+}
+
+/// `task not completed` 是**常态**，不是系统错误。
+///
+/// 传输层看到 HTTP 400 只能报 `Business`；但对业务层，它的意思是
+/// "这个任务现在还不能领"——记成 rejected，下一轮重读状态再判断，
+/// 不能记 failed 也不能算进已领奖。
+pub fn is_task_not_completed(err: &GrowthError) -> bool {
+    err.message
+        .to_ascii_lowercase()
+        .contains("task not completed")
 }
 
 fn int_of(value: Option<&Value>) -> Option<i64> {
@@ -209,6 +227,7 @@ pub fn parse_claim(response: &Value) -> ClaimOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::growth::api::ErrorKind;
     use serde_json::json;
 
     fn task(status: TaskStatus, locked: bool) -> GrowthTask {
@@ -274,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn accept_parses_per_task_results() {
+    fn accept_ok_is_accepted_and_error_is_rejected() {
         let response = json!({
             "code": 0,
             "data": {"results": [
@@ -288,25 +307,49 @@ mod tests {
             outcome.rejected,
             vec![("b".to_string(), "prerequisite not met".to_string())]
         );
-        assert!(!outcome.unknown);
+        assert!(outcome.unknown.is_empty());
+        assert!(!outcome.missing_results);
     }
 
+    /// status 缺失：不许当成功。以前这里是 `else { accepted }`，
+    /// 结果一条没有状态的答复就能让界面显示"已接单"。
+    #[test]
+    fn accept_without_status_is_unknown() {
+        let response = json!({"code": 0, "data": {"results": [{"task_code": "a"}]}});
+        let outcome = parse_accept(&response, &["a".to_string()]);
+        assert!(outcome.accepted.is_empty(), "没状态不能算接受");
+        assert_eq!(outcome.unknown, vec!["a"]);
+    }
+
+    /// 没见过的 status 同样不许猜。
+    #[test]
+    fn accept_with_unknown_status_is_unknown() {
+        let response =
+            json!({"code": 0, "data": {"results": [{"task_code": "a", "status": "pending"}]}});
+        let outcome = parse_accept(&response, &["a".to_string()]);
+        assert!(outcome.accepted.is_empty());
+        assert_eq!(outcome.unknown, vec!["a"]);
+    }
+
+    /// 整个 results 缺失：连逐条判断的材料都没有。
     #[test]
     fn accept_without_results_is_unknown_not_success() {
         let outcome = parse_accept(&json!({"code": 0, "msg": "OK"}), &["a".to_string()]);
-        assert!(outcome.unknown, "缺 results 不许猜成成功");
-        assert!(outcome.accepted.is_empty());
+        assert!(outcome.missing_results, "缺 results 要显式标出来");
+        assert!(outcome.accepted.is_empty(), "缺 results 不许猜成成功");
+        assert_eq!(outcome.unknown, vec!["a"], "没被提到的任务算未确认");
+        assert!(outcome.rejected.is_empty());
     }
 
+    /// 响应里少了一条：那条进 unknown，不硬算成功也不硬算失败。
     #[test]
     fn accept_flags_requested_codes_missing_from_the_response() {
         let response =
             json!({"code": 0, "data": {"results": [{"task_code": "a", "status": "ok"}]}});
         let outcome = parse_accept(&response, &["a".to_string(), "b".to_string()]);
         assert_eq!(outcome.accepted, vec!["a"]);
-        assert_eq!(outcome.rejected.len(), 1);
-        assert_eq!(outcome.rejected[0].0, "b");
-        assert!(outcome.rejected[0].1.contains("响应中没有"));
+        assert_eq!(outcome.unknown, vec!["b"]);
+        assert!(outcome.rejected.is_empty());
     }
 
     #[test]
@@ -314,6 +357,14 @@ mod tests {
         let response = json!({"code": 0, "results": [{"task_code": "a", "status": "ok"}]});
         let outcome = parse_accept(&response, &["a".to_string()]);
         assert_eq!(outcome.accepted, vec!["a"]);
+    }
+
+    #[test]
+    fn task_not_completed_is_recognised_as_a_rejection() {
+        let err = GrowthError::new(ErrorKind::Business, "task not completed");
+        assert!(is_task_not_completed(&err));
+        let other = GrowthError::new(ErrorKind::Business, "活动已结束");
+        assert!(!is_task_not_completed(&other));
     }
 
     #[test]

@@ -143,11 +143,11 @@ impl Transport for Mock {
 
     async fn claim(&self, code: &str) -> Result<Value, GrowthError> {
         self.calls.lock().unwrap().push(format!("claim:{code}"));
-        let queue = self.claims.lock().unwrap();
-        for (target, reply) in queue.iter() {
-            if target == code {
-                return reply.clone();
-            }
+        let mut queue = self.claims.lock().unwrap();
+        // 同一个任务可以配多条回复，按顺序消费 —— "第一次被拒、第二次成功"
+        // 这种跨轮次的场景只有这样才测得出来。
+        if let Some(index) = queue.iter().position(|(target, _)| target == code) {
+            return queue.remove(index).1;
         }
         Err(err(ErrorKind::Business, "task not completed"))
     }
@@ -257,9 +257,21 @@ async fn accept_is_capped_at_twenty_per_batch() {
         .collect();
     let first_batch: Vec<String> = (0..20).map(|i| format!("t{i}")).collect();
     let first_batch: Vec<&str> = first_batch.iter().map(String::as_str).collect();
+    // 接单后必须回查到"已接受"，否则新逻辑会全部记 not_confirmed。
+    let after: Vec<Value> = (0..25)
+        .map(|i| task(&format!("t{i}"), "accepted", false))
+        .collect();
     let mock = Mock::with_tasks(items)
         .accept_reply(Ok(accept_ok(&first_batch)))
-        .accept_reply(Ok(accept_ok(&["t20", "t21", "t22", "t23", "t24"])));
+        .accept_reply(Ok(accept_ok(&["t20", "t21", "t22", "t23", "t24"])))
+        .tasks_pages(vec![
+            tasks_body(
+                (0..25)
+                    .map(|i| task(&format!("t{i}"), "not_accepted", false))
+                    .collect(),
+            ),
+            tasks_body(after),
+        ]);
 
     let run = run(&app, &id, &mock, Options::FULL).await;
     assert_eq!(run.accepted, 25, "{run:?}");
@@ -531,7 +543,11 @@ async fn accounts_stay_isolated_in_records_and_counts() {
             tasks_body(vec![task("a_task", "claimed", false)]),
         ]);
     let mock_b = Mock::with_tasks(vec![task("b_task", "not_accepted", false)])
-        .accept_reply(Ok(accept_ok(&["b_task"])));
+        .accept_reply(Ok(accept_ok(&["b_task"])))
+        .tasks_pages(vec![
+            tasks_body(vec![task("b_task", "not_accepted", false)]),
+            tasks_body(vec![task("b_task", "accepted", false)]),
+        ]);
 
     let run_a = run(&app, &a, &mock_a, Options::FULL).await;
     let run_b = run(&app, &b, &mock_b, Options::FULL).await;
@@ -619,4 +635,134 @@ async fn claim_budget_leaves_the_rest_for_the_next_round() {
         "剩下的要留到下一轮并说明：{:?}",
         run.errors
     );
+}
+
+// ---------------------------------------------------------------------------
+// 验收修正：接单确认、401 立即停止、task not completed
+// ---------------------------------------------------------------------------
+
+/// 接口说 ok、但服务端状态没动：不许记成功。
+#[tokio::test]
+async fn accept_that_did_not_change_the_status_is_not_counted() {
+    let (app, _dir) = test_app();
+    let id = account(&app, "uid-accept-noland");
+    let mock = Mock::with_tasks(vec![task("todo", "not_accepted", false)])
+        .accept_reply(Ok(accept_ok(&["todo"])))
+        // 回查还是 not_accepted
+        .tasks_pages(vec![
+            tasks_body(vec![task("todo", "not_accepted", false)]),
+            tasks_body(vec![task("todo", "not_accepted", false)]),
+        ]);
+
+    let run = run(&app, &id, &mock, Options::FULL).await;
+    assert_eq!(run.accepted, 0, "状态没变就不能说接单成功：{run:?}");
+    assert_eq!(run.tasks[0].outcome, OUTCOME_UNKNOWN);
+    assert_eq!(run.tasks[0].error_kind.as_deref(), Some("not_confirmed"));
+    assert_eq!(
+        run.tasks[0].verified_status.as_deref(),
+        Some("not_accepted")
+    );
+}
+
+/// 接单首批就 401：剩下的批次一个都不许发，领奖阶段也不许进。
+#[tokio::test]
+async fn unauthorized_during_accept_stops_every_remaining_write() {
+    let (app, _dir) = test_app();
+    let id = account(&app, "uid-accept-401");
+    // 25 个待接单 = 两批。第一批就 401。
+    let items: Vec<Value> = (0..25)
+        .map(|i| task(&format!("t{i}"), "not_accepted", false))
+        .collect();
+    let mock =
+        Mock::with_tasks(items).accept_reply(Err(err(ErrorKind::Unauthorized, "unauthorized")));
+
+    let run = run(&app, &id, &mock, Options::FULL).await;
+    assert_eq!(run.state, "unauthorized");
+    let writes = mock.write_calls();
+    assert_eq!(writes.len(), 1, "只该发出第一批那一次：{writes:?}");
+    assert!(writes[0].starts_with("accept:"));
+    assert!(
+        !writes.iter().any(|c| c.starts_with("claim:")),
+        "授权失效后不许再进领奖：{writes:?}"
+    );
+}
+
+/// 领奖过程中 401：当前账号剩下的任务不再领。
+#[tokio::test]
+async fn unauthorized_during_claim_stops_the_remaining_tasks() {
+    let (app, _dir) = test_app();
+    let id = account(&app, "uid-claim-401");
+    let mock = Mock::with_tasks(vec![
+        task("a", "completed", false),
+        task("b", "completed", false),
+        task("c", "completed", false),
+    ])
+    .claim_reply("a", Err(err(ErrorKind::Unauthorized, "unauthorized")))
+    .claim_reply("b", Ok(claim_ok(100, 5)))
+    .claim_reply("c", Ok(claim_ok(100, 5)));
+
+    let run = run(&app, &id, &mock, Options::FULL).await;
+    assert_eq!(run.state, "unauthorized");
+    let claims: Vec<String> = mock
+        .calls()
+        .into_iter()
+        .filter(|c| c.starts_with("claim:"))
+        .collect();
+    assert_eq!(claims, vec!["claim:a"], "401 之后不该再领：{claims:?}");
+    assert_eq!(run.claimed, 0);
+}
+
+/// 一个账号 401 不能拖累另一个账号。
+#[tokio::test]
+async fn one_unauthorized_account_does_not_stop_another() {
+    let (app, _dir) = test_app();
+    let bad = account(&app, "uid-bad");
+    let good = account(&app, "uid-good");
+
+    let bad_mock = Mock::with_tasks(vec![task("x", "not_accepted", false)])
+        .accept_reply(Err(err(ErrorKind::Unauthorized, "unauthorized")));
+    let good_mock = Mock::with_tasks(vec![task("y", "not_accepted", false)])
+        .accept_reply(Ok(accept_ok(&["y"])))
+        .tasks_pages(vec![
+            tasks_body(vec![task("y", "not_accepted", false)]),
+            tasks_body(vec![task("y", "accepted", false)]),
+        ]);
+
+    let run_bad = run(&app, &bad, &bad_mock, Options::FULL).await;
+    let run_good = run(&app, &good, &good_mock, Options::FULL).await;
+
+    assert_eq!(run_bad.state, "unauthorized");
+    assert_eq!(run_good.state, "ok");
+    assert_eq!(run_good.accepted, 1, "另一个账号照常接单");
+}
+
+/// `task not completed` 是常态：记 rejected，不算系统错误、不算积分，
+/// 下一轮重读状态还能正常领。
+#[tokio::test]
+async fn task_not_completed_is_rejected_and_retried_next_round() {
+    let (app, _dir) = test_app();
+    let id = account(&app, "uid-notcompleted");
+    let mock = Mock::with_tasks(vec![task("done", "completed", false)])
+        .claim_reply("done", Err(err(ErrorKind::Business, "task not completed")))
+        .claim_reply("done", Ok(claim_ok(100, 5)))
+        .tasks_pages(vec![
+            // 第一轮：状态还是 completed（说明刚才那下确实不该领）
+            tasks_body(vec![task("done", "completed", false)]),
+            // 第二轮重读：仍是 completed，这次接口给成功
+            tasks_body(vec![task("done", "completed", false)]),
+            // 领完复核
+            tasks_body(vec![task("done", "claimed", false)]),
+        ]);
+
+    let first = run(&app, &id, &mock, Options::FULL).await;
+    assert_eq!(first.rejected, 1, "记 rejected：{first:?}");
+    assert_eq!(first.claimed, 0, "没领到就不许记成功");
+    assert_eq!(first.credit, 0, "更不能记积分");
+    assert_eq!(first.tasks[0].error_kind.as_deref(), Some("not_completed"));
+    assert_ne!(first.state, "failed", "这不是系统故障");
+
+    // 第二轮：服务端状态允许了就照常领
+    let second = run(&app, &id, &mock, Options::FULL).await;
+    assert_eq!(second.claimed, 1, "{second:?}");
+    assert_eq!(second.credit, 100);
 }

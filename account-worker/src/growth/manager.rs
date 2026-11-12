@@ -25,7 +25,9 @@ use crate::storage::growth::{
 
 use super::api::{ErrorKind, GrowthError, ReadOnlyEndpoints, WriteEndpoints, ACCEPT_BATCH};
 use super::models::{locate_tasks, parse_task, GrowthTask, TaskStatus};
-use super::rewards::{decide, parse_accept, parse_claim, Action, ClaimOutcome};
+use super::rewards::{
+    decide, is_task_not_completed, parse_accept, parse_claim, Action, ClaimOutcome,
+};
 
 /// 一轮里允许领几个奖。领奖是逐个请求，一轮领几十个会把单次 tick 拖到分钟级；
 /// 剩下的留到下一轮，反正任务不会跑。
@@ -230,97 +232,74 @@ pub async fn run_account_with<T: Transport>(
     let mut tasks = tasks_from(&first);
 
     // ---- 2. 接单 ----
-    if options.accept {
-        let pending: Vec<String> = tasks
-            .iter()
-            .filter(|task| decide(task) == Action::Accept)
-            .map(|task| task.code.clone())
-            .collect();
-        let titles: Vec<(String, String)> = tasks
+    //
+    // 三类结果分开处理：服务端明说 ok 的、明说 error 的、以及说不清的。
+    // **只有第一类才算候选成功**，而且候选还要回查 `/tasks` 才算真的接下 ——
+    // 200 + code 0 是"请求收到了"，不是"任务已接受"。
+    if options.accept && run.state != "unauthorized" {
+        let pending: Vec<(String, String)> = tasks
             .iter()
             .filter(|task| decide(task) == Action::Accept)
             .map(|task| (task.code.clone(), task.title.clone()))
             .collect();
 
-        let mut accepted_any = false;
+        // 服务端说 ok、但还没被状态确认的那批。
+        let mut candidates: Vec<(String, String)> = Vec::new();
+        let mut touched = false;
+
         for batch in pending.chunks(ACCEPT_BATCH) {
-            let codes = batch.to_vec();
-            let outcome = transport.accept(&codes).await;
-            match outcome {
+            let codes: Vec<String> = batch.iter().map(|(code, _)| code.clone()).collect();
+            match transport.accept(&codes).await {
                 Ok(body) => {
+                    touched = true;
                     let parsed = parse_accept(&body, &codes);
-                    for code in codes.iter() {
-                        let title = titles
+                    for (code, title) in batch {
+                        if parsed.accepted.iter().any(|c| c == code) {
+                            candidates.push((code.clone(), title.clone()));
+                            continue;
+                        }
+                        let rejected_reason = parsed
+                            .rejected
                             .iter()
                             .find(|(c, _)| c == code)
-                            .map(|(_, t)| t.clone())
-                            .unwrap_or_else(|| code.clone());
-                        if parsed.accepted.iter().any(|c| c == code) {
-                            accepted_any = true;
-                            run.accepted += 1;
-                            let task_run = TaskRun {
-                                task_code: code.clone(),
-                                title,
-                                action: ACTION_ACCEPT,
-                                outcome: OUTCOME_OK,
-                                credit: None,
-                                energy: None,
-                                error_kind: None,
-                                error_detail: None,
-                                verified_status: None,
-                            };
-                            record(app, account_id, &task_run);
-                            run.tasks.push(task_run);
-                        } else {
-                            run.rejected += 1;
-                            let message = parsed
-                                .rejected
-                                .iter()
-                                .find(|(c, _)| c == code)
-                                .map(|(_, m)| m.clone())
-                                .unwrap_or_else(|| {
-                                    if parsed.unknown {
-                                        "响应里没有逐条结果".to_string()
-                                    } else {
-                                        "服务端未确认".to_string()
-                                    }
-                                });
-                            let task_run = TaskRun {
-                                task_code: code.clone(),
-                                title,
-                                action: ACTION_ACCEPT,
-                                outcome: if parsed.unknown {
-                                    OUTCOME_UNKNOWN
+                            .map(|(_, message)| message.clone());
+                        let (outcome, kind, detail) = match rejected_reason {
+                            Some(message) => (OUTCOME_REJECTED, "rejected", message),
+                            None => (
+                                OUTCOME_UNKNOWN,
+                                "unconfirmed",
+                                if parsed.missing_results {
+                                    "响应里没有逐条结果，未确认".to_string()
                                 } else {
-                                    OUTCOME_REJECTED
+                                    "服务端未给出可识别的状态，未确认".to_string()
                                 },
-                                credit: None,
-                                energy: None,
-                                error_kind: Some(if parsed.unknown {
-                                    "no_results".to_string()
-                                } else {
-                                    "rejected".to_string()
-                                }),
-                                error_detail: Some(message),
-                                verified_status: None,
-                            };
-                            record(app, account_id, &task_run);
-                            run.tasks.push(task_run);
+                            ),
+                        };
+                        if outcome == OUTCOME_REJECTED {
+                            run.rejected += 1;
                         }
+                        let task_run = TaskRun {
+                            task_code: code.clone(),
+                            title: title.clone(),
+                            action: ACTION_ACCEPT,
+                            outcome,
+                            credit: None,
+                            energy: None,
+                            error_kind: Some(kind.to_string()),
+                            error_detail: Some(detail),
+                            verified_status: None,
+                        };
+                        record(app, account_id, &task_run);
+                        run.tasks.push(task_run);
                     }
                 }
                 Err(err) => {
                     let (kind, message) = detail_of(&err);
-                    // 整批失败：逐条记 unknown，不重发。
-                    for code in codes.iter() {
-                        let title = titles
-                            .iter()
-                            .find(|(c, _)| c == code)
-                            .map(|(_, t)| t.clone())
-                            .unwrap_or_else(|| code.clone());
+                    // 整批失败：逐条记，**不重发**。
+                    for (code, title) in batch {
                         let task_run = TaskRun {
                             task_code: code.clone(),
-                            title,
+                            title: title.clone(),
                             action: ACTION_ACCEPT,
                             outcome: if err.kind.retryable() {
                                 OUTCOME_UNKNOWN
@@ -337,28 +316,86 @@ pub async fn run_account_with<T: Transport>(
                         run.tasks.push(task_run);
                     }
                     run.errors.push(format!("接单失败（{kind}）：{message}"));
+                    if err.kind == ErrorKind::Unauthorized {
+                        // 明确 401：这份凭据已经不能用了。剩下的批次和后续领奖都不许再发。
+                        run.state = "unauthorized";
+                        break;
+                    }
                 }
             }
-            if !pending.is_empty() {
-                tokio::time::sleep(WRITE_GAP).await;
-            }
+            tokio::time::sleep(WRITE_GAP).await;
         }
 
-        // 接完单必须重新拉一次：接下来判断"能不能领"要基于变化后的状态。
-        if accepted_any {
+        // 回查确认：只有服务端状态真的动了，才把候选记成成功。
+        if touched {
             match transport.tasks().await {
-                Ok(body) => tasks = tasks_from(&body),
+                Ok(body) => {
+                    let after = tasks_from(&body);
+                    for (code, title) in candidates {
+                        let status = after
+                            .iter()
+                            .find(|task| task.code == code)
+                            .map(|task| task.status);
+                        let landed = matches!(
+                            status,
+                            Some(TaskStatus::Accepted)
+                                | Some(TaskStatus::InProgress)
+                                | Some(TaskStatus::Completed)
+                                | Some(TaskStatus::Claimed)
+                        );
+                        let task_run = TaskRun {
+                            task_code: code.clone(),
+                            title,
+                            action: ACTION_ACCEPT,
+                            outcome: if landed { OUTCOME_OK } else { OUTCOME_UNKNOWN },
+                            credit: None,
+                            energy: None,
+                            error_kind: (!landed).then(|| "not_confirmed".to_string()),
+                            error_detail: (!landed)
+                                .then(|| "接口返回成功，但重新查询任务状态没有变化".to_string()),
+                            verified_status: status.map(|s| raw_status_name(s).to_string()),
+                        };
+                        if landed {
+                            run.accepted += 1;
+                        }
+                        record(app, account_id, &task_run);
+                        run.tasks.push(task_run);
+                    }
+                    // 领奖阶段必须基于变化后的状态。
+                    if run.accepted > 0 {
+                        tasks = after;
+                    }
+                }
                 Err(err) => {
                     let (kind, message) = detail_of(&err);
+                    // 回查不了：候选全部记 unknown，不猜。
+                    for (code, title) in candidates {
+                        let task_run = TaskRun {
+                            task_code: code,
+                            title,
+                            action: ACTION_ACCEPT,
+                            outcome: OUTCOME_UNKNOWN,
+                            credit: None,
+                            energy: None,
+                            error_kind: Some(kind.clone()),
+                            error_detail: Some(format!("接单后无法确认：{message}")),
+                            verified_status: None,
+                        };
+                        record(app, account_id, &task_run);
+                        run.tasks.push(task_run);
+                    }
                     run.errors
-                        .push(format!("接单后重新查询失败（{kind}）：{message}"));
+                        .push(format!("接单后无法确认（{kind}）：{message}"));
                 }
             }
         }
     }
 
     // ---- 3. 领奖 ----
-    if options.claim {
+    //
+    // 接单阶段已经 401 就不再进这里：一份失效的令牌去领奖只会多几条 401。
+    let mut stop_claims = run.state == "unauthorized";
+    if options.claim && !stop_claims {
         let claimable: Vec<GrowthTask> = tasks
             .iter()
             .filter(|task| decide(task) == Action::Claim)
@@ -408,19 +445,29 @@ pub async fn run_account_with<T: Transport>(
                 },
                 Err(err) => {
                     let (kind, message) = detail_of(&err);
-                    task_run.outcome = if err.kind == ErrorKind::Network {
-                        // 超时有可能是"服务端已经处理完了才断"：只能回查。
-                        OUTCOME_UNKNOWN
-                    } else if err.kind.retryable() {
-                        OUTCOME_UNKNOWN
-                    } else {
-                        OUTCOME_FAILED
-                    };
-                    task_run.error_kind = Some(kind.clone());
-                    task_run.error_detail = Some(message);
-                    needs_verify = err.kind == ErrorKind::Network || err.kind.retryable();
-                    if err.kind == ErrorKind::Unauthorized {
+                    if is_task_not_completed(&err) {
+                        // "还没做完"是常态，不是故障：记 rejected，下一轮重读状态再说。
+                        task_run.outcome = OUTCOME_REJECTED;
+                        task_run.error_kind = Some("not_completed".to_string());
+                        task_run.error_detail = Some(message);
+                    } else if err.kind == ErrorKind::Unauthorized {
+                        // 明确 401：这份凭据不能用了，立即停止本账号剩余领奖。
+                        task_run.outcome = OUTCOME_FAILED;
+                        task_run.error_kind = Some(kind.clone());
+                        task_run.error_detail = Some(message);
                         run.state = "unauthorized";
+                        stop_claims = true;
+                    } else if err.kind == ErrorKind::Network || err.kind.retryable() {
+                        // 超时/限流/5xx 都有可能是"服务端已经处理完了才断"：
+                        // 记 unknown 并回查，**绝不重发**。
+                        task_run.outcome = OUTCOME_UNKNOWN;
+                        task_run.error_kind = Some(kind.clone());
+                        task_run.error_detail = Some(message);
+                        needs_verify = true;
+                    } else {
+                        task_run.outcome = OUTCOME_FAILED;
+                        task_run.error_kind = Some(kind.clone());
+                        task_run.error_detail = Some(message);
                     }
                 }
             }
@@ -468,6 +515,9 @@ pub async fn run_account_with<T: Transport>(
 
             record(app, account_id, &task_run);
             run.tasks.push(task_run);
+            if stop_claims {
+                break;
+            }
             tokio::time::sleep(WRITE_GAP).await;
         }
 

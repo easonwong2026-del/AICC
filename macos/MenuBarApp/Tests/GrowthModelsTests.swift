@@ -193,11 +193,15 @@ final class GrowthModelsTests: XCTestCase {
         let status = GrowthAutoStatus(json: nil)
         XCTAssertFalse(status.enabled, "默认必须是关的")
         XCTAssertFalse(status.continuesAfterQuit, "不许暗示 App 退出后还在跑")
-        XCTAssertEqual(status.intervalText, "每 3 分钟")
+        XCTAssertEqual(status.intervalText, "每天检查一次")
         XCTAssertEqual(status.nextTickText, "未开启")
     }
 
     func testAutoStatusFormatsIntervals() {
+        XCTAssertEqual(
+            GrowthAutoStatus(json: ["enabled": true, "intervalSeconds": 86_400]).intervalText,
+            "每天检查一次"
+        )
         XCTAssertEqual(
             GrowthAutoStatus(json: ["enabled": true, "intervalSeconds": 180]).intervalText,
             "每 3 分钟"
