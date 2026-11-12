@@ -16,7 +16,10 @@ final class GrowthModelsTests: XCTestCase {
             "target": 1,
             "rewardCredit": 20,
             "rewardEnergy": 0,
+            // 真实 JSON 里 status 是枚举串、rawStatus 是原始值；模型只读
+            // rawStatus 建枚举，两个都放进来才和线上一致。
             "status": "not_accepted",
+            "rawStatus": "not_accepted",
             "class": "realAction",
             "classReason": "需要在 WorkBuddy 里真实操作",
             "locked": false,
@@ -72,7 +75,9 @@ final class GrowthModelsTests: XCTestCase {
 
     /// 未知分类必须显式暴露，界面据此标红并不自动执行。
     func testUnknownClassIsSurfaced() throws {
-        let row = try XCTUnwrap(GrowthTaskRow(json: task(["class": "unknown", "status": "mystery"])))
+        let row = try XCTUnwrap(
+            GrowthTaskRow(json: task(["class": "unknown", "status": "mystery", "rawStatus": "mystery"]))
+        )
         XCTAssertEqual(row.taskClass, .unknown)
         XCTAssertTrue(row.isUnrecognised)
         XCTAssertEqual(row.status, .unknown, "没见过的状态落 unknown，不是 notAccepted")

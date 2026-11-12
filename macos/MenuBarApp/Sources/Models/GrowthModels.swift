@@ -101,7 +101,9 @@ struct GrowthTaskRow: Identifiable, Equatable {
         }
         rewardText = rewards.isEmpty ? "—" : rewards.joined(separator: " · ")
 
-        statusRaw = str(json["rawStatus"])
+        // 线上 JSON 两个字段都有（status 是枚举串，rawStatus 是原始值）。
+        // 只认 rawStatus 会让缺字段的老响应变成"待识别"，所以留一个回落。
+        statusRaw = str(json["rawStatus"]) ?? str(json["status"])
         status = GrowthTaskStatus(raw: statusRaw)
         taskClass = GrowthTaskClass(raw: json["class"] as? String)
         classReason = str(json["classReason"]) ?? "—"
