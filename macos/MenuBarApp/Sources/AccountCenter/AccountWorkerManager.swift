@@ -24,6 +24,10 @@ final class AccountWorkerManager: ObservableObject {
     @Published private(set) var state: State = .stopped
     @Published private(set) var lastChecked: Date?
     @Published private(set) var secureStoreSummary = "未检查"
+    /// 全局授权优先级：`magpie`（默认）或 `own`。由助手持久化在 `app_settings`。
+    @Published var preferredAuthSource = "magpie"
+    /// 设置项读写的最近一次错误，界面上不静默。
+    @Published private(set) var authSettingsError: String?
 
     private var client: AccountWorkerClient?
     private var restartCount = 0
@@ -117,6 +121,52 @@ final class AccountWorkerManager: ObservableObject {
             }
         } catch {
             secureStoreSummary = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    // MARK: - 全局授权优先级（PR #66 M3）
+
+    /// 读一次首选来源。失败时保持当前值并记错误，不把界面卡在"未知"。
+    func loadAuthPreferences() async {
+        guard let client, client.isRunning else { return }
+        do {
+            let result = try await client.call(
+                "settings.get",
+                params: ["key": AccountWorkerProtocol.settingPreferredAuthSource],
+                timeout: 8
+            )
+            if let value = result["value"] as? String,
+               value == "magpie" || value == "own" {
+                preferredAuthSource = value
+            }
+            authSettingsError = nil
+        } catch {
+            authSettingsError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    /// 写首选来源。助手侧会校验取值，非法值返回 `invalid_params`。
+    func setPreferredAuthSource(_ value: String) async {
+        guard value == "magpie" || value == "own" else { return }
+        let previous = preferredAuthSource
+        preferredAuthSource = value
+        guard let client, client.isRunning else {
+            authSettingsError = "助手未运行，设置没有保存"
+            return
+        }
+        do {
+            _ = try await client.call(
+                "settings.set",
+                params: [
+                    "key": AccountWorkerProtocol.settingPreferredAuthSource,
+                    "value": value,
+                ],
+                timeout: 8
+            )
+            authSettingsError = nil
+        } catch {
+            preferredAuthSource = previous
+            authSettingsError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
     }
 

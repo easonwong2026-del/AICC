@@ -13,7 +13,10 @@ use sha2::{Digest, Sha256};
 use crate::clock::now_rfc3339;
 use crate::rpc::{RpcError, RpcResult};
 
+pub mod authz;
 pub mod travel;
+
+pub use authz::AuthorizationRecord;
 
 const SCHEMA_V1: &str = include_str!("schema.sql");
 
@@ -76,16 +79,98 @@ CREATE INDEX IF NOT EXISTS idx_travel_events_account ON travel_events (account_i
 const MIGRATION_V5: &str = "\
 ALTER TABLE accounts ADD COLUMN auth_epoch INTEGER NOT NULL DEFAULT 0;";
 
+/// v6：一账号多来源授权（PR #66）。
+///
+/// 只建表。回填是 Rust 步骤（见 `authz::backfill_v6`），因为它要算确定性授权 ID、
+/// 按 kind 决定 `refresh_ref` 是 NULL 还是引用 —— 这些属于业务规则，不属于 DDL。
+///
+/// `refresh_ref` 对 magpie 恒为 NULL 由 `CHECK` 保证：表比"记得别写"可靠。
+const MIGRATION_V6_SQL: &str = "\
+CREATE TABLE IF NOT EXISTS account_authorizations (\
+    id                  TEXT PRIMARY KEY,\
+    account_id          TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,\
+    kind                TEXT NOT NULL CHECK (kind IN ('own', 'magpie')),\
+    access_ref          TEXT NOT NULL,\
+    refresh_ref         TEXT,\
+    auth_domain         TEXT,\
+    token_expires_at    TEXT,\
+    status              TEXT NOT NULL DEFAULT 'unknown'\
+                        CHECK (status IN ('unknown', 'valid', 'expired', 'invalid', 'denied')),\
+    version             INTEGER NOT NULL DEFAULT 0,\
+    key_migration_state TEXT NOT NULL DEFAULT 'pending'\
+                        CHECK (key_migration_state IN ('pending', 'migrating', 'ready', 'failed')),\
+    source_key          TEXT,\
+    last_used_at        TEXT,\
+    last_error          TEXT,\
+    created_at          TEXT NOT NULL,\
+    updated_at          TEXT NOT NULL,\
+    CHECK (kind <> 'magpie' OR refresh_ref IS NULL),\
+    UNIQUE (account_id, kind)\
+);\
+CREATE INDEX IF NOT EXISTS idx_auth_account ON account_authorizations (account_id, status);\
+CREATE INDEX IF NOT EXISTS idx_auth_pending ON account_authorizations (key_migration_state);";
+
+/// v7：镜像指针（双写起点）。
+///
+/// `auth_mirror_auth_id` 记录兼容镜像来自**哪一行授权**。没有它就无法证明
+/// "`auth_status = valid` 说的是 own 那份还是 magpie 那份"（G6）。
+const MIGRATION_V7_SQL: &str = "\
+ALTER TABLE accounts ADD COLUMN auth_mirror_auth_id TEXT;";
+
+/// 一次迁移里的一步：纯 SQL，或者需要 Rust 参与的数据迁移。
+enum MigrationStep {
+    Sql(&'static str),
+    Rust(fn(&rusqlite::Transaction<'_>) -> RpcResult<()>),
+}
+
+struct Migration {
+    version: i64,
+    steps: &'static [MigrationStep],
+}
+
 /// 迁移清单：按 version 升序，只追加不修改。
-const MIGRATIONS: &[(i64, &str)] = &[
-    (1, SCHEMA_V1),
-    (2, MIGRATION_V2),
-    (3, MIGRATION_V3),
-    (4, MIGRATION_V4),
-    (5, MIGRATION_V5),
+///
+/// **v6 与 v7 都在本版本里，`Db::open()` 会连续执行它们。** 拆号是为了 diff 可评审、
+/// 每一步能单独回滚，不是为了让运行时观察到"只有 v6"的中间态 —— 任何 RPC 都看不到。
+/// v8（删旧钥匙串键、下线镜像列）属于后续独立 PR，这里刻意没有。
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        steps: &[MigrationStep::Sql(SCHEMA_V1)],
+    },
+    Migration {
+        version: 2,
+        steps: &[MigrationStep::Sql(MIGRATION_V2)],
+    },
+    Migration {
+        version: 3,
+        steps: &[MigrationStep::Sql(MIGRATION_V3)],
+    },
+    Migration {
+        version: 4,
+        steps: &[MigrationStep::Sql(MIGRATION_V4)],
+    },
+    Migration {
+        version: 5,
+        steps: &[MigrationStep::Sql(MIGRATION_V5)],
+    },
+    Migration {
+        version: 6,
+        steps: &[
+            MigrationStep::Sql(MIGRATION_V6_SQL),
+            MigrationStep::Rust(authz::backfill_v6),
+        ],
+    },
+    Migration {
+        version: 7,
+        steps: &[
+            MigrationStep::Sql(MIGRATION_V7_SQL),
+            MigrationStep::Rust(authz::seed_mirror_v7),
+        ],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 5;
+pub const LATEST_VERSION: i64 = 7;
 
 pub struct Db {
     conn: Connection,
@@ -111,11 +196,15 @@ pub struct AccountRecord {
     /// 登录时响应里的 domain，刷新令牌要带上。
     pub auth_domain: Option<String>,
     /// `own`（独立授权）或 `magpie`（借用 Magpie 的 access token）。
+    ///
+    /// v7 起这是**派生值**：真实状态在 `account_authorizations`，这里只是兼容镜像（G6）。
     pub auth_source: String,
     /// 该账号是否允许自动派 Buddy 旅行。默认关闭，与签到开关互不影响。
     pub travel_enabled: bool,
     /// 凭据版本号。任何一次账号/授权写入都会 +1，用来让在途的旧快照作废。
     pub auth_epoch: i64,
+    /// 兼容镜像来自哪一行授权（v7）。为空表示还没镜像过。
+    pub auth_mirror_auth_id: Option<String>,
 }
 
 /// 账号写入参数。**所有可选字段都是"补丁"语义**：
@@ -197,19 +286,25 @@ impl Db {
         let mut current: i64 = self
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        for (version, sql) in MIGRATIONS {
-            if *version <= current {
+        for migration in MIGRATIONS {
+            if migration.version <= current {
                 continue;
             }
+            // 一个版本里的所有步骤在同一个事务里：SQL 与 Rust 数据迁移要么都成，要么都不留痕。
             let tx = self.conn.transaction()?;
-            tx.execute_batch(sql)?;
+            for step in migration.steps {
+                match step {
+                    MigrationStep::Sql(sql) => tx.execute_batch(sql)?,
+                    MigrationStep::Rust(run) => run(&tx)?,
+                }
+            }
             tx.execute(
                 "INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
-                params![version, now_rfc3339()],
+                params![migration.version, now_rfc3339()],
             )?;
-            tx.pragma_update(None, "user_version", *version)?;
+            tx.pragma_update(None, "user_version", migration.version)?;
             tx.commit()?;
-            current = *version;
+            current = migration.version;
         }
         Ok(current)
     }
@@ -248,6 +343,7 @@ impl Db {
             "app_settings",
             "travel_states",
             "travel_events",
+            "account_authorizations",
         ] {
             let sql = format!("SELECT COUNT(*) FROM {table}");
             let n: i64 = self.conn.query_row(&sql, [], |row| row.get(0))?;
@@ -380,7 +476,8 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, platform, uid, nickname, email, group_id, auth_status,
                     checkin_enabled, last_checkin_at, last_result, updated_at,
-                    token_expires_at, auth_domain, auth_source, travel_enabled, auth_epoch
+                    token_expires_at, auth_domain, auth_source, travel_enabled, auth_epoch,
+                    auth_mirror_auth_id
              FROM accounts WHERE id = ?1",
         )?;
         let row = stmt.query_row(params![id], map_account).optional()?;
@@ -392,30 +489,12 @@ impl Db {
         self.get_account(&account_id(platform, uid))
     }
 
-    /// 只更新登录态相关字段，不动用户填的备注/分组。
-    pub fn set_auth_state(
-        &self,
-        id: &str,
-        status: &str,
-        token_expires_at: Option<&str>,
-    ) -> RpcResult<()> {
-        self.conn.execute(
-            "UPDATE accounts
-                SET auth_status = ?1,
-                    token_expires_at = COALESCE(?2, token_expires_at),
-                    auth_epoch = auth_epoch + 1,
-                    updated_at = ?3
-              WHERE id = ?4",
-            params![status, token_expires_at, now_rfc3339(), id],
-        )?;
-        Ok(())
-    }
-
     pub fn list_accounts(&self, filter: &AccountFilter) -> RpcResult<Vec<AccountRecord>> {
         let mut sql = String::from(
             "SELECT id, platform, uid, nickname, email, group_id, auth_status,
                     checkin_enabled, last_checkin_at, last_result, updated_at,
-                    token_expires_at, auth_domain, auth_source, travel_enabled, auth_epoch
+                    token_expires_at, auth_domain, auth_source, travel_enabled, auth_epoch,
+                    auth_mirror_auth_id
              FROM accounts WHERE 1 = 1",
         );
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -523,6 +602,7 @@ fn map_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRecord> {
             .unwrap_or_else(|| "own".into()),
         travel_enabled: row.get::<_, Option<i64>>(14)?.unwrap_or(0) != 0,
         auth_epoch: row.get::<_, Option<i64>>(15)?.unwrap_or(0),
+        auth_mirror_auth_id: row.get(16)?,
     })
 }
 
@@ -547,6 +627,166 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = Db::open(&dir.path().join("accounts.sqlite")).expect("open");
         (db, dir)
+    }
+
+    /// 造一个"旧版本"的库：逐条跑 v1..=target，再把 user_version 钉住。
+    ///
+    /// 不用 `Db::open`，因为它会把库一路迁到最新；这里要的是真实的旧库形态。
+    fn legacy_db(dir: &std::path::Path, target: i64) -> std::path::PathBuf {
+        let path = dir.join("accounts.sqlite");
+        let conn = Connection::open(&path).expect("open legacy");
+        for migration in MIGRATIONS {
+            if migration.version > target {
+                break;
+            }
+            for step in migration.steps {
+                if let MigrationStep::Sql(sql) = step {
+                    conn.execute_batch(sql).expect("legacy step");
+                }
+            }
+        }
+        conn.pragma_update(None, "user_version", target)
+            .expect("pin version");
+        path
+    }
+
+    fn seed_history(path: &std::path::Path) {
+        let conn = Connection::open(path).expect("open");
+        conn.execute_batch(
+            "INSERT INTO accounts (id, platform, uid, nickname, auth_status, checkin_enabled,
+                                   created_at, updated_at, auth_source)
+             VALUES ('acc-own', 'workbuddy', 'uid-own', '自有', 'valid', 1, '2026-01-01T00:00:00Z',
+                     '2026-01-01T00:00:00Z', 'own'),
+                    ('acc-magpie', 'workbuddy', 'uid-magpie', '借用', 'expired', 0,
+                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'magpie'),
+                    ('acc-qoder', 'qoder_cn', 'uid-q', 'Qoder', 'valid', 0,
+                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'own');
+             INSERT INTO checkin_records (account_id, platform, local_date, status, checked_at)
+             VALUES ('acc-own', 'workbuddy', '2026-11-10', 'claimed', '2026-11-10T01:00:00Z');
+             INSERT INTO travel_states (account_id, updated_at) VALUES ('acc-own', '2026-11-10T01:00:00Z');
+             INSERT INTO travel_events (account_id, kind, status, created_at)
+             VALUES ('acc-own', 'depart', 'ok', '2026-11-10T01:00:00Z');",
+        )
+        .expect("seed history");
+    }
+
+    fn count(db: &Db, table: &str) -> i64 {
+        db.conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("count")
+    }
+
+    /// v5 → v6/v7：账号 ID、签到、旅行事件一行不改，授权行按确定公式生成，
+    /// 镜像指向同一行（G2 / G3 / G5 / G6）。
+    #[test]
+    fn v5_upgrades_to_v7_and_keeps_history() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = legacy_db(dir.path(), 5);
+        seed_history(&path);
+
+        let db = Db::open(&path).expect("open");
+        assert_eq!(db.schema_version().unwrap(), 7);
+
+        assert_eq!(count(&db, "accounts"), 3, "账号一行都不能少");
+        assert_eq!(count(&db, "checkin_records"), 1);
+        assert_eq!(count(&db, "travel_events"), 1);
+        assert_eq!(count(&db, "travel_states"), 1);
+
+        // 只为 WorkBuddy 建授权行，Qoder 不进这张表
+        assert_eq!(count(&db, "account_authorizations"), 2);
+
+        let own = db
+            .find_authorization("acc-own", "own")
+            .unwrap()
+            .expect("own row");
+        assert_eq!(
+            own.id,
+            crate::auth::ids::auth_id("acc-own", "own"),
+            "G5：ID 必须可重算"
+        );
+        assert_eq!(own.key_migration_state, "pending");
+        assert!(own.refresh_ref.is_some(), "own 必须保留 refresh 引用");
+        assert_eq!(own.status, "valid");
+
+        let magpie = db
+            .find_authorization("acc-magpie", "magpie")
+            .unwrap()
+            .expect("magpie row");
+        assert!(magpie.refresh_ref.is_none(), "magpie 不允许有 refresh 引用");
+        assert_eq!(magpie.status, "expired");
+
+        // 镜像：来自同一行、来源一致
+        let account = db.get_account("acc-own").unwrap().expect("account");
+        assert_eq!(account.auth_source, "own");
+        assert_eq!(
+            account.auth_mirror_auth_id.as_deref(),
+            Some(own.id.as_str())
+        );
+        let mirrored_ref: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT auth_ref FROM accounts WHERE id = 'acc-own'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            mirrored_ref.as_deref(),
+            Some(own.access_ref.as_str()),
+            "镜像必须指向同一来源的 access"
+        );
+
+        let qoder = db.get_account("acc-qoder").unwrap().expect("qoder");
+        assert!(qoder.auth_mirror_auth_id.is_none(), "Qoder 不参与多授权");
+    }
+
+    /// v4 → v5 → v6/v7：跨两级升级同样不丢数据。
+    #[test]
+    fn v4_upgrades_to_v7() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = legacy_db(dir.path(), 4);
+        seed_history(&path);
+        let db = Db::open(&path).expect("open");
+        assert_eq!(db.schema_version().unwrap(), 7);
+        assert_eq!(count(&db, "accounts"), 3);
+        assert_eq!(count(&db, "account_authorizations"), 2);
+    }
+
+    /// 空库直接建到 v7：不产生任何授权行，也不报错。
+    #[test]
+    fn empty_database_lands_on_v7_without_rows() {
+        let (db, _dir) = temp_db();
+        assert_eq!(db.schema_version().unwrap(), 7);
+        assert_eq!(count(&db, "account_authorizations"), 0);
+    }
+
+    /// 反复打开（重复启动）不产生重复授权行（G3）。
+    #[test]
+    fn reopening_does_not_duplicate_authorizations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = legacy_db(dir.path(), 5);
+        seed_history(&path);
+        let mut first = Db::open(&path).expect("first");
+        assert_eq!(count(&first, "account_authorizations"), 2);
+        first.migrate().unwrap();
+        drop(first);
+        let second = Db::open(&path).expect("second");
+        assert_eq!(count(&second, "account_authorizations"), 2);
+        assert_eq!(second.schema_version().unwrap(), 7);
+    }
+
+    /// 删账号连带删授权行（外键级联），不留孤儿。
+    #[test]
+    fn deleting_an_account_cascades_authorizations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = legacy_db(dir.path(), 5);
+        seed_history(&path);
+        let mut db = Db::open(&path).expect("open");
+        assert!(db.delete_account("acc-own").unwrap());
+        assert!(db.find_authorization("acc-own", "own").unwrap().is_none());
+        assert_eq!(count(&db, "account_authorizations"), 1);
     }
 
     #[test]

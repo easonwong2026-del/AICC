@@ -51,20 +51,63 @@ pub struct AppTokens<'a> {
 }
 
 impl Tokens for AppTokens<'_> {
+    /// 取令牌走 Broker：默认 Magpie 优先、失败时读时兜底到自有授权（G1 / G6）。
+    ///
+    /// 这里不再自己拼钥匙串键 —— 键名多了三个之后，任何一处自己拼都会漏掉一种来源。
     fn access(&self, account: &AccountRecord) -> Result<String, String> {
-        let (key, _) = crate::providers::workbuddy_auth::secret_keys(&account.uid);
-        let bytes = self.app.secure.get(&key).map_err(|err| err.message)?;
-        let token = String::from_utf8(bytes).map_err(|_| "凭据不是 UTF-8".to_string())?;
-        if token.trim().is_empty() {
-            return Err("钥匙串里的访问令牌为空，请重新登录".to_string());
+        match crate::auth::broker::resolve(self.app, account) {
+            Ok(crate::auth::broker::Outcome::Resolved(resolved)) => Ok(resolved.access),
+            Ok(crate::auth::broker::Outcome::Unavailable { detail, .. }) => Err(detail),
+            Err(err) => Err(err.message),
         }
-        Ok(token)
     }
 
-    fn resync(&self, account: &AccountRecord) -> Result<String, String> {
-        if account.auth_source != crate::providers::magpie::SOURCE_MAGPIE {
-            return Err("该账号是独立扫码授权，请重新扫码登录".to_string());
+    /// 401 之后恢复一次。
+    ///
+    /// 顺序：
+    /// 1. **按当前选中的来源**走各自的恢复路径 —— own 用 refresh，magpie 重新从文件读 access；
+    /// 2. 主路失败后，**只读**地试另一份仍在有效期内的 access（不再发第二次请求）。
+    ///
+    /// 这样 "一次 401 只触发一次恢复"，既不会循环刷新，也不会因为一次失败就把账号打进冷却。
+    async fn resync(&self, account: &AccountRecord) -> Result<String, String> {
+        let selected = selected_kind(self.app, account);
+        let primary = if selected == crate::auth::ids::KIND_OWN {
+            self.refresh_own(account).await
+        } else {
+            self.resync_magpie(account)
+        };
+
+        match primary {
+            Ok(token) => Ok(token),
+            Err(err) => match other_access(self.app, account, &selected) {
+                Some(token) => Ok(token),
+                None => Err(err),
+            },
         }
+    }
+}
+
+impl AppTokens<'_> {
+    /// 自有授权的恢复：走 refresh（会落盘新令牌并推进版本）。
+    async fn refresh_own(&self, account: &AccountRecord) -> Result<String, String> {
+        let report = crate::handlers::refresh_account(self.app, &account.id)
+            .await
+            .map_err(|err| err.message)?;
+        if report.get("state").and_then(Value::as_str) != Some("valid") {
+            return Err(report
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("自有授权刷新失败")
+                .to_string());
+        }
+        crate::auth::service::read_access(self.app, account, crate::auth::ids::KIND_OWN)
+            .map_err(|err| err.message)?
+            .ok_or_else(|| "刷新后读不到新的访问令牌".to_string())
+    }
+
+    /// 借用授权的恢复：重新从 Magpie 读一次 access（**不刷新**）。
+    fn resync_magpie(&self, account: &AccountRecord) -> Result<String, String> {
         match crate::handlers::resync_magpie_access(self.app, account) {
             Ok(report) => {
                 if report.get("state").and_then(Value::as_str) != Some("valid") {
@@ -77,15 +120,45 @@ impl Tokens for AppTokens<'_> {
                 }
                 <Self as Tokens>::access(self, account)
             }
-            // 手上这份账号快照已经过期（用户刚好扫码换成了自有授权，或者账号刚被写过）：
-            // worker 拒绝写入，我们也不该把它当失败——那会给账号打上 6 小时冷却。
-            // 直接用手上现在的令牌继续，下一轮自然读到新账号。
+            // 手上这份账号快照已经过期（期间用户扫码换了授权，或者账号刚被写过）：
+            // 不算失败，直接用手上现有的令牌继续，下一轮自然读到新账号。
             Err(err) if crate::handlers::is_stale_snapshot(&err) => {
                 <Self as Tokens>::access(self, account)
             }
             Err(err) => Err(err.message),
         }
     }
+}
+
+/// 当前 Broker 会选用哪一份；选不出来时退回首选来源，保证恢复路径有明确方向。
+fn selected_kind(app: &App, account: &AccountRecord) -> String {
+    match crate::auth::broker::resolve(app, account) {
+        Ok(crate::auth::broker::Outcome::Resolved(resolved)) => resolved.kind,
+        _ => crate::auth::broker::preferred_source(app),
+    }
+}
+
+/// 另一份授权**现成**的 access：只读钥匙串，不看网络。
+///
+/// 只在主恢复路径明确失败后才调用；状态是失效类或已过期的就不算可用，
+/// 免得把一份死令牌交回去再撞一次 401。
+fn other_access(app: &App, account: &AccountRecord, selected: &str) -> Option<String> {
+    let other = if selected == crate::auth::ids::KIND_OWN {
+        crate::auth::ids::KIND_MAGPIE
+    } else {
+        crate::auth::ids::KIND_OWN
+    };
+    let row = app
+        .with_db(|db| db.find_authorization(&account.id, other))
+        .ok()
+        .flatten()?;
+    if !crate::auth::broker::is_usable(&row) {
+        return None;
+    }
+    crate::auth::service::read_access(app, account, other)
+        .ok()
+        .flatten()
+        .filter(|token| !token.trim().is_empty())
 }
 
 fn load_state(app: &App, account_id: &str) -> RpcResult<TravelState> {

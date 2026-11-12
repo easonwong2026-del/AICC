@@ -45,6 +45,75 @@ final class ConsoleModelsTests: XCTestCase {
         XCTAssertNil(ConsoleAccount(json: ["id": "x", "uid": "u"]))
     }
 
+    /// 一个账号可以同时有自有与 Magpie 两份授权，界面要能分开显示。
+    func testParsesTwoAuthorizations() throws {
+        let account = try XCTUnwrap(ConsoleAccount(json: row([
+            "authSource": "magpie",
+            "authorizations": [
+                [
+                    "id": "a1", "kind": "own", "status": "valid",
+                    "tokenExpiresAt": "2026-12-01T00:00:00Z",
+                    "keyMigrationState": "ready",
+                ],
+                [
+                    "id": "a2", "kind": "magpie", "status": "valid",
+                    "tokenExpiresAt": "2026-11-22T13:42:14Z",
+                    "keyMigrationState": "pending",
+                ],
+            ] as [[String: Any]],
+        ])))
+
+        XCTAssertEqual(account.authorizations.count, 2)
+        XCTAssertEqual(account.ownAuthorization?.kindLabel, "自有")
+        XCTAssertEqual(account.magpieAuthorization?.authLabel, "已授权")
+        XCTAssertEqual(account.magpieAuthorization?.isMigrating, true)
+        XCTAssertEqual(account.activeSourceLabel, "Magpie", "authSource 是派生值，直接用它")
+        XCTAssertNil(account.authorizationProblem)
+    }
+
+    /// 只有一份授权时，另一份是 nil（界面显示"未授权"而不是消失）。
+    func testSingleAuthorizationLeavesTheOtherEmpty() throws {
+        let account = try XCTUnwrap(ConsoleAccount(json: row([
+            "authorizations": [
+                ["id": "a1", "kind": "own", "status": "valid"],
+            ] as [[String: Any]],
+        ])))
+        XCTAssertNotNil(account.ownAuthorization)
+        XCTAssertNil(account.magpieAuthorization)
+    }
+
+    /// 两份都失效 / 有错误时必须给出可读原因。
+    func testAuthorizationProblemIsSurfaced() throws {
+        let failed = try XCTUnwrap(ConsoleAccount(json: row([
+            "authorizations": [
+                ["id": "a1", "kind": "own", "status": "invalid"],
+                ["id": "a2", "kind": "magpie", "status": "expired"],
+            ] as [[String: Any]],
+        ])))
+        XCTAssertNotNil(failed.authorizationProblem)
+
+        let withError = try XCTUnwrap(ConsoleAccount(json: row([
+            "authorizations": [
+                [
+                    "id": "a1", "kind": "own", "status": "valid",
+                    "lastError": "旧别名写入失败",
+                ],
+            ] as [[String: Any]],
+        ])))
+        XCTAssertEqual(withError.authorizationProblem, "旧别名写入失败")
+    }
+
+    /// 未知 kind 的行要被丢掉，避免把将来的类型当成本地已知的两份之一。
+    func testUnknownAuthorizationKindIsRejected() throws {
+        XCTAssertNil(ConsoleAuthorization(json: ["id": "a1", "kind": "qoder", "status": "valid"]))
+        let account = try XCTUnwrap(ConsoleAccount(json: row([
+            "authorizations": [
+                ["id": "a1", "kind": "qoder", "status": "valid"],
+            ] as [[String: Any]],
+        ])))
+        XCTAssertTrue(account.authorizations.isEmpty)
+    }
+
     func testAuthToneMapping() throws {
         let cases: [(String, ConsoleAccount.AuthTone)] = [
             ("valid", .ok),

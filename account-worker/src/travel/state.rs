@@ -111,8 +111,34 @@ fn as_i64(value: Option<&Value>) -> i64 {
 /// 401/403 单独归类成 `unauthorized`，让上层决定「重新从 Magpie 取 access」
 /// 而不是盲目退避重试。缺 `state` 或状态未知一律当失败，绝不当成 `idle`——
 /// 那会导致「明明在旅行却被标成今日已完成」。
+/// 只有**明确**的认证失败才算 401。
+///
+/// 上游的 `is_unauthorized` 会看文案里的 "token" / "过期"，于是一个 429 限流
+/// （`code: 429, message: "token 频率超限"`）也会命中。旅行侧把它当 401 的代价很大：
+/// 换源、并且给账号打 6 小时冷却。所以先按 HTTP 语义截断，文案只在 403 时作为补充判据。
+pub fn is_auth_failure(resp: &Value) -> bool {
+    match resp.get("code").and_then(Value::as_i64).unwrap_or(-1) {
+        401 => true,
+        403 => {
+            // 三个键都看：上游不同接口分别用 message / msg / error 放文案。
+            let msg = resp
+                .get("message")
+                .or_else(|| resp.get("msg"))
+                .or_else(|| resp.get("error"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_lowercase();
+            ["unauthorized", "登录", "失效"]
+                .iter()
+                .any(|k| msg.contains(k))
+        }
+        // 429 / 5xx / 传输错误（-1）/ 其它业务码：都不是认证结论。
+        _ => false,
+    }
+}
+
 pub fn parse_status(resp: &Value) -> Result<ServerStatus, StatusError> {
-    if wb_switch_core::modules::travel::is_unauthorized(resp) {
+    if is_auth_failure(resp) {
         return Err(StatusError::new("unauthorized", error_text(resp)));
     }
     let code = as_i64(resp.get("code"));
@@ -313,11 +339,26 @@ mod tests {
                 .kind,
             "unauthorized"
         );
+        // 403 不再无条件算认证失败：没有鉴权文案时语义不明，按 http 退避处理，
+        // 免得一次网关拦截就把账号打进 6 小时令牌冷却。
         assert_eq!(
             parse_status(&json!({"ok":false,"code":403}))
                 .unwrap_err()
                 .kind,
+            "http"
+        );
+        assert_eq!(
+            parse_status(&json!({"ok":false,"code":403,"error":"登录已失效"}))
+                .unwrap_err()
+                .kind,
             "unauthorized"
+        );
+        // 429 即使文案里有 "token" 也只能是限流。
+        assert_eq!(
+            parse_status(&json!({"ok":false,"code":429,"error":"token 频率超限"}))
+                .unwrap_err()
+                .kind,
+            "rate_limited"
         );
         assert_eq!(
             parse_status(&json!({"ok":false,"code":429,"error":"too many requests"}))

@@ -213,6 +213,25 @@ private struct ConsoleAccountCard: View {
                         .textSelection(.enabled)
                 }
 
+                if !account.authorizations.isEmpty {
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 6) {
+                            AuthorizationChip(kindLabel: "自有", authorization: account.ownAuthorization)
+                            AuthorizationChip(kindLabel: "Magpie", authorization: account.magpieAuthorization)
+                            Spacer(minLength: 0)
+                        }
+                        Text("当前使用 \(account.activeSourceLabel)")
+                            .font(.system(size: 10))
+                            .foregroundStyle(ConsoleTheme.tertiaryText)
+                        if let problem = account.authorizationProblem {
+                            Text(problem)
+                                .font(.system(size: 10))
+                                .foregroundStyle(ConsoleTheme.tone(.warning))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
                 Divider().overlay(ConsoleTheme.border)
 
                 HStack(spacing: 14) {
@@ -255,5 +274,45 @@ private struct ConsoleAccountCard: View {
         formatter.locale = .current
         formatter.dateFormat = "MM-dd HH:mm"
         return formatter.string(from: date)
+    }
+}
+
+/// 一份授权的徽章：谁、什么状态、什么时候到期。
+///
+/// 两份都在时并排显示，用户能一眼看出"Magpie 有、自有没有"这种情况；
+/// 只有一份时另一枚显示"未授权"，而不是干脆不画（否则看起来像只有一种来源）。
+private struct AuthorizationChip: View {
+    let kindLabel: String
+    let authorization: ConsoleAuthorization?
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(tint)
+                .frame(width: 5, height: 5)
+            Text(kindLabel)
+                .foregroundStyle(ConsoleTheme.secondaryText)
+            Text(detail)
+                .foregroundStyle(ConsoleTheme.tertiaryText)
+        }
+        .font(.system(size: 9, weight: .medium))
+        .lineLimit(1)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(ConsoleTheme.cardSubtle, in: RoundedRectangle(cornerRadius: 5))
+    }
+
+    private var tint: Color {
+        guard let authorization else { return ConsoleTheme.tertiaryText }
+        return ConsoleTheme.tone(authorization.tone)
+    }
+
+    private var detail: String {
+        guard let authorization else { return "未授权" }
+        if authorization.isMigrating { return "迁移中" }
+        if let expires = authorization.tokenExpiresAt, expires.count >= 10 {
+            return "\(authorization.authLabel) · \(expires.prefix(10))"
+        }
+        return authorization.authLabel
     }
 }

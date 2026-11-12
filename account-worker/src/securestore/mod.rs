@@ -88,6 +88,8 @@ enum Backend {
         fail_values: Vec<String>,
         /// 武装时读也失败：用来验证「拍不到快照就不许写」。
         fail_reads: bool,
+        /// 只让这些 key（子串命中）读失败：用来验证「读不出目标就不能盲写」。
+        fail_read_keys: Vec<String>,
         /// 默认不生效：测试要先把「旧凭据」写进去，再 `arm()` 打开故障注入。
         armed: std::sync::atomic::AtomicBool,
     },
@@ -141,6 +143,7 @@ impl SecureStore {
                 fail_delete: fail_delete.iter().map(|s| s.to_string()).collect(),
                 fail_values: Vec::new(),
                 fail_reads: false,
+                fail_read_keys: Vec::new(),
                 armed: std::sync::atomic::AtomicBool::new(false),
             },
         }
@@ -159,6 +162,7 @@ impl SecureStore {
                 fail_delete: Vec::new(),
                 fail_values: vec![marker.to_string()],
                 fail_reads: false,
+                fail_read_keys: Vec::new(),
                 armed: std::sync::atomic::AtomicBool::new(false),
             },
         }
@@ -174,6 +178,25 @@ impl SecureStore {
                 fail_delete: Vec::new(),
                 fail_values: Vec::new(),
                 fail_reads: true,
+                fail_read_keys: Vec::new(),
+                armed: std::sync::atomic::AtomicBool::new(false),
+            },
+        }
+    }
+
+    /// 仅测试用：只有这些 key（子串命中）读失败，别的一律正常。
+    ///
+    /// 用来覆盖"旧键读得到、目标键读不出来"——那种情况不许盲写。
+    #[cfg(test)]
+    pub fn faulty_on_read_keys(keys: &[&str]) -> Self {
+        Self {
+            backend: Backend::Faulty {
+                map: Mutex::new(HashMap::new()),
+                fail_set: Vec::new(),
+                fail_delete: Vec::new(),
+                fail_values: Vec::new(),
+                fail_reads: false,
+                fail_read_keys: keys.iter().map(|s| s.to_string()).collect(),
                 armed: std::sync::atomic::AtomicBool::new(false),
             },
         }
@@ -279,9 +302,11 @@ impl SecureStore {
                 map,
                 armed,
                 fail_reads,
+                fail_read_keys,
                 ..
             } => {
-                if *fail_reads && armed.load(std::sync::atomic::Ordering::SeqCst) {
+                let hit_key = fail_read_keys.iter().any(|p| account.contains(p.as_str()));
+                if (*fail_reads || hit_key) && armed.load(std::sync::atomic::Ordering::SeqCst) {
                     return Err(SecretError::new(
                         SecretErrorKind::Denied,
                         format!("测试后端：注入读取失败（{account}）"),

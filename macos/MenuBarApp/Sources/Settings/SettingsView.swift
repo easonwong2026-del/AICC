@@ -87,6 +87,23 @@ struct SettingsView: View {
                     Text(accountWorker.secureStoreSummary).foregroundStyle(.secondary)
                     Button("测试钥匙串") { Task { await accountWorker.checkSecureStore() } }
                 }
+                Picker(
+                    "首选授权",
+                    selection: Binding(
+                        get: { accountWorker.preferredAuthSource },
+                        set: { value in Task { await accountWorker.setPreferredAuthSource(value) } }
+                    )
+                ) {
+                    Text("Magpie 优先").tag("magpie")
+                    Text("自有优先").tag("own")
+                }
+                .pickerStyle(.segmented)
+                Text("Magpie 优先：直接使用 Magpie 已登录的令牌，AICC 不刷新它。自有优先：AICC 用自己的扫码授权，并用自己的刷新令牌续期。优先级不可用时自动兜底到另一份。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let error = accountWorker.authSettingsError {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                }
                 Text("助手是内嵌在本 App 内的独立可执行文件，只通过本机管道通信，不开放网络端口。")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("账号管理已移到主控制台（AI 账号 / 签到任务）。这里只保留助手与凭据的自检。")
@@ -134,6 +151,8 @@ struct SettingsView: View {
             }
         }
         .task { widgetProviders = WidgetStatusStore.load(port: settings.magpiePort)?.providers ?? [] }
+        // 首选授权来源存在助手的 app_settings 里，进设置页时读一次真实值。
+        .task { await accountWorker.loadAuthPreferences() }
         .confirmationDialog("撤销设备后需要重新配对", isPresented: $showRevoke) {
             Button("撤销所有设备", role: .destructive) {
                 Task {

@@ -146,7 +146,7 @@ impl Tokens for MockTokens {
         self.access.lock().unwrap().clone()
     }
 
-    fn resync(&self, _account: &AccountRecord) -> Result<String, String> {
+    async fn resync(&self, _account: &AccountRecord) -> Result<String, String> {
         self.resync_calls.fetch_add(1, Ordering::SeqCst);
         self.resync.lock().unwrap().clone()
     }
@@ -170,6 +170,7 @@ fn account() -> AccountRecord {
         auth_source: "magpie".to_string(),
         travel_enabled: true,
         auth_epoch: 0,
+        auth_mirror_auth_id: None,
     }
 }
 
@@ -225,6 +226,73 @@ async fn observe(
         false,
     )
     .await
+}
+
+/// 只有明确的认证失败才算 401。429 / 5xx / 传输错误即使文案里带 "token" 也不算。
+#[test]
+fn only_explicit_auth_failures_count_as_unauthorized() {
+    use super::state::is_auth_failure;
+
+    assert!(is_auth_failure(
+        &json!({"code":401,"message":"unauthorized"})
+    ));
+    assert!(is_auth_failure(&json!({"code":403,"message":"登录已失效"})));
+    assert!(
+        !is_auth_failure(&json!({"code":403,"message":"activity not open"})),
+        "活动未开放不是认证失败"
+    );
+    assert!(
+        !is_auth_failure(&json!({"code":429,"message":"token 频率超限"})),
+        "限流不能被当成令牌失效"
+    );
+    assert!(
+        !is_auth_failure(&json!({"code":503,"message":"token 服务不可用"})),
+        "5xx 不能被当成令牌失效"
+    );
+    assert!(
+        !is_auth_failure(&json!({"code":-1,"message":"timeout token"})),
+        "传输错误不能被当成令牌失效"
+    );
+}
+
+/// 429 不触发换源，也不该用 6 小时的"令牌失效"冷却。
+#[tokio::test]
+async fn rate_limited_status_does_not_resync_or_use_token_cooldown() {
+    let transport =
+        MockTransport::new().with_status(vec![json!({"code":429,"message":"token 频率超限"})]);
+    let tokens = MockTokens::valid("access-1");
+
+    let outcome = observe(&transport, &tokens, prior()).await;
+
+    assert_eq!(
+        tokens.resync_calls.load(Ordering::SeqCst),
+        0,
+        "429 不换源、不重新同步"
+    );
+    assert_eq!(transport.call_count("status"), 1);
+    let retry_after = outcome.state.retry_after.clone().expect("要退避");
+    let at = chrono::DateTime::parse_from_rfc3339(&retry_after)
+        .unwrap()
+        .timestamp();
+    assert!(
+        at - NOW < TOKEN_INVALID_COOLDOWN_SECS,
+        "429 走普通退避，不该打 6 小时令牌冷却"
+    );
+}
+
+/// 5xx 同理：不换源，也不重复派出。
+#[tokio::test]
+async fn server_error_does_not_switch_source_or_depart() {
+    let transport = MockTransport::new().with_status(vec![
+        json!({"code":502,"message":"bad gateway: token 服务不可用"}),
+    ]);
+    let tokens = MockTokens::valid("access-1");
+
+    let outcome = run(&transport, &tokens, prior(), true).await;
+
+    assert_eq!(tokens.resync_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(transport.call_count("depart"), 0, "状态都没查清就不许派出");
+    assert_eq!(outcome.state.label, Label::Failed.as_str());
 }
 
 #[tokio::test]

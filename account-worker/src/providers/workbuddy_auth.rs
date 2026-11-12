@@ -243,13 +243,6 @@ fn expires_at_ms(data: &Value, absolute: &str, relative: &str) -> Option<i64> {
 }
 
 /// 钥匙串里的键名。按 uid 隔离，换账号不会互相覆盖。
-pub fn secret_keys(uid: &str) -> (String, String) {
-    (
-        format!("workbuddy/{uid}/access"),
-        format!("workbuddy/{uid}/refresh"),
-    )
-}
-
 pub fn ms_to_rfc3339(ms: i64) -> Option<String> {
     chrono::DateTime::from_timestamp_millis(ms)
         .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
@@ -633,16 +626,6 @@ mod tests {
             Err(err) => assert_eq!(err.kind, KIND_PROFILE_MISSING),
             Ok(_) => panic!("缺 uid 不应解析成功"),
         }
-    }
-
-    #[test]
-    fn secret_keys_are_per_account() {
-        let (a, b) = secret_keys("u-1");
-        let (c, d) = secret_keys("u-2");
-        assert_eq!(a, "workbuddy/u-1/access");
-        assert_eq!(b, "workbuddy/u-1/refresh");
-        assert_ne!(a, c);
-        assert_ne!(b, d);
     }
 
     #[test]
