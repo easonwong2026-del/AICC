@@ -29,6 +29,14 @@ final class ConsoleStore: ObservableObject {
     /// 最近一次动作的一句话结果（成功/失败都给一句），显示在区域底部。
     @Published private(set) var travelNotice: String?
 
+    /// 成长中心（PR #67：只读）。没有扫描过就是空，不预填假数据。
+    @Published private(set) var growthResult: GrowthScanResult = .empty
+    @Published private(set) var growthError: String?
+    @Published private(set) var growthLoading = false
+    @Published private(set) var lastGrowthScan: Date?
+    /// 展开某个账号的任务列表（默认只展开第一个，避免一屏全是任务）。
+    @Published var expandedGrowthAccount: String?
+
     let worker: AccountWorkerManager
     private let settings: AppSettings
 
@@ -172,8 +180,39 @@ final class ConsoleStore: ObservableObject {
         }
     }
 
-    private var workerFailureText: String {
-        switch worker.state {
+    // MARK: - 成长中心（PR #67：只读）
+
+    /// 扫一遍成长中心。**由用户点按钮触发**，不自动轮询 ——
+    /// 一次扫描要打 9 个接口 × N 个账号，静默定时跑会让用户以为"我没让它联网"。
+    ///
+    /// 也只做 GET：接受任务、领奖在 #68，各自会有独立开关。
+    func loadGrowth(accountIds: [String] = []) async {
+        guard !growthLoading else { return }
+        growthLoading = true
+        defer { growthLoading = false }
+        do {
+            let json = try await worker.growthScan(accountIds: accountIds)
+            let result = GrowthScanResult(json: json)
+            growthResult = result
+            growthError = nil
+            lastGrowthScan = Date()
+            // 默认展开第一个"有事要做"的账号：全是空的时候展开哪一行都没意义。
+            if expandedGrowthAccount == nil {
+                expandedGrowthAccount = result.scans
+                    .first(where: { $0.pendingCount > 0 || $0.needsAuth })?.accountId
+                    ?? result.scans.first?.accountId
+            }
+        } catch {
+            growthResult = .empty
+            growthError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    func toggleGrowthAccount(_ accountId: String) {
+        expandedGrowthAccount = expandedGrowthAccount == accountId ? nil : accountId
+    }
+
+    private var workerFailureText: String {        switch worker.state {
         case .failed(let message):
             return message.components(separatedBy: "\n").first ?? "账号助手异常"
         case .starting:

@@ -20,8 +20,8 @@ struct ConsoleCheckinView: View {
     private let tasks: [TaskDefinition] = [
         .init(id: "wb-daily", title: "WorkBuddy 每日签到", detail: "查询当日状态并领取",
               symbol: "calendar.badge.checkmark", platform: "WorkBuddy"),
-        .init(id: "wb-growth", title: "成长中心任务", detail: "任务奖励、盲盒与抽奖",
-              symbol: "sparkles", platform: "WorkBuddy"),
+        .init(id: "wb-growth", title: "成长中心任务", detail: "任务、积分、能量与连签（只读）",
+              symbol: "sparkles", platform: "WorkBuddy", wired: true),
         .init(id: "wb-travel", title: "Buddy 旅行", detail: "派出、到达与奖励领取",
               symbol: "airplane", platform: "WorkBuddy", wired: true),
         .init(id: "qoder-credits", title: "Qoder CN 每日 Credits", detail: "每天 100 Credits，10:00 刷新",
@@ -34,6 +34,7 @@ struct ConsoleCheckinView: View {
         VStack(alignment: .leading, spacing: 18) {
             notice
             taskSection
+            ConsoleGrowthSection(store: store)
             ConsoleTravelSection(store: store)
             accountSection
         }
@@ -43,7 +44,7 @@ struct ConsoleCheckinView: View {
         HStack(spacing: 9) {
             Image(systemName: "info.circle")
                 .font(.system(size: 11))
-            Text("签到与成长中心任务尚未接入，本页不会为它们发送请求。Buddy 旅行已接入：只在你点按钮或开启自动开关后才会请求服务端。")
+            Text("成长中心已接入只读扫描：只查任务与奖励状态，不会接受任务或领奖。Buddy 旅行已接入：只在你点按钮或开启自动开关后才会请求服务端。签到尚未接入。")
                 .font(.system(size: 11))
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
@@ -104,11 +105,19 @@ struct ConsoleCheckinView: View {
             .frame(width: 56, alignment: .trailing)
 
             Button(task.wired ? "查看" : "立即执行") {
-                Task { await store.loadTravel() }
+                Task {
+                    // 两个已接入的任务分别对应下方两块区域：成长中心只读扫描、
+                    // 旅行读本地快照。点错区域比点错按钮更容易让人困惑，所以分开调。
+                    if task.id == "wb-growth" {
+                        await store.loadGrowth()
+                    } else {
+                        await store.loadTravel()
+                    }
+                }
             }
             .buttonStyle(ConsoleSecondaryButtonStyle())
             .disabled(!task.wired)
-            .help(task.wired ? "跳到下方的 Buddy 旅行区域" : "后续版本接入")
+            .help(task.id == "wb-growth" ? "扫描成长中心（只读）" : (task.wired ? "刷新下方的 Buddy 旅行区域" : "后续版本接入"))
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 11)

@@ -275,6 +275,23 @@ final class AccountWorkerManager: ObservableObject {
         return TravelAutoStatus(json: result)
     }
 
+    // MARK: - 成长中心（PR #67：只读）
+
+    /// 扫一遍成长中心。**只有 GET**：任务列表、档案、能量、连签、兑换状态、
+    /// 抽奖次数、Buddy 配额与旅行状态。
+    ///
+    /// 超时给 90 秒：账号之间是串行的，一个账号最坏要等 9 个接口各 15 秒。
+    /// 传 `accountIds` 只扫指定账号，空数组表示全部。
+    func growthScan(accountIds: [String] = []) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call(
+            "growth.scan",
+            params: accountIds.isEmpty ? [:] : ["accountIds": accountIds],
+            timeout: 90
+        )
+    }
+
     private func ensureRunning() async throws {
         if case .running = state { return }
         await refresh()
