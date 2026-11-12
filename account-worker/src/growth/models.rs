@@ -91,6 +91,14 @@ impl GrowthTask {
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GrowthProfile {
+    /// 成长等级。`/profile` 给的是 `level`，不是积分 —— 成长中心页展示的
+    /// 那串数字其实是等级，别把它当积分用。
+    pub level: Option<i64>,
+    /// 已完成 / 全部任务数，来自 `/profile`。
+    pub completed_tasks: Option<i64>,
+    pub total_tasks: Option<i64>,
+    /// 积分。**`/profile` 不返回这个字段**，所以 #67 阶段永远为空，
+    /// 界面上显示「—」。等 #68 领奖时按服务端回执累计，才谈得上"积分"。
     pub credit: Option<i64>,
     pub energy: Option<i64>,
     pub streak_days: Option<i64>,

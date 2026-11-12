@@ -191,11 +191,17 @@ pub fn read_travel(response: Option<&Value>) -> Option<TravelView> {
     Some(TravelView {
         state,
         location: dig_str(Some(node), &[&["location", "name"], &["location_name"]]),
+        // 服务端用 0 / 空串表示"没有"，别把 0 号记录渲染成一个真实行程。
         record_id: dig_i64(
             Some(node),
             &[&["record_id"], &["recordId"], &["travel", "record_id"]],
-        ),
-        arrive_at: dig_str(Some(node), &[&["arrive_at"], &["arriveAt"]]),
+        )
+        .filter(|id| *id > 0),
+        arrive_at: dig_str(Some(node), &[&["arrive_at"], &["arriveAt"]]).or_else(|| {
+            dig_i64(Some(node), &[&["arrive_at"], &["arriveAt"]])
+                .filter(|at| *at > 0)
+                .map(|at| at.to_string())
+        }),
         daily_limit_reached: node
             .get("daily_limit_reached")
             .and_then(Value::as_bool)
@@ -292,18 +298,12 @@ pub async fn scan(
         Ok((response, prefix)) => {
             path_prefix.get_or_insert_with(|| (*prefix).to_string());
             let node = response.get("data").unwrap_or(response);
-            profile_data.credit = dig_i64(
-                Some(node),
-                &[
-                    &["credit"],
-                    &["credits"],
-                    &["total_credit"],
-                    &["total_credits"],
-                ],
-            );
-            profile_data.energy = dig_i64(Some(node), &[&["energy"], &["energy_balance"]]);
-            profile_data.streak_days =
-                dig_i64(Some(node), &[&["streak_days"], &["streak", "days"]]);
+            // 真实字段（2026-11-12 用 4 个账号实测）：completed / first_visit /
+            // level / level_icon / level_name / max_level / total。
+            // **没有积分字段** —— 界面上"积分"那一栏只能留空，等 #68 领奖回执再算。
+            profile_data.level = dig_i64(Some(node), &[&["level"]]);
+            profile_data.completed_tasks = dig_i64(Some(node), &[&["completed"]]);
+            profile_data.total_tasks = dig_i64(Some(node), &[&["total"]]);
         }
         Err(err) => push_error(&mut errors, "profile", err),
     }
@@ -492,6 +492,41 @@ mod tests {
             "没有状态就不编一个出来"
         );
         assert!(read_travel(None).is_none());
+    }
+
+    /// 服务端用一个 0 / 空串表示"没有"。真实的 `/buddy/travel/status` 在
+    /// idle 时就是 `record_id: 0, arrive_at: 0, location: null`，
+    /// 直接透传会让界面出现"0 号行程"这种不存在的记录。
+    #[test]
+    fn idle_travel_with_zero_placeholders_has_no_record() {
+        let idle = json!({
+            "state": "idle",
+            "record_id": 0,
+            "arrive_at": 0,
+            "location": null,
+            "daily_limit_reached": true,
+        });
+        let view = read_travel(Some(&idle)).expect("view");
+        assert_eq!(view.state.as_deref(), Some("idle"));
+        assert_eq!(view.record_id, None, "0 不是一条真实行程");
+        assert_eq!(view.arrive_at, None);
+        assert_eq!(view.location, None);
+        assert_eq!(view.daily_limit_reached, Some(true));
+    }
+
+    /// 档案接口给的是等级与完成数，没有积分。钉住这个事实，
+    /// 免得有人"顺手"把某个数字映射成 credit，界面就多出一个假余额。
+    #[test]
+    fn profile_level_and_completion_are_read_by_name() {
+        let data = json!({"level": 15, "completed": 15, "total": 19, "max_level": false});
+        assert_eq!(dig_i64(Some(&data), &[&["level"]]), Some(15));
+        assert_eq!(dig_i64(Some(&data), &[&["completed"]]), Some(15));
+        assert_eq!(dig_i64(Some(&data), &[&["total"]]), Some(19));
+        assert_eq!(
+            dig_i64(Some(&data), &[&["credit"], &["total_credits"]]),
+            None,
+            "档案里没有积分字段，读不到就是读不到"
+        );
     }
 
     #[test]

@@ -31,7 +31,13 @@ final class GrowthModelsTests: XCTestCase {
             "nickname": "工作号",
             "state": "ok",
             "tasks": [task()],
-            "profile": ["credit": 120, "energy": 8, "streakDays": 3],
+            "profile": [
+                "level": 15,
+                "completedTasks": 15,
+                "totalTasks": 19,
+                "energy": 8,
+                "streakDays": 3,
+            ],
             "counts": ["total": 1, "claimable": 0, "acceptable": 1],
             "authSource": "magpie",
             "pathPrefix": "/v2/activity/growth",
@@ -92,7 +98,7 @@ final class GrowthModelsTests: XCTestCase {
         XCTAssertEqual(account.stateText, "正常")
         XCTAssertEqual(account.authSourceText, "Magpie 授权")
         XCTAssertEqual(account.tasks.count, 1)
-        XCTAssertEqual(account.profile.summaryText, "120 积分 · 8 能量 · 连签 3 天")
+        XCTAssertEqual(account.profile.summaryText, "Lv.15 · 完成 15/19 · 8 能量 · 连签 3 天")
         XCTAssertEqual(account.pendingCount, 1)
         XCTAssertFalse(account.needsAuth)
     }
@@ -101,7 +107,18 @@ final class GrowthModelsTests: XCTestCase {
     func testUnknownProfileFieldsDoNotBecomeZero() throws {
         let account = try XCTUnwrap(GrowthAccountScan(json: scan(["profile": [:]])))
         XCTAssertNil(account.profile.credit)
+        XCTAssertNil(account.profile.level)
         XCTAssertEqual(account.profile.summaryText, "—")
+    }
+
+    /// 成长中心没有积分接口：摘要里不能出现"0 积分"这种会误导的措辞。
+    func testSummaryNeverFabricatesCredit() throws {
+        let account = try XCTUnwrap(GrowthAccountScan(json: scan([
+            "profile": ["level": 3, "energy": 0],
+        ])))
+        XCTAssertNil(account.profile.credit)
+        XCTAssertFalse(account.profile.summaryText.contains("积分"))
+        XCTAssertTrue(account.profile.summaryText.contains("0 能量"), "能量确实是 0，要显示")
     }
 
     func testUnauthorizedAccountIsCalledOut() throws {

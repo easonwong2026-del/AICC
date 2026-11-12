@@ -153,6 +153,11 @@ struct GrowthRedeemTier: Identifiable, Equatable {
 }
 
 struct GrowthProfile: Equatable {
+    /// 成长等级。`/profile` 给的是 `level`，不是积分。
+    var level: Int?
+    var completedTasks: Int?
+    var totalTasks: Int?
+    /// 积分。成长中心没有积分接口，#67 阶段恒为 nil，界面显示「—」。
     var credit: Int?
     var energy: Int?
     var streakDays: Int?
@@ -163,6 +168,9 @@ struct GrowthProfile: Equatable {
 
     init(json: [String: Any]?) {
         guard let json else { return }
+        level = (json["level"] as? NSNumber)?.intValue
+        completedTasks = (json["completedTasks"] as? NSNumber)?.intValue
+        totalTasks = (json["totalTasks"] as? NSNumber)?.intValue
         credit = (json["credit"] as? NSNumber)?.intValue
         energy = (json["energy"] as? NSNumber)?.intValue
         streakDays = (json["streakDays"] as? NSNumber)?.intValue
@@ -180,9 +188,15 @@ struct GrowthProfile: Equatable {
     }
 
     /// 顶部一行摘要。查不到的项直接不出现，不用 0 占位。
+    ///
+    /// 这里没有"积分"：成长中心的档案接口只给等级和完成数，积分要等
+    /// #68 领奖拿到服务端回执才能累计。写个 0 会让人以为余额清零了。
     var summaryText: String {
         var parts: [String] = []
-        if let credit { parts.append("\(credit) 积分") }
+        if let level { parts.append("Lv.\(level)") }
+        if let completedTasks, let totalTasks, totalTasks > 0 {
+            parts.append("完成 \(completedTasks)/\(totalTasks)")
+        }
         if let energy { parts.append("\(energy) 能量") }
         if let streakDays { parts.append("连签 \(streakDays) 天") }
         if let makeupCards, makeupCards > 0 { parts.append("补签卡 \(makeupCards) 张") }
@@ -301,7 +315,8 @@ struct GrowthOverview: Equatable {
     var unknown = 0
     var traveling = 0
     var energy = 0
-    var credit = 0
+    var tasksCompleted = 0
+    var tasksTotal = 0
     var needsAuth = 0
 
     init(json: [String: Any]?) {
@@ -314,7 +329,8 @@ struct GrowthOverview: Equatable {
         unknown = int("unknown")
         traveling = int("traveling")
         energy = int("energy")
-        credit = int("credit")
+        tasksCompleted = int("tasksCompleted")
+        tasksTotal = int("tasksTotal")
         needsAuth = int("needsAuth")
     }
 

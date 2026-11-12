@@ -95,7 +95,8 @@ pub fn overview(scans: &[AccountScan]) -> serde_json::Value {
     let mut unknown = 0usize;
     let mut traveling = 0usize;
     let mut energy = 0i64;
-    let mut credit = 0i64;
+    let mut tasks_completed = 0i64;
+    let mut tasks_total = 0i64;
     let mut needs_auth = 0usize;
     for scan in scans {
         claimable += scan.counts.claimable;
@@ -103,7 +104,8 @@ pub fn overview(scans: &[AccountScan]) -> serde_json::Value {
         manual += scan.counts.manual;
         unknown += scan.counts.unknown;
         energy += scan.profile.energy.unwrap_or(0);
-        credit += scan.profile.credit.unwrap_or(0);
+        tasks_completed += scan.profile.completed_tasks.unwrap_or(0);
+        tasks_total += scan.profile.total_tasks.unwrap_or(0);
         if scan.travel.as_ref().and_then(|t| t.state.as_deref()) == Some("traveling") {
             traveling += 1;
         }
@@ -119,7 +121,9 @@ pub fn overview(scans: &[AccountScan]) -> serde_json::Value {
         "unknown": unknown,
         "traveling": traveling,
         "energy": energy,
-        "credit": credit,
+        // 成长中心没有"积分"接口，这里给的是档案里的完成数，不是积分。
+        "tasksCompleted": tasks_completed,
+        "tasksTotal": tasks_total,
         "needsAuth": needs_auth,
     })
 }
