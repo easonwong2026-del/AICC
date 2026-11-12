@@ -44,6 +44,18 @@ pub const SETTING_INTERVAL: &str = "growth_auto_interval_secs";
 /// 同一时刻只允许一个 tick。App 侧定时器和服务端手动触发都可能撞进来。
 static TICK_RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// 这个账号还应不应该开始。
+///
+/// 只读轮次（开关关着、用户点的是只读检查）不需要这个判断 —— 那些轮次
+/// 本来就不发写请求。一旦是写轮次，开关每关一次就要立刻生效。
+pub fn should_start_account(options: Options, switch_on: bool) -> bool {
+    if options.accept || options.claim {
+        switch_on
+    } else {
+        true
+    }
+}
+
 /// 开关决定这一轮能不能写。`force` 只跳过间隔判断，**不跳过开关**：
 /// 用户点「立即检查」时如果总开关是关的，那就是一次只读检查。
 pub fn options_for(enabled: bool) -> Options {
@@ -157,8 +169,23 @@ pub async fn run_tick(app: &std::sync::Arc<App>, force: bool) -> Value {
     };
 
     let mut runs = Vec::new();
+    // gate：每个账号、每一批接单、每一次领奖之前都会重新问一次。
+    // 关掉开关之后，剩下的请求一个都不会发；已经发出的照常走完并复核。
+    let gate = || enabled(app);
+
     for account in accounts {
         if account.platform != "workbuddy" {
+            continue;
+        }
+        // 切到下一个账号之前重新确认：用户可能刚在界面上关掉。
+        if !should_start_account(options, gate()) {
+            runs.push(json!({
+                "accountId": account.id,
+                "nickname": account.nickname,
+                "state": "skipped",
+                "reason": "switch_closed",
+                "detail": "自动管理已关闭，未开始这个账号",
+            }));
             continue;
         }
         // 账号级串行：一个账号跑完再下一个。某个账号失败不影响后面的。
@@ -193,6 +220,7 @@ pub async fn run_tick(app: &std::sync::Arc<App>, force: bool) -> Value {
             &account.uid,
             &domain,
             options,
+            &gate,
         )
         .await;
         runs.push(json!(run));
@@ -226,6 +254,7 @@ fn summarize(runs: &[Value]) -> String {
     let mut rejected = 0;
     let mut credit = 0;
     let mut problems = 0;
+    let mut stopped = 0;
     for run in runs {
         accepted += run.get("accepted").and_then(Value::as_i64).unwrap_or(0);
         claimed += run.get("claimed").and_then(Value::as_i64).unwrap_or(0);
@@ -238,6 +267,13 @@ fn summarize(runs: &[Value]) -> String {
         let state = run.get("state").and_then(Value::as_str).unwrap_or("");
         if matches!(state, "failed" | "unauthorized" | "partial") {
             problems += 1;
+        }
+        if run
+            .get("stoppedByUser")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            stopped += 1;
         }
     }
     let mut parts = Vec::new();
@@ -252,6 +288,9 @@ fn summarize(runs: &[Value]) -> String {
     }
     if rejected > 0 {
         parts.push(format!("被拒 {rejected}"));
+    }
+    if stopped > 0 {
+        parts.push(format!("{stopped} 个账号因关闭自动管理而中止"));
     }
     if problems > 0 {
         parts.push(format!("{problems} 个账号有问题"));
@@ -302,6 +341,16 @@ mod tests {
         assert!(enabled(&app));
         set_enabled(&app, false).expect("off");
         assert!(!enabled(&app));
+    }
+
+    #[test]
+    fn write_rounds_require_the_switch_to_still_be_on() {
+        // 只读轮次不看开关：它本来就不发写请求。
+        assert!(should_start_account(Options::READ_ONLY, false));
+        assert!(should_start_account(Options::READ_ONLY, true));
+        // 写轮次：开关关掉之后，后面的账号一个都不碰。
+        assert!(should_start_account(Options::FULL, true));
+        assert!(!should_start_account(Options::FULL, false));
     }
 
     #[test]

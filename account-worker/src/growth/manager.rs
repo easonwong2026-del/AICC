@@ -53,6 +53,13 @@ impl Options {
     };
 }
 
+/// 每次真要发 POST 之前问一句"还允许写吗"。
+///
+/// 为什么不是启动时读一次就够：用户在接单/领奖进行到一半时关掉开关，
+/// 剩下那些请求就不该再发出去。已经发出去的按它自己的结果走完并复核，
+/// 但**新的一个都不许发**。
+pub type WriteGate<'a> = &'a (dyn Fn() -> bool + Send + Sync);
+
 /// 传输层抽象。存在的唯一理由：让写流程能在 Mock 上跑测试。
 ///
 /// CI 里绝不能对真实账号发 POST，而"领奖超时后回查"这种分支又只有靠注入
@@ -124,6 +131,8 @@ pub struct AccountRun {
     pub energy: i64,
     pub tasks: Vec<TaskRun>,
     pub errors: Vec<String>,
+    /// 用户中途关掉自动管理，导致这一轮没跑完。
+    pub stopped_by_user: bool,
     pub started_at: String,
     pub finished_at: Option<String>,
 }
@@ -142,6 +151,7 @@ impl AccountRun {
             energy: 0,
             tasks: Vec::new(),
             errors: Vec::new(),
+            stopped_by_user: false,
             started_at: now_rfc3339(),
             finished_at: None,
         }
@@ -197,9 +207,10 @@ pub async fn run_account(
     uid: &str,
     domain: &str,
     options: Options,
+    gate: WriteGate<'_>,
 ) -> AccountRun {
     let transport = LiveTransport::new(access, uid, domain);
-    run_account_with(app, account_id, nickname, &transport, options).await
+    run_account_with(app, account_id, nickname, &transport, options, gate).await
 }
 
 /// 可注入的执行主体。测试用 Mock 实现 `Transport`，生产用 `LiveTransport`。
@@ -209,6 +220,7 @@ pub async fn run_account_with<T: Transport>(
     nickname: &str,
     transport: &T,
     options: Options,
+    gate: WriteGate<'_>,
 ) -> AccountRun {
     let mut run = AccountRun::new(account_id, nickname);
 
@@ -248,6 +260,12 @@ pub async fn run_account_with<T: Transport>(
         let mut touched = false;
 
         for batch in pending.chunks(ACCEPT_BATCH) {
+            // 每批之前重新问一次：用户可能刚把开关关掉。
+            if !gate() {
+                run.stopped_by_user = true;
+                run.errors.push("自动管理已关闭，中止剩余接单".to_string());
+                break;
+            }
             let codes: Vec<String> = batch.iter().map(|(code, _)| code.clone()).collect();
             match transport.accept(&codes).await {
                 Ok(body) => {
@@ -395,6 +413,12 @@ pub async fn run_account_with<T: Transport>(
     //
     // 接单阶段已经 401 就不再进这里：一份失效的令牌去领奖只会多几条 401。
     let mut stop_claims = run.state == "unauthorized";
+    // 接单阶段被用户关掉开关：领奖整个阶段都不进。
+    if options.claim && !stop_claims && !gate() {
+        run.stopped_by_user = true;
+        run.errors.push("自动管理已关闭，跳过领奖".to_string());
+        stop_claims = true;
+    }
     if options.claim && !stop_claims {
         let claimable: Vec<GrowthTask> = tasks
             .iter()
@@ -403,6 +427,12 @@ pub async fn run_account_with<T: Transport>(
             .collect();
 
         for task in claimable.iter().take(CLAIM_BUDGET) {
+            // 每个任务领之前重新问一次：用户可能刚关掉开关。
+            if !gate() {
+                run.stopped_by_user = true;
+                run.errors.push("自动管理已关闭，中止剩余领奖".to_string());
+                break;
+            }
             let outcome = transport.claim(&task.code).await;
             let mut needs_verify = false;
 

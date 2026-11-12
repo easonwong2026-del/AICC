@@ -4,7 +4,8 @@
 //! 覆盖的是那些"看起来能跑但会悄悄做错事"的分支：超时后回查、`already_claimed`、
 //! 缺 `results` 数组、限流、授权失效、未知状态。
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
@@ -74,6 +75,11 @@ struct Mock {
     /// claim 按 task_code 取；没配的返回 `task not completed`。
     claims: Mutex<Vec<(String, Result<Value, GrowthError>)>>,
     calls: Mutex<Vec<String>>,
+    /// 第 N 次 accept / claim 之后把开关关掉，模拟用户在运行途中点关闭。
+    close_after_accept: Mutex<Option<(Arc<AtomicBool>, usize)>>,
+    close_after_claim: Mutex<Option<(Arc<AtomicBool>, usize)>>,
+    accept_count: AtomicUsize,
+    claim_count: AtomicUsize,
 }
 
 impl Mock {
@@ -96,6 +102,16 @@ impl Mock {
 
     fn claim_reply(self, code: &str, reply: Result<Value, GrowthError>) -> Self {
         self.claims.lock().unwrap().push((code.to_string(), reply));
+        self
+    }
+
+    fn close_switch_after_accept(self, switch: Arc<AtomicBool>, after: usize) -> Self {
+        *self.close_after_accept.lock().unwrap() = Some((switch, after));
+        self
+    }
+
+    fn close_switch_after_claim(self, switch: Arc<AtomicBool>, after: usize) -> Self {
+        *self.close_after_claim.lock().unwrap() = Some((switch, after));
         self
     }
 
@@ -130,6 +146,12 @@ impl Transport for Mock {
             .lock()
             .unwrap()
             .push(format!("accept:{}", codes.join(",")));
+        let count = self.accept_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some((switch, after)) = self.close_after_accept.lock().unwrap().as_ref() {
+            if count >= *after {
+                switch.store(false, Ordering::SeqCst);
+            }
+        }
         let mut queue = self.accepts.lock().unwrap();
         if queue.len() > 1 {
             queue.remove(0)
@@ -143,6 +165,12 @@ impl Transport for Mock {
 
     async fn claim(&self, code: &str) -> Result<Value, GrowthError> {
         self.calls.lock().unwrap().push(format!("claim:{code}"));
+        let count = self.claim_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some((switch, after)) = self.close_after_claim.lock().unwrap().as_ref() {
+            if count >= *after {
+                switch.store(false, Ordering::SeqCst);
+            }
+        }
         let mut queue = self.claims.lock().unwrap();
         // 同一个任务可以配多条回复，按顺序消费 —— "第一次被拒、第二次成功"
         // 这种跨轮次的场景只有这样才测得出来。
@@ -169,7 +197,19 @@ fn claim_already() -> Value {
 }
 
 async fn run(app: &App, id: &str, mock: &Mock, options: Options) -> AccountRun {
-    run_account_with(app, id, "测试号", mock, options).await
+    let open = || true;
+    run_account_with(app, id, "测试号", mock, options, &open).await
+}
+
+/// 带可开关 gate 的版本：用来验证"跑到一半关开关"。
+async fn run_gated(
+    app: &App,
+    id: &str,
+    mock: &Mock,
+    options: Options,
+    gate: WriteGate<'_>,
+) -> AccountRun {
+    run_account_with(app, id, "测试号", mock, options, gate).await
 }
 
 // ---------------------------------------------------------------------------
@@ -505,7 +545,8 @@ async fn unauthorized_on_tasks_stops_the_account_without_writing() {
         }
     }
 
-    let run = run_account_with(&app, &id, "测试号", &Unauthorized, Options::FULL).await;
+    let open = || true;
+    let run = run_account_with(&app, &id, "测试号", &Unauthorized, Options::FULL, &open).await;
     assert_eq!(run.state, "unauthorized");
     assert_eq!(run.accepted, 0);
     assert_eq!(run.claimed, 0);
@@ -765,4 +806,142 @@ async fn task_not_completed_is_rejected_and_retried_next_round() {
     let second = run(&app, &id, &mock, Options::FULL).await;
     assert_eq!(second.claimed, 1, "{second:?}");
     assert_eq!(second.credit, 100);
+}
+
+// ---------------------------------------------------------------------------
+// 开关在运行途中被关掉：后续 POST 一个都不许发
+// ---------------------------------------------------------------------------
+
+/// 第一批接单发出去之后用户关掉开关：第二批不许再发。
+#[tokio::test]
+async fn closing_the_switch_after_the_first_accept_batch_stops_the_second() {
+    let (app, _dir) = test_app();
+    let id = account(&app, "uid-close-accept");
+    let switch = Arc::new(AtomicBool::new(true));
+
+    let items: Vec<Value> = (0..25)
+        .map(|i| task(&format!("t{i}"), "not_accepted", false))
+        .collect();
+    let first_batch: Vec<String> = (0..20).map(|i| format!("t{i}")).collect();
+    let first_ref: Vec<&str> = first_batch.iter().map(String::as_str).collect();
+    let mock = Mock::with_tasks(items)
+        .accept_reply(Ok(accept_ok(&first_ref)))
+        .close_switch_after_accept(switch.clone(), 1);
+
+    let gate = {
+        let switch = switch.clone();
+        move || switch.load(Ordering::SeqCst)
+    };
+    let run = run_gated(&app, &id, &mock, Options::FULL, &gate).await;
+
+    let accepts = mock
+        .calls()
+        .iter()
+        .filter(|call| call.starts_with("accept:"))
+        .count();
+    assert_eq!(accepts, 1, "开关关了就不该再发第二批");
+    assert!(run.stopped_by_user, "{run:?}");
+    assert!(
+        run.errors.iter().any(|e| e.contains("中止剩余接单")),
+        "{:?}",
+        run.errors
+    );
+}
+
+/// 领完第一个之后关掉开关：剩下的任务一个都不领，
+/// 但**已经发出去的那一个照常复核**。
+#[tokio::test]
+async fn closing_the_switch_after_one_claim_stops_the_rest_but_still_verifies() {
+    let (app, _dir) = test_app();
+    let id = account(&app, "uid-close-claim");
+    let switch = Arc::new(AtomicBool::new(true));
+
+    let mock = Mock::with_tasks(vec![
+        task("a", "completed", false),
+        task("b", "completed", false),
+        task("c", "completed", false),
+    ])
+    .claim_reply("a", Ok(claim_ok(100, 5)))
+    .claim_reply("b", Ok(claim_ok(100, 5)))
+    .claim_reply("c", Ok(claim_ok(100, 5)))
+    .close_switch_after_claim(switch.clone(), 1)
+    .tasks_pages(vec![
+        tasks_body(vec![
+            task("a", "completed", false),
+            task("b", "completed", false),
+            task("c", "completed", false),
+        ]),
+        // a 领完的复核页
+        tasks_body(vec![
+            task("a", "claimed", false),
+            task("b", "completed", false),
+            task("c", "completed", false),
+        ]),
+    ]);
+
+    let gate = {
+        let switch = switch.clone();
+        move || switch.load(Ordering::SeqCst)
+    };
+    let run = run_gated(&app, &id, &mock, Options::FULL, &gate).await;
+
+    let claims: Vec<String> = mock
+        .calls()
+        .into_iter()
+        .filter(|call| call.starts_with("claim:"))
+        .collect();
+    assert_eq!(claims, vec!["claim:a"], "只该领第一个：{claims:?}");
+    assert_eq!(run.claimed, 1, "已发出的那个要照常算");
+    assert_eq!(run.credit, 100);
+    assert_eq!(
+        run.tasks[0].verified_status.as_deref(),
+        Some("claimed"),
+        "已发出的请求仍要复核"
+    );
+    assert!(run.stopped_by_user);
+    assert!(
+        run.errors.iter().any(|e| e.contains("中止剩余领奖")),
+        "{:?}",
+        run.errors
+    );
+}
+
+/// 接单阶段关掉开关：领奖整个阶段都不进。
+#[tokio::test]
+async fn closing_the_switch_after_accept_skips_the_claim_phase() {
+    let (app, _dir) = test_app();
+    let id = account(&app, "uid-close-before-claim");
+    let switch = Arc::new(AtomicBool::new(true));
+
+    let mock = Mock::with_tasks(vec![
+        task("todo", "not_accepted", false),
+        task("done", "completed", false),
+    ])
+    .accept_reply(Ok(accept_ok(&["todo"])))
+    .claim_reply("done", Ok(claim_ok(100, 5)))
+    .close_switch_after_accept(switch.clone(), 1)
+    .tasks_pages(vec![
+        tasks_body(vec![
+            task("todo", "not_accepted", false),
+            task("done", "completed", false),
+        ]),
+        tasks_body(vec![
+            task("todo", "accepted", false),
+            task("done", "completed", false),
+        ]),
+    ]);
+
+    let gate = {
+        let switch = switch.clone();
+        move || switch.load(Ordering::SeqCst)
+    };
+    let run = run_gated(&app, &id, &mock, Options::FULL, &gate).await;
+
+    assert!(
+        !mock.calls().iter().any(|call| call.starts_with("claim:")),
+        "开关关了就不该进领奖：{:?}",
+        mock.calls()
+    );
+    assert_eq!(run.claimed, 0);
+    assert!(run.stopped_by_user);
 }
