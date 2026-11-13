@@ -364,7 +364,12 @@ async fn run_tick_inner(app: &Arc<App>, force: bool) -> Value {
             }));
             continue;
         }
-        if !force && attempts >= MAX_ATTEMPTS_PER_DAY {
+        // 一天最多 N 次，**force 也不例外**。
+        //
+        // force 的语义只有一个："现在没到计划时间也跑一次"。它不能变成
+        // "无限重试"的开关 —— 那样用户点几下「立即检查」就能把接口打成筛子，
+        // 而这正是 #69 里唯一自愿放弃的速率保证。
+        if attempts >= MAX_ATTEMPTS_PER_DAY {
             runs.push(json!({
                 "accountId": account.id,
                 "nickname": account.nickname,
@@ -668,6 +673,52 @@ mod tests {
         account(&app, "uid-a", false);
         let result = run_tick(&app, true).await;
         assert_eq!(result["skipped"], json!("no_accounts_enabled"));
+    }
+
+    /// `force` 只跳过"到没到点"，**不许跳过一天 4 次的上限**。
+    ///
+    /// 不联网：上限判断发生在取凭据之前，所以这条用例在 CI 里是安全的。
+    #[tokio::test]
+    async fn force_cannot_bypass_the_daily_attempt_cap() {
+        let _serial = tick_lock();
+        let (app, _dir) = test_app();
+        let id = account(&app, "uid-a", true);
+        let now = now_rfc3339();
+        for _ in 0..MAX_ATTEMPTS_PER_DAY {
+            app.with_db(|db| {
+                db.insert_checkin_attempt(crate::storage::checkin::NewAttempt {
+                    account_id: &id,
+                    status: crate::storage::checkin::ATTEMPT_FAILED,
+                    started_at: &now,
+                    finished_at: Some(&now),
+                    credits: None,
+                    error_kind: Some("network"),
+                    error_detail: None,
+                    next_retry_at: None,
+                })
+                .map(|_| ())
+            })
+            .unwrap();
+        }
+
+        let result = run_tick(&app, true).await;
+        let runs = result["accounts"].as_array().expect("rows");
+        assert_eq!(runs[0]["reason"], json!("attempts_exhausted"), "{result}");
+        assert_eq!(result["ranAccounts"], json!(0), "满额之后 force 也不许再跑");
+    }
+
+    /// 还有余量时 `force` 要真的把账号送进执行路径（这里因为无凭据而立刻返回，
+    /// 不会联网）。它证明上一条不是因为"force 根本不跑"才通过的。
+    #[tokio::test]
+    async fn force_still_runs_an_account_that_has_attempts_left() {
+        let _serial = tick_lock();
+        let (app, _dir) = test_app();
+        account(&app, "uid-a", true);
+
+        let result = run_tick(&app, true).await;
+        assert_eq!(result["ranAccounts"], json!(1), "{result}");
+        let runs = result["accounts"].as_array().expect("rows");
+        assert_eq!(runs[0]["state"], json!("no_credential"), "{result}");
     }
 
     /// 今天已经有确认结论：即使到点也不发请求。

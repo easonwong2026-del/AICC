@@ -71,7 +71,7 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `checkin.runPending` | 用户显式批量签到：只处理服务端确认未签到的账号 | 是（仅未签到时） |
 | `checkin.setEnabled` | 每账号自动签到开关（默认关）；**不动 `auth_epoch`** | 否 |
 | `checkin.auto.status` | 计划时间、下次执行、尝试次数与每账号状态 | 否 |
-| `checkin.auto.tick` | 跑一轮自动签到；`force` 只跳过时间判断，不绕过开关 | 是（开关打开时） |
+| `checkin.auto.tick` | 跑一轮自动签到；`force` 只跳过时间判断，不绕过开关与每日次数上限 | 是（开关打开时） |
 | `checkin.records` | 签到历史与每次尝试（`checkin_records` + `task_executions`） | 否 |
 
 `health` **故意不做**钥匙串探针：否则每次启动 App 都会弹一次系统授权框。
