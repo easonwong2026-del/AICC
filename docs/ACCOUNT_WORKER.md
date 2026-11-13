@@ -60,13 +60,14 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `qoder.profiles.create` | 新建 Profile（AICC 托管的空快照目录） | 否 |
 | `qoder.profiles.import` | 登记一份已有账号快照目录（必须有 `auth.v1.dat`；`..` 与重复目录会被拒） | 否 |
 | `qoder.profiles.inspect` | 用对应版本的适配器解密**快照**，写回指纹/到期/身份；**不回传令牌** | 否 |
-| `qoder.profiles.capture` | 把客户端此刻的登录态存进该 Profile 的快照（身份不一致时拒绝） | 否 |
+| `qoder.profiles.capture` | 把客户端此刻的登录态存进该 Profile 的快照；**无法证明 live 属于该 Profile 时拒绝覆盖**（只写快照，不碰 live） | 否 |
 | `qoder.profiles.rename` | 只改 AICC 里的显示名 | 否 |
-| `qoder.profiles.open` | 快照切换并启动：先退出客户端 → 存回当前账号 → 写回目标快照 → 启动 → 核实进程与认证 | 否 |
+| `qoder.profiles.open` | 快照切换并启动：**默认拒绝**（`AICC_QODER_ENABLE_SWITCH=1` 且版本已复验才放行）。放行时走"备份 → 暂存 → 校验 → 提交 → 启动核实"的文件组事务，失败按备份回滚 | 否 |
 | `qoder.profiles.close` | 只关 AICC 自己拉起的进程；`force` 才升级 SIGKILL | 否 |
 | `qoder.profiles.activate` | 切换（等价于 `open`，`open` 内部已包含"先关后写"） | 否 |
 | `qoder.profiles.remove` | 移除登记；`purge=true` 才删**AICC 快照**，客户端数据目录永远不动 | 否 |
-| `qoder.profiles.status` | 运行状态汇总（每次都重新核实 PID，不信旧记录） | 否 |
+| `qoder.profiles.status` | 运行状态汇总（`running` / `stopped` / `unknown` 三态，每次都重新核实 PID） | 否 |
+| `qoder.profiles.recover` | 恢复上一次崩溃遗留的未完成切换（按备份回滚），没有记录时零写入 | 否 |
 | `auth.workbuddy.start` / `poll` / `cancel` | 官方 OAuth 扫码：发起、轮询、取消（PR1b-1） | 是 |
 | `auth.workbuddy.refresh` | 刷新令牌；`auth_source=magpie` 的账号改为重新同步 | 是 |
 | `auth.workbuddy.status` | 用当前选用的授权探测一次登录态（只读）：先 `Valid/Unauthorized/Transient` 分类，再过 401 才切源 | 是 |

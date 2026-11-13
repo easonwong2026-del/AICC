@@ -17,6 +17,7 @@ final class QoderProfileModelsTests: XCTestCase {
             "authStatus": "valid",
             "snapshotReady": true,
             "active": false,
+            "switchEnabled": true,
             "managed": true,
             "runtime": ["state": "stopped"],
         ]
@@ -88,6 +89,48 @@ final class QoderProfileModelsTests: XCTestCase {
         ])))
         XCTAssertEqual(profile.primaryActionTitle, "登录并保存")
         XCTAssertEqual(profile.authLabel, "未保存登录")
+    }
+
+    func testSwitchDisabledWinsOverEverything() throws {
+        let profile = try XCTUnwrap(QoderProfile(json: row([
+            "switchEnabled": false,
+            "switchBlockedReason": "认证快照不等于完整 Profile 隔离",
+            "runtime": ["state": "running"],
+            "active": true,
+        ])))
+        XCTAssertEqual(profile.primaryActionTitle, "切换暂不可用")
+        XCTAssertEqual(profile.switchBlockedReason, "认证快照不等于完整 Profile 隔离")
+    }
+
+    func testUnknownRuntimeIsNotTreatedAsRunningOrStopped() throws {
+        let profile = try XCTUnwrap(QoderProfile(json: row([
+            "runtime": ["state": "unknown", "pid": 4242],
+        ])))
+        XCTAssertFalse(profile.runtime.isRunning)
+        XCTAssertTrue(profile.runtime.isUnknown)
+        XCTAssertEqual(profile.runtimeLabel, "状态未知")
+        XCTAssertEqual(profile.runtimeTone, .warning)
+    }
+
+    func testParallelLabelNeverClaimsForCN() throws {
+        let cn = try XCTUnwrap(QoderEditionInfo(json: [
+            "edition": "qoder_cn",
+            "installed": false,
+            "parallelInstances": "unknown",
+            "switchEnabled": false,
+        ]))
+        XCTAssertEqual(cn.parallelLabel, "并行能力未复验")
+        XCTAssertFalse(cn.switchEnabled)
+
+        let global = try XCTUnwrap(QoderEditionInfo(json: [
+            "edition": "qoder_global",
+            "installed": true,
+            "parallelInstances": "no",
+            "switchEnabled": false,
+            "switchBlockedReason": "未解决隔离",
+        ]))
+        XCTAssertEqual(global.parallelLabel, "实测不支持并行")
+        XCTAssertEqual(global.switchBlockedReason, "未解决隔离")
     }
 
     func testFingerprintNeverLeaksToken() throws {

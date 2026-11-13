@@ -31,6 +31,9 @@ struct QoderProfile: Identifiable, Equatable {
     let snapshotReady: Bool
     /// live 当前登录的是不是这个 Profile（按文件指纹比对）。
     let active: Bool
+    /// 这个版本能不能做真实快照切换（默认关闭，原因见 switchBlockedReason）。
+    let switchEnabled: Bool
+    let switchBlockedReason: String?
     let runtime: Runtime
 
     struct Runtime: Equatable {
@@ -38,6 +41,8 @@ struct QoderProfile: Identifiable, Equatable {
         let pid: Int?
 
         var isRunning: Bool { state == "running" }
+        /// 进程活着但无法证明是我们这个 Profile（或读不到命令行）。
+        var isUnknown: Bool { state == "unknown" }
     }
 
     init?(json: [String: Any]) {
@@ -62,6 +67,8 @@ struct QoderProfile: Identifiable, Equatable {
         self.lastOpenedAt = json["lastOpenedAt"] as? String
         self.snapshotReady = json["snapshotReady"] as? Bool ?? false
         self.active = json["active"] as? Bool ?? false
+        self.switchEnabled = json["switchEnabled"] as? Bool ?? false
+        self.switchBlockedReason = json["switchBlockedReason"] as? String
         let runtimeJSON = json["runtime"] as? [String: Any] ?? [:]
         self.runtime = Runtime(
             state: runtimeJSON["state"] as? String ?? "stopped",
@@ -117,11 +124,13 @@ struct QoderProfile: Identifiable, Equatable {
 
     var runtimeLabel: String {
         if runtime.isRunning { return active ? "运行中（当前）" : "运行中" }
+        if runtime.isUnknown { return "状态未知" }
         return active ? "当前账号" : "未运行"
     }
 
     var runtimeTone: ConsoleAccount.AuthTone {
         if runtime.isRunning { return .ok }
+        if runtime.isUnknown { return .warning }
         return active ? .ok : .neutral
     }
 
@@ -130,8 +139,9 @@ struct QoderProfile: Identifiable, Equatable {
         return authFingerprint
     }
 
-    /// 主按钮文案：没快照就要"登录并保存"，有快照就是"切换并打开"。
+    /// 主按钮文案。切换默认关闭时按钮禁用，只保留"保存快照"这类安全动作。
     var primaryActionTitle: String {
+        if !switchEnabled { return "切换暂不可用" }
         if runtime.isRunning && active { return "已在此账号" }
         if !snapshotReady { return "登录并保存" }
         return active ? "打开" : "切换并打开"
@@ -155,6 +165,8 @@ struct QoderEditionInfo: Identifiable, Equatable {
     let dataDirCount: Int
     let parallelInstances: String
     let switchMode: String
+    let switchEnabled: Bool
+    let switchBlockedReason: String?
     let verifiedOnThisMachine: Bool
     let loggedIn: Bool
     let loggedInEmail: String?
@@ -170,8 +182,10 @@ struct QoderEditionInfo: Identifiable, Equatable {
         self.appPath = json["appPath"] as? String
         self.clientVersion = json["clientVersion"] as? String
         self.dataDirCount = (json["dataDirs"] as? [Any])?.count ?? 0
-        self.parallelInstances = json["parallelInstances"] as? String ?? "no"
+        self.parallelInstances = json["parallelInstances"] as? String ?? "unknown"
         self.switchMode = json["switchMode"] as? String ?? "snapshot"
+        self.switchEnabled = json["switchEnabled"] as? Bool ?? false
+        self.switchBlockedReason = json["switchBlockedReason"] as? String
         self.verifiedOnThisMachine = json["verifiedOnThisMachine"] as? Bool ?? false
         self.loggedIn = json["loggedIn"] as? Bool ?? false
         self.loggedInEmail = json["loggedInEmail"] as? String
@@ -183,6 +197,15 @@ struct QoderEditionInfo: Identifiable, Equatable {
             return "已安装\(version)"
         }
         return "未安装"
+    }
+
+    /// 并行能力的人话口径：`no` = 实测不支持，`unknown` = 未复验。
+    var parallelLabel: String {
+        switch parallelInstances {
+        case "no": return "实测不支持并行"
+        case "yes": return "允许并行"
+        default: return "并行能力未复验"
+        }
     }
 
     /// 客户端当前登录的账号（来自客户端自己写的状态文件，不是 AICC 推断）。

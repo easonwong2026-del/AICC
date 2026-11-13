@@ -17,6 +17,7 @@ pub mod authz;
 pub mod checkin;
 pub mod growth;
 pub mod qoder_profiles;
+pub mod qoder_switch;
 pub mod travel;
 
 pub use authz::AuthorizationRecord;
@@ -204,6 +205,29 @@ CREATE TABLE IF NOT EXISTS qoder_runtime (\
     launched_at TEXT NOT NULL\
 );";
 
+/// v12：快照切换日志（PR #70 安全收尾）。
+///
+/// 切换是"多文件多步骤"的操作，进程中途崩溃后必须能在重启时把 live 目录
+/// 恢复成原账号。日志落在库里而不是内存里，就是为了活过崩溃。
+///
+/// 唯一索引只约束"同一版本同时最多一条未完成切换"，是并发切换的闸门。
+const MIGRATION_V12_SQL: &str = "\
+CREATE TABLE IF NOT EXISTS qoder_switch_journal (\
+    id          TEXT PRIMARY KEY,\
+    profile_id  TEXT NOT NULL,\
+    edition     TEXT NOT NULL,\
+    phase       TEXT NOT NULL CHECK (phase IN (\
+                    'prepared','staged','committed','rolled_back','cleared')),\
+    live_dir    TEXT NOT NULL,\
+    backup_dir  TEXT NOT NULL,\
+    files_json  TEXT NOT NULL,\
+    created_at  TEXT NOT NULL,\
+    updated_at  TEXT NOT NULL\
+);\
+CREATE UNIQUE INDEX IF NOT EXISTS ux_qoder_switch_active \
+    ON qoder_switch_journal (edition) WHERE phase IN ('prepared', 'staged');\
+ALTER TABLE qoder_profiles ADD COLUMN snapshot_hash TEXT;";
+
 /// 一次迁移里的一步：纯 SQL，或者需要 Rust 参与的数据迁移。
 enum MigrationStep {
     Sql(&'static str),
@@ -270,9 +294,14 @@ const MIGRATIONS: &[Migration] = &[
         version: 11,
         steps: &[MigrationStep::Sql(MIGRATION_V11_SQL)],
     },
+    // v12：快照切换日志（崩溃恢复用）。同样只建新表。
+    Migration {
+        version: 12,
+        steps: &[MigrationStep::Sql(MIGRATION_V12_SQL)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 11;
+pub const LATEST_VERSION: i64 = 12;
 
 pub struct Db {
     conn: Connection,

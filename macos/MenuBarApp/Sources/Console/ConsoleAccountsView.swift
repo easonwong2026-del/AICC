@@ -292,9 +292,11 @@ struct ConsoleAccountsView: View {
                         .font(.system(size: 10))
                         .foregroundStyle(info.installed ? ConsoleTheme.tertiaryText : ConsoleTheme.warning)
                 }
-                Text("切换方式：快照（同一时刻只跑一个客户端）")
-                    .font(.system(size: 10))
-                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                if let info {
+                    Text(info.parallelLabel)
+                        .font(.system(size: 10))
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                }
                 if let hint = info?.currentAccountHint {
                     Text("客户端当前：\(hint)")
                         .font(.system(size: 10))
@@ -312,6 +314,21 @@ struct ConsoleAccountsView: View {
                 }
                 .buttonStyle(ConsoleSecondaryButtonStyle())
                 .help("新建一个独立 Profile，或用已有目录导入")
+            }
+            if let info, !info.switchEnabled, let reason = info.switchBlockedReason {
+                HStack(spacing: 6) {
+                    Image(systemName: "lock.shield")
+                        .font(.system(size: 10))
+                    Text("真实切换已停用：\(reason)")
+                        .font(.system(size: 10))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .lineLimit(3)
+                }
+                .foregroundStyle(ConsoleTheme.tertiaryText)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(ConsoleTheme.cardSubtle, in: RoundedRectangle(cornerRadius: 8))
             }
             if profiles.isEmpty {
                 ConsoleCard {
@@ -444,7 +461,12 @@ private struct QoderProfileCard: View {
                     Spacer(minLength: 0)
                 }
 
-                if !profile.snapshotReady {
+                if profile.runtime.isUnknown {
+                    Text("有进程存活但无法确认归属（读不到命令行或缺少 AICC 标记），AICC 不会对它发信号。")
+                        .font(.system(size: 9))
+                        .foregroundStyle(ConsoleTheme.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if !profile.snapshotReady {
                     Text("还没有认证快照：点「登录并保存」会在客户端里打开登录页，登录后自动保存一份。")
                         .font(.system(size: 9))
                         .foregroundStyle(ConsoleTheme.tertiaryText)
@@ -462,10 +484,17 @@ private struct QoderProfileCard: View {
                             .buttonStyle(ConsoleSecondaryButtonStyle())
                         Button(profile.active ? "已在此账号" : "切换并打开", action: onActivate)
                             .buttonStyle(ConsoleSecondaryButtonStyle())
-                            .disabled(profile.active)
+                            .disabled(profile.active || !profile.switchEnabled)
+                            .help(profile.switchBlockedReason ?? "切换到该账号")
+                    } else if profile.runtime.isUnknown {
+                        Button("关闭（需确认归属）", action: onClose)
+                            .buttonStyle(ConsoleSecondaryButtonStyle())
+                            .help("进程还活着，但无法确认是不是 AICC 启动的；关闭时会拒绝发信号")
                     } else {
                         Button(profile.primaryActionTitle, action: onOpen)
                             .buttonStyle(ConsolePrimaryButtonStyle())
+                            .disabled(!profile.switchEnabled)
+                            .help(profile.switchBlockedReason ?? "打开/切换这个账号")
                     }
                     Button("保存当前登录", action: onCapture)
                         .buttonStyle(ConsoleSecondaryButtonStyle())

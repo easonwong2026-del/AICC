@@ -164,11 +164,10 @@ PRD 原设想是"每个账号一个独立 userDataDir，可以并行"。实测�
 
 | 版本 | 并行实例 | 依据 |
 | --- | --- | --- |
-| International | **不支持** | 实测：自定义 userDataDir 被忽略，只有一份 userData |
-| CN | **未复验**，按不支持处理 | 同源实现没有理由更宽松；等装上 CN 再补测 |
+| International | **不支持**（`no`） | 实测：自定义 userDataDir 被忽略，只有一份 userData |
+| CN | **未知**（`unknown`） | 本机没装过，不能写成"已确认不支持" |
 
-`qoder.editions.detect` 对两个版本都返回 `parallelInstances: "no"`、
-`switchMode: "snapshot"`，界面据此显示"同一时刻只跑一个客户端"。
+`qoder.editions.detect` 分别返回 `no` / `unknown`，界面显示"实测不支持并行"/"并行能力未复验"。
 
 ### 4.5 另一个实测坑：`ELECTRON_RUN_AS_NODE`
 
@@ -180,15 +179,27 @@ AICC 永远起不来客户端。
 
 ---
 
+## 4.5 切换默认关闭（安全收尾后）
+
+即使文件组事务已经做到原子，**只切换两个认证文件也不等于完整 Profile 隔离**，
+见 §7。因此：
+
+- `AICC_QODER_ENABLE_SWITCH=1` 且该版本 `verified_on_this_machine=true` 才允许真实切换；
+- 默认只开放：扫描、导入、认证检查、保存快照；
+- CN 永远不满足第二个条件，所以在复验前不可能发生真实写操作。
+
 ## 5. 进程与归属判定
 
 1. 启动：`<app>/Contents/MacOS/Qoder`（**不传任何参数**），注入
    `AICC_QODER_PROFILE=<profile_id>`。
-2. 核实：`spawn` 成功不算成功。用 `ps -p <pid> -E -ww -o args=` 确认进程还在，
-   命令行里能看到归属标记。读不到就报 `unverified`，不显示"运行中"。
-3. 归属：只有"标记命中"或"argv[0] 与记录的可执行文件一致"才允许发信号；
-   另外运行记录里必须有我们 spawn 时写下的 PID。用户手动启动的客户端没有记录，
-   因此永远不会被 AICC 杀掉——`open` 遇到这种情况会明确报"正在运行，请先手动退出"。
+2. 探测是三态：`confirmed_stopped` / `confirmed_running` / `unknown`。
+   `pgrep` 退出码 1 才算"确认没跑"；`pgrep` 不可用、退出码异常、或"报告有匹配但没给 PID"
+   一律是 `unknown`，**禁止修改 live 认证**。
+3. 核实：`spawn` 成功不算成功。用 `ps -p <pid> -E -ww -o args=` 读到
+   `AICC_QODER_PROFILE=<profile_id>` 才算"归属确认"。读不到命令行时用 `kill -0`：
+   只有拿到 ESRCH（No such process）才算"已退出"，其它情况都是 `unknown`。
+4. 归属：**只认启动时注入的标记**。`argv[0]` 相同不再算证据（同一份 App 用户也能自己开）。
+   没有标记 → 不发信号、不判 running，只报 `unknown` 并提示手动退出。
 4. 重启对账：`qoder_runtime` 表里的 PID 每次都要重新核实；
    PID 被复用、进程已退出、可执行文件不匹配 → 直接丢弃记录。
 
@@ -202,9 +213,10 @@ AICC 永远起不来客户端。
 2. **International 解密未见明文**：需要人工在钥匙串弹窗点一次"始终允许"，
    然后跑 `qoder.profiles.inspect` 补录 Token 指纹与到期时间。
 3. `auth-profile-overlays.v1.dat` 的语义尚未逆推；当前实现不读不写。
-4. 快照切换期间客户端必须处于退出状态：如果用户在切换瞬间手动打开客户端，
-   AICC 的写回可能落在客户端已打开的文件上。当前用"先检查 pgrep、再写文件"缩小窗口，
-   并在返回结果里如实报告核实结论。
+4. **隔离未成立**：只换认证文件无法隔离 `main.sqlite` 里的账号数据（§7），
+   所以真实切换默认关闭；要打开必须先解决 §7.2 的最小安全快照并重新验证。
+5. 快照切换期间客户端必须处于退出状态：提交前会再 probe 一次，发现被外部启动就回滚；
+   但无法阻止用户在"写文件的那几百毫秒"里抢先启动。
 
 ### 复验清单（装好 CN 后逐条打勾）
 
@@ -215,3 +227,94 @@ AICC 永远起不来客户端。
 - [ ] CN 快照切换后客户端能正常进入目标账号
 - [ ] 两版本交替切换各 5 次，认证不互相污染
 - [ ] 重启 AICC 后 PID 对账正确，且不误杀手动启动的客户端
+
+---
+
+## 7. 认证快照 ≠ 完整 Profile 隔离
+
+> 这一节是"切换默认关闭"的依据。结论不是"大概有风险"，而是**在同一份
+> `com.qoder.app.stable` 里读到了账号绑定数据**。
+
+调查方法：只读打开客户端数据目录（客户端已退出），按文件/表统计，凭据字段只看长度。
+
+| 状态 | 位置 | 是否账号绑定 | 证据 |
+| --- | --- | --- | --- |
+| 登录凭据 | `auth.v1.dat` | **是** | `v10` 信封，切换时会替换 |
+| 账号 overlay | `auth-profile-overlays.v1.dat` | **是**（语义未逆推） | 同信封，147 B |
+| 设备身份 | `auth.machine-id`、`main.sqlite:local_device_identity.device_id` | 否（机器级） | `device_id=c2aad4f9-…`，与账号无关 |
+| Cookie | `Cookies` | 当前为空，但不能保证 | `select count(*) from cookies` = **0** |
+| Chromium 偏好 | `Local State`、`Preferences` | 未逐键审计 | 主要含 `os_crypt` / 窗口状态，**无证据证明不含账号痕迹** |
+| 应用数据 | `main.sqlite` | **是** | 见下 |
+| CLI 状态 | `~/.qoder/.qoder-app-status.json` | **是**（切换后会被客户端重写） | 含当前账号 email |
+| 插件/市场 | `~/.qoder/plugins`、`extension_installations` | 机器级为主 | 与账号无直接关联证据 |
+
+`main.sqlite` 里直接读到账号维度的行：
+
+```
+account_profiles:      account_id = qoder:prod:global:053f2aa8…  (1 行)
+agent_profiles:        account_id = 01a1afdc-c495-78ad-8a5c-9123e17e8708 (1 行)
+agent_profile_details: account_id = 01a1afdc-c495-78ad-8a5c-9123e17e8708 (1 行)
+collaboration_runtime_credentials: account_id = qoder:prod:global:053f2aa8…, encrypted_token(151 B)
+```
+
+也就是说：**只换 `auth.v1.dat` 之后，A 账号的 agent 定义、工作角色、
+协作运行时凭据仍然留在同一个库里**。客户端按 `account_id` 读取，这些都是跨账号可见/可误用的。
+仅凭两个认证文件无法证明"切到 B 之后不会看到 A 的数据"。
+
+### 7.1 因此采取的措施
+
+1. `qoder.profiles.open` / `activate` **默认拒绝**，返回原因；
+2. 只有 `AICC_QODER_ENABLE_SWITCH=1` **且**该版本已在本机复验时才允许；
+3. CN 永远不满足"已复验"，所以 CN 在装好并验证前不可能发生真实写操作；
+4. 保留 `scan` / `import` / `inspect` / `capture`（都不写 live）。
+
+### 7.2 最小安全快照（未来工作，不在本 PR）
+
+要真正隔离，快照至少要覆盖"账号维度"的状态：
+
+- 认证组：`auth.v1.dat` + `auth-profile-overlays.v1.dat`
+- 数据组：`main.sqlite` 中按 `account_id` 分区的表（account_profiles / agent_profiles /
+  agent_profile_details / collaboration_runtime_credentials / chat_* 等）
+- 会话组：`Cookies`、`Local Storage`、`Session Storage`（一旦出现登录态就必须一起换）
+- **不要**换：`auth.machine-id`、`local_device_identity`（机器级，换掉反而触发风控）
+
+`main.sqlite` 在客户端运行时持续写入，整库快照需要"客户端完全退出 + 一致性备份（`.backup`）"两个前提，
+且体积会随聊天记录增长。这部分要单独设计、单独验证，当前**没有实现**。
+
+## 8. 切换事务与崩溃恢复
+
+切换不再"两个文件 cp 一下"，而是一个带日志的文件组事务：
+
+```
+begin   备份 live 组（auth + overlays）到 switch-backups/<journal>，写 manifest.json（含 sha256）
+        → 插入 qoder_switch_journal(phase=prepared)；同版本已有未完成 journal 时直接拒绝
+stage   把快照组写成 live/.aicc-*.tmp，逐个校验 sha256
+        → 目标快照的 sha256 必须等于库里记录的 snapshot_hash，否则判"快照损坏"并中止
+        提交前再 probe 一次客户端，发现被外部启动就回滚
+commit  逐个 rename 到正式位置，全组再校验一次 sha256 → phase=committed，删除 journal
+失败    任一步 I/O 失败 → rollback：按 manifest 把 live 组恢复原样（缺的文件删掉）
+崩溃    重启后 list/status/open 都会先跑 recover_pending：所有 prepared/staged 的 journal
+        一律按备份回滚，然后删日志
+```
+
+要点：
+
+- **备份先落盘**：`begin` 之前不会动 live 一个字节；
+- 恢复证据来自 manifest 的 sha256，恢复后还要再校验一次；
+- 回滚失败会如实报错（不会假装成功）；
+- 备份目录保留最近 20 份，便于人工排查。
+
+对应的故障注入测试（`qoder_profiles::switch` + `manager`）：
+
+| 场景 | 断言 |
+| --- | --- |
+| pgrep 不可用 | 零写入：live 哈希不变、无 journal、无备份目录 |
+| ps 读不到但进程活着 | 拒绝切换，live 不变 |
+| 捕获身份不一致 | live 与已有快照都不变 |
+| 捕获 I/O 失败 | 不进入 restore，live 不变 |
+| 提交第二个文件失败 | 两个文件都回到原值 |
+| 崩溃后重启 | 按备份恢复成功，journal 清空 |
+| 目标快照损坏 | 覆盖前中止，live 不变 |
+| 并发切换 | 唯一索引拒绝第二条 journal |
+| 切换窗口被外部启动 | 回滚并报错，live 回到原账号 |
+| CN 未复验 | 拒绝真实切换 |

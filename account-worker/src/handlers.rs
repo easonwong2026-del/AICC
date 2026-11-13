@@ -57,6 +57,7 @@ pub const METHODS: &[&str] = &[
     "qoder.profiles.activate",
     "qoder.profiles.remove",
     "qoder.profiles.status",
+    "qoder.profiles.recover",
     "auth.workbuddy.start",
     "auth.workbuddy.poll",
     "auth.workbuddy.cancel",
@@ -370,6 +371,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
         "qoder.profiles.remove" => qoder_manager::remove(app, params),
 
         "qoder.profiles.status" => qoder_manager::status(app, params),
+
+        "qoder.profiles.recover" => qoder_manager::recover(app, params),
 
         // ---- WorkBuddy 扫码登录（PR1b-1）----
         "auth.workbuddy.start" => {

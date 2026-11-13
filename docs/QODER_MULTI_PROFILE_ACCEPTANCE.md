@@ -35,7 +35,28 @@
 | verifiedOnThisMachine | false | true |
 | parallelInstances / switchMode | `no` / `snapshot` | `no` / `snapshot` |
 
-## 3. 账号登记与切换（核心）
+## 3. 安全收尾后的当前状态（2026-11-13 晚）
+
+**真实切换已停用**，本轮没有做任何新的真实账号快照写操作。
+
+| 能力 | 状态 | 说明 |
+| --- | --- | --- |
+| 版本检测 `editions.detect` | 可用 | International 实测；CN 标注未复验，`parallelInstances=unknown` |
+| 扫描 `profiles.scan` | 可用 | 只读 live + 复制快照，live 零改动 |
+| 导入 `profiles.import` | 可用 | 只登记已有快照目录 |
+| 认证检查 `profiles.inspect` | 可用 | 只读快照，不碰 live |
+| 保存快照 `profiles.capture` | 可用 | 只写快照目录；身份证明不了就拒绝 |
+| 切换 `profiles.open` / `activate` | **默认拒绝** | 需要 `AICC_QODER_ENABLE_SWITCH=1` 且版本已复验；CN 永远不满足 |
+| 关闭 `profiles.close` | 可用 | 只对"命令行带本 Profile 标记"的进程发信号 |
+| 恢复 `profiles.recover` | 可用 | 只处理崩溃遗留的 journal |
+
+原因见 `docs/QODER_MULTI_PROFILE_SPIKE.md` §7：`main.sqlite` 里存在按 `account_id`
+分区的账号数据（agent 定义、工作角色、协作运行时凭据），只换两个认证文件无法隔离。
+
+## 3.1 上一轮（收尾前）的真机往返记录（历史）
+
+下面这段是在**加闸门之前**的构建上做的，保留下来作为"快照机制本身可用"的证据；
+当前版本不会再执行这些写操作。
 
 ### A. 原有账号保护
 
@@ -68,6 +89,9 @@
 
 ## 4. 未完成 / 限制（必须如实记录）
 
+0. **隔离未成立 → 切换默认关闭**（新增）：`main.sqlite` 的账号绑定数据无法用两个认证文件隔离；
+   要恢复切换，先完成 SPIKE §7.2 的最小安全快照设计并重新做真机验证。
+
 1. **Qoder CN 未安装**：CN 的 Bundle ID、数据目录、钥匙串条目名、`--user-data-dir`
    行为都还没有真机复验。代码按既有实现与官方发行标识处理，并在
    `verifiedOnThisMachine=false` 与界面文案里明确标注。
@@ -75,9 +99,9 @@
    系统授权框；自动化终端里点不到那个框（等待 4 分钟超时）。因此
    `authFingerprint` / `expiresAt` 仍为空，快照状态停在"待检查"。
    这一步需要在 GUI 里点一次"始终允许"，之后不再弹。
-3. **进程命令行核实被环境限制**：本机执行 `ps` 被宿主 sandbox 拒绝，所以
-   `verified` 只能通过 `kill -0` 确认"活着"，报告为 `running + verified=false`。
-   在正常 GUI 运行的 AICC 里 `ps` 可用，会走完整的命令行核实分支（有单测覆盖）。
+3. **进程探测现在是三态**：`pgrep` 不可用/退出码异常 → `unknown`，界面显示"状态未知"，
+   此时**禁止任何 live 写操作**；`ps` 读不到命令行时用 `kill -0` 兜底，
+   只有拿到 ESRCH 才判"已退出"。归属判定只认 `AICC_QODER_PROFILE` 标记。
 4. 切换依赖"客户端已退出"。如果用户在切换的瞬间手动打开客户端，
    AICC 会检测到非自己启动的进程并**拒绝**切换（有单测覆盖），但无法阻止用户
    在写文件的那几百毫秒里抢先启动。

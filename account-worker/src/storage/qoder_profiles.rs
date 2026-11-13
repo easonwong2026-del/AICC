@@ -49,6 +49,8 @@ pub struct ProfileRecord {
     /// 快照里的认证文件路径。
     pub auth_file: Option<String>,
     pub auth_fingerprint: Option<String>,
+    /// 快照文件的整文件 sha256，切换时用来判断"快照有没有被改坏"。
+    pub snapshot_hash: Option<String>,
     pub auth_status: String,
     pub expires_at: Option<String>,
     pub managed: bool,
@@ -68,6 +70,7 @@ pub struct ProfileInsert {
     pub app_path: Option<String>,
     pub client_version: Option<String>,
     pub auth_file: Option<String>,
+    pub snapshot_hash: Option<String>,
     pub auth_status: String,
     pub managed: bool,
 }
@@ -83,6 +86,7 @@ pub struct ProfilePatch {
     pub client_version: Option<String>,
     pub auth_file: Option<String>,
     pub auth_fingerprint: Option<String>,
+    pub snapshot_hash: Option<String>,
     pub auth_status: Option<String>,
     pub expires_at: Option<String>,
     pub managed: Option<bool>,
@@ -101,7 +105,7 @@ pub struct RuntimeRecord {
 const PROFILE_COLUMNS: &str =
     "profile_id, edition, display_name, account_uid, email, app_bundle_id, \
      app_path, client_version, live_dir, snapshot_dir, auth_file, auth_fingerprint, \
-     auth_status, expires_at, managed, last_opened_at, created_at, updated_at";
+     snapshot_hash, auth_status, expires_at, managed, last_opened_at, created_at, updated_at";
 
 fn map_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProfileRecord> {
     Ok(ProfileRecord {
@@ -117,12 +121,13 @@ fn map_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProfileRecord> {
         snapshot_dir: row.get(9)?,
         auth_file: row.get(10)?,
         auth_fingerprint: row.get(11)?,
-        auth_status: row.get(12)?,
-        expires_at: row.get(13)?,
-        managed: row.get::<_, i64>(14)? != 0,
-        last_opened_at: row.get(15)?,
-        created_at: row.get(16)?,
-        updated_at: row.get(17)?,
+        snapshot_hash: row.get(12)?,
+        auth_status: row.get(13)?,
+        expires_at: row.get(14)?,
+        managed: row.get::<_, i64>(15)? != 0,
+        last_opened_at: row.get(16)?,
+        created_at: row.get(17)?,
+        updated_at: row.get(18)?,
     })
 }
 
@@ -140,8 +145,9 @@ impl crate::storage::Db {
             "INSERT INTO qoder_profiles (
                  profile_id, edition, display_name, account_uid, email, app_bundle_id, app_path,
                  client_version, live_dir, snapshot_dir, auth_file, auth_fingerprint,
-                 auth_status, expires_at, managed, last_opened_at, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, NULL, ?11, NULL, ?12, ?12)",
+                 snapshot_hash, auth_status, expires_at, managed, last_opened_at,
+                 created_at, updated_at
+             ) VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?11, NULL, ?12, NULL, ?13, ?13)",
             params![
                 input.profile_id,
                 input.edition,
@@ -152,6 +158,7 @@ impl crate::storage::Db {
                 input.live_dir,
                 input.snapshot_dir,
                 input.auth_file,
+                input.snapshot_hash,
                 input.auth_status,
                 i64::from(input.managed),
                 now,
@@ -240,6 +247,7 @@ impl crate::storage::Db {
         set_text!(patch.client_version, "client_version");
         set_text!(patch.auth_file, "auth_file");
         set_text!(patch.auth_fingerprint, "auth_fingerprint");
+        set_text!(patch.snapshot_hash, "snapshot_hash");
         set_text!(patch.auth_status, "auth_status");
         set_text!(patch.expires_at, "expires_at");
         set_text!(patch.last_opened_at, "last_opened_at");
@@ -355,6 +363,7 @@ mod tests {
             app_path: Some("/Applications/Qoder.app".into()),
             client_version: Some("0.5.7".into()),
             auth_file: Some(format!("{snapshot}/auth.v1.dat")),
+            snapshot_hash: None,
             auth_status: "unknown".into(),
             managed: true,
         }

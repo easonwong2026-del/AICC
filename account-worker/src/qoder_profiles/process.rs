@@ -1,16 +1,18 @@
-//! Qoder 客户端进程：启动、核实、关闭、对账。
+//! Qoder 客户端进程：探测、归属、启动、关闭、对账。
 //!
-//! 三条铁律（PRD §7）：
+//! 这一层的核心原则是**"不知道就停下来"**：
 //!
-//! 1. **不认"启动成功"这四个字**。`Command::spawn` 成功只说明 fork/exec 没报错，
-//!    必须再读一次真实进程，确认它还在跑。
-//! 2. **只碰自己拉起来的进程**。归属判定看启动时注入的环境变量标记；
-//!    `ps -E` 不可用时退回"可执行文件路径一致 + 运行记录里有我们写下的 PID"。
-//! 3. **PID 会复用**。AICC 重启后旧 PID 可能已经属于别的程序，必须重新核实，
-//!    核实不上就当没在跑。
+//! | 探测结果 | 含义 | 允许做什么 |
+//! | --- | --- | --- |
+//! | `Stopped` | 有确凿证据说明客户端没在跑（`pgrep` 明确返回"无匹配"） | 可以进入切换流程 |
+//! | `Running(pids)` | 有进程在跑 | 只有确认是本 Profile 的进程才发信号 |
+//! | `Unknown` | 探测工具本身失败（spawn 失败 / 退出码异常） | **禁止**任何 live 认证写入、禁止发信号 |
 //!
-//! 注意：Qoder 忽略 `--user-data-dir`（M0 实测），所以这里**不再**靠
-//! "命令行里有没有某个目录"来认亲。
+//! 同理，`liveness(pid)` 只有在拿到"进程不存在"的确凿证据时才返回 `Gone`；
+//! `ps` 读不到不等于进程死了，必须再用 `kill -0` 拿 ESRCH 才算数。
+//!
+//! 归属判定只认启动时注入的 `AICC_QODER_PROFILE=<profile_id>`：
+//! "可执行文件路径相同" 不再算证据——同一份 App 用户也可能自己开一个。
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -23,51 +25,60 @@ pub const OWNER_ENV: &str = "AICC_QODER_PROFILE";
 pub const PS_BIN_ENV: &str = "AICC_PS_BIN";
 /// 测试注入的假 `pgrep`。
 pub const PGREP_BIN_ENV: &str = "AICC_PGREP_BIN";
+/// 测试注入的假 `kill`。
+pub const KILL_BIN_ENV: &str = "AICC_KILL_BIN";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessInfo {
     pub pid: i64,
-    /// 完整命令行（含 argv[0]）。
     pub argv: Vec<String>,
-    /// 命令行里出现了归属标记（说明是本进程注入的环境变量）。
-    pub has_owner_marker: bool,
+    /// 命令行里解析出的归属 Profile（`AICC_QODER_PROFILE=` 的值）。
+    pub owner_profile: Option<String>,
 }
 
-impl ProcessInfo {
-    /// 取 `--flag=value` 形式参数的值。只有测试用得到。
-    #[cfg(test)]
-    pub fn arg_after(&self, prefix: &str) -> Option<&str> {
-        self.argv
-            .iter()
-            .find_map(|arg| arg.strip_prefix(prefix))
-            .filter(|v| !v.is_empty())
+/// "客户端在不在跑"的三态。**不要把它压成 bool。**
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Running {
+    Stopped,
+    Running(Vec<i64>),
+    Unknown(String),
+}
+
+/// 某个 PID 的存活三态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Liveness {
+    Alive,
+    Gone,
+    Unknown(String),
+}
+
+fn tool(env_key: &str, default: &str) -> PathBuf {
+    match std::env::var_os(env_key) {
+        Some(v) if !v.is_empty() => PathBuf::from(v),
+        _ => PathBuf::from(default),
     }
 }
 
 fn ps_bin() -> PathBuf {
-    match std::env::var_os(PS_BIN_ENV) {
-        Some(v) if !v.is_empty() => PathBuf::from(v),
-        _ => PathBuf::from("/bin/ps"),
-    }
+    tool(PS_BIN_ENV, "/bin/ps")
 }
 
 fn pgrep_bin() -> PathBuf {
-    match std::env::var_os(PGREP_BIN_ENV) {
-        Some(v) if !v.is_empty() => PathBuf::from(v),
-        _ => PathBuf::from("/usr/bin/pgrep"),
-    }
+    tool(PGREP_BIN_ENV, "/usr/bin/pgrep")
 }
 
-/// 读进程命令行。读不到（进程不存在 / 权限不足 / ps 不可用）一律返回 `None`。
+fn kill_bin() -> PathBuf {
+    tool(KILL_BIN_ENV, "/bin/kill")
+}
+
+/// 读进程命令行。读不到返回 `None`（**不代表进程已经退出**）。
 pub fn describe(pid: i64) -> Option<ProcessInfo> {
     if pid <= 1 {
         return None;
     }
-    let with_env = run_ps(&["-p", &pid.to_string(), "-E", "-ww", "-o", "args="]);
-    let output = match with_env {
-        Some(text) => text,
-        None => run_ps(&["-p", &pid.to_string(), "-ww", "-o", "args="])?,
-    };
+    let args = pid.to_string();
+    let output = run_ps(&["-p", &args, "-E", "-ww", "-o", "args="])
+        .or_else(|| run_ps(&["-p", &args, "-ww", "-o", "args="]))?;
     let line = output.trim();
     if line.is_empty() {
         return None;
@@ -76,16 +87,22 @@ pub fn describe(pid: i64) -> Option<ProcessInfo> {
     if argv.is_empty() {
         return None;
     }
+    let prefix = format!("{OWNER_ENV}=");
+    let owner_profile = argv
+        .iter()
+        .find_map(|arg| arg.strip_prefix(&prefix).map(str::to_string))
+        .filter(|v| !v.is_empty());
     Some(ProcessInfo {
         pid,
         argv,
-        has_owner_marker: line.contains(&format!("{OWNER_ENV}=")),
+        owner_profile,
     })
 }
 
 fn run_ps(args: &[&str]) -> Option<String> {
     let output = Command::new(ps_bin())
         .args(args)
+        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -96,41 +113,82 @@ fn run_ps(args: &[&str]) -> Option<String> {
     String::from_utf8(output.stdout).ok()
 }
 
-/// 归属判定。
-///
-/// - 命令行里带 `AICC_QODER_PROFILE=` 标记 → 一定是 AICC 拉的；
-/// - 没有标记（`ps -E` 不可用）→ 要求 argv[0] 与记录的可执行文件一致。
-///
-/// 运行记录本来就是"我们 spawn 时写下的 PID"，再加可执行文件一致已经足够，
-/// 而且绝不会误伤用户手动启动的另一份客户端（它没有运行记录）。
-pub fn is_owned(info: &ProcessInfo, executable: &Path) -> bool {
-    if info.has_owner_marker {
-        return true;
-    }
-    info.argv
-        .first()
-        .map(|arg0| arg0 == &executable.to_string_lossy())
-        .unwrap_or(false)
-}
-
-/// 找出当前正在跑的同一份客户端。切换账号前必须先确认它已经退出。
-///
-/// 用 `pgrep -f <可执行文件绝对路径>`，只匹配这个路径。
-pub fn find_running(executable: &Path) -> Vec<i64> {
-    let output = Command::new(pgrep_bin())
+/// 客户端是否在运行。`pgrep` 明确"无匹配"(exit 1) 才算 `Stopped`；
+/// 其它任何异常都是 `Unknown`，调用方必须停下来。
+pub fn probe(executable: &Path) -> Running {
+    let output = match Command::new(pgrep_bin())
         .arg("-f")
         .arg(executable.to_string_lossy().to_string())
+        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => return Running::Unknown(format!("pgrep 无法执行：{err}")),
     };
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<i64>().ok())
-        .filter(|pid| *pid > 1)
-        .collect()
+
+    match output.status.code() {
+        Some(1) => Running::Stopped,
+        Some(0) => {
+            let pids: Vec<i64> = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.trim().parse::<i64>().ok())
+                .filter(|pid| *pid > 1)
+                .collect();
+            if pids.is_empty() {
+                // 退出码说"找到了"，输出却是空的：两边矛盾，不能当没跑。
+                Running::Unknown("pgrep 报告有匹配但没给出 PID".into())
+            } else {
+                Running::Running(pids)
+            }
+        }
+        other => Running::Unknown(format!(
+            "pgrep 退出码异常：{other:?}（stderr: {}）",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    }
+}
+
+/// 某个 PID 还在不在。
+///
+/// `ps` 读不到时会再用 `kill -0`：拿到 "No such process" 才算 `Gone`，
+/// 其它情况（权限不足、kill 不可用）都返回 `Unknown` —— **宁可不结束，也不误判。**
+pub fn liveness(pid: i64) -> Liveness {
+    if pid <= 1 {
+        return Liveness::Gone;
+    }
+    if describe(pid).is_some() {
+        return Liveness::Alive;
+    }
+    let output = match Command::new(kill_bin())
+        .arg("-0")
+        .arg(pid.to_string())
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => return Liveness::Unknown(format!("kill -0 无法执行：{err}")),
+    };
+    if output.status.success() {
+        return Liveness::Alive;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    if stderr.contains("no such process") {
+        return Liveness::Gone;
+    }
+    Liveness::Unknown(format!(
+        "kill -0 失败但没有明确的'进程不存在'证据：{}",
+        stderr.trim()
+    ))
+}
+
+/// 归属判定：只认启动时注入的标记，且必须与目标 Profile 一致。
+pub fn owned_by(info: &ProcessInfo, profile_id: &str) -> bool {
+    info.owner_profile.as_deref() == Some(profile_id)
 }
 
 pub fn spawn(executable: &Path, args: &[String], profile_id: &str) -> io::Result<u32> {
@@ -138,9 +196,8 @@ pub fn spawn(executable: &Path, args: &[String], profile_id: &str) -> io::Result
     command
         .args(args)
         .env(OWNER_ENV, profile_id)
-        // 主机进程（尤其是从终端/IDE 继承来的环境）可能带着
-        // `ELECTRON_RUN_AS_NODE=1`，那会让 Electron 客户端退化成 node，
-        // 一行代码都没跑就退出。隔离启动时必须把这几个变量摘掉。
+        // 宿主环境（终端 / IDE）可能带着 `ELECTRON_RUN_AS_NODE=1`，
+        // 那会让 Electron 客户端退化成 node，一行代码都没跑就退出。
         .env_remove("ELECTRON_RUN_AS_NODE")
         .env_remove("ELECTRON_NO_ATTACH_CONSOLE")
         .stdin(Stdio::null())
@@ -151,11 +208,14 @@ pub fn spawn(executable: &Path, args: &[String], profile_id: &str) -> io::Result
 }
 
 /// 发信号。`force = SIGKILL`，否则 `SIGTERM`。
+///
+/// **调用前必须已经确认归属**（`owned_by`），这个函数自己不做判断。
 pub fn signal(pid: i64, force: bool) -> bool {
     let flag = if force { "-KILL" } else { "-TERM" };
-    Command::new("/bin/kill")
+    Command::new(kill_bin())
         .arg(flag)
         .arg(pid.to_string())
+        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -164,32 +224,13 @@ pub fn signal(pid: i64, force: bool) -> bool {
         .unwrap_or(false)
 }
 
-/// 只探测"这个 PID 还在不在"，不读命令行。
-///
-/// 有些环境（沙箱、受限终端）禁掉了 `ps`，但 `kill -0` 仍可用。
-/// 这种情况下我们只能确认"进程活着"，不能确认"它是我们那个实例"，
-/// 调用方必须把 `verified` 标成 false，并且**不许**据此发终止信号。
-pub fn is_alive(pid: i64) -> bool {
-    if pid <= 1 {
-        return false;
-    }
-    Command::new("/bin/kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// 等进程消失。超时返回 false（调用方决定要不要升级到 SIGKILL）。
+/// 等进程消失。**只有拿到 `Gone` 才返回 true**，超时或探测不确定都返回 false。
 pub fn wait_gone(pid: i64, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
-        if describe(pid).is_none() {
-            return true;
+        match liveness(pid) {
+            Liveness::Gone => return true,
+            Liveness::Alive | Liveness::Unknown(_) => {}
         }
         if Instant::now() >= deadline {
             return false;
@@ -203,14 +244,6 @@ mod tests {
     use super::*;
     use crate::test_env::lock as lock_env;
 
-    fn info(argv: &[&str], marker: bool) -> ProcessInfo {
-        ProcessInfo {
-            pid: 100,
-            argv: argv.iter().map(|s| s.to_string()).collect(),
-            has_owner_marker: marker,
-        }
-    }
-
     fn write_script(path: &Path, body: &str) {
         std::fs::write(path, body).unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -219,86 +252,152 @@ mod tests {
         std::fs::set_permissions(path, perms).unwrap();
     }
 
-    #[test]
-    fn owner_marker_wins() {
-        let i = info(&["/Applications/Qoder.app/Contents/MacOS/Qoder"], true);
-        assert!(is_owned(&i, Path::new("/whatever")));
+    fn info(argv: &[&str], owner: Option<&str>) -> ProcessInfo {
+        ProcessInfo {
+            pid: 100,
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+            owner_profile: owner.map(str::to_string),
+        }
     }
 
     #[test]
-    fn exe_path_must_match_without_marker() {
-        let exe = Path::new("/Applications/Qoder.app/Contents/MacOS/Qoder");
-        assert!(is_owned(
-            &info(&["/Applications/Qoder.app/Contents/MacOS/Qoder"], false),
-            exe
-        ));
-        assert!(!is_owned(
-            &info(&["/Applications/Other.app/Contents/MacOS/Other"], false),
-            exe
-        ));
+    fn ownership_requires_marker_not_just_path() {
+        let exe = "/Applications/Qoder.app/Contents/MacOS/Qoder";
+        // 同一份可执行文件、没有标记 → 不是我们的。
+        assert!(!owned_by(&info(&[exe], None), "qp_1"));
+        // 标记属于别的 Profile → 也不是我们的。
+        assert!(!owned_by(&info(&[exe], Some("qp_2")), "qp_1"));
+        assert!(owned_by(&info(&[exe], Some("qp_1")), "qp_1"));
     }
 
     #[test]
-    fn describe_uses_injected_ps() {
+    fn describe_parses_owner_marker() {
         let _guard = lock_env();
         let tmp = tempfile::tempdir().unwrap();
         let stub = tmp.path().join("ps");
         write_script(
             &stub,
-            "#!/bin/sh\necho '/fake/Qoder --flag AICC_QODER_PROFILE=qp_1'\n",
+            "#!/bin/sh\necho '/fake/Qoder AICC_QODER_PROFILE=qp_abc'\n",
         );
         std::env::set_var(PS_BIN_ENV, stub.to_string_lossy().to_string());
         let described = describe(4242).expect("stub output");
         std::env::remove_var(PS_BIN_ENV);
+        assert_eq!(described.owner_profile.as_deref(), Some("qp_abc"));
+        assert!(owned_by(&described, "qp_abc"));
+        assert!(!owned_by(&described, "qp_other"));
+    }
 
-        assert_eq!(described.pid, 4242);
-        assert!(described.has_owner_marker);
-        assert_eq!(
-            described.argv.first().map(String::as_str),
-            Some("/fake/Qoder")
+    #[test]
+    fn pgrep_no_match_is_confirmed_stopped() {
+        let _guard = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = tmp.path().join("pgrep");
+        write_script(&stub, "#!/bin/sh\nexit 1\n");
+        std::env::set_var(PGREP_BIN_ENV, stub.to_string_lossy().to_string());
+        let state = probe(Path::new("/fake/Qoder"));
+        std::env::remove_var(PGREP_BIN_ENV);
+        assert_eq!(state, Running::Stopped);
+    }
+
+    #[test]
+    fn pgrep_error_is_unknown_not_stopped() {
+        let _guard = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = tmp.path().join("pgrep");
+        write_script(&stub, "#!/bin/sh\necho boom >&2\nexit 3\n");
+        std::env::set_var(PGREP_BIN_ENV, stub.to_string_lossy().to_string());
+        let state = probe(Path::new("/fake/Qoder"));
+        std::env::remove_var(PGREP_BIN_ENV);
+        assert!(matches!(state, Running::Unknown(_)), "got {state:?}");
+    }
+
+    #[test]
+    fn pgrep_missing_binary_is_unknown() {
+        let _guard = lock_env();
+        std::env::set_var(PGREP_BIN_ENV, "/nonexistent/pgrep");
+        let state = probe(Path::new("/fake/Qoder"));
+        std::env::remove_var(PGREP_BIN_ENV);
+        assert!(matches!(state, Running::Unknown(_)), "got {state:?}");
+    }
+
+    #[test]
+    fn pgrep_found_but_empty_output_is_unknown() {
+        let _guard = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = tmp.path().join("pgrep");
+        write_script(&stub, "#!/bin/sh\nexit 0\n");
+        std::env::set_var(PGREP_BIN_ENV, stub.to_string_lossy().to_string());
+        let state = probe(Path::new("/fake/Qoder"));
+        std::env::remove_var(PGREP_BIN_ENV);
+        assert!(matches!(state, Running::Unknown(_)), "got {state:?}");
+    }
+
+    #[test]
+    fn liveness_reports_gone_only_with_esrch() {
+        let _guard = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let ps = tmp.path().join("ps");
+        write_script(&ps, "#!/bin/sh\nexit 1\n");
+        let kill = tmp.path().join("kill");
+        write_script(
+            &kill,
+            "#!/bin/sh\necho 'kill: 4242: No such process' >&2\nexit 1\n",
         );
-        assert!(described.arg_after("--user-data-dir=").is_none());
-    }
-
-    #[test]
-    fn dead_pid_has_no_description() {
-        let _guard = lock_env();
-        let tmp = tempfile::tempdir().unwrap();
-        let stub = tmp.path().join("ps");
-        write_script(&stub, "#!/bin/sh\nexit 1\n");
-        std::env::set_var(PS_BIN_ENV, stub.to_string_lossy().to_string());
-        assert!(describe(4242).is_none());
+        std::env::set_var(PS_BIN_ENV, ps.to_string_lossy().to_string());
+        std::env::set_var(KILL_BIN_ENV, kill.to_string_lossy().to_string());
+        let state = liveness(4242);
         std::env::remove_var(PS_BIN_ENV);
+        std::env::remove_var(KILL_BIN_ENV);
+        assert_eq!(state, Liveness::Gone);
     }
 
     #[test]
-    fn find_running_parses_pgrep_output() {
+    fn liveness_unknown_when_kill_fails_without_esrch() {
         let _guard = lock_env();
         let tmp = tempfile::tempdir().unwrap();
-        let stub = tmp.path().join("pgrep");
-        write_script(&stub, "#!/bin/sh\nprintf '111\\n222\\nnot-a-pid\\n'\n");
-        std::env::set_var(PGREP_BIN_ENV, stub.to_string_lossy().to_string());
-        let pids = find_running(Path::new("/fake/Qoder"));
-        std::env::remove_var(PGREP_BIN_ENV);
-        assert_eq!(pids, vec![111, 222]);
+        let ps = tmp.path().join("ps");
+        write_script(&ps, "#!/bin/sh\nexit 1\n");
+        let kill = tmp.path().join("kill");
+        write_script(
+            &kill,
+            "#!/bin/sh\necho 'operation not permitted' >&2\nexit 1\n",
+        );
+        std::env::set_var(PS_BIN_ENV, ps.to_string_lossy().to_string());
+        std::env::set_var(KILL_BIN_ENV, kill.to_string_lossy().to_string());
+        let state = liveness(4242);
+        std::env::remove_var(PS_BIN_ENV);
+        std::env::remove_var(KILL_BIN_ENV);
+        assert!(matches!(state, Liveness::Unknown(_)), "got {state:?}");
     }
 
     #[test]
-    fn alive_probe_rejects_bogus_pids() {
-        // 0/1 与不可能存在的 PID 一律当"不在"。
-        assert!(!is_alive(0));
-        assert!(!is_alive(1));
-        assert!(!is_alive(999_999));
-    }
-
-    #[test]
-    fn find_running_returns_empty_when_pgrep_fails() {
+    fn liveness_alive_when_kill_0_succeeds() {
         let _guard = lock_env();
         let tmp = tempfile::tempdir().unwrap();
-        let stub = tmp.path().join("pgrep");
-        write_script(&stub, "#!/bin/sh\nexit 1\n");
-        std::env::set_var(PGREP_BIN_ENV, stub.to_string_lossy().to_string());
-        assert!(find_running(Path::new("/fake/Qoder")).is_empty());
-        std::env::remove_var(PGREP_BIN_ENV);
+        let ps = tmp.path().join("ps");
+        write_script(&ps, "#!/bin/sh\nexit 1\n");
+        let kill = tmp.path().join("kill");
+        write_script(&kill, "#!/bin/sh\nexit 0\n");
+        std::env::set_var(PS_BIN_ENV, ps.to_string_lossy().to_string());
+        std::env::set_var(KILL_BIN_ENV, kill.to_string_lossy().to_string());
+        assert_eq!(liveness(4242), Liveness::Alive);
+        std::env::remove_var(PS_BIN_ENV);
+        std::env::remove_var(KILL_BIN_ENV);
+    }
+
+    #[test]
+    fn wait_gone_never_returns_true_on_unknown() {
+        let _guard = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let ps = tmp.path().join("ps");
+        write_script(&ps, "#!/bin/sh\nexit 1\n");
+        let kill = tmp.path().join("kill");
+        write_script(&kill, "#!/bin/sh\nexit 2\n");
+        std::env::set_var(PS_BIN_ENV, ps.to_string_lossy().to_string());
+        std::env::set_var(KILL_BIN_ENV, kill.to_string_lossy().to_string());
+        let gone = wait_gone(4242, Duration::from_millis(300));
+        std::env::remove_var(PS_BIN_ENV);
+        std::env::remove_var(KILL_BIN_ENV);
+        assert!(!gone, "探测不确定时不能报告'已退出'");
     }
 }

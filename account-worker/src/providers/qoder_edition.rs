@@ -86,15 +86,21 @@ impl QoderEdition {
         }
     }
 
+    /// 该版本的识别/认证参数是否在本机验证过。
+    pub fn verified_on_this_machine(self) -> bool {
+        matches!(self, Self::Global)
+    }
+
     /// 是否能"同时跑多个账号"。
     ///
-    /// International 实测：客户端**忽略** `--user-data-dir`，一个 OS 用户只有
-    /// 一份 userData，第二个实例会被单实例锁挡回。所以答案是不能——
-    /// 两个版本都只能"退出 → 换快照 → 再启动"。
-    /// CN 没装过，但同源实现没有理由更宽松，因此同样按"不能"处理并在文档标注未复验。
+    /// - International：实测**不能**——客户端忽略 `--user-data-dir`，
+    ///   一个 OS 用户只有一份 userData，第二个实例被单实例锁挡回。
+    /// - CN：没实测过，答案是**未知**，不能写成"已确认不支持"。
     pub fn parallel_instances_label(self) -> &'static str {
-        let _ = self;
-        "no"
+        match self {
+            Self::Global => "no",
+            Self::Cn => "unknown",
+        }
     }
 }
 
@@ -252,7 +258,7 @@ pub fn detect(edition: QoderEdition) -> EditionDetection {
         executable: app.and_then(|a| a.executable),
         data_dirs,
         parallel_instances: edition.parallel_instances_label(),
-        verified_on_this_machine: matches!(edition, QoderEdition::Global),
+        verified_on_this_machine: edition.verified_on_this_machine(),
     }
 }
 
@@ -495,9 +501,11 @@ mod tests {
     }
 
     #[test]
-    fn parallel_instances_are_not_claimed() {
-        // M0 实测客户端忽略 --user-data-dir，两版都只能快照切换。
-        assert_eq!(QoderEdition::Cn.parallel_instances_label(), "no");
+    fn parallel_capability_is_not_guessed_for_cn() {
+        // International 实测不能并行；CN 没装过，只能是 unknown。
         assert_eq!(QoderEdition::Global.parallel_instances_label(), "no");
+        assert_eq!(QoderEdition::Cn.parallel_instances_label(), "unknown");
+        assert!(QoderEdition::Global.verified_on_this_machine());
+        assert!(!QoderEdition::Cn.verified_on_this_machine());
     }
 }
