@@ -53,6 +53,20 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `providers.workbuddy.oauth` | OAuth 能力说明（PR1a 未接线） | 否 |
 | `providers.qoder.presence` | 只查配置目录/文件，不碰钥匙串 | 否 |
 | `providers.qoder.inspect` | 解密 `auth.v1.dat` 并给令牌指纹 | 否 |
+| `providers.qoder_global.presence` / `inspect` | 国际版同名的只读检查，**与 CN 分开**：自己的路径、自己的钥匙串条目 | 否 |
+| `qoder.editions.detect` | 报两个版本各自的 Bundle ID、安装路径、客户端版本、数据目录、是否允许并行实例、是否在本机复验过 | 否 |
+| `qoder.profiles.list` | 列出 Profile（可带 `edition` 过滤）；附带快照是否就绪、live 当前是否就是这个账号、运行状态 | 否 |
+| `qoder.profiles.scan` | 把客户端当前登录的账号登记成 Profile：复制一份快照，**不移动、不覆盖、不要求重新登录** | 否 |
+| `qoder.profiles.create` | 新建 Profile（AICC 托管的空快照目录） | 否 |
+| `qoder.profiles.import` | 登记一份已有账号快照目录（必须有 `auth.v1.dat`；`..` 与重复目录会被拒） | 否 |
+| `qoder.profiles.inspect` | 用对应版本的适配器解密**快照**，写回指纹/到期/身份；**不回传令牌** | 否 |
+| `qoder.profiles.capture` | 把客户端此刻的登录态存进该 Profile 的快照（身份不一致时拒绝） | 否 |
+| `qoder.profiles.rename` | 只改 AICC 里的显示名 | 否 |
+| `qoder.profiles.open` | 快照切换并启动：先退出客户端 → 存回当前账号 → 写回目标快照 → 启动 → 核实进程与认证 | 否 |
+| `qoder.profiles.close` | 只关 AICC 自己拉起的进程；`force` 才升级 SIGKILL | 否 |
+| `qoder.profiles.activate` | 切换（等价于 `open`，`open` 内部已包含"先关后写"） | 否 |
+| `qoder.profiles.remove` | 移除登记；`purge=true` 才删**AICC 快照**，客户端数据目录永远不动 | 否 |
+| `qoder.profiles.status` | 运行状态汇总（每次都重新核实 PID，不信旧记录） | 否 |
 | `auth.workbuddy.start` / `poll` / `cancel` | 官方 OAuth 扫码：发起、轮询、取消（PR1b-1） | 是 |
 | `auth.workbuddy.refresh` | 刷新令牌；`auth_source=magpie` 的账号改为重新同步 | 是 |
 | `auth.workbuddy.status` | 用当前选用的授权探测一次登录态（只读）：先 `Valid/Unauthorized/Transient` 分类，再过 401 才切源 | 是 |

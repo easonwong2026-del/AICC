@@ -16,6 +16,7 @@ use crate::rpc::{RpcError, RpcResult};
 pub mod authz;
 pub mod checkin;
 pub mod growth;
+pub mod qoder_profiles;
 pub mod travel;
 
 pub use authz::AuthorizationRecord;
@@ -156,6 +157,53 @@ const MIGRATION_V10_SQL: &str = "\
 ALTER TABLE checkin_records ADD COLUMN error_kind TEXT;\
 ALTER TABLE checkin_records ADD COLUMN execution_source TEXT;";
 
+/// v11：Qoder 双版本多账号 Profile（PR #70）。
+///
+/// **只新增两张表，不碰任何已有表。**
+///
+/// 表结构按 M0 实测结论设计：Qoder 客户端忽略 `--user-data-dir`，一个 OS 用户
+/// 只有一份 `userData`，所以
+///
+/// - `live_dir` 是**客户端真实目录**（同版本的多个 Profile 共享同一行值，不做唯一约束）；
+/// - `snapshot_dir` 是 AICC 管理的**认证快照**（每个 Profile 独占，唯一）；
+/// - 切换账号靠"退出客户端 → 存回当前账号 → 写回目标快照 → 再启动"。
+///
+/// 为什么不把 `qoder_global` 塞进 `accounts.platform`：见 `storage/qoder_profiles.rs`
+/// 顶部注释——那需要重建挂着四组外键的主表，风险与收益不成比例。
+const MIGRATION_V11_SQL: &str = "\
+CREATE TABLE IF NOT EXISTS qoder_profiles (\
+    profile_id       TEXT PRIMARY KEY,\
+    edition          TEXT NOT NULL CHECK (edition IN ('qoder_cn', 'qoder_global')),\
+    display_name     TEXT NOT NULL,\
+    account_uid      TEXT,\
+    email            TEXT,\
+    app_bundle_id    TEXT,\
+    app_path         TEXT,\
+    client_version   TEXT,\
+    live_dir         TEXT NOT NULL,\
+    snapshot_dir     TEXT NOT NULL,\
+    auth_file        TEXT,\
+    auth_fingerprint TEXT,\
+    auth_status      TEXT NOT NULL DEFAULT 'missing'\
+                     CHECK (auth_status IN ('unknown','valid','expired','invalid','denied','missing')),\
+    expires_at       TEXT,\
+    managed          INTEGER NOT NULL DEFAULT 1 CHECK (managed IN (0, 1)),\
+    last_opened_at   TEXT,\
+    created_at       TEXT NOT NULL,\
+    updated_at       TEXT NOT NULL\
+);\
+CREATE UNIQUE INDEX IF NOT EXISTS ux_qoder_profiles_snapshot ON qoder_profiles (snapshot_dir);\
+CREATE UNIQUE INDEX IF NOT EXISTS ux_qoder_profiles_identity \
+    ON qoder_profiles (edition, account_uid) WHERE account_uid IS NOT NULL;\
+CREATE INDEX IF NOT EXISTS idx_qoder_profiles_edition ON qoder_profiles (edition);\
+CREATE INDEX IF NOT EXISTS idx_qoder_profiles_live ON qoder_profiles (edition, live_dir);\
+CREATE TABLE IF NOT EXISTS qoder_runtime (\
+    profile_id  TEXT PRIMARY KEY REFERENCES qoder_profiles(profile_id) ON DELETE CASCADE,\
+    pid         INTEGER NOT NULL,\
+    executable  TEXT NOT NULL,\
+    launched_at TEXT NOT NULL\
+);";
+
 /// 一次迁移里的一步：纯 SQL，或者需要 Rust 参与的数据迁移。
 enum MigrationStep {
     Sql(&'static str),
@@ -217,9 +265,14 @@ const MIGRATIONS: &[Migration] = &[
         version: 10,
         steps: &[MigrationStep::Sql(MIGRATION_V10_SQL)],
     },
+    // v11：Qoder 双版本多账号 Profile。只建新表，不重建 accounts。
+    Migration {
+        version: 11,
+        steps: &[MigrationStep::Sql(MIGRATION_V11_SQL)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 10;
+pub const LATEST_VERSION: i64 = 11;
 
 pub struct Db {
     conn: Connection,

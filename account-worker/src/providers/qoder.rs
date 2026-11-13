@@ -14,14 +14,23 @@
 //! 直接算，所以**不依赖 Qoder 客户端进程**。
 //!
 //! 注意钥匙串口令是**机器级**的：它能解开本机任意一份 `auth.v1.dat`。
-//! 因此"一份 auth.v1.dat = 一个账号"，多账号必须各自一份独立 profile 目录
-//! （PRD §5.2；真机隔离验证排在 PR1b）。
+//! 因此"一份 auth.v1.dat = 一个账号"，多账号必须各自一份独立 profile 目录。
+//!
+//! 算法细节已抽到 `providers::qoder_crypto`，与 International 共用**算法**、
+//! 但**不共用**密钥、路径和钥匙串条目（见 `providers::qoder_global`）。
+//!
+//! ## 本机复验状态
+//!
+//! PR #70 落地时这台机器上只装了 International 客户端，CN 没有安装，
+//! 所以本文件的路径/钥匙串取值**未被本机复验**（`providers::qoder_edition`
+//! 里对 CN 的 `verified_on_this_machine` 为 false）。解密算法本身有单测覆盖。
 
 use std::path::{Path, PathBuf};
 
-use aes::cipher::{BlockDecrypt, KeyInit};
 use serde_json::{json, Value};
 
+use crate::providers::qoder_crypto::{self, CryptoError};
+use crate::providers::qoder_identity::{self, Identity};
 use crate::securestore::{fingerprint, third_party_password, SecretErrorKind};
 
 pub const AUTH_FILE: &str = "auth.v1.dat";
@@ -30,19 +39,13 @@ pub const AUTH_DIR_ENV: &str = "QODER_AUTH_DIR";
 pub const KEYCHAIN_SERVICE: &str = "Qoder CN App Safe Storage";
 pub const KEYCHAIN_ACCOUNT: &str = "Qoder CN App Key";
 
-const FILE_MAGIC: &[u8] = b"v10";
-const PBKDF2_SALT: &[u8] = b"saltysalt";
-const PBKDF2_ROUNDS: u32 = 1003;
-const KEY_LEN: usize = 16;
-const IV: [u8; 16] = [0x20; 16];
-const BLOCK: usize = 16;
-
-/// 解密后的会话：只留 PR1a 需要的字段，令牌不出本模块。
+/// 解密后的会话：只留本地判定需要的字段，令牌不出本模块。
 #[derive(Debug, Clone)]
 pub struct QoderSession {
     pub token: String,
     pub expires_at: Option<String>,
     pub fields: Vec<String>,
+    pub identity: Identity,
 }
 
 #[derive(Debug)]
@@ -86,6 +89,13 @@ impl QoderError {
             ),
             Self::TokenMissing => "解密成功但没有 token 字段，可能是未登录或新版格式".to_string(),
         }
+    }
+}
+
+fn map_crypto(err: CryptoError) -> QoderError {
+    match err {
+        CryptoError::UnsupportedFormat(m) => QoderError::UnsupportedFormat(m),
+        CryptoError::DecryptFailed(m) => QoderError::DecryptFailed(m),
     }
 }
 
@@ -193,13 +203,12 @@ pub fn inspect(explicit_dir: Option<&str>) -> Value {
             })
         }
     };
+    inspect_dir(&dir)
+}
 
-    let report = json!({
-        "platform": "qoder_cn",
-        "authDir": dir.to_string_lossy(),
-        "authFile": dir.join(AUTH_FILE).to_string_lossy(),
-    });
-    match read_session(&dir) {
+/// 对指定目录做只读检查。profile 管理走这里，避免再解析一次目录。
+pub fn inspect_dir(dir: &Path) -> Value {
+    match read_session(dir) {
         Ok(session) => json!({
             "platform": "qoder_cn",
             "state": "authenticated",
@@ -210,15 +219,19 @@ pub fn inspect(explicit_dir: Option<&str>) -> Value {
             "tokenLength": session.token.len(),
             "expiresAt": session.expires_at,
             "fields": session.fields,
+            "uid": session.identity.uid,
+            "email": session.identity.email,
+            "identitySource": session.identity.source,
             "reason": Value::Null,
         }),
-        Err(err) => {
-            let mut merged = report;
-            merged["state"] = json!(err.state());
-            merged["authenticated"] = json!(false);
-            merged["reason"] = json!(err.reason());
-            merged
-        }
+        Err(err) => json!({
+            "platform": "qoder_cn",
+            "state": err.state(),
+            "authenticated": false,
+            "authDir": dir.to_string_lossy(),
+            "authFile": dir.join(AUTH_FILE).to_string_lossy(),
+            "reason": err.reason(),
+        }),
     }
 }
 
@@ -227,14 +240,14 @@ pub fn read_session(dir: &Path) -> Result<QoderSession, QoderError> {
     let path = dir.join(AUTH_FILE);
     let raw = std::fs::read(&path)
         .map_err(|_| QoderError::MissingAuthFile(format!("{} 不存在或不可读", path.display())))?;
-    if raw.len() <= FILE_MAGIC.len() {
+    if raw.len() <= qoder_crypto::FILE_MAGIC.len() {
         return Err(QoderError::UnsupportedFormat(format!(
             "{} 只有 {} 字节，可能正被客户端改写",
             AUTH_FILE,
             raw.len()
         )));
     }
-    if !raw.starts_with(FILE_MAGIC) {
+    if !qoder_crypto::has_envelope(&raw) {
         return Err(QoderError::UnsupportedFormat(format!(
             "{} 前缀不是 v10（实际 {:?}），格式未支持",
             AUTH_FILE,
@@ -253,7 +266,7 @@ pub fn read_session(dir: &Path) -> Result<QoderSession, QoderError> {
             _ => QoderError::KeychainUnavailable(err.message),
         })?;
 
-    let plain = decrypt_mac(&raw[FILE_MAGIC.len()..], &password)?;
+    let plain = qoder_crypto::decrypt_envelope(&raw, &password).map_err(map_crypto)?;
     let parsed: Value = serde_json::from_slice(&plain)
         .map_err(|_| QoderError::DecryptFailed("解密成功但内容不是 JSON".into()))?;
 
@@ -266,15 +279,10 @@ pub fn read_session(dir: &Path) -> Result<QoderSession, QoderError> {
         .get("token")
         .and_then(Value::as_str)
         .map(str::to_string)
-        .filter(|t| !t.is_empty())
         .ok_or(QoderError::TokenMissing)?;
 
     // 令牌字符集/长度与参考实现一致，异常形态直接判为不可用，避免拿脏数据去打接口。
-    if token.len() > 32768
-        || !token
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '~' | '+' | '/' | '-'))
-    {
+    if !qoder_crypto::token_shape_ok(&token) {
         return Err(QoderError::DecryptFailed("token 形态异常".into()));
     }
 
@@ -285,51 +293,16 @@ pub fn read_session(dir: &Path) -> Result<QoderSession, QoderError> {
             .and_then(Value::as_str)
             .map(str::to_string),
         fields,
+        identity: qoder_identity::extract(&parsed),
     })
 }
 
-/// AES-128-CBC(IV=16 空格, PKCS7) + PBKDF2-HMAC-SHA1。
+/// AES-128-CBC(IV=16 空格, PKCS7) + PBKDF2-HMAC-SHA1（保留公开签名，实现已共用）。
+///
+/// 生产路径走 `read_session`；这个函数保留给单测和"只想验算法"的调用方。
+#[allow(dead_code)]
 pub fn decrypt_mac(cipher_text: &[u8], password: &str) -> Result<Vec<u8>, QoderError> {
-    if cipher_text.is_empty() || cipher_text.len() % BLOCK != 0 {
-        return Err(QoderError::DecryptFailed(format!(
-            "密文长度 {} 不是 16 的整数倍",
-            cipher_text.len()
-        )));
-    }
-
-    let mut key = [0u8; KEY_LEN];
-    pbkdf2::pbkdf2_hmac::<sha1::Sha1>(password.as_bytes(), PBKDF2_SALT, PBKDF2_ROUNDS, &mut key);
-    let cipher = aes::Aes128::new_from_slice(&key)
-        .map_err(|_| QoderError::DecryptFailed("AES 密钥长度非法".into()))?;
-
-    let mut prev = IV;
-    let mut out = Vec::with_capacity(cipher_text.len());
-    for chunk in cipher_text.chunks_exact(BLOCK) {
-        let mut block = aes::Block::default();
-        block.copy_from_slice(chunk);
-        cipher.decrypt_block(&mut block);
-        for (i, byte) in block.iter_mut().enumerate() {
-            *byte ^= prev[i];
-        }
-        out.extend_from_slice(&block);
-        prev.copy_from_slice(chunk);
-    }
-
-    unpad_pkcs7(out)
-}
-
-fn unpad_pkcs7(mut data: Vec<u8>) -> Result<Vec<u8>, QoderError> {
-    let pad = *data
-        .last()
-        .ok_or_else(|| QoderError::DecryptFailed("解密结果为空".into()))? as usize;
-    if pad == 0 || pad > BLOCK || pad > data.len() {
-        return Err(QoderError::DecryptFailed("PKCS7 填充非法".into()));
-    }
-    if !data[data.len() - pad..].iter().all(|b| *b as usize == pad) {
-        return Err(QoderError::DecryptFailed("PKCS7 填充校验失败".into()));
-    }
-    data.truncate(data.len() - pad);
-    Ok(data)
+    qoder_crypto::decrypt_cbc(cipher_text, password).map_err(map_crypto)
 }
 
 fn expand_home(input: &str) -> PathBuf {
@@ -343,42 +316,10 @@ fn expand_home(input: &str) -> PathBuf {
 mod tests {
     use super::*;
 
-    /// 用与参考实现相同的参数**加密**一段会话，再解密回来，验证算法参数一致。
-    fn encrypt_for_test(plain: &[u8], password: &str) -> Vec<u8> {
-        use aes::cipher::BlockEncrypt;
-        let mut key = [0u8; KEY_LEN];
-        pbkdf2::pbkdf2_hmac::<sha1::Sha1>(
-            password.as_bytes(),
-            PBKDF2_SALT,
-            PBKDF2_ROUNDS,
-            &mut key,
-        );
-        let cipher = aes::Aes128::new_from_slice(&key).unwrap();
-
-        let mut data = plain.to_vec();
-        let pad = BLOCK - data.len() % BLOCK;
-        data.extend(std::iter::repeat(pad as u8).take(pad));
-
-        let mut prev = IV;
-        let mut out = Vec::with_capacity(data.len());
-        for chunk in data.chunks_exact(BLOCK) {
-            let mut block = aes::Block::default();
-            for i in 0..BLOCK {
-                block[i] = chunk[i] ^ prev[i];
-            }
-            cipher.encrypt_block(&mut block);
-            out.extend_from_slice(&block);
-            prev.copy_from_slice(&block);
-        }
-        let mut file = FILE_MAGIC.to_vec();
-        file.extend_from_slice(&out);
-        file
-    }
-
     #[test]
     fn decrypts_reference_style_payload() {
         let session = r#"{"token":"abc.def-123_XYZ","expiresAt":"2026-12-01T00:00:00Z"}"#;
-        let file = encrypt_for_test(session.as_bytes(), "pw-from-keychain");
+        let file = qoder_crypto::encrypt_for_test(session.as_bytes(), "pw-from-keychain");
         assert_eq!(&file[..3], b"v10");
         let plain = decrypt_mac(&file[3..], "pw-from-keychain").unwrap();
         assert_eq!(String::from_utf8(plain).unwrap(), session);
@@ -386,7 +327,7 @@ mod tests {
 
     #[test]
     fn wrong_password_fails_cleanly() {
-        let file = encrypt_for_test(br#"{"token":"x"}"#, "right");
+        let file = qoder_crypto::encrypt_for_test(br#"{"token":"x"}"#, "right");
         assert!(decrypt_mac(&file[3..], "wrong").is_err());
     }
 
@@ -397,10 +338,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_padding() {
-        // 全零块解出来必然是非法填充（极大概率），这里直接构造一个 pad=0 的场景。
-        let mut data = vec![0u8; 16];
-        data[15] = 0;
-        assert!(unpad_pkcs7(data).is_err());
+        assert!(qoder_crypto::unpad_pkcs7(vec![0u8; 16]).is_err());
     }
 
     #[test]
@@ -430,9 +368,17 @@ mod tests {
 
     #[test]
     fn ambiguous_scan_refuses_to_guess() {
-        // 只要存在多个候选就必须报歧义，绝不"自动挑第一个"。
         let err = QoderError::AmbiguousAuthDir(vec!["/a".into(), "/b".into()]);
         assert_eq!(err.state(), "ambiguous_auth_dir");
         assert!(err.reason().contains("QODER_AUTH_DIR"));
+    }
+
+    #[test]
+    fn cn_and_global_never_share_keychain() {
+        assert_eq!(KEYCHAIN_SERVICE, "Qoder CN App Safe Storage");
+        assert_ne!(
+            KEYCHAIN_SERVICE,
+            crate::providers::qoder_edition::QoderEdition::Global.keychain_service()
+        );
     }
 }

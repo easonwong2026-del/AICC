@@ -56,6 +56,16 @@ final class ConsoleStore: ObservableObject {
     /// 最近一次动作的一句话结果。
     @Published private(set) var checkinNotice: String?
 
+    /// Qoder 双版本多账号（PR #70）。Profile 是 Qoder 的唯一数据源，
+    /// 老的 `accounts` 表只留给 WorkBuddy。
+    @Published private(set) var qoderProfiles: [QoderProfile] = []
+    @Published private(set) var qoderEditions: [QoderEditionInfo] = []
+    @Published private(set) var qoderError: String?
+    @Published private(set) var qoderNotice: String?
+    @Published private(set) var qoderLoading = false
+    /// 正在执行动作的 profileId，用来禁用该卡片按钮。
+    @Published private(set) var qoderActing: String?
+
     let worker: AccountWorkerManager
     private let settings: AppSettings
 
@@ -75,12 +85,213 @@ final class ConsoleStore: ObservableObject {
         if lastAccountsRefresh == nil && !loadingAccounts {
             await refreshAccounts()
         }
+        if qoderEditions.isEmpty && !qoderLoading {
+            await refreshQoder(silent: true)
+        }
     }
 
     func refreshAll() async {
         async let accountsTask: Void = refreshAccounts()
         async let quotaTask: Void = refreshQuota(force: true)
-        _ = await (accountsTask, quotaTask)
+        async let qoderTask: Void = refreshQoder(silent: true)
+        _ = await (accountsTask, quotaTask, qoderTask)
+    }
+
+    // MARK: - Qoder 双版本多账号（PR #70）
+
+    /// 版本探测 + Profile 列表。`silent` 用于自动刷新，不覆盖已有提示。
+    func refreshQoder(silent: Bool = false) async {
+        guard !qoderLoading else { return }
+        qoderLoading = true
+        defer { qoderLoading = false }
+        do {
+            async let editionsRaw = worker.qoderEditionsDetect()
+            async let profilesRaw = worker.qoderProfilesList()
+            let (editionsJSON, profilesJSON) = try await (editionsRaw, profilesRaw)
+            qoderEditions = (editionsJSON["editions"] as? [[String: Any]] ?? [])
+                .compactMap(QoderEditionInfo.init(json:))
+            qoderProfiles = (profilesJSON["profiles"] as? [[String: Any]] ?? [])
+                .compactMap(QoderProfile.init(json:))
+            qoderError = nil
+        } catch {
+            qoderError = message(for: error)
+            if !silent { qoderNotice = nil }
+        }
+    }
+
+    /// 扫描本机已有的 Qoder 配置并登记。只登记引用，不动任何目录。
+    func scanQoderProfiles() async {
+        guard qoderActing == nil else { return }
+        qoderActing = "scan"
+        defer { qoderActing = nil }
+        do {
+            let json = try await worker.qoderProfilesScan()
+            let created = (json["created"] as? [[String: Any]] ?? []).count
+            let skipped = (json["skipped"] as? [[String: Any]] ?? []).count
+            qoderNotice = created == 0
+                ? "没有发现新的 Qoder 配置（已有 \(skipped) 个已登记）"
+                : "已登记 \(created) 个 Qoder 配置，原有登录状态未改动"
+            await refreshQoder(silent: true)
+        } catch {
+            qoderNotice = message(for: error)
+        }
+    }
+
+    func addQoderProfile(edition: QoderEdition, displayName: String) async {
+        guard qoderActing == nil else { return }
+        qoderActing = "create"
+        defer { qoderActing = nil }
+        do {
+            _ = try await worker.qoderProfileCreate(
+                edition: edition.rawValue,
+                displayName: displayName
+            )
+            qoderNotice = "已创建 \(edition.displayName) Profile：\(displayName)"
+            await refreshQoder(silent: true)
+        } catch {
+            qoderNotice = message(for: error)
+        }
+    }
+
+    func importQoderProfile(edition: QoderEdition, snapshotDir: String, displayName: String) async {
+        guard qoderActing == nil else { return }
+        qoderActing = "import"
+        defer { qoderActing = nil }
+        do {
+            _ = try await worker.qoderProfileImport(
+                edition: edition.rawValue,
+                snapshotDir: snapshotDir,
+                displayName: displayName
+            )
+            qoderNotice = "已导入 \(edition.displayName) 账号快照（原目录未改动）"
+            await refreshQoder(silent: true)
+        } catch {
+            qoderNotice = message(for: error)
+        }
+    }
+
+    func qoderInspect(_ profile: QoderProfile) async {
+        guard qoderActing == nil else { return }
+        qoderActing = profile.id
+        defer { qoderActing = nil }
+        do {
+            let json = try await worker.qoderProfileInspect(profileId: profile.id)
+            let summary = json["summary"] as? String ?? "检查完成"
+            if let conflict = json["identityConflict"] as? String {
+                qoderNotice = "\(profile.displayName)：\(summary)，但与另一个 Profile 身份重复（\(conflict)），未自动合并"
+            } else {
+                qoderNotice = "\(profile.displayName)：\(summary)"
+            }
+            await refreshQoder(silent: true)
+        } catch {
+            qoderNotice = message(for: error)
+        }
+    }
+
+    func qoderOpen(_ profile: QoderProfile) async {
+        guard qoderActing == nil else { return }
+        qoderActing = profile.id
+        defer { qoderActing = nil }
+        do {
+            let json = try await worker.qoderProfileOpen(profileId: profile.id)
+            let state = json["state"] as? String ?? "unknown"
+            if state != "running" {
+                let reason = json["reason"] as? String ?? "进程未能核实"
+                qoderNotice = "\(profile.displayName) 启动后未能核实：\(reason)"
+            } else if json["requiresLogin"] as? Bool == true {
+                qoderNotice = "已切到 \(profile.displayName)：客户端已启动，请在官方客户端里登录，"
+                    + "登录后点「保存当前登录」。"
+            } else {
+                qoderNotice = "已切换到 \(profile.displayName)（PID \(json["pid"] ?? "-")，"
+                    + "快照已写回并被客户端接受）"
+            }
+            await refreshQoder(silent: true)
+        } catch {
+            qoderNotice = message(for: error)
+        }
+    }
+
+    func qoderClose(_ profile: QoderProfile, force: Bool = false) async {
+        guard qoderActing == nil else { return }
+        qoderActing = profile.id
+        defer { qoderActing = nil }
+        do {
+            _ = try await worker.qoderProfileClose(profileId: profile.id, force: force)
+            qoderNotice = "\(profile.displayName) 已关闭"
+            await refreshQoder(silent: true)
+        } catch {
+            qoderNotice = message(for: error)
+        }
+    }
+
+    func qoderActivate(_ profile: QoderProfile) async {
+        guard qoderActing == nil else { return }
+        qoderActing = profile.id
+        defer { qoderActing = nil }
+        do {
+            let json = try await worker.qoderProfileActivate(profileId: profile.id)
+            let closed = (json["opened"] as? [String: Any])?["closedProfiles"] as? [String] ?? []
+            qoderNotice = closed.isEmpty
+                ? "已切换到 \(profile.displayName)"
+                : "已切换到 \(profile.displayName)，并关闭了同版本其它 \(closed.count) 个实例"
+            await refreshQoder(silent: true)
+        } catch {
+            qoderNotice = message(for: error)
+        }
+    }
+
+    /// 把客户端当前登录态存进该 Profile（登录完成、或令牌刷新后手动存一次）。
+    func qoderCapture(_ profile: QoderProfile) async {
+        guard qoderActing == nil else { return }
+        qoderActing = profile.id
+        defer { qoderActing = nil }
+        do {
+            let json = try await worker.qoderProfileCapture(profileId: profile.id)
+            if json["captured"] as? Bool == true {
+                qoderNotice = "已保存 \(profile.displayName) 的当前登录态"
+            } else {
+                let reason = json["reason"] as? String ?? "没有可保存的登录态"
+                qoderNotice = "\(profile.displayName)：\(reason)"
+            }
+            await refreshQoder(silent: true)
+        } catch {
+            qoderNotice = message(for: error)
+        }
+    }
+
+    func qoderRename(_ profile: QoderProfile, to name: String) async {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != profile.displayName else { return }
+        guard qoderActing == nil else { return }
+        qoderActing = profile.id
+        defer { qoderActing = nil }
+        do {
+            _ = try await worker.qoderProfileRename(profileId: profile.id, displayName: trimmed)
+            qoderNotice = "已重命名为 \(trimmed)"
+            await refreshQoder(silent: true)
+        } catch {
+            qoderNotice = message(for: error)
+        }
+    }
+
+    /// `purge` 只有在用户二次确认"删除磁盘数据"时才为 true。
+    func qoderRemove(_ profile: QoderProfile, purge: Bool) async {
+        guard qoderActing == nil else { return }
+        qoderActing = profile.id
+        defer { qoderActing = nil }
+        do {
+            _ = try await worker.qoderProfileRemove(profileId: profile.id, purge: purge)
+            qoderNotice = purge
+                ? "已删除 \(profile.displayName) 及其用户数据目录"
+                : "已从 AICC 移除 \(profile.displayName)（磁盘数据保留）"
+            await refreshQoder(silent: true)
+        } catch {
+            qoderNotice = message(for: error)
+        }
+    }
+
+    private func message(for error: Error) -> String {
+        (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
 
     // MARK: - Magpie 导入

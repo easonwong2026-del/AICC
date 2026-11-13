@@ -41,18 +41,63 @@ struct ConsoleOverviewView: View {
 
     private var accountsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ConsoleSectionTitle(title: "AI 账号", detail: "共 \(store.stats.total) 个")
+            ConsoleSectionTitle(
+                title: "AI 账号",
+                detail: "共 \(store.stats.total + store.qoderProfiles.count) 个"
+            )
             HStack(spacing: ConsoleTheme.cardSpacing) {
                 platformCard(
                     name: "WorkBuddy",
                     platform: "workbuddy",
                     symbol: "bubble.left.and.bubble.right.fill"
                 )
-                platformCard(
-                    name: "Qoder CN",
-                    platform: "qoder_cn",
-                    symbol: "chevron.left.forwardslash.chevron.right"
-                )
+                // 两个 Qoder 版本的数据源是 Profile，不再是 accounts 表。
+                profileCard(edition: .cn, symbol: "chevron.left.forwardslash.chevron.right")
+                profileCard(edition: .global, symbol: "globe")
+            }
+        }
+    }
+
+    /// Qoder 版本卡：数量来自 Profile，登录态来自每个 Profile 的 authStatus。
+    private func profileCard(edition: QoderEdition, symbol: String) -> some View {
+        let rows = store.qoderProfiles.filter { $0.edition == edition.rawValue }
+        let healthy = rows.filter { $0.authStatus == "valid" }.count
+        let pending = rows.count - healthy
+        let running = rows.filter { $0.runtime.isRunning }.count
+
+        return ConsoleCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 9) {
+                    Image(systemName: symbol)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(ConsoleTheme.accent)
+                        .frame(width: 26, height: 26)
+                        .background(ConsoleTheme.accentSoft, in: RoundedRectangle(cornerRadius: 7))
+                    Text(edition.displayName)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(ConsoleTheme.text)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    Text("\(rows.count)")
+                        .font(.system(size: 17, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(ConsoleTheme.text)
+                }
+
+                HStack(spacing: 10) {
+                    ConsoleStatusDot(color: ConsoleTheme.success, text: "已登录 \(healthy)")
+                    if pending > 0 {
+                        ConsoleStatusDot(color: ConsoleTheme.warning, text: "待处理 \(pending)")
+                    } else {
+                        ConsoleStatusDot(color: ConsoleTheme.tertiaryText, text: "无异常")
+                    }
+                    if running > 0 {
+                        ConsoleStatusDot(color: ConsoleTheme.accent, text: "运行中 \(running)")
+                    }
+                }
+
+                Button("查看账号") { navigate(.accounts) }
+                    .buttonStyle(ConsoleSecondaryButtonStyle())
             }
         }
     }
