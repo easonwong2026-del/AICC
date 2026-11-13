@@ -14,6 +14,7 @@ use crate::clock::now_rfc3339;
 use crate::rpc::{RpcError, RpcResult};
 
 pub mod authz;
+pub mod checkin;
 pub mod growth;
 pub mod travel;
 
@@ -143,6 +144,18 @@ CREATE TABLE IF NOT EXISTS growth_runs (\
 CREATE INDEX IF NOT EXISTS idx_growth_runs_account ON growth_runs (account_id, executed_at DESC);\
 CREATE INDEX IF NOT EXISTS idx_growth_runs_task ON growth_runs (account_id, task_code, executed_at DESC);";
 
+/// v10：签到结果的两列诊断字段（PR #69）。
+///
+/// `checkin_records` 原本只有 `status` / `credits` / `checked_at`，够回答"今天签了没"，
+/// 但答不了"为什么没签、是谁触发的"。两列都为 NULL 即旧行为，**旧二进制读到多出来的
+/// 列会直接忽略**，回退不需要脚本。
+///
+/// 没有新增表：每次尝试的细节走已有的 `task_executions`（`task_kind = 'daily_checkin'`），
+/// 它本来就有 `error_kind` / `error_detail` / `next_retry_at` 三列。
+const MIGRATION_V10_SQL: &str = "\
+ALTER TABLE checkin_records ADD COLUMN error_kind TEXT;\
+ALTER TABLE checkin_records ADD COLUMN execution_source TEXT;";
+
 /// 一次迁移里的一步：纯 SQL，或者需要 Rust 参与的数据迁移。
 enum MigrationStep {
     Sql(&'static str),
@@ -199,9 +212,14 @@ const MIGRATIONS: &[Migration] = &[
         version: 9,
         steps: &[MigrationStep::Sql(MIGRATION_V9_SQL)],
     },
+    // v10：签到诊断列。只追加列，不改 v1～v9 里的任何一个字。
+    Migration {
+        version: 10,
+        steps: &[MigrationStep::Sql(MIGRATION_V10_SQL)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 9;
+pub const LATEST_VERSION: i64 = 10;
 
 pub struct Db {
     conn: Connection,
