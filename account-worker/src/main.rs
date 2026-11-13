@@ -148,9 +148,9 @@ fn serve() {
                 }
                 _ = ticker.tick() => {
                     // 放到独立任务里跑：一轮检查可能要几十秒，不能把 RPC 卡住。
-                    let app = Arc::clone(&app);
+                    let travel_app = Arc::clone(&app);
                     tokio::task::spawn(async move {
-                        let report = travel::scheduler::run_tick(&app).await;
+                        let report = travel::scheduler::run_tick(&travel_app).await;
                         let status = report.get("status").and_then(Value::as_str).unwrap_or("?");
                         if status == "ok" {
                             log(&format!(
@@ -158,6 +158,21 @@ fn serve() {
                                 report.get("accounts").and_then(Value::as_i64).unwrap_or(0),
                                 report.get("checked").and_then(Value::as_i64).unwrap_or(0)
                             ));
+                        }
+                    });
+
+                    // 成长中心挂同一个心跳，但**自己判断到没到点**（默认 3 分钟）。
+                    // 开关关着时 run_tick 立刻返回，不发任何请求。
+                    let growth_app = Arc::clone(&app);
+                    tokio::task::spawn(async move {
+                        let result = growth::scheduler::run_tick(&growth_app, false).await;
+                        // 只在真的跑了一轮时记日志：skipped 每分钟都有，会淹掉日志。
+                        if result.get("skipped").is_none() {
+                            let summary = result
+                                .get("summary")
+                                .and_then(Value::as_str)
+                                .unwrap_or("已完成");
+                            log(&format!("成长中心检查：{summary}"));
                         }
                     });
                 }

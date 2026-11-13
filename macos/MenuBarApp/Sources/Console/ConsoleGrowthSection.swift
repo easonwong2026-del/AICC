@@ -57,12 +57,72 @@ struct ConsoleGrowthSection: View {
         }
     }
 
+    // MARK: - 自动管理开关
+
+    /// 整块区域只有一个开关。开着才可能有写操作；关着连 tick 都不发请求。
+    private var automationBar: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Toggle(
+                    "成长中心自动管理",
+                    isOn: Binding(
+                        get: { store.growthAuto.enabled },
+                        set: { enabled in
+                            Task { await store.setGrowthAutoEnabled(enabled) }
+                        }
+                    )
+                )
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .font(.system(size: 12, weight: .medium))
+                .disabled(store.growthActing)
+
+                Spacer(minLength: 8)
+
+                if store.growthAuto.enabled {
+                    Text(store.growthAuto.intervalText)
+                        .font(.system(size: 10))
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                    Text(store.growthAuto.nextTickText)
+                        .font(.system(size: 10))
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                }
+
+                Button("立即检查") {
+                    Task { await store.runGrowthTick(force: true) }
+                }
+                .buttonStyle(ConsoleSecondaryButtonStyle())
+                .disabled(store.growthActing || store.growthAuto.running)
+                .help("跑一轮：接单 + 领奖。开关关着时只做只读检查")
+            }
+
+            if let summary = store.growthAuto.lastResult, store.growthAuto.enabled {
+                Text("最近：\(summary)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(ConsoleTheme.secondaryText)
+            }
+            if let notice = store.growthNotice {
+                Text(notice)
+                    .font(.system(size: 10))
+                    .foregroundStyle(ConsoleTheme.secondaryText)
+            }
+            if !store.growthAuto.enabled {
+                Text("开启后 AICC 会替你接单、并在任务完成后自动领奖；不代替你完成任何任务。")
+                    .font(.system(size: 10))
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
     private var detailText: String {
         if store.growthLoading { return "扫描中…" }
         if let error = store.growthError { return error }
-        guard let scanned = store.lastGrowthScan else { return "尚未扫描 · 只读" }
+        let mode = store.growthAuto.enabled ? "自动管理已开启" : "只读"
+        guard let scanned = store.lastGrowthScan else { return "尚未扫描 · \(mode)" }
         let time = Self.timeFormatter.string(from: scanned)
-        return "\(result.overview.headline) · \(time) 扫描 · 只读"
+        return "\(result.overview.headline) · \(time) 扫描 · \(mode)"
     }
 
     // MARK: - 卡片
@@ -73,6 +133,8 @@ struct ConsoleGrowthSection: View {
                 emptyState
             } else {
                 VStack(spacing: 0) {
+                    automationBar
+                    Divider().overlay(ConsoleTheme.border)
                     ForEach(Array(result.scans.enumerated()), id: \.element.id) { index, scan in
                         accountBlock(scan)
                         if index < result.scans.count - 1 {
@@ -148,6 +210,12 @@ struct ConsoleGrowthSection: View {
 
                     Spacer(minLength: 8)
 
+                    if let runs = store.growthRuns[scan.accountId], runs.grantedCredit > 0 {
+                        Text("已领 +\(runs.grantedCredit)")
+                            .font(.system(size: 10))
+                            .foregroundStyle(ConsoleTheme.success)
+                    }
+
                     if let travel = scan.travel {
                         Text(travel.stateText)
                             .font(.system(size: 10))
@@ -192,7 +260,7 @@ struct ConsoleGrowthSection: View {
                     .padding(.bottom, 10)
             } else {
                 ForEach(scan.tasks) { task in
-                    taskRow(task)
+                    taskRow(task, accountId: scan.accountId)
                 }
             }
 
@@ -208,7 +276,7 @@ struct ConsoleGrowthSection: View {
         .background(ConsoleTheme.cardSubtle)
     }
 
-    private func taskRow(_ task: GrowthTaskRow) -> some View {
+    private func taskRow(_ task: GrowthTaskRow, accountId: String) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: symbol(for: task.taskClass))
                 .font(.system(size: 10, weight: .medium))
@@ -226,6 +294,12 @@ struct ConsoleGrowthSection: View {
                     .foregroundStyle(ConsoleTheme.tertiaryText)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
+                if let record = store.growthRuns[accountId]?.latestByTask[task.code] {
+                    Text("\(record.summary) · \(record.timeText)")
+                        .font(.system(size: 9))
+                        .foregroundStyle(record.outcome.isProblem ? ConsoleTheme.danger : ConsoleTheme.tertiaryText)
+                        .lineLimit(1)
+                }
             }
 
             Spacer(minLength: 8)
@@ -282,7 +356,7 @@ struct ConsoleGrowthSection: View {
 
     private var footerNote: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text("这一版只读取：不会接受任务、不会领取奖励、不会补签、不会抽奖。AICC 也不会为了提高进度伪造任何使用行为。")
+            Text(footerLine)
                 .font(.system(size: 10))
                 .foregroundStyle(ConsoleTheme.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
@@ -293,6 +367,14 @@ struct ConsoleGrowthSection: View {
                     .foregroundStyle(ConsoleTheme.tertiaryText)
             }
         }
+    }
+
+    /// 必须让用户一眼看清"现在到底会不会动服务端"。
+    private var footerLine: String {
+        if store.growthAuto.enabled {
+            return "自动管理已开启：只做接单与领奖，不代替你完成任何任务。补签、兑换、抽奖、开盲盒都不会自动执行。"
+        }
+        return "当前只读：不会接受任务、不会领取奖励。开启自动管理后，AICC 只做接单与领奖，不代替你完成任何任务。"
     }
 
     private static let timeFormatter: DateFormatter = {

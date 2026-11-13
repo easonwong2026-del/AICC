@@ -186,4 +186,104 @@ final class GrowthModelsTests: XCTestCase {
         XCTAssertTrue(GrowthScanResult.empty.scans.isEmpty)
         XCTAssertEqual(GrowthScanResult.empty.overview.accounts, 0)
     }
+
+    // MARK: - 自动管理（PR #68）
+
+    func testAutoStatusDefaultsToOff() {
+        let status = GrowthAutoStatus(json: nil)
+        XCTAssertFalse(status.enabled, "默认必须是关的")
+        XCTAssertFalse(status.continuesAfterQuit, "不许暗示 App 退出后还在跑")
+        XCTAssertEqual(status.intervalText, "每天检查一次")
+        XCTAssertEqual(status.nextTickText, "未开启")
+    }
+
+    func testAutoStatusFormatsIntervals() {
+        XCTAssertEqual(
+            GrowthAutoStatus(json: ["enabled": true, "intervalSeconds": 86_400]).intervalText,
+            "每天检查一次"
+        )
+        XCTAssertEqual(
+            GrowthAutoStatus(json: ["enabled": true, "intervalSeconds": 180]).intervalText,
+            "每 3 分钟"
+        )
+        XCTAssertEqual(
+            GrowthAutoStatus(json: ["enabled": true, "intervalSeconds": 60]).intervalText,
+            "每分钟"
+        )
+        XCTAssertEqual(
+            GrowthAutoStatus(json: ["enabled": true, "intervalSeconds": 3600]).intervalText,
+            "每 1 小时"
+        )
+    }
+
+    func testAutoStatusReadsNextTick() {
+        let future = ISO8601DateFormatter().string(from: Date().addingTimeInterval(120))
+        let status = GrowthAutoStatus(json: ["enabled": true, "nextTickAt": future])
+        XCTAssertTrue(status.nextTickText.hasPrefix("下次"), status.nextTickText)
+    }
+
+    func testTickResultExplainsWhyItSkipped() {
+        XCTAssertEqual(
+            GrowthTickResult(json: ["skipped": "disabled"]).skippedText,
+            "自动管理未开启"
+        )
+        XCTAssertEqual(
+            GrowthTickResult(json: ["skipped": "not_due"]).skippedText,
+            "还没到检查时间"
+        )
+        XCTAssertNil(GrowthTickResult(json: ["summary": "领奖 1"]).skippedText)
+    }
+
+    func testRunRecordSummaryHidesZeroRewards() throws {
+        let ok = try XCTUnwrap(GrowthRunRecord(json: [
+            "id": 1,
+            "accountId": "acc-1",
+            "taskCode": "t1",
+            "action": "claim",
+            "outcome": "ok",
+            "credit": 100,
+            "energy": 5,
+        ]))
+        XCTAssertEqual(ok.summary, "上次 领奖 · 成功 +100 积分 +5 能量")
+        XCTAssertFalse(ok.outcome.isProblem)
+    }
+
+    func testRunRecordShowsTheFailureReason() throws {
+        let rejected = try XCTUnwrap(GrowthRunRecord(json: [
+            "taskCode": "t1",
+            "action": "accept",
+            "outcome": "rejected",
+            "errorDetail": "prerequisite not met: first_buddy",
+        ]))
+        XCTAssertTrue(rejected.outcome.isProblem)
+        XCTAssertTrue(rejected.summary.contains("被拒绝"))
+        XCTAssertTrue(rejected.summary.contains("first_buddy"))
+    }
+
+    /// `already` 是幂等回执，不能标红当错误。
+    func testAlreadyClaimedIsNotAProblem() throws {
+        let already = try XCTUnwrap(GrowthRunRecord(json: [
+            "taskCode": "t1",
+            "action": "claim",
+            "outcome": "already",
+            "credit": 0,
+        ]))
+        XCTAssertFalse(already.outcome.isProblem)
+        XCTAssertFalse(already.summary.contains("+0"))
+    }
+
+    func testRunsIndexByTaskAndKeepTotals() {
+        let runs = GrowthRuns(json: [
+            "latestByTask": [
+                ["id": 2, "taskCode": "a", "action": "claim", "outcome": "ok"],
+                ["id": 3, "taskCode": "b", "action": "accept", "outcome": "ok"],
+            ],
+            "grantedCredit": 250,
+            "grantedEnergy": 12,
+        ])
+        XCTAssertEqual(runs.latestByTask.count, 2)
+        XCTAssertEqual(runs.latestByTask["a"]?.outcome, .ok)
+        XCTAssertEqual(runs.grantedCredit, 250)
+        XCTAssertEqual(runs.grantedEnergy, 12)
+    }
 }

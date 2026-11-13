@@ -37,6 +37,13 @@ final class ConsoleStore: ObservableObject {
     /// 展开某个账号的任务列表（默认只展开第一个，避免一屏全是任务）。
     @Published var expandedGrowthAccount: String?
 
+    /// 自动管理（PR #68）。开关默认关闭，状态从 worker 读。
+    @Published private(set) var growthAuto: GrowthAutoStatus = GrowthAutoStatus(json: nil)
+    @Published private(set) var growthRuns: [String: GrowthRuns] = [:]
+    @Published private(set) var growthActing = false
+    /// 最近一次手动检查 / 开关动作的一句话结果。
+    @Published private(set) var growthNotice: String?
+
     let worker: AccountWorkerManager
     private let settings: AppSettings
 
@@ -202,6 +209,9 @@ final class ConsoleStore: ObservableObject {
                     .first(where: { $0.pendingCount > 0 || $0.needsAuth })?.accountId
                     ?? result.scans.first?.accountId
             }
+            // 开关状态与执行记录一起刷新：任务行要显示"上次执行结果"。
+            await loadGrowthAuto()
+            await loadGrowthRuns()
         } catch {
             growthResult = .empty
             growthError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -210,6 +220,59 @@ final class ConsoleStore: ObservableObject {
 
     func toggleGrowthAccount(_ accountId: String) {
         expandedGrowthAccount = expandedGrowthAccount == accountId ? nil : accountId
+    }
+
+    // MARK: - 成长中心自动管理（PR #68）
+
+    /// 读开关与下次检查时间。便宜，界面可以随扫描一起调。
+    func loadGrowthAuto() async {
+        do {
+            growthAuto = GrowthAutoStatus(json: try await worker.growthAutoStatus())
+        } catch {
+            // 读不到就保持原样：这是次要信息，不该把整页打成错误态。
+        }
+    }
+
+    /// 打开 / 关闭自动管理。**打开之后才可能有写操作**。
+    func setGrowthAutoEnabled(_ enabled: Bool) async {
+        growthActing = true
+        defer { growthActing = false }
+        do {
+            growthAuto = GrowthAutoStatus(json: try await worker.setGrowthAutoEnabled(enabled))
+            growthNotice = enabled
+                ? "已开启自动管理：会替你接单并领取已完成任务的奖励"
+                : "已关闭自动管理：只保留手动扫描"
+        } catch {
+            growthNotice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    /// 手动跑一轮。`force` 跳过间隔判断，但仍然受总开关约束。
+    func runGrowthTick(force: Bool = true) async {
+        growthActing = true
+        defer { growthActing = false }
+        do {
+            let json = try await worker.growthTick(force: force)
+            let result = GrowthTickResult(json: json)
+            if let skipped = result.skippedText {
+                growthNotice = skipped
+            } else {
+                growthNotice = result.summary ?? "检查完成"
+            }
+            await loadGrowthAuto()
+            // 跑完把最新状态与记录一起刷新，界面不用等下一轮。
+            await loadGrowth()
+        } catch {
+            growthNotice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    /// 读所有账号的执行记录。失败保持原样，不影响任务列表。
+    func loadGrowthRuns() async {
+        for scan in growthResult.scans {
+            guard let runs = try? await worker.growthRuns(accountId: scan.accountId) else { continue }
+            growthRuns[scan.accountId] = GrowthRuns(json: runs)
+        }
     }
 
     private var workerFailureText: String {        switch worker.state {
