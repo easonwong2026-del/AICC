@@ -212,12 +212,11 @@ pub async fn run_account_with<T: Transport>(
     let mut outcome = AccountOutcome::new(account, source);
 
     if account.platform != "workbuddy" {
-        outcome = outcome
+        // 别的平台不签也不记账：往 `checkin_records` 里塞一行 Qoder 的"跳过"
+        // 只会让历史查询出现永远不会有意义的数据。
+        return outcome
             .state(State::Unsupported)
             .error("unsupported_platform", Some("签到只支持 WorkBuddy".into()));
-        record_attempt(app, &outcome, State::Unsupported, None);
-        persist(app, &outcome, State::Unsupported, None);
-        return outcome;
     }
     if source == Source::Auto && !account.checkin_enabled {
         outcome = outcome

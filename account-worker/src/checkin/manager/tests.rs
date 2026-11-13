@@ -550,6 +550,14 @@ async fn an_unsupported_platform_never_calls_the_network() {
 
     assert_eq!(outcome.state, "unsupported");
     assert!(mock.calls().is_empty());
+    let today = crate::clock::beijing_date();
+    assert!(
+        f.app
+            .with_db(|db| db.checkin_record(&record.id, &today))
+            .unwrap()
+            .is_none(),
+        "不支持的平台不该留下签到记录"
+    );
 }
 
 // ---------------------------------------------------------------------------
