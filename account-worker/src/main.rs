@@ -6,6 +6,7 @@
 
 mod app;
 mod auth;
+mod checkin;
 mod clock;
 mod growth;
 mod handlers;
@@ -173,6 +174,20 @@ fn serve() {
                                 .and_then(Value::as_str)
                                 .unwrap_or("已完成");
                             log(&format!("成长中心检查：{summary}"));
+                        }
+                    });
+
+                    // 每日签到也挂同一个心跳。没开任何账号的自动签到时立刻返回，
+                    // 一个请求都不发；到点判断在它自己里面（北京时间 09:00 + 错峰）。
+                    let checkin_app = Arc::clone(&app);
+                    tokio::task::spawn(async move {
+                        let result = checkin::scheduler::run_tick(&checkin_app, false).await;
+                        if result.get("skipped").is_none() {
+                            let summary = result
+                                .get("summary")
+                                .and_then(Value::as_str)
+                                .unwrap_or("已完成");
+                            log(&format!("每日签到检查：{summary}"));
                         }
                     });
                 }
