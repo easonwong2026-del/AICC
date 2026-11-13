@@ -60,6 +60,8 @@ final class ConsoleStore: ObservableObject {
     /// 老的 `accounts` 表只留给 WorkBuddy。
     @Published private(set) var qoderProfiles: [QoderProfile] = []
     @Published private(set) var qoderEditions: [QoderEditionInfo] = []
+    /// 未完成的切换日志：只用于提示，恢复必须由用户显式确认。
+    @Published private(set) var qoderPendingSwitches: [QoderPendingSwitch] = []
     @Published private(set) var qoderError: String?
     @Published private(set) var qoderNotice: String?
     @Published private(set) var qoderLoading = false
@@ -112,6 +114,9 @@ final class ConsoleStore: ObservableObject {
                 .compactMap(QoderEditionInfo.init(json:))
             qoderProfiles = (profilesJSON["profiles"] as? [[String: Any]] ?? [])
                 .compactMap(QoderProfile.init(json:))
+            let pending = profilesJSON["pendingSwitches"] as? [String: Any] ?? [:]
+            qoderPendingSwitches = (pending["items"] as? [[String: Any]] ?? [])
+                .compactMap(QoderPendingSwitch.init(json:))
             qoderError = nil
         } catch {
             qoderError = message(for: error)
@@ -253,6 +258,23 @@ final class ConsoleStore: ObservableObject {
                 let reason = json["reason"] as? String ?? "没有可保存的登录态"
                 qoderNotice = "\(profile.displayName)：\(reason)"
             }
+            await refreshQoder(silent: true)
+        } catch {
+            qoderNotice = message(for: error)
+        }
+    }
+
+    /// 显式恢复未完成的切换。后端会先确认客户端已完全退出，状态未知时不写盘。
+    func qoderRecover() async {
+        guard qoderActing == nil else { return }
+        qoderActing = "recover"
+        defer { qoderActing = nil }
+        do {
+            let json = try await worker.qoderProfileRecover()
+            let count = json["count"] as? Int ?? 0
+            qoderNotice = count == 0
+                ? "没有需要恢复的切换记录"
+                : "已恢复 \(count) 条未完成的切换，live 认证回到原账号"
             await refreshQoder(silent: true)
         } catch {
             qoderNotice = message(for: error)

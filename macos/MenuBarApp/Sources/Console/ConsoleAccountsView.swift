@@ -3,8 +3,11 @@ import SwiftUI
 
 /// 「AI 账号」= 三个平台：WorkBuddy、Qoder CN、Qoder International。
 ///
-/// WorkBuddy 的账号来自 `accounts` 表；两个 Qoder 版本来自 `qoder_profiles`——
-/// 一个 Profile 就是"一份独立用户数据目录 + 一份独立认证"，两个版本互不共享。
+/// WorkBuddy 的账号来自 `accounts` 表；两个 Qoder 版本来自 `qoder_profiles`。
+///
+/// ⚠️ 本阶段 Qoder 是**只读管理**：识别 / 扫描 / 导入 / 认证检查 / 保存快照。
+/// 账号切换在完整隔离（`main.sqlite` 的账号数据、Cookies、Local Storage）落地前
+/// 不开放，界面上不提供任何写入 live 的入口。
 struct ConsoleAccountsView: View {
     @ObservedObject var store: ConsoleStore
 
@@ -18,6 +21,7 @@ struct ConsoleAccountsView: View {
     @State private var renameText = ""
     @State private var removing: QoderProfile?
     @State private var confirmPurge = false
+    @State private var showRecoverConfirm = false
 
     private var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -51,6 +55,8 @@ struct ConsoleAccountsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             toolbar
+            readOnlyStageNote
+            if !store.qoderPendingSwitches.isEmpty { pendingSwitchBanner }
             if let error = store.accountsError { banner(error, tone: .error) }
             if let error = store.qoderError { banner(error, tone: .error) }
             if let notice = store.qoderNotice { banner(notice, tone: .info) }
@@ -97,6 +103,13 @@ struct ConsoleAccountsView: View {
             }
         } message: {
             Text("只改 AICC 里显示的名称，不会改动 Qoder 客户端里的任何数据。")
+        }
+        .alert("恢复未完成的切换？", isPresented: $showRecoverConfirm) {
+            Button("取消", role: .cancel) {}
+            Button("确认恢复") { Task { await store.qoderRecover() } }
+        } message: {
+            Text("AICC 会先确认对应的 Qoder 客户端已经完全退出；"
+                + "无法确认（进程状态未知）时会拒绝恢复，并保持 live 认证原样。")
         }
         .confirmationDialog(
             removing.map { "移除 \($0.displayName)？" } ?? "移除 Profile",
@@ -188,6 +201,43 @@ struct ConsoleAccountsView: View {
                 .buttonStyle(ConsolePrimaryButtonStyle())
                 .help("用手机 WorkBuddy 扫码授权")
         }
+    }
+
+    /// 本阶段的定位说明，避免用户以为这里能切账号。
+    private var readOnlyStageNote: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "lock.shield")
+                .font(.system(size: 11))
+            Text("Qoder 当前为只读管理：版本识别、扫描、导入、认证检查、保存快照。"
+                + "账号切换在完整隔离方案落地前不开放。")
+                .font(.system(size: 11))
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+        }
+        .foregroundStyle(ConsoleTheme.secondaryText)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(ConsoleTheme.cardSubtle, in: RoundedRectangle(cornerRadius: 9))
+    }
+
+    /// 只报告、不自动恢复：恢复需要用户显式确认。
+    private var pendingSwitchBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 11))
+            Text("检测到 \(store.qoderPendingSwitches.count) 条未完成的切换记录。"
+                + "AICC 不会自动恢复；请先完全退出 Qoder 客户端，再手动恢复。")
+                .font(.system(size: 11))
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            Button("恢复…") { showRecoverConfirm = true }
+                .buttonStyle(ConsoleSecondaryButtonStyle())
+                .disabled(store.qoderActing != nil)
+        }
+        .foregroundStyle(ConsoleTheme.warning)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(ConsoleTheme.warning.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
     }
 
     private enum BannerTone { case error, info }
@@ -319,7 +369,7 @@ struct ConsoleAccountsView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "lock.shield")
                         .font(.system(size: 10))
-                    Text("真实切换已停用：\(reason)")
+                    Text("账号切换未开放：\(reason)")
                         .font(.system(size: 10))
                         .fixedSize(horizontal: false, vertical: true)
                         .lineLimit(3)
@@ -466,13 +516,19 @@ private struct QoderProfileCard: View {
                         .font(.system(size: 9))
                         .foregroundStyle(ConsoleTheme.warning)
                         .fixedSize(horizontal: false, vertical: true)
+                } else if profile.snapshotIncomplete {
+                    Text("上一次保存快照没有完成，快照可能只有半套文件。"
+                        + "点「保存当前登录」会先恢复到上一份完整快照，再重新保存。")
+                        .font(.system(size: 9))
+                        .foregroundStyle(ConsoleTheme.warning)
+                        .fixedSize(horizontal: false, vertical: true)
                 } else if !profile.snapshotReady {
-                    Text("还没有认证快照：点「登录并保存」会在客户端里打开登录页，登录后自动保存一份。")
+                    Text("还没有认证快照：先在 Qoder 客户端里登录这个账号，再回来点「保存当前登录」。")
                         .font(.system(size: 9))
                         .foregroundStyle(ConsoleTheme.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 } else if profile.active {
-                    Text("客户端当前登录的就是这个账号。切换其它账号会先把它现在的登录态存回来。")
+                    Text("客户端当前登录的就是这个账号。")
                         .font(.system(size: 9))
                         .foregroundStyle(ConsoleTheme.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
@@ -482,10 +538,15 @@ private struct QoderProfileCard: View {
                     if profile.runtime.isRunning {
                         Button("关闭", action: onClose)
                             .buttonStyle(ConsoleSecondaryButtonStyle())
-                        Button(profile.active ? "已在此账号" : "切换并打开", action: onActivate)
-                            .buttonStyle(ConsoleSecondaryButtonStyle())
-                            .disabled(profile.active || !profile.switchEnabled)
-                            .help(profile.switchBlockedReason ?? "切换到该账号")
+                        Button(
+                            profile.switchEnabled
+                                ? (profile.active ? "已在此账号" : "切换并打开")
+                                : "切换未开放",
+                            action: onActivate
+                        )
+                        .buttonStyle(ConsoleSecondaryButtonStyle())
+                        .disabled(profile.active || !profile.switchEnabled)
+                        .help(profile.switchBlockedReason ?? "切换到该账号")
                     } else if profile.runtime.isUnknown {
                         Button("关闭（需确认归属）", action: onClose)
                             .buttonStyle(ConsoleSecondaryButtonStyle())
@@ -521,8 +582,10 @@ private struct QoderProfileCard: View {
         .contextMenu {
             if profile.runtime.isRunning {
                 Button("关闭", action: onClose)
-                Button("切换", action: onActivate)
-            } else {
+                if profile.switchEnabled {
+                    Button("切换", action: onActivate)
+                }
+            } else if profile.switchEnabled {
                 Button("打开", action: onOpen)
             }
             Button("检查授权", action: onInspect)
@@ -661,9 +724,9 @@ struct QoderProfileSheet: View {
                         .foregroundStyle(ConsoleTheme.tertiaryText)
                 }
             } else {
-                Text("会创建一个空的账号快照。点「登录并保存」后 AICC 会用 \(edition.displayName) 客户端"
-                    + "打开登录页；登录在官方客户端里完成，AICC 不接触账号密码。\n"
-                    + "注意：Qoder 不支持同时挂多个账号，切换时会先退出当前客户端。")
+                Text("会创建一个空的账号快照。创建后请手动打开 \(edition.displayName) 客户端登录，"
+                    + "登录完成再回 AICC 点「保存当前登录」。AICC 不接触账号密码。\n"
+                    + "注意：当前阶段不提供账号切换，AICC 不会改写客户端正在使用的认证文件。")
                     .font(.system(size: 10))
                     .foregroundStyle(ConsoleTheme.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)

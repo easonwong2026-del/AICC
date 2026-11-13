@@ -468,6 +468,13 @@ final class AccountWorkerManager: ObservableObject {
         )
     }
 
+    /// 显式恢复未完成的切换。后端会先确认对应客户端已完全退出。
+    func qoderProfileRecover() async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call("qoder.profiles.recover", params: [:], timeout: 30)
+    }
+
     /// 只读检查认证。第一次会弹钥匙串授权，之后不再弹。
     func qoderProfileInspect(profileId: String) async throws -> [String: Any] {
         try await ensureRunning()

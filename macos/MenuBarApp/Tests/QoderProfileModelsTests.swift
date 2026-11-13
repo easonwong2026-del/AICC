@@ -98,7 +98,7 @@ final class QoderProfileModelsTests: XCTestCase {
             "runtime": ["state": "running"],
             "active": true,
         ])))
-        XCTAssertEqual(profile.primaryActionTitle, "切换暂不可用")
+        XCTAssertEqual(profile.primaryActionTitle, "切换未开放")
         XCTAssertEqual(profile.switchBlockedReason, "认证快照不等于完整 Profile 隔离")
     }
 
@@ -131,6 +131,40 @@ final class QoderProfileModelsTests: XCTestCase {
         ]))
         XCTAssertEqual(global.parallelLabel, "实测不支持并行")
         XCTAssertEqual(global.switchBlockedReason, "未解决隔离")
+    }
+
+    func testReadOnlyStageNeverAdvertisesSwitch() throws {
+        // 服务端现在恒发 switchEnabled=false；界面不能出现"可以切换"的文案。
+        let profile = try XCTUnwrap(QoderProfile(json: row([
+            "switchEnabled": false,
+            "switchBlockedReason": "账号切换未开放：只替换认证文件无法隔离 main.sqlite",
+            "snapshotReady": true,
+            "authStatus": "valid",
+        ])))
+        XCTAssertEqual(profile.primaryActionTitle, "切换未开放")
+        XCTAssertFalse(profile.switchEnabled)
+    }
+
+    func testSnapshotIncompleteIsNotTreatedAsReady() throws {
+        let profile = try XCTUnwrap(QoderProfile(json: row([
+            "snapshotReady": false,
+            "snapshotIncomplete": true,
+        ])))
+        XCTAssertTrue(profile.snapshotIncomplete)
+        XCTAssertFalse(profile.snapshotReady)
+    }
+
+    func testPendingSwitchIsParsedFromReadOnlyResponse() throws {
+        let pending = try XCTUnwrap(QoderPendingSwitch(json: [
+            "journalId": "sw_abc",
+            "profileId": "qp_0123456789ab",
+            "edition": "qoder_cn",
+            "phase": "staged",
+        ]))
+        XCTAssertEqual(pending.id, "sw_abc")
+        XCTAssertEqual(pending.editionName, "Qoder CN")
+        XCTAssertEqual(pending.phase, "staged")
+        XCTAssertNil(QoderPendingSwitch(json: ["profileId": "qp_1"]))
     }
 
     func testFingerprintNeverLeaksToken() throws {

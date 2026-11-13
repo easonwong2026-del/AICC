@@ -14,7 +14,6 @@
 //! 归属判定只认启动时注入的 `AICC_QODER_PROFILE=<profile_id>`：
 //! "可执行文件路径相同" 不再算证据——同一份 App 用户也可能自己开一个。
 
-use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -189,22 +188,6 @@ pub fn liveness(pid: i64) -> Liveness {
 /// 归属判定：只认启动时注入的标记，且必须与目标 Profile 一致。
 pub fn owned_by(info: &ProcessInfo, profile_id: &str) -> bool {
     info.owner_profile.as_deref() == Some(profile_id)
-}
-
-pub fn spawn(executable: &Path, args: &[String], profile_id: &str) -> io::Result<u32> {
-    let mut command = Command::new(executable);
-    command
-        .args(args)
-        .env(OWNER_ENV, profile_id)
-        // 宿主环境（终端 / IDE）可能带着 `ELECTRON_RUN_AS_NODE=1`，
-        // 那会让 Electron 客户端退化成 node，一行代码都没跑就退出。
-        .env_remove("ELECTRON_RUN_AS_NODE")
-        .env_remove("ELECTRON_NO_ATTACH_CONSOLE")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let child = command.spawn()?;
-    Ok(child.id())
 }
 
 /// 发信号。`force = SIGKILL`，否则 `SIGTERM`。

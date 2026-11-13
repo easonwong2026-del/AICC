@@ -21,6 +21,10 @@
 //!    `prepared` / `staged` 的切换按备份回滚。
 //! 4. **并发互斥**：同一版本同时只允许一条未完成 journal（唯一索引）。
 //!
+//! ⚠️ 本文件里"写 live"的那一半（`begin` / `stage` / `commit` / `clear_live`）
+//! 现在**只在测试构建里编译**：交付的二进制没有任何入口能开始一次切换，
+//! 生产代码只保留 `file_sha256`、`GROUP_FILES` 和崩溃恢复用的 `rollback`。
+//!
 //! ⚠️ 这一层保证的是"认证文件组的切换是原子的"，**不等于完整的 Profile 隔离**：
 //! `main.sqlite`、`Local State`、Cookies、CLI 状态里还有账号绑定数据，
 //! 见 `docs/QODER_MULTI_PROFILE_SPIKE.md` §7。
@@ -34,10 +38,12 @@ use sha2::{Digest, Sha256};
 
 use crate::app::App;
 use crate::rpc::{RpcError, RpcResult};
+#[cfg(test)]
 use crate::storage::qoder_profiles::ProfileRecord;
-use crate::storage::qoder_switch::{
-    SwitchJournal, PHASE_CLEARED, PHASE_COMMITTED, PHASE_ROLLED_BACK, PHASE_STAGED,
-};
+use crate::storage::qoder_switch::{SwitchJournal, PHASE_ROLLED_BACK};
+
+#[cfg(test)]
+use crate::storage::qoder_switch::{PHASE_COMMITTED, PHASE_STAGED};
 
 /// 参与切换的文件组（相对 live/snapshot 目录）。
 ///
@@ -62,6 +68,8 @@ struct BackupManifest {
     files: BTreeMap<String, ManifestEntry>,
 }
 
+/// 只存在于测试构建：交付的二进制里没有"开始一次切换"的类型。
+#[cfg(test)]
 #[derive(Debug)]
 pub struct PreparedSwitch {
     pub journal: SwitchJournal,
@@ -90,11 +98,6 @@ pub mod fault {
 #[cfg(test)]
 fn fault_hit(_point: &str) -> bool {
     fault::hit(_point)
-}
-
-#[cfg(not(test))]
-fn fault_hit(_point: &str) -> bool {
-    false
 }
 
 // ---------------------------------------------------------------------------
@@ -144,10 +147,12 @@ fn copy_atomic(src: &Path, dst: &Path, expect_sha: Option<&str>) -> RpcResult<()
     Ok(())
 }
 
+#[cfg(test)]
 fn backup_root(app: &App) -> PathBuf {
     app.paths.data_dir.join("qoder").join("switch-backups")
 }
 
+#[cfg(test)]
 fn prune_backups(app: &App, keep: usize) {
     let root = backup_root(app);
     let Ok(entries) = std::fs::read_dir(&root) else {
@@ -172,6 +177,9 @@ fn prune_backups(app: &App, keep: usize) {
 // ---------------------------------------------------------------------------
 
 /// 备份 live 文件组并写 journal。**这一步之后才允许动 live。**
+///
+/// 只在测试构建里存在：本阶段没有任何生产代码路径可以创建切换日志。
+#[cfg(test)]
 pub fn begin(app: &App, profile: &ProfileRecord) -> RpcResult<PreparedSwitch> {
     let live = PathBuf::from(&profile.live_dir);
     if !live.is_dir() {
@@ -252,6 +260,7 @@ pub fn begin(app: &App, profile: &ProfileRecord) -> RpcResult<PreparedSwitch> {
 }
 
 /// 把快照文件组暂存成 live 目录里的临时文件，并校验完整性。
+#[cfg(test)]
 pub fn stage(
     app: &App,
     prepared: &PreparedSwitch,
@@ -299,9 +308,9 @@ pub fn stage(
 }
 
 /// 提交：把暂存文件逐个 rename 到位；任何一步失败按备份回滚。
+#[cfg(test)]
 pub fn commit(app: &App, prepared: &PreparedSwitch, snapshot: &Path) -> RpcResult<()> {
     let live = PathBuf::from(&prepared.journal.live_dir);
-    let mut renamed: Vec<String> = Vec::new();
 
     let outcome = (|| -> RpcResult<()> {
         for (index, name) in GROUP_FILES.iter().enumerate() {
@@ -314,7 +323,6 @@ pub fn commit(app: &App, prepared: &PreparedSwitch, snapshot: &Path) -> RpcResul
                 std::fs::rename(&staged, &target).map_err(|e| {
                     RpcError::internal(format!("提交 {} 失败：{e}", target.display()))
                 })?;
-                renamed.push((*name).to_string());
             } else if target.is_file() {
                 // 快照里没有这个文件（例如 overlays）：按快照删除。
                 std::fs::remove_file(&target).map_err(|e| {
@@ -345,28 +353,14 @@ pub fn commit(app: &App, prepared: &PreparedSwitch, snapshot: &Path) -> RpcResul
             prune_backups(app, 20);
             Ok(())
         }
-        Err(err) => {
-            let _ = renamed;
-            let _ = rollback(app, &prepared.journal);
-            Err(err)
-        }
+        Err(err) => match rollback(app, &prepared.journal) {
+            Ok(_) => Err(err),
+            Err(rollback_err) => Err(RpcError::internal(format!(
+                "{}；回滚也失败：{}",
+                err.message, rollback_err.message
+            ))),
+        },
     }
-}
-
-/// 目标 Profile 还没有快照（要登录新账号）：把 live 的认证文件组挪进备份，
-/// 客户端下次启动会进登录页。备份已经由 `begin` 落盘，这里只是移走原文件。
-pub fn clear_live(app: &App, prepared: &PreparedSwitch) -> RpcResult<()> {
-    let live = PathBuf::from(&prepared.journal.live_dir);
-    for name in GROUP_FILES {
-        let path = live.join(name);
-        if path.exists() {
-            std::fs::remove_file(&path)
-                .map_err(|e| RpcError::internal(format!("清空 live {name} 失败：{e}")))?;
-        }
-    }
-    app.with_db(|db| db.set_switch_phase(&prepared.journal.id, PHASE_CLEARED))?;
-    app.with_db(|db| db.finish_switch(&prepared.journal.id))?;
-    Ok(())
 }
 
 /// 按备份把 live 组恢复原样。**恢复失败要如实报错，不能假装成功。**
@@ -416,7 +410,9 @@ pub fn rollback(app: &App, journal: &SwitchJournal) -> RpcResult<Value> {
     Ok(json!({ "restored": restored, "removed": removed }))
 }
 
-/// 恢复所有未完成的切换（重启后调用）。
+/// 恢复所有未完成的切换（仅测试用；生产入口是 `manager::recover`，
+/// 那里会先确认客户端已经退出）。
+#[cfg(test)]
 pub fn recover_pending(app: &App, edition: Option<&str>) -> RpcResult<Vec<Value>> {
     let journals = app.with_db(|db| db.active_switches(edition))?;
     let mut reports = Vec::new();

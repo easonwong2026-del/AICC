@@ -1,20 +1,25 @@
-//! Qoder 多账号 Profile 的业务层（认证快照顺序切换）。
+//! Qoder 双版本账号管理的业务层（本阶段：只读管理 + 认证快照）。
 //!
-//! ## 三条硬约束
+//! ## 四条硬约束
 //!
 //! 1. **不确定就停**：客户端在不在跑、进程是不是我们启动的、live 属于哪个账号——
 //!    任何一项判断不出来，都直接拒绝，不写 live 的任何一个字节。
-//! 2. **先备份再覆盖**：切换走 `switch.rs` 的文件组事务（备份 → 暂存 → 校验 → 提交），
-//!    中途失败或进程崩溃都能按备份恢复。
-//! 3. **切换默认关闭**：`main.sqlite` / `Local State` / Cookies 里还有账号绑定数据，
+//! 2. **不写 live**：`main.sqlite` / `Local State` / Cookies 里还有账号绑定数据，
 //!    只切两个认证文件**不等于**完整 Profile 隔离（见 SPIKE §7）。
-//!    默认只开放扫描、导入、认证检查、保存快照；切换要显式打开工程开关。
+//!    因此 `open` / `activate` **永久拒绝**，没有任何环境变量或调试开关能打开它；
+//!    本阶段只开放版本识别、扫描、导入、认证检查、保存快照。
+//! 3. **只读就是只读**：`list` / `status` 只报告未完成的切换日志，不执行恢复。
+//!    恢复是显式动作，且必须先确认客户端已退出。
+//! 4. **快照按组提交**：保存快照只写 AICC 自己的目录，但两个认证文件必须一起成功
+//!    或一起回退；覆盖前还要能证明"当前 live 就是这个 Profile"。
 //!
-//! 关于"保存快照"（capture）：它只写 AICC 自己的快照目录，不碰 live；
-//! 但仍然要求能证明"当前 live 就是这个 Profile"，否则拒绝覆盖已有快照。
+//! 切换事务的代码留在 `switch.rs`，但**只在测试构建里存在**（`#[cfg(test)]`），
+//! 交付的二进制里没有任何"开始切换"的入口。
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -28,16 +33,19 @@ use crate::storage::qoder_profiles::{ProfileInsert, ProfilePatch, ProfileRecord,
 use super::process::{self, Liveness, Running};
 use super::switch;
 
-/// 工程开关：**默认关闭**。只有在"认证快照 ≠ 完整 Profile 隔离"这件事被解决、
-/// 并重新做过真机验证之后，才允许把它打开。
-pub const SWITCH_ENV: &str = "AICC_QODER_ENABLE_SWITCH";
+/// 故障注入点只在测试构建里生效，交付的二进制里恒为 false。
+#[cfg(test)]
+fn fault_hit(point: &str) -> bool {
+    switch::fault::hit(point)
+}
 
-/// 启动后等客户端就绪的窗口。
-const VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(not(test))]
+fn fault_hit(_point: &str) -> bool {
+    false
+}
+
 /// 正常退出的等待窗口。
 const TERM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
-/// 启动后等客户端把 live 认证写出来的窗口。
-const AUTH_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 // ---------------------------------------------------------------------------
 // 参数与校验
@@ -116,24 +124,19 @@ fn edition_of(profile: &ProfileRecord) -> RpcResult<QoderEdition> {
 
 /// 这一版能不能做真实的快照切换。
 ///
-/// 两个条件必须同时满足：
-/// 1. 该版本在本机做过认证+切换验证（CN 目前没有）；
-/// 2. 显式打开了工程开关（因为 2 个文件的快照无法隔离 main.sqlite 里的账号数据）。
-pub fn switch_capability(edition: QoderEdition) -> (bool, &'static str) {
-    if !edition.verified_on_this_machine() {
-        return (
-            false,
-            "该版本未在本机完成认证与切换验证（CN 客户端未安装），不开放快照写操作",
-        );
-    }
-    match std::env::var(SWITCH_ENV).ok().as_deref() {
-        Some("1") => (true, ""),
-        _ => (
-            false,
-            "认证快照不等于完整 Profile 隔离：main.sqlite / Local State / Cookies 仍属同一账号体系；\
-             切换默认关闭，仅开放扫描、导入、认证检查与保存快照",
-        ),
-    }
+/// **恒为 `false`，没有任何运行时开关。**
+///
+/// 上一版用 `AICC_QODER_ENABLE_SWITCH=1` + `verified_on_this_machine()` 两个条件，
+/// 但后者对 International 是编译期常量 `true`——等于一个环境变量就能绕过全部安全结论。
+/// 在 `main.sqlite` / `Local State` / Cookies 里的账号数据被真正隔离之前，
+/// 这条写入路径必须彻底封闭：要恢复切换，只能在代码里补上完整隔离 + 重新真机验收，
+/// 不能靠外部配置。
+pub fn switch_capability(_edition: QoderEdition) -> (bool, &'static str) {
+    (
+        false,
+        "只替换认证文件无法隔离 main.sqlite / Local State / Cookies 中的账号数据；\
+         本阶段仅支持双版本识别、扫描、导入、认证检查与快照保存",
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -142,10 +145,6 @@ pub fn switch_capability(edition: QoderEdition) -> (bool, &'static str) {
 
 fn auth_path_in(dir: &Path) -> PathBuf {
     dir.join(qoder::AUTH_FILE)
-}
-
-fn live_has_auth(profile: &ProfileRecord) -> bool {
-    auth_path_in(Path::new(&profile.live_dir)).is_file()
 }
 
 /// 当前 live 认证属于哪个 Profile（按快照整文件哈希）。判不出来返回 None。
@@ -299,12 +298,15 @@ fn profile_json(app: &App, profile: &ProfileRecord) -> RpcResult<Value> {
     let live_hash = switch::file_sha256(&auth_path_in(live));
     let snapshot_hash = switch::file_sha256(&auth_path_in(snapshot));
     let active = live_hash.is_some() && live_hash == snapshot_hash;
+    // 保存快照做到一半（有日志）时，快照可能只有半套文件，不能当成就绪。
+    let incomplete = capture_journal_path(snapshot).exists();
     let (switching, reason) = edition_of(profile)
         .map(switch_capability)
         .unwrap_or((false, "版本未知"));
     value["runtime"] = runtime;
     value["active"] = json!(active);
-    value["snapshotReady"] = json!(snapshot_hash.is_some());
+    value["snapshotReady"] = json!(snapshot_hash.is_some() && !incomplete);
+    value["snapshotIncomplete"] = json!(incomplete);
     value["snapshotHash"] = json!(snapshot_hash);
     value["switchEnabled"] = json!(switching);
     value["switchBlockedReason"] = json!(if switching {
@@ -322,10 +324,104 @@ fn profile_json(app: &App, profile: &ProfileRecord) -> RpcResult<Value> {
 // 保存快照（只写快照目录，不碰 live）
 // ---------------------------------------------------------------------------
 
+/// 保存快照的提交日志。放在快照目录里，进程崩了也能知道上一份在哪。
+const CAPTURE_JOURNAL: &str = ".aicc-capture.json";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CaptureJournal {
+    id: String,
+    /// 提交前快照里已经存在的文件（恢复时据此决定"搬回去"还是"删掉"）。
+    previous: Vec<String>,
+    /// 上一份快照的哈希，恢复后用来校验。
+    previous_hashes: BTreeMap<String, String>,
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn capture_journal_path(snapshot: &Path) -> PathBuf {
+    snapshot.join(CAPTURE_JOURNAL)
+}
+
+fn capture_scratch(snapshot: &Path, kind: &str, id: &str) -> PathBuf {
+    snapshot.join(format!(".aicc-capture-{kind}-{id}"))
+}
+
+fn write_json_atomic(path: &Path, value: &impl Serialize) -> RpcResult<()> {
+    let body = serde_json::to_vec_pretty(value)
+        .map_err(|e| RpcError::internal(format!("序列化快照日志失败：{e}")))?;
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, body).map_err(|e| RpcError::internal(format!("写快照日志失败：{e}")))?;
+    std::fs::rename(&tmp, path).map_err(|e| RpcError::internal(format!("落盘快照日志失败：{e}")))
+}
+
+fn cleanup_capture(snapshot: &Path, id: &str) {
+    let _ = std::fs::remove_dir_all(capture_scratch(snapshot, "new", id));
+    let _ = std::fs::remove_dir_all(capture_scratch(snapshot, "old", id));
+    let _ = std::fs::remove_file(capture_journal_path(snapshot));
+}
+
+/// 按日志把快照恢复成上一份完整版本。**恢复不了就报错，不假装成功。**
+fn restore_capture(snapshot: &Path, journal: &CaptureJournal) -> RpcResult<()> {
+    let previous_dir = capture_scratch(snapshot, "old", &journal.id);
+    for name in switch::GROUP_FILES {
+        let target = snapshot.join(name);
+        let backup = previous_dir.join(name);
+        if journal.previous.iter().any(|n| n == name) {
+            if backup.is_file() {
+                let _ = std::fs::remove_file(&target);
+                std::fs::rename(&backup, &target)
+                    .map_err(|e| RpcError::internal(format!("恢复快照 {name} 失败：{e}")))?;
+            } else if switch::file_sha256(&target).as_ref() != journal.previous_hashes.get(*name) {
+                // 备份不在、正式文件也不是上一份：这份快照已经无法证明是完整的。
+                return Err(RpcError::internal(format!(
+                    "恢复快照失败：上一份的 {name} 既不在备份目录里，也不在原位（{}）",
+                    previous_dir.display()
+                )));
+            }
+        } else if target.exists() {
+            std::fs::remove_file(&target)
+                .map_err(|e| RpcError::internal(format!("清理半成品快照 {name} 失败：{e}")))?;
+        }
+    }
+    for name in &journal.previous {
+        let want = journal.previous_hashes.get(name);
+        let got = switch::file_sha256(&snapshot.join(name));
+        if want != got.as_ref() {
+            return Err(RpcError::internal(format!(
+                "恢复快照后校验失败：{name} 期望 {want:?} 实际 {got:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// 上一次保存如果被中断，先把快照恢复到上一份完整版本。
+///
+/// 返回被修复的日志 id（没有残留时返回 `None`）。这个函数只动 AICC 自己的
+/// 快照目录，**永远不碰 live**，所以可以在写快照前无条件调用。
+fn heal_capture(snapshot: &Path) -> RpcResult<Option<String>> {
+    let path = capture_journal_path(snapshot);
+    let Ok(raw) = std::fs::read(&path) else {
+        return Ok(None);
+    };
+    let journal: CaptureJournal = serde_json::from_slice(&raw)
+        .map_err(|e| RpcError::internal(format!("快照保存日志损坏（{}）：{e}", path.display())))?;
+    restore_capture(snapshot, &journal)?;
+    cleanup_capture(snapshot, &journal.id);
+    Ok(Some(journal.id))
+}
+
 /// 把 live 的认证文件组存进快照。
 ///
 /// 覆盖已有快照前必须能证明"live 现在就是这个 Profile"：
 /// 邮箱一致，或 live 与快照逐字节一致。证明不了就拒绝。
+///
+/// 提交是**文件组事务**：新内容先写进暂存目录并逐个校验，然后写日志，
+/// 再把上一份快照整体挪进 `old/`、新文件挪进正式位置，最后全组校验。
+/// 任一步失败都按日志把上一份完整快照搬回来——不会出现"auth 是新的、
+/// overlay 还是旧的"这种半套快照。
 fn capture_into(app: &App, profile: &ProfileRecord) -> RpcResult<Value> {
     let live = PathBuf::from(&profile.live_dir);
     let snapshot = PathBuf::from(&profile.snapshot_dir);
@@ -334,6 +430,11 @@ fn capture_into(app: &App, profile: &ProfileRecord) -> RpcResult<Value> {
     if !live_auth.is_file() {
         return Ok(json!({ "captured": false, "reason": "live 目录里没有 auth.v1.dat" }));
     }
+
+    std::fs::create_dir_all(&snapshot)
+        .map_err(|e| RpcError::internal(format!("创建快照目录失败：{e}")))?;
+    // 上一次保存被中断 → 先恢复到上一份完整快照，再谈这次。
+    let healed = heal_capture(&snapshot)?;
 
     let live_email = client_email(edition);
     let live_hash = switch::file_sha256(&live_auth);
@@ -352,28 +453,121 @@ fn capture_into(app: &App, profile: &ProfileRecord) -> RpcResult<Value> {
         }));
     }
 
-    // 先写临时文件，两个文件都成功后再一起 rename，避免留下半个快照。
-    std::fs::create_dir_all(&snapshot)
-        .map_err(|e| RpcError::internal(format!("创建快照目录失败：{e}")))?;
-    for name in switch::GROUP_FILES {
-        let src = live.join(name);
-        let staged = snapshot.join(format!(".{name}.tmp"));
-        if src.is_file() {
-            std::fs::copy(&src, &staged)
+    let id = format!(
+        "cp_{}",
+        &hex(&Sha256::digest(uuid::Uuid::new_v4().as_bytes()))[..16]
+    );
+    let staging = capture_scratch(&snapshot, "new", &id);
+    std::fs::create_dir_all(&staging)
+        .map_err(|e| RpcError::internal(format!("创建快照暂存目录失败：{e}")))?;
+
+    // 1. 暂存 + 逐个校验。全部成功之前不碰正式文件。
+    let stage = (|| -> RpcResult<Vec<String>> {
+        let mut present = Vec::new();
+        for (index, name) in switch::GROUP_FILES.iter().enumerate() {
+            let src = live.join(name);
+            if !src.is_file() {
+                continue;
+            }
+            if fault_hit("capture_stage_second") && index == 1 {
+                return Err(RpcError::internal("注入故障：暂存第二个快照文件失败"));
+            }
+            let dst = staging.join(name);
+            std::fs::copy(&src, &dst)
                 .map_err(|e| RpcError::internal(format!("复制 {name} 到快照失败：{e}")))?;
-            if switch::file_sha256(&staged) != switch::file_sha256(&src) {
-                let _ = std::fs::remove_file(&staged);
+            let want = switch::file_sha256(&src);
+            let got = switch::file_sha256(&dst);
+            if want.is_none() || want != got {
                 return Err(RpcError::internal(format!("快照 {name} 复制后校验失败")));
             }
+            present.push((*name).to_string());
         }
-    }
+        if !staging.join(switch::GROUP_FILES[0]).is_file() {
+            return Err(RpcError::internal(
+                "live 里的 auth.v1.dat 读不到，无法保存快照",
+            ));
+        }
+        Ok(present)
+    })();
+
+    let present = match stage {
+        Ok(present) => present,
+        Err(err) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(err);
+        }
+    };
+    let _ = present;
+
+    // 2. 记录上一份快照（提交前落盘，崩溃后靠它恢复）。
+    let mut previous = Vec::new();
+    let mut previous_hashes = BTreeMap::new();
     for name in switch::GROUP_FILES {
-        let staged = snapshot.join(format!(".{name}.tmp"));
-        if staged.is_file() {
-            std::fs::rename(&staged, snapshot.join(name))
-                .map_err(|e| RpcError::internal(format!("落盘快照 {name} 失败：{e}")))?;
+        if let Some(hash) = switch::file_sha256(&snapshot.join(name)) {
+            previous.push((*name).to_string());
+            previous_hashes.insert((*name).to_string(), hash);
         }
     }
+    let journal = CaptureJournal {
+        id: id.clone(),
+        previous,
+        previous_hashes,
+    };
+    if let Err(err) = write_json_atomic(&capture_journal_path(&snapshot), &journal) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(err);
+    }
+
+    // 3. 提交：旧的一代挪进 old/，新的一代挪进正式位置，最后整组校验。
+    let previous_dir = capture_scratch(&snapshot, "old", &id);
+    let commit = (|| -> RpcResult<()> {
+        std::fs::create_dir_all(&previous_dir)
+            .map_err(|e| RpcError::internal(format!("创建快照备份目录失败：{e}")))?;
+        // 先把上一代整体挪走（任何一步失败都还能按日志搬回来）。
+        for name in switch::GROUP_FILES {
+            let target = snapshot.join(name);
+            if target.exists() {
+                std::fs::rename(&target, previous_dir.join(name))
+                    .map_err(|e| RpcError::internal(format!("备份上一份快照 {name} 失败：{e}")))?;
+            }
+        }
+        // 再把新的一代挪到正式位置。
+        for (index, name) in switch::GROUP_FILES.iter().enumerate() {
+            if fault_hit("capture_commit_second") && index == 1 {
+                return Err(RpcError::internal("注入故障：提交第二个快照文件失败"));
+            }
+            let staged = staging.join(name);
+            if staged.is_file() {
+                std::fs::rename(&staged, snapshot.join(name))
+                    .map_err(|e| RpcError::internal(format!("落盘快照 {name} 失败：{e}")))?;
+            }
+        }
+        for name in switch::GROUP_FILES {
+            let want = switch::file_sha256(&live.join(name));
+            let got = switch::file_sha256(&snapshot.join(name));
+            if want != got {
+                return Err(RpcError::internal(format!(
+                    "保存后校验失败：{name} 期望 {want:?} 实际 {got:?}"
+                )));
+            }
+        }
+        Ok(())
+    })();
+
+    if let Err(err) = commit {
+        return match restore_capture(&snapshot, &journal) {
+            Ok(()) => {
+                cleanup_capture(&snapshot, &id);
+                Err(err)
+            }
+            Err(restore_err) => Err(RpcError::internal(format!(
+                "{}；且恢复上一份快照也失败：{}",
+                err.message, restore_err.message
+            ))),
+        };
+    }
+
+    cleanup_capture(&snapshot, &id);
 
     let new_hash = switch::file_sha256(&auth_path_in(&snapshot));
     let patch = ProfilePatch {
@@ -387,7 +581,11 @@ fn capture_into(app: &App, profile: &ProfileRecord) -> RpcResult<Value> {
         ..Default::default()
     };
     let updated = app.with_db(|db| db.update_profile(&profile.profile_id, &patch))?;
-    Ok(json!({ "captured": true, "profile": updated.to_json() }))
+    Ok(json!({
+        "captured": true,
+        "profile": updated.to_json(),
+        "healedCapture": healed,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -415,6 +613,35 @@ pub fn editions_detect() -> Value {
     json!({ "editions": editions })
 }
 
+/// 未完成的切换日志（**只读**）。
+///
+/// `list` / `status` 只把它报出来，绝不在这里执行恢复：恢复会写 live 认证文件，
+/// 而打开账号页面不应该产生任何写入。
+fn pending_switches(app: &App, edition: Option<&str>) -> RpcResult<Value> {
+    let journals = app.with_db(|db| db.active_switches(edition))?;
+    let items: Vec<Value> = journals
+        .iter()
+        .map(|journal| {
+            json!({
+                "journalId": journal.id,
+                "profileId": journal.profile_id,
+                "edition": journal.edition,
+                "phase": journal.phase,
+                "createdAt": journal.created_at,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "count": items.len(),
+        "items": items,
+        "hint": if items.is_empty() {
+            Value::Null
+        } else {
+            json!("存在未完成的切换记录：确认客户端已完全退出后再调用 qoder.profiles.recover 恢复，只读操作不会自动恢复")
+        },
+    }))
+}
+
 pub fn list(app: &App, params: &Value) -> RpcResult<Value> {
     let edition = match param_str(params, "edition") {
         Some(raw) => Some(
@@ -424,8 +651,8 @@ pub fn list(app: &App, params: &Value) -> RpcResult<Value> {
         ),
         None => None,
     };
-    // 有未完成切换就先按备份恢复（没有 journal 时零写入）。
-    let recovered = switch::recover_pending(app, edition)?;
+    // 只读：有未完成切换也只报告，不恢复（恢复见 `recover`）。
+    let pending = pending_switches(app, edition)?;
     let profiles = app.with_db(|db| db.list_profiles(edition))?;
     let mut out = Vec::with_capacity(profiles.len());
     for profile in &profiles {
@@ -440,7 +667,7 @@ pub fn list(app: &App, params: &Value) -> RpcResult<Value> {
         "profiles": out,
         "count": out.len(),
         "activeProfileId": active,
-        "recovered": recovered,
+        "pendingSwitches": pending,
     }))
 }
 
@@ -630,6 +857,11 @@ pub fn inspect(app: &App, params: &Value) -> RpcResult<Value> {
     let profile = require_profile(app, id)?;
     let edition = edition_of(&profile)?;
     let snapshot = PathBuf::from(&profile.snapshot_dir);
+    if capture_journal_path(&snapshot).exists() {
+        return Err(RpcError::invalid_params(
+            "该 Profile 上一次保存快照没有完成，快照可能只有半套文件；             请重新「保存当前登录」修复后再检查",
+        ));
+    }
     let report = inspect_snapshot(edition, &snapshot);
     let (status, summary) = classify_status(&report);
 
@@ -707,234 +939,31 @@ pub fn capture(app: &App, params: &Value) -> RpcResult<Value> {
 // 切换（默认关闭）
 // ---------------------------------------------------------------------------
 
-fn refuse_switch(edition: QoderEdition) -> RpcResult<()> {
-    let (enabled, reason) = switch_capability(edition);
-    if enabled {
-        return Ok(());
-    }
-    Err(RpcError::invalid_params(format!(
-        "{} 的快照切换当前不可用：{reason}",
+fn refuse_switch(edition: QoderEdition) -> RpcError {
+    let (_, reason) = switch_capability(edition);
+    RpcError::invalid_params(format!(
+        "{} 的账号切换未开放：{reason}",
         edition.display_name()
     ))
-    .with_data(json!({ "switchEnabled": false, "reason": reason })))
+    .with_data(json!({
+        "switchEnabled": false,
+        "permanent": true,
+        "reason": reason,
+    }))
 }
 
-/// 切换前的进程闸门：只有"确认没在跑"或"跑的是本 Profile 且已退出"才继续。
-fn ensure_client_stopped(
-    app: &App,
-    profile: &ProfileRecord,
-    exe: &Path,
-) -> RpcResult<Option<Value>> {
-    match process::probe(exe) {
-        Running::Stopped => Ok(None),
-        Running::Unknown(reason) => Err(RpcError::internal(format!(
-            "无法确认客户端是否在运行（{reason}），为安全起见不修改认证文件"
-        ))),
-        Running::Running(pids) => {
-            let record = app.with_db(|db| db.get_runtime(&profile.profile_id))?;
-            let Some(record) = record.filter(|r| pids.contains(&r.pid)) else {
-                return Err(RpcError::invalid_params(format!(
-                    "{} 正在运行（PID {}），但不是 AICC 为这个 Profile 启动的。请先手动退出客户端。",
-                    edition_of(profile)?.display_name(),
-                    pids.iter().map(i64::to_string).collect::<Vec<_>>().join("、")
-                )));
-            };
-            match process::describe(record.pid) {
-                Some(info) if process::owned_by(&info, &profile.profile_id) => {
-                    let closed = close_owned(app, profile, exe, false)?;
-                    Ok(Some(closed))
-                }
-                _ => Err(RpcError::invalid_params(format!(
-                    "PID {} 存活但无法确认归属（缺少 {} 标记），不会发信号；请手动退出客户端",
-                    record.pid,
-                    process::OWNER_ENV
-                ))),
-            }
-        }
-    }
-}
-
-/// 打开（切换到）指定 Profile。**默认被闸门挡住**，见 `SWITCH_ENV`。
+/// 打开（切换到）指定 Profile。
+///
+/// **本阶段永久拒绝。** 没有环境变量、没有调试开关：调用进来只做参数校验，
+/// 不探测进程、不建备份、不读也不写 live 的任何一个字节。
+///
+/// 以后要在代码层面补上完整隔离（`main.sqlite` 的账号表、Cookies、
+/// Local Storage 等）并重新做真机验收，才可能恢复这条路径。
 pub fn open(app: &App, params: &Value) -> RpcResult<Value> {
     let id = param_str(params, "profileId")
         .ok_or_else(|| RpcError::invalid_params("必须提供 profileId"))?;
     let profile = require_profile(app, id)?;
-    let edition = edition_of(&profile)?;
-
-    // 0. 闸门：未验证/未开启时，一个字节都不动，也不去关客户端。
-    refuse_switch(edition)?;
-
-    let exe = executable_for(&profile)?;
-    let live = PathBuf::from(&profile.live_dir);
-    if !live.is_dir() {
-        return Err(RpcError::not_found(format!(
-            "客户端数据目录不存在：{}",
-            live.display()
-        )));
-    }
-
-    // 1. 先把上次崩溃留下的未完成切换恢复掉。
-    let recovered = switch::recover_pending(app, Some(edition.as_str()))?;
-
-    // 2. 进程闸门。
-    if let Some(closed) = ensure_client_stopped(app, &profile, &exe)? {
-        if closed["state"] == "unknown" {
-            return Err(RpcError::internal(
-                "关闭上一个实例时无法确认它是否真的退出，已停止切换",
-            ));
-        }
-    }
-
-    // 3. live 归属：属于别的 Profile 就必须先成功保存，失败即中止。
-    let saved_into: Option<String> = if live_has_auth(&profile) {
-        match profile_owning_live(app, edition, &live)? {
-            Some(owner) if owner.profile_id != profile.profile_id => {
-                match capture_into(app, &owner) {
-                    Ok(result) if result["captured"] == json!(true) => Some(owner.profile_id),
-                    Ok(result) => {
-                        return Err(RpcError::internal(format!(
-                            "当前 live 属于 {}，但保存失败（{}），已停止切换，live 保持原样",
-                            owner.display_name,
-                            result["reason"].as_str().unwrap_or("未知原因")
-                        )))
-                    }
-                    Err(err) => {
-                        return Err(RpcError::internal(format!(
-                            "当前 live 属于 {}，保存失败（{}），已停止切换，live 保持原样",
-                            owner.display_name, err.message
-                        )))
-                    }
-                }
-            }
-            _ => None,
-        }
-    } else {
-        None
-    };
-
-    // 4. 文件组事务：备份 → 暂存 → 校验 → 提交。
-    let snapshot = PathBuf::from(&profile.snapshot_dir);
-    let snapshot_ready = auth_path_in(&snapshot).is_file();
-    if snapshot_ready && profile.snapshot_hash.is_none() {
-        return Err(RpcError::invalid_params(
-            "该 Profile 的快照没有完整性记录（snapshotHash），请先「保存当前登录」重建快照",
-        ));
-    }
-
-    let prepared = switch::begin(app, &profile)?;
-    let commit_result = (|| -> RpcResult<()> {
-        if snapshot_ready {
-            switch::stage(app, &prepared, &snapshot, profile.snapshot_hash.as_deref())?;
-        } else {
-            // 目标没有快照 = 要登录新账号：把 live 那组文件挪进备份，客户端会进登录页。
-            switch::clear_live(app, &prepared)?;
-        }
-
-        // 提交前再确认一次：切换窗口内客户端不能被外部拉起来。
-        match process::probe(&exe) {
-            Running::Stopped => {}
-            Running::Running(pids) => {
-                return Err(RpcError::invalid_params(format!(
-                    "切换过程中检测到客户端被外部启动（PID {}），已回滚",
-                    pids.iter()
-                        .map(i64::to_string)
-                        .collect::<Vec<_>>()
-                        .join("、")
-                )))
-            }
-            Running::Unknown(reason) => {
-                return Err(RpcError::internal(format!(
-                    "提交前无法确认客户端状态（{reason}），已回滚"
-                )))
-            }
-        }
-
-        if snapshot_ready {
-            switch::commit(app, &prepared, &snapshot)?;
-        }
-        Ok(())
-    })();
-
-    if let Err(err) = commit_result {
-        let _ = switch::rollback(app, &prepared.journal);
-        return Err(err);
-    }
-
-    // 5. 启动 + 核实。
-    let pid = process::spawn(&exe, &[], &profile.profile_id)
-        .map_err(|e| RpcError::internal(format!("启动 {} 失败：{e}", edition.display_name())))?;
-    let deadline = std::time::Instant::now() + VERIFY_TIMEOUT;
-    let mut alive = false;
-    while std::time::Instant::now() < deadline {
-        match process::liveness(i64::from(pid)) {
-            Liveness::Alive => {
-                alive = true;
-                break;
-            }
-            Liveness::Gone => break,
-            Liveness::Unknown(_) => {
-                std::thread::sleep(std::time::Duration::from_millis(150));
-            }
-        }
-    }
-    if alive {
-        std::thread::sleep(AUTH_SETTLE);
-    }
-
-    let live_hash = switch::file_sha256(&auth_path_in(&live));
-    let snapshot_hash = switch::file_sha256(&auth_path_in(&snapshot));
-    let authenticated = live_hash.is_some() && live_hash == snapshot_hash;
-    let verified = alive
-        && process::describe(i64::from(pid))
-            .map(|info| process::owned_by(&info, &profile.profile_id))
-            .unwrap_or(false);
-
-    let now = crate::clock::now_rfc3339();
-    app.with_db(|db| {
-        db.set_runtime(&RuntimeRecord {
-            profile_id: profile.profile_id.clone(),
-            pid: i64::from(pid),
-            executable: exe.to_string_lossy().to_string(),
-            launched_at: now.clone(),
-        })?;
-        db.update_profile(
-            &profile.profile_id,
-            &ProfilePatch {
-                last_opened_at: Some(now),
-                app_path: Some(exe.to_string_lossy().to_string()),
-                auth_status: Some(if authenticated {
-                    if profile.auth_status == "valid" {
-                        "valid".to_string()
-                    } else {
-                        "unknown".to_string()
-                    }
-                } else if snapshot_ready {
-                    profile.auth_status.clone()
-                } else {
-                    "missing".to_string()
-                }),
-                ..Default::default()
-            },
-        )?;
-        Ok(())
-    })?;
-
-    Ok(json!({
-        "state": if alive { "running" } else { "unverified" },
-        "pid": pid,
-        "verified": verified,
-        "authenticated": authenticated,
-        "requiresLogin": !authenticated,
-        "savedPreviousProfile": saved_into,
-        "usedSnapshot": snapshot_ready,
-        "recovered": recovered,
-        "mode": "snapshot-switch",
-        "reason": if alive {
-            Value::Null
-        } else {
-            json!("进程未在超时内出现（可能被单实例锁挡回）")
-        },
-    }))
+    Err(refuse_switch(edition_of(&profile)?))
 }
 
 fn close_owned(app: &App, profile: &ProfileRecord, exe: &Path, force: bool) -> RpcResult<Value> {
@@ -1008,18 +1037,12 @@ pub fn close(app: &App, params: &Value) -> RpcResult<Value> {
     Ok(json!({ "close": stopped, "capture": captured, "state": "stopped" }))
 }
 
+/// 切换（等价于 `open`）：本阶段同样永久拒绝。
 pub fn activate(app: &App, params: &Value) -> RpcResult<Value> {
     let id = param_str(params, "profileId")
         .ok_or_else(|| RpcError::invalid_params("必须提供 profileId"))?;
     let profile = require_profile(app, id)?;
-    let opened = open(app, params)?;
-    Ok(json!({
-        "activated": profile.profile_id,
-        "edition": profile.edition,
-        "opened": opened,
-        "state": opened["state"],
-        "mode": "snapshot-switch",
-    }))
+    Err(refuse_switch(edition_of(&profile)?))
 }
 
 pub fn remove(app: &App, params: &Value) -> RpcResult<Value> {
@@ -1068,7 +1091,7 @@ pub fn status(app: &App, params: &Value) -> RpcResult<Value> {
         })
         .transpose()?
         .map(|e| e.as_str());
-    let recovered = switch::recover_pending(app, edition)?;
+    let pending = pending_switches(app, edition)?;
     let profiles = app.with_db(|db| db.list_profiles(edition))?;
     let runtimes: std::collections::HashMap<String, RuntimeRecord> = app
         .with_db(|db| db.list_runtime())?
@@ -1105,11 +1128,18 @@ pub fn status(app: &App, params: &Value) -> RpcResult<Value> {
         "running": running,
         "unknown": unknown,
         "activeProfileId": active,
-        "recovered": recovered,
+        "pendingSwitches": pending,
     }))
 }
 
-/// 显式恢复未完成切换（启动时/排障时调用）。没有未完成记录时零写入。
+/// 显式恢复未完成的切换。
+///
+/// 三条规则（P0 复核要求）：
+///
+/// 1. **只在显式调用时执行**：`list` / `status` 不会顺带写 live；
+/// 2. **必须先确认客户端已退出**：`pgrep` 说还在跑 → 拒绝；探测不确定 → 拒绝；
+///    客户端装在哪都找不到 → 拒绝（连"是否退出"都无法证明）；
+/// 3. **恢复失败不静默**：任何一条恢复不了，整个调用返回错误并带上明细。
 pub fn recover(app: &App, params: &Value) -> RpcResult<Value> {
     let edition = param_str(params, "edition")
         .map(|raw| {
@@ -1118,8 +1148,89 @@ pub fn recover(app: &App, params: &Value) -> RpcResult<Value> {
         })
         .transpose()?
         .map(|e| e.as_str());
-    let reports = switch::recover_pending(app, edition)?;
-    Ok(json!({ "recovered": reports, "count": reports.len() }))
+    let journals = app.with_db(|db| db.active_switches(edition))?;
+
+    let mut recovered = Vec::new();
+    let mut blocked = Vec::new();
+    for journal in &journals {
+        let Some(edition) = QoderEdition::parse(&journal.edition) else {
+            blocked.push(json!({
+                "journalId": journal.id,
+                "profileId": journal.profile_id,
+                "edition": journal.edition,
+                "error": "日志里的版本无法识别，拒绝恢复",
+            }));
+            continue;
+        };
+
+        // 只有能证明"客户端确实没在跑"才允许动 live。
+        let executable = qoder_edition::find_app(edition)
+            .and_then(|app| qoder_edition::resolve_executable(&app.app_path).ok());
+        let Some(executable) = executable else {
+            blocked.push(json!({
+                "journalId": journal.id,
+                "profileId": journal.profile_id,
+                "edition": journal.edition,
+                "error": "找不到该版本的客户端，无法确认它已经退出，拒绝恢复",
+            }));
+            continue;
+        };
+        match process::probe(&executable) {
+            Running::Stopped => {}
+            Running::Running(pids) => {
+                blocked.push(json!({
+                    "journalId": journal.id,
+                    "profileId": journal.profile_id,
+                    "edition": journal.edition,
+                    "error": format!(
+                        "客户端正在运行（PID {}），请先完全退出再恢复",
+                        pids.iter().map(i64::to_string).collect::<Vec<_>>().join("、")
+                    ),
+                }));
+                continue;
+            }
+            Running::Unknown(reason) => {
+                blocked.push(json!({
+                    "journalId": journal.id,
+                    "profileId": journal.profile_id,
+                    "edition": journal.edition,
+                    "error": format!("无法确认客户端是否已退出（{reason}），拒绝恢复"),
+                }));
+                continue;
+            }
+        }
+
+        match switch::rollback(app, journal) {
+            Ok(detail) => recovered.push(json!({
+                "journalId": journal.id,
+                "profileId": journal.profile_id,
+                "edition": journal.edition,
+                "phase": journal.phase,
+                "recovered": true,
+                "detail": detail,
+            })),
+            Err(err) => blocked.push(json!({
+                "journalId": journal.id,
+                "profileId": journal.profile_id,
+                "edition": journal.edition,
+                "error": err.message,
+            })),
+        }
+    }
+
+    if !blocked.is_empty() {
+        return Err(RpcError::internal(format!(
+            "{} 条未完成的切换未能恢复，live 目录保持原样；请按明细处理后重试",
+            blocked.len()
+        ))
+        .with_data(json!({ "recovered": recovered, "blocked": blocked })));
+    }
+
+    Ok(json!({
+        "recovered": recovered,
+        "count": recovered.len(),
+        "pending": journals.len(),
+    }))
 }
 
 #[cfg(test)]
@@ -1152,20 +1263,14 @@ if [ -f "$AICC_MOCK_STATE/line.$pid" ]; then cat "$AICC_MOCK_STATE/line.$pid"; e
 "#;
 
     /// 假 pgrep：由 `$AICC_MOCK_STATE/mode` 决定行为。
-    /// stopped → exit 1（确认没跑）；state → 回放现存实例；external → 回放外部 PID；
-    /// seq → 第一次 stopped，之后 external（模拟"切换窗口里被外部启动"）。
+    /// stopped → exit 1（唯一能代表"确认没跑"的退出码）；
+    /// external → 回放一个外部 PID；state → 回放现存实例。
     const MOCK_PGREP: &str = r#"#!/bin/sh
 mode=$(cat "$AICC_MOCK_STATE/mode" 2>/dev/null)
 [ -z "$mode" ] && mode=stopped
 case "$mode" in
   stopped) exit 1;;
   external) cat "$AICC_MOCK_STATE/external.pid" 2>/dev/null; exit 0;;
-  seq)
-    n=$(cat "$AICC_MOCK_STATE/seq" 2>/dev/null)
-    [ -z "$n" ] && n=0
-    n=$((n+1)); echo "$n" > "$AICC_MOCK_STATE/seq"
-    if [ "$n" -ge 2 ]; then cat "$AICC_MOCK_STATE/external.pid"; exit 0; fi
-    exit 1;;
   *)
     found=0
     for f in "$AICC_MOCK_STATE"/line.*; do
@@ -1224,9 +1329,7 @@ esac
         }
     }
 
-    struct Fixture;
-
-    fn install_both(sb: &Sandbox, dir: &Path) -> PathBuf {
+    fn install_both(sb: &Sandbox, dir: &Path) {
         let apps = dir.join("apps");
         std::fs::create_dir_all(&apps).unwrap();
         for (name, bundle, version) in [
@@ -1267,7 +1370,6 @@ esac
         std::env::set_var(process::PS_BIN_ENV, ps.to_string_lossy().to_string());
         std::env::set_var(process::PGREP_BIN_ENV, pgrep.to_string_lossy().to_string());
         std::env::set_var("AICC_MOCK_STATE", sb.state.to_string_lossy().to_string());
-        apps
     }
 
     fn set_mode(sb: &Sandbox, mode: &str) {
@@ -1287,407 +1389,311 @@ esac
         );
     }
 
-    fn seed_live(sb: &Sandbox, name: &str, auth: &str) -> PathBuf {
+    fn seed_live(sb: &Sandbox, name: &str, auth: &str, overlay: &str) -> PathBuf {
         let dir = sb.support.join(name);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("Local State"), b"{}").unwrap();
         std::fs::write(dir.join(qoder::AUTH_FILE), auth.as_bytes()).unwrap();
+        std::fs::write(dir.join("auth-profile-overlays.v1.dat"), overlay.as_bytes()).unwrap();
         dir
-    }
-
-    fn enable_switch() {
-        std::env::set_var(super::SWITCH_ENV, "1");
     }
 
     fn create_profile(app: &App, edition: &str, name: &str) -> Value {
         super::create(app, &json!({ "edition": edition, "displayName": name })).unwrap()
     }
 
-    fn live_hash(dir: &Path) -> Option<String> {
-        switch::file_sha256(&dir.join(qoder::AUTH_FILE))
+    fn sha(path: &Path) -> Option<String> {
+        switch::file_sha256(path)
     }
 
-    // ---- 1. pgrep 失败：零写入 ----
-
-    #[test]
-    fn unknown_process_state_blocks_switch_without_writing() {
-        let _guard = lock_env();
-        enable_switch();
-        let sb = sandbox();
-        install_both(&sb, sb._dir.path());
-        let live = seed_live(&sb, "com.qoder.app.stable", "LIVE-AUTH");
-        set_status_json(&sb, "a@example.com");
-        super::scan(&sb.app, &json!({})).unwrap();
-        let id = super::list(&sb.app, &json!({})).unwrap()["profiles"][0]["profileId"]
-            .as_str()
-            .unwrap()
-            .to_string();
-
-        // pgrep 直接不可用 → Running::Unknown。
-        std::env::set_var(process::PGREP_BIN_ENV, "/nonexistent/pgrep");
-        let before = live_hash(&live);
-        let err = super::open(&sb.app, &json!({ "profileId": id })).unwrap_err();
-        assert!(
-            err.message.contains("无法确认客户端"),
-            "msg={}",
-            err.message
-        );
-
-        assert_eq!(live_hash(&live), before, "live 认证不允许被改动");
-        assert!(sb
-            .app
-            .with_db(|db| db.active_switches(None))
-            .unwrap()
-            .is_empty());
-        assert!(!super::profiles_root(&sb.app)
-            .join("switch-backups")
-            .exists());
-    }
-
-    // ---- 2. ps 失败但进程仍存活：禁止切换 ----
-
-    #[test]
-    fn alive_process_without_readable_cmdline_blocks_switch() {
-        let _guard = lock_env();
-        enable_switch();
-        let sb = sandbox();
-        install_both(&sb, sb._dir.path());
-        let live = seed_live(&sb, "com.qoder.app.stable", "LIVE-AUTH");
-        set_status_json(&sb, "a@example.com");
-        super::scan(&sb.app, &json!({})).unwrap();
-        let id = super::list(&sb.app, &json!({})).unwrap()["profiles"][0]["profileId"]
-            .as_str()
-            .unwrap()
-            .to_string();
-
-        // pgrep 说"有一个 PID"，但 ps 读不到它的命令行；kill -0 能看到本测试进程。
-        std::fs::write(
-            sb.state.join("external.pid"),
-            std::process::id().to_string(),
-        )
-        .unwrap();
-        set_mode(&sb, "external");
-        sb.app
-            .with_db(|db| {
-                db.set_runtime(&RuntimeRecord {
-                    profile_id: id.clone(),
-                    pid: i64::from(std::process::id()),
-                    executable: "/nonexistent/Qoder".into(),
-                    launched_at: "t".into(),
-                })?;
-                Ok(())
-            })
-            .unwrap();
-
-        let before = live_hash(&live);
-        let err = super::open(&sb.app, &json!({ "profileId": id })).unwrap_err();
-        assert!(
-            err.message.contains("无法确认归属") || err.message.contains("无法确认"),
-            "msg={}",
-            err.message
-        );
-        assert_eq!(live_hash(&live), before);
-        assert!(sb
-            .app
-            .with_db(|db| db.active_switches(None))
-            .unwrap()
-            .is_empty());
-    }
-
-    // ---- 3. 捕获身份不一致：原 live 不变 ----
-
-    #[test]
-    fn capture_refuses_identity_mismatch_and_keeps_live() {
-        let _guard = lock_env();
-        let sb = sandbox();
-        install_both(&sb, sb._dir.path());
-        let live = seed_live(&sb, "com.qoder.app.stable", "LIVE-A");
-        set_status_json(&sb, "a@example.com");
+    fn register_current(sb: &Sandbox) -> (String, PathBuf) {
         super::scan(&sb.app, &json!({})).unwrap();
         let profile = super::list(&sb.app, &json!({})).unwrap()["profiles"][0].clone();
         let id = profile["profileId"].as_str().unwrap().to_string();
         let snapshot = PathBuf::from(profile["snapshotDir"].as_str().unwrap());
-        let snapshot_before = switch::file_sha256(&snapshot.join(qoder::AUTH_FILE));
-
-        // live 换成了 B 的账号，但 Profile 记的是 A。
-        set_status_json(&sb, "b@example.com");
-        std::fs::write(live.join(qoder::AUTH_FILE), b"LIVE-B").unwrap();
-        let before = live_hash(&live);
-
-        let result = super::capture(&sb.app, &json!({ "profileId": id })).unwrap();
-        assert_eq!(result["captured"], false);
-        assert_eq!(result["identityMismatch"], true);
-        assert_eq!(live_hash(&live), before, "live 不能被改");
-        assert_eq!(
-            switch::file_sha256(&snapshot.join(qoder::AUTH_FILE)),
-            snapshot_before,
-            "已有快照不能被覆盖"
-        );
+        (id, snapshot)
     }
 
-    // ---- 4. 捕获 I/O 失败：禁止进入 restore ----
+    // ---- 1. 环境变量绕不过闸门 ----
 
     #[test]
-    fn capture_io_failure_aborts_before_restore() {
+    fn switch_is_permanently_off_even_with_env_flag() {
         let _guard = lock_env();
-        enable_switch();
-        let sb = sandbox();
-        install_both(&sb, sb._dir.path());
-        let live = seed_live(&sb, "com.qoder.app.stable", "LIVE-A");
-        set_status_json(&sb, "a@example.com");
-        super::scan(&sb.app, &json!({})).unwrap();
-        let a = super::list(&sb.app, &json!({})).unwrap()["profiles"][0].clone();
-        let a_id = a["profileId"].as_str().unwrap().to_string();
-        let a_snapshot = PathBuf::from(a["snapshotDir"].as_str().unwrap());
+        std::env::set_var("AICC_QODER_ENABLE_SWITCH", "1");
+        let (global, reason) = switch_capability(QoderEdition::Global);
+        let (cn, _) = switch_capability(QoderEdition::Cn);
+        let detected = editions_detect();
+        std::env::remove_var("AICC_QODER_ENABLE_SWITCH");
 
-        // 造一个 B Profile，并让 A 的快照目录不可写，模拟"保存当前账号失败"。
-        let b = create_profile(&sb.app, "qoder_global", "B");
-        let b_id = b["profile"]["profileId"].as_str().unwrap().to_string();
-        let b_snapshot = PathBuf::from(b["profile"]["snapshotDir"].as_str().unwrap());
-        std::fs::write(b_snapshot.join(qoder::AUTH_FILE), b"SNAP-B").unwrap();
-        sb.app
-            .with_db(|db| {
-                db.update_profile(
-                    &b_id,
-                    &ProfilePatch {
-                        snapshot_hash: switch::file_sha256(&b_snapshot.join(qoder::AUTH_FILE)),
-                        ..Default::default()
-                    },
-                )?;
-                Ok(())
-            })
-            .unwrap();
-
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&a_snapshot).unwrap().permissions();
-        perms.set_mode(0o500);
-        std::fs::set_permissions(&a_snapshot, perms).unwrap();
-
-        // live 仍是 A 的认证，切到 B 之前必须先把它存回 A —— 保存会失败。
-        let before = live_hash(&live);
-        let err = super::open(&sb.app, &json!({ "profileId": b_id })).unwrap_err();
-
-        let mut perms = std::fs::metadata(&a_snapshot).unwrap().permissions();
-        perms.set_mode(0o700);
-        std::fs::set_permissions(&a_snapshot, perms).unwrap();
-
-        assert!(err.message.contains("保存失败"), "msg={}", err.message);
-        assert_eq!(live_hash(&live), before, "restore 必须被禁止");
-        assert_eq!(
-            std::fs::read_to_string(live.join(qoder::AUTH_FILE)).unwrap(),
-            "LIVE-A"
-        );
-        let _ = a_id;
+        assert!(!global, "国际版也必须永久关闭");
+        assert!(!cn);
+        assert!(reason.contains("无法隔离"), "reason={reason}");
+        for edition in detected["editions"].as_array().unwrap() {
+            assert_eq!(edition["switchEnabled"], false, "{edition}");
+        }
     }
 
-    // ---- 7. 目标快照损坏：不能覆盖 live ----
-
     #[test]
-    fn corrupt_target_snapshot_never_overwrites_live() {
+    fn open_and_activate_refuse_and_write_nothing() {
         let _guard = lock_env();
-        enable_switch();
+        std::env::set_var("AICC_QODER_ENABLE_SWITCH", "1");
         let sb = sandbox();
         install_both(&sb, sb._dir.path());
-        let live = seed_live(&sb, "com.qoder.app.stable", "LIVE-A");
+        let live = seed_live(&sb, "com.qoder.app.stable", "LIVE-A", "OVERLAY-A");
         set_status_json(&sb, "a@example.com");
-        super::scan(&sb.app, &json!({})).unwrap();
-        let a = super::list(&sb.app, &json!({})).unwrap()["profiles"][0].clone();
-        let a_id = a["profileId"].as_str().unwrap().to_string();
+        let (id, _) = register_current(&sb);
+        let before = sha(&live.join(qoder::AUTH_FILE));
 
-        // 造 B 的快照，并把记录的哈希改坏（模拟快照被截断/篡改）。
-        let b = create_profile(&sb.app, "qoder_global", "B");
-        let b_id = b["profile"]["profileId"].as_str().unwrap().to_string();
-        let b_snapshot = PathBuf::from(b["profile"]["snapshotDir"].as_str().unwrap());
-        std::fs::write(b_snapshot.join(qoder::AUTH_FILE), b"SNAP-B").unwrap();
-        sb.app
-            .with_db(|db| {
-                db.update_profile(
-                    &b_id,
-                    &ProfilePatch {
-                        snapshot_hash: Some("0000000000".into()),
-                        ..Default::default()
-                    },
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        let opened = super::open(&sb.app, &json!({ "profileId": id }));
+        let activated = super::activate(&sb.app, &json!({ "profileId": id }));
+        std::env::remove_var("AICC_QODER_ENABLE_SWITCH");
 
-        let before = live_hash(&live);
-        let err = super::open(&sb.app, &json!({ "profileId": b_id })).unwrap_err();
-        assert!(err.message.contains("损坏"), "msg={}", err.message);
-        assert_eq!(live_hash(&live), before);
+        for outcome in [opened, activated] {
+            let err = outcome.unwrap_err();
+            assert!(err.message.contains("未开放"), "msg={}", err.message);
+        }
         assert_eq!(
-            std::fs::read_to_string(live.join(qoder::AUTH_FILE)).unwrap(),
-            "LIVE-A"
+            sha(&live.join(qoder::AUTH_FILE)),
+            before,
+            "live 一个字节都不能动"
         );
-        let _ = a_id;
-    }
-
-    // ---- 8. 未完成 journal：先恢复，再继续；互斥本身由唯一索引保证 ----
-
-    #[test]
-    fn pending_journal_is_recovered_then_switch_completes() {
-        let _guard = lock_env();
-        enable_switch();
-        let sb = sandbox();
-        install_both(&sb, sb._dir.path());
-        let live = seed_live(&sb, "com.qoder.app.stable", "LIVE-A");
-        set_status_json(&sb, "a@example.com");
-        super::scan(&sb.app, &json!({})).unwrap();
-        let a = super::list(&sb.app, &json!({})).unwrap()["profiles"][0].clone();
-        let a_id = a["profileId"].as_str().unwrap().to_string();
-
-        let b = create_profile(&sb.app, "qoder_global", "B");
-        let b_id = b["profile"]["profileId"].as_str().unwrap().to_string();
-        let b_snapshot = PathBuf::from(b["profile"]["snapshotDir"].as_str().unwrap());
-        std::fs::write(b_snapshot.join(qoder::AUTH_FILE), b"SNAP-B").unwrap();
-        sb.app
-            .with_db(|db| {
-                db.update_profile(
-                    &b_id,
-                    &ProfilePatch {
-                        snapshot_hash: switch::file_sha256(&b_snapshot.join(qoder::AUTH_FILE)),
-                        ..Default::default()
-                    },
-                )?;
-                Ok(())
-            })
-            .unwrap();
-
-        // 模拟上一次切换崩溃：留下一条 prepared journal。
-        // 同一时刻第二条 journal 会被唯一索引挡住（见 storage::qoder_switch 的测试）。
-        let prepared = switch::begin(&sb.app, &require_profile(&sb.app, &a_id).unwrap()).unwrap();
-        let before = live_hash(&live);
-
-        // open 会先把崩溃残留恢复掉，再完成本次切换。
-        let opened = super::open(&sb.app, &json!({ "profileId": b_id })).unwrap();
-        assert_eq!(opened["state"], "running", "opened={opened}");
-        assert_eq!(opened["recovered"].as_array().unwrap().len(), 1);
-        assert_eq!(
-            std::fs::read_to_string(live.join(qoder::AUTH_FILE)).unwrap(),
-            "SNAP-B"
+        assert!(
+            !sb.app.paths.data_dir.join("qoder/switch-backups").exists(),
+            "拒绝时不允许创建备份目录"
         );
-        assert_ne!(live_hash(&live), before);
         assert!(sb
             .app
             .with_db(|db| db.active_switches(None))
             .unwrap()
             .is_empty());
+        assert!(sb.app.with_db(|db| db.list_runtime()).unwrap().is_empty());
+    }
+
+    // ---- 2. 只读操作不恢复 live ----
+
+    #[test]
+    fn list_and_status_report_pending_switch_without_restoring() {
+        let _guard = lock_env();
+        let sb = sandbox();
+        install_both(&sb, sb._dir.path());
+        let live = seed_live(&sb, "com.qoder.app.stable", "ORIGINAL", "ORIGINAL-OVERLAY");
+        set_status_json(&sb, "a@example.com");
+        let (id, _) = register_current(&sb);
+
+        // 模拟"切换走到一半崩溃"：journal 还在，live 已被改写。
+        let profile = require_profile(&sb.app, &id).unwrap();
+        let prepared = switch::begin(&sb.app, &profile).unwrap();
+        std::fs::write(live.join(qoder::AUTH_FILE), b"HALF-WRITTEN").unwrap();
+
+        let listed = super::list(&sb.app, &json!({})).unwrap();
+        assert_eq!(listed["pendingSwitches"]["count"], 1, "list 只报告，不恢复");
+        let stated = super::status(&sb.app, &json!({})).unwrap();
+        assert_eq!(stated["pendingSwitches"]["count"], 1);
+
+        assert_eq!(
+            std::fs::read(live.join(qoder::AUTH_FILE)).unwrap(),
+            b"HALF-WRITTEN",
+            "只读接口不允许写 live"
+        );
+        assert_eq!(
+            sb.app.with_db(|db| db.active_switches(None)).unwrap().len(),
+            1,
+            "journal 也不允许被只读接口清掉"
+        );
         let _ = prepared;
     }
 
-    // ---- 9. 切换窗口被外部启动：安全停止 ----
+    // ---- 3. 恢复必须先确认客户端退出 ----
 
     #[test]
-    fn external_start_during_switch_rolls_back() {
+    fn recover_refuses_when_process_state_is_unknown() {
         let _guard = lock_env();
-        enable_switch();
         let sb = sandbox();
         install_both(&sb, sb._dir.path());
-        let live = seed_live(&sb, "com.qoder.app.stable", "LIVE-A");
+        let live = seed_live(&sb, "com.qoder.app.stable", "ORIGINAL", "ORIGINAL-OVERLAY");
         set_status_json(&sb, "a@example.com");
-        super::scan(&sb.app, &json!({})).unwrap();
-        let a = super::list(&sb.app, &json!({})).unwrap()["profiles"][0].clone();
-        let a_id = a["profileId"].as_str().unwrap().to_string();
+        let (id, _) = register_current(&sb);
+        let profile = require_profile(&sb.app, &id).unwrap();
+        switch::begin(&sb.app, &profile).unwrap();
+        std::fs::write(live.join(qoder::AUTH_FILE), b"HALF-WRITTEN").unwrap();
 
-        let b = create_profile(&sb.app, "qoder_global", "B");
-        let b_id = b["profile"]["profileId"].as_str().unwrap().to_string();
-        let b_snapshot = PathBuf::from(b["profile"]["snapshotDir"].as_str().unwrap());
-        std::fs::write(b_snapshot.join(qoder::AUTH_FILE), b"SNAP-B").unwrap();
-        sb.app
-            .with_db(|db| {
-                db.update_profile(
-                    &b_id,
-                    &ProfilePatch {
-                        snapshot_hash: switch::file_sha256(&b_snapshot.join(qoder::AUTH_FILE)),
-                        ..Default::default()
-                    },
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        // pgrep 不可执行 → Unknown。
+        let broken = sb._dir.path().join("no-such-pgrep");
+        std::env::set_var(process::PGREP_BIN_ENV, broken.to_string_lossy().to_string());
+        let err = super::recover(&sb.app, &json!({})).unwrap_err();
+        assert!(err.message.contains("未能恢复"), "msg={}", err.message);
 
-        // 第一次 probe 说"没在跑"，第二次（提交前）说"有外部进程"。
-        std::fs::write(
-            sb.state.join("external.pid"),
-            std::process::id().to_string(),
-        )
-        .unwrap();
-        set_mode(&sb, "seq");
-
-        let before = live_hash(&live);
-        let err = super::open(&sb.app, &json!({ "profileId": b_id })).unwrap_err();
-        assert!(err.message.contains("外部启动"), "msg={}", err.message);
-        assert_eq!(live_hash(&live), before, "必须回滚到原账号");
         assert_eq!(
-            std::fs::read_to_string(live.join(qoder::AUTH_FILE)).unwrap(),
-            "LIVE-A"
+            std::fs::read(live.join(qoder::AUTH_FILE)).unwrap(),
+            b"HALF-WRITTEN",
+            "状态未知时禁止恢复"
+        );
+        assert_eq!(
+            sb.app.with_db(|db| db.active_switches(None)).unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn recover_refuses_while_client_is_running() {
+        let _guard = lock_env();
+        let sb = sandbox();
+        install_both(&sb, sb._dir.path());
+        let live = seed_live(&sb, "com.qoder.app.stable", "ORIGINAL", "ORIGINAL-OVERLAY");
+        set_status_json(&sb, "a@example.com");
+        let (id, _) = register_current(&sb);
+        let profile = require_profile(&sb.app, &id).unwrap();
+        switch::begin(&sb.app, &profile).unwrap();
+        std::fs::write(live.join(qoder::AUTH_FILE), b"HALF-WRITTEN").unwrap();
+
+        std::fs::write(sb.state.join("external.pid"), "424242").unwrap();
+        set_mode(&sb, "external");
+        let err = super::recover(&sb.app, &json!({})).unwrap_err();
+        assert!(err.message.contains("未能恢复"), "msg={}", err.message);
+        assert_eq!(
+            std::fs::read(live.join(qoder::AUTH_FILE)).unwrap(),
+            b"HALF-WRITTEN"
+        );
+    }
+
+    #[test]
+    fn recover_restores_only_after_confirmed_stop() {
+        let _guard = lock_env();
+        let sb = sandbox();
+        install_both(&sb, sb._dir.path());
+        let live = seed_live(&sb, "com.qoder.app.stable", "ORIGINAL", "ORIGINAL-OVERLAY");
+        set_status_json(&sb, "a@example.com");
+        let (id, _) = register_current(&sb);
+        let profile = require_profile(&sb.app, &id).unwrap();
+        switch::begin(&sb.app, &profile).unwrap();
+        std::fs::write(live.join(qoder::AUTH_FILE), b"HALF-WRITTEN").unwrap();
+
+        set_mode(&sb, "stopped");
+        let result = super::recover(&sb.app, &json!({})).unwrap();
+        assert_eq!(result["count"], 1);
+        assert_eq!(
+            std::fs::read(live.join(qoder::AUTH_FILE)).unwrap(),
+            b"ORIGINAL"
         );
         assert!(sb
             .app
             .with_db(|db| db.active_switches(None))
             .unwrap()
             .is_empty());
-        let _ = a_id;
     }
 
-    // ---- 10. CN 未复验：拒绝真实切换 ----
+    // ---- 4. 保存快照的文件组原子性 ----
 
     #[test]
-    fn cn_switch_is_refused_until_verified() {
+    fn capture_stage_failure_keeps_previous_snapshot() {
         let _guard = lock_env();
-        enable_switch();
         let sb = sandbox();
         install_both(&sb, sb._dir.path());
-        seed_live(&sb, "com.qodercn.app", "CN-LIVE");
-        set_mode(&sb, "stopped");
-        let created = create_profile(&sb.app, "qoder_cn", "CN 账号");
-        let id = created["profile"]["profileId"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        assert_eq!(created["switchEnabled"], false);
-
-        let before = live_hash(&sb.support.join("com.qodercn.app"));
-        let err = super::open(&sb.app, &json!({ "profileId": id })).unwrap_err();
-        assert!(
-            err.message.contains("未在本机完成认证与切换验证"),
-            "msg={}",
-            err.message
-        );
-        assert_eq!(live_hash(&sb.support.join("com.qodercn.app")), before);
-    }
-
-    // ---- 其余回归 ----
-
-    #[test]
-    fn switch_is_disabled_by_default_even_for_verified_edition() {
-        let _guard = lock_env();
-        std::env::remove_var(super::SWITCH_ENV);
-        let sb = sandbox();
-        install_both(&sb, sb._dir.path());
-        seed_live(&sb, "com.qoder.app.stable", "LIVE-A");
+        let live = seed_live(&sb, "com.qoder.app.stable", "LIVE-A", "OVERLAY-A");
         set_status_json(&sb, "a@example.com");
-        super::scan(&sb.app, &json!({})).unwrap();
-        let profile = super::list(&sb.app, &json!({})).unwrap()["profiles"][0].clone();
-        assert_eq!(profile["switchEnabled"], false);
-        let reason = profile["switchBlockedReason"].as_str().unwrap_or("");
-        assert!(
-            reason.contains("不等于完整 Profile 隔离"),
-            "reason={reason}"
-        );
+        let (id, snapshot) = register_current(&sb);
 
-        let id = profile["profileId"].as_str().unwrap().to_string();
-        let err = super::open(&sb.app, &json!({ "profileId": id })).unwrap_err();
-        assert!(err.message.contains("不可用"), "msg={}", err.message);
+        std::fs::write(live.join(qoder::AUTH_FILE), b"LIVE-A2").unwrap();
+        std::fs::write(live.join("auth-profile-overlays.v1.dat"), b"OVERLAY-A2").unwrap();
+
+        switch::fault::set(Some("capture_stage_second"));
+        let err = super::capture(&sb.app, &json!({ "profileId": id })).unwrap_err();
+        switch::fault::set(None);
+        assert!(err.message.contains("注入故障"));
+        assert_eq!(
+            std::fs::read(snapshot.join(qoder::AUTH_FILE)).unwrap(),
+            b"LIVE-A"
+        );
+        assert_eq!(
+            std::fs::read(snapshot.join("auth-profile-overlays.v1.dat")).unwrap(),
+            b"OVERLAY-A"
+        );
+        assert!(!capture_journal_path(&snapshot).exists());
     }
+
+    #[test]
+    fn capture_commit_failure_restores_both_files() {
+        let _guard = lock_env();
+        let sb = sandbox();
+        install_both(&sb, sb._dir.path());
+        let live = seed_live(&sb, "com.qoder.app.stable", "LIVE-A", "OVERLAY-A");
+        set_status_json(&sb, "a@example.com");
+        let (id, snapshot) = register_current(&sb);
+
+        std::fs::write(live.join(qoder::AUTH_FILE), b"LIVE-A2").unwrap();
+        std::fs::write(live.join("auth-profile-overlays.v1.dat"), b"OVERLAY-A2").unwrap();
+
+        switch::fault::set(Some("capture_commit_second"));
+        let err = super::capture(&sb.app, &json!({ "profileId": id })).unwrap_err();
+        switch::fault::set(None);
+        assert!(err.message.contains("注入故障"));
+        assert_eq!(
+            std::fs::read(snapshot.join(qoder::AUTH_FILE)).unwrap(),
+            b"LIVE-A",
+            "第一个文件也必须回到上一份"
+        );
+        assert_eq!(
+            std::fs::read(snapshot.join("auth-profile-overlays.v1.dat")).unwrap(),
+            b"OVERLAY-A"
+        );
+        assert!(!capture_journal_path(&snapshot).exists());
+        assert_eq!(
+            std::fs::read(live.join(qoder::AUTH_FILE)).unwrap(),
+            b"LIVE-A2",
+            "live 从不参与保存"
+        );
+    }
+
+    #[test]
+    fn capture_heals_an_interrupted_commit() {
+        let _guard = lock_env();
+        let sb = sandbox();
+        install_both(&sb, sb._dir.path());
+        let live = seed_live(&sb, "com.qoder.app.stable", "LIVE-A", "OVERLAY-A");
+        set_status_json(&sb, "a@example.com");
+        let (id, snapshot) = register_current(&sb);
+
+        // 手工制造"提交到一半崩溃"：上一代在 old/，正式位置只有半套新文件。
+        let journal = CaptureJournal {
+            id: "cp_deadbeefdeadbeef".into(),
+            previous: vec![qoder::AUTH_FILE.to_string()],
+            previous_hashes: BTreeMap::from([(
+                qoder::AUTH_FILE.to_string(),
+                sha(&snapshot.join(qoder::AUTH_FILE)).unwrap(),
+            )]),
+        };
+        let old = capture_scratch(&snapshot, "old", &journal.id);
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::rename(snapshot.join(qoder::AUTH_FILE), old.join(qoder::AUTH_FILE)).unwrap();
+        std::fs::write(snapshot.join(qoder::AUTH_FILE), b"PARTIAL-WRITE").unwrap();
+        write_json_atomic(&capture_journal_path(&snapshot), &journal).unwrap();
+
+        // live 换成同账号的新一代，然后保存：必须先修复上一份，再整体提交。
+        std::fs::write(live.join(qoder::AUTH_FILE), b"LIVE-A2").unwrap();
+        std::fs::write(live.join("auth-profile-overlays.v1.dat"), b"OVERLAY-A2").unwrap();
+        let result = super::capture(&sb.app, &json!({ "profileId": id })).unwrap();
+        assert_eq!(result["captured"], true);
+        assert_eq!(result["healedCapture"], json!("cp_deadbeefdeadbeef"));
+        assert_eq!(
+            std::fs::read(snapshot.join(qoder::AUTH_FILE)).unwrap(),
+            b"LIVE-A2"
+        );
+        assert_eq!(
+            std::fs::read(snapshot.join("auth-profile-overlays.v1.dat")).unwrap(),
+            b"OVERLAY-A2"
+        );
+        assert!(!capture_journal_path(&snapshot).exists());
+        assert!(!old.exists());
+    }
+
+    // ---- 5. 回归：识别、扫描、导入、检查、删除 ----
 
     #[test]
     fn scan_captures_current_account_without_touching_live() {
         let _guard = lock_env();
         let sb = sandbox();
         install_both(&sb, sb._dir.path());
-        let live = seed_live(&sb, "com.qoder.app.stable", "LIVE-A");
+        let live = seed_live(&sb, "com.qoder.app.stable", "LIVE-A", "OVERLAY-A");
         set_status_json(&sb, "me@example.com");
 
         let before = std::fs::read(live.join(qoder::AUTH_FILE)).unwrap();
@@ -1707,10 +1713,34 @@ esac
             before
         );
         assert_eq!(profile["snapshotReady"], true);
+        assert_eq!(profile["switchEnabled"], false);
+        assert!(profile["switchBlockedReason"]
+            .as_str()
+            .unwrap()
+            .contains("无法隔离"));
 
-        // 重复扫描不重复登记。
         let again = super::scan(&sb.app, &json!({})).unwrap();
         assert!(again["created"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cross_edition_profiles_are_independent() {
+        let _guard = lock_env();
+        let sb = sandbox();
+        install_both(&sb, sb._dir.path());
+        seed_live(&sb, "com.qoder.app.stable", "GL", "GL-OV");
+        seed_live(&sb, "com.qodercn.app", "CN", "CN-OV");
+        let cn = create_profile(&sb.app, "qoder_cn", "CN");
+        let global = create_profile(&sb.app, "qoder_global", "GL");
+        assert_ne!(cn["profile"]["liveDir"], global["profile"]["liveDir"]);
+        assert_ne!(
+            cn["profile"]["snapshotDir"],
+            global["profile"]["snapshotDir"]
+        );
+        assert_eq!(
+            super::list(&sb.app, &json!({ "edition": "qoder_cn" })).unwrap()["count"],
+            1
+        );
     }
 
     #[test]
@@ -1718,7 +1748,7 @@ esac
         let _guard = lock_env();
         let sb = sandbox();
         install_both(&sb, sb._dir.path());
-        seed_live(&sb, "com.qoder.app.stable", "LIVE-A");
+        seed_live(&sb, "com.qoder.app.stable", "LIVE-A", "OVERLAY-A");
 
         let empty = sb._dir.path().join("empty");
         std::fs::create_dir_all(&empty).unwrap();
@@ -1738,16 +1768,49 @@ esac
     }
 
     #[test]
+    fn invalid_profile_ids_are_rejected() {
+        let _guard = lock_env();
+        let sb = sandbox();
+        install_both(&sb, sb._dir.path());
+        for bad in ["../etc", "qp_xyz", "qp_123", "qp_0123456789abc"] {
+            let err = super::inspect(&sb.app, &json!({ "profileId": bad })).unwrap_err();
+            assert!(
+                err.message.contains("非法"),
+                "bad={bad} msg={}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn capture_refuses_identity_mismatch_and_keeps_live() {
+        let _guard = lock_env();
+        let sb = sandbox();
+        install_both(&sb, sb._dir.path());
+        let live = seed_live(&sb, "com.qoder.app.stable", "LIVE-A", "OVERLAY-A");
+        set_status_json(&sb, "a@example.com");
+        let (id, snapshot) = register_current(&sb);
+        let snapshot_before = sha(&snapshot.join(qoder::AUTH_FILE));
+
+        set_status_json(&sb, "b@example.com");
+        std::fs::write(live.join(qoder::AUTH_FILE), b"LIVE-B").unwrap();
+        let before = sha(&live.join(qoder::AUTH_FILE));
+
+        let result = super::capture(&sb.app, &json!({ "profileId": id })).unwrap();
+        assert_eq!(result["captured"], false);
+        assert_eq!(result["identityMismatch"], true);
+        assert_eq!(sha(&live.join(qoder::AUTH_FILE)), before);
+        assert_eq!(sha(&snapshot.join(qoder::AUTH_FILE)), snapshot_before);
+    }
+
+    #[test]
     fn purge_deletes_only_snapshot() {
         let _guard = lock_env();
         let sb = sandbox();
         install_both(&sb, sb._dir.path());
-        let live = seed_live(&sb, "com.qoder.app.stable", "LIVE-A");
+        let live = seed_live(&sb, "com.qoder.app.stable", "LIVE-A", "OVERLAY-A");
         set_status_json(&sb, "a@example.com");
-        super::scan(&sb.app, &json!({})).unwrap();
-        let profile = super::list(&sb.app, &json!({})).unwrap()["profiles"][0].clone();
-        let id = profile["profileId"].as_str().unwrap().to_string();
-        let snapshot = PathBuf::from(profile["snapshotDir"].as_str().unwrap());
+        let (id, snapshot) = register_current(&sb);
 
         let removed = super::remove(&sb.app, &json!({ "profileId": id, "purge": true })).unwrap();
         assert_eq!(removed["purged"], true);
@@ -1760,12 +1823,9 @@ esac
         let _guard = lock_env();
         let sb = sandbox();
         install_both(&sb, sb._dir.path());
-        seed_live(&sb, "com.qoder.app.stable", "v10LIVE");
+        seed_live(&sb, "com.qoder.app.stable", "v10LIVE", "v10OVERLAY");
         set_status_json(&sb, "a@example.com");
-        super::scan(&sb.app, &json!({})).unwrap();
-        let profile = super::list(&sb.app, &json!({})).unwrap()["profiles"][0].clone();
-        let id = profile["profileId"].as_str().unwrap().to_string();
-        let snapshot = PathBuf::from(profile["snapshotDir"].as_str().unwrap());
+        let (id, snapshot) = register_current(&sb);
         std::fs::write(snapshot.join(qoder::AUTH_FILE), b"v99garbagegarbage").unwrap();
 
         let report = super::inspect(&sb.app, &json!({ "profileId": id })).unwrap();
@@ -1778,15 +1838,10 @@ esac
         let _guard = lock_env();
         let sb = sandbox();
         install_both(&sb, sb._dir.path());
-        seed_live(&sb, "com.qoder.app.stable", "LIVE-A");
+        seed_live(&sb, "com.qoder.app.stable", "LIVE-A", "OVERLAY-A");
         set_status_json(&sb, "a@example.com");
-        super::scan(&sb.app, &json!({})).unwrap();
-        let id = super::list(&sb.app, &json!({})).unwrap()["profiles"][0]["profileId"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let (id, _) = register_current(&sb);
 
-        // ps 读不到、但 kill -0 能看到本测试进程 → unknown（不是 running，也不是 stopped）。
         sb.app
             .with_db(|db| {
                 db.set_runtime(&RuntimeRecord {
@@ -1801,9 +1856,7 @@ esac
         let state = super::status(&sb.app, &json!({})).unwrap();
         assert_eq!(state["running"], 0);
         assert_eq!(state["unknown"], 1);
-        let runtime = &state["profiles"][0]["runtime"];
-        assert_eq!(runtime["state"], "unknown");
-        assert_eq!(runtime["verified"], false);
+        assert_eq!(state["profiles"][0]["runtime"]["state"], "unknown");
         sb.app.with_db(|db| db.clear_runtime(&id)).unwrap();
     }
 

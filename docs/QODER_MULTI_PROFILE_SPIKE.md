@@ -179,19 +179,18 @@ AICC 永远起不来客户端。
 
 ---
 
-## 4.5 切换默认关闭（安全收尾后）
+## 4.5 本阶段不提供切换（安全收尾后）
 
 即使文件组事务已经做到原子，**只切换两个认证文件也不等于完整 Profile 隔离**，
-见 §7。因此：
+见 §7。因此本阶段只开放：版本识别、扫描、导入、认证检查、保存快照。
 
-- `AICC_QODER_ENABLE_SWITCH=1` 且该版本 `verified_on_this_machine=true` 才允许真实切换；
-- 默认只开放：扫描、导入、认证检查、保存快照；
-- CN 永远不满足第二个条件，所以在复验前不可能发生真实写操作。
+`open` / `activate` 恒拒绝，**没有任何环境变量或调试开关**；写入 live 的实现
+只存在于测试构建。§9 记录了这条闸门的最终形态。
 
 ## 5. 进程与归属判定
 
-1. 启动：`<app>/Contents/MacOS/Qoder`（**不传任何参数**），注入
-   `AICC_QODER_PROFILE=<profile_id>`。
+1. 本阶段**不启动客户端**：`process::spawn` 已删除，产品里没有任何
+   "由 AICC 拉起 Qoder 再写 live"的路径。
 2. 探测是三态：`confirmed_stopped` / `confirmed_running` / `unknown`。
    `pgrep` 退出码 1 才算"确认没跑"；`pgrep` 不可用、退出码异常、或"报告有匹配但没给 PID"
    一律是 `unknown`，**禁止修改 live 认证**。
@@ -210,13 +209,16 @@ AICC 永远起不来客户端。
 1. **CN 全链路未复验**：装好 `Qoder CN` 后重跑 §1、§2、§4，确认
    `com.qodercn.app` 目录前缀、`Qoder CN App Safe Storage` 条目名、`--user-data-dir`
    是否同样被忽略。
-2. **International 解密未见明文**：需要人工在钥匙串弹窗点一次"始终允许"，
-   然后跑 `qoder.profiles.inspect` 补录 Token 指纹与到期时间。
+2. **International 解密已复验（2026-11-13）**：钥匙串 ACL 原本只信任
+   `/Applications/Qoder.app`（partition `teamid:B6U242QL73`），人工点过「始终允许」后
+   ACL 加入 AICC helper，`inspect` 读到真实指纹 `688d92f2`、到期
+   `2026-12-12T03:39:39Z`、UID `01a1afdc-…`。**ad-hoc 签名每次构建 cdhash 变化，
+   授权可能要重做**；有稳定证书后应改为按 designated requirement 授权。
 3. `auth-profile-overlays.v1.dat` 的语义尚未逆推；当前实现不读不写。
 4. **隔离未成立**：只换认证文件无法隔离 `main.sqlite` 里的账号数据（§7），
-   所以真实切换默认关闭；要打开必须先解决 §7.2 的最小安全快照并重新验证。
-5. 快照切换期间客户端必须处于退出状态：提交前会再 probe 一次，发现被外部启动就回滚；
-   但无法阻止用户在"写文件的那几百毫秒"里抢先启动。
+   所以切换永久关闭；要打开必须先解决 §7.2 的最小安全快照，并在代码里重新开放。
+5. 恢复未完成切换时客户端必须已退出：`recover` 会先 probe，`Running` / `Unknown`
+   一律拒绝；但无法阻止用户在"恢复的那几百毫秒"里抢先启动。
 
 ### 复验清单（装好 CN 后逐条打勾）
 
@@ -263,9 +265,9 @@ collaboration_runtime_credentials: account_id = qoder:prod:global:053f2aa8…, e
 
 ### 7.1 因此采取的措施
 
-1. `qoder.profiles.open` / `activate` **默认拒绝**，返回原因；
-2. 只有 `AICC_QODER_ENABLE_SWITCH=1` **且**该版本已在本机复验时才允许；
-3. CN 永远不满足"已复验"，所以 CN 在装好并验证前不可能发生真实写操作；
+1. `qoder.profiles.open` / `activate` **恒拒绝**，返回 `permanent:true` 与原因；
+2. 没有任何运行时开关：`switch_capability()` 恒为 `false`；
+3. 切换的写入实现（`begin` / `stage` / `commit`）只编进测试构建；
 4. 保留 `scan` / `import` / `inspect` / `capture`（都不写 live）。
 
 ### 7.2 最小安全快照（未来工作，不在本 PR）
@@ -293,16 +295,21 @@ stage   把快照组写成 live/.aicc-*.tmp，逐个校验 sha256
         提交前再 probe 一次客户端，发现被外部启动就回滚
 commit  逐个 rename 到正式位置，全组再校验一次 sha256 → phase=committed，删除 journal
 失败    任一步 I/O 失败 → rollback：按 manifest 把 live 组恢复原样（缺的文件删掉）
-崩溃    重启后 list/status/open 都会先跑 recover_pending：所有 prepared/staged 的 journal
-        一律按备份回滚，然后删日志
+崩溃    重启后**不会自动恢复**：list/status 只报告未完成 journal；
+        只有显式调用 recover、且确认客户端已退出，才按备份回滚
 ```
+
+**注意：`begin` / `stage` / `commit` 现在只存在于测试构建（`#[cfg(test)]`）。**
+交付的二进制里没有"开始一次切换"的入口，只有 `file_sha256`、`GROUP_FILES`
+和恢复用的 `rollback`。这是 §9 的硬闸门。
 
 要点：
 
 - **备份先落盘**：`begin` 之前不会动 live 一个字节；
 - 恢复证据来自 manifest 的 sha256，恢复后还要再校验一次；
 - 回滚失败会如实报错（不会假装成功）；
-- 备份目录保留最近 20 份，便于人工排查。
+- 备份目录保留最近 20 份，便于人工排查；
+- 恢复只处理 `prepared` / `staged` 两种未完成状态，终态日志直接清掉。
 
 对应的故障注入测试（`qoder_profiles::switch` + `manager`）：
 
@@ -318,3 +325,72 @@ commit  逐个 rename 到正式位置，全组再校验一次 sha256 → phase=c
 | 并发切换 | 唯一索引拒绝第二条 journal |
 | 切换窗口被外部启动 | 回滚并报错，live 回到原账号 |
 | CN 未复验 | 拒绝真实切换 |
+
+---
+
+## 9. 最终安全闸门（2026-11-13 复核后）
+
+复核发现上一版仍有三处可以绕过结论的路径，本轮全部封死：
+
+### 9.1 切换不再是"默认关闭"，而是**没有开关**
+
+上一版的条件是 `AICC_QODER_ENABLE_SWITCH=1` 且 `verified_on_this_machine()`。
+后者对 International 是编译期常量 `true`，所以一个环境变量就能重新打开
+"只换两个认证文件"的不完整切换——这与"隔离未成立"的结论矛盾。
+
+现在：
+
+| 项 | 状态 |
+| --- | --- |
+| `switch_capability()` | **恒返回 `false`**，不读任何环境变量 |
+| `qoder.profiles.open` / `activate` | 恒返回 `switchEnabled:false, permanent:true`，不探测进程、不建备份、不读写 live |
+| `switch::begin` / `stage` / `commit` / `clear_live` | `#[cfg(test)]`，**不编进交付二进制** |
+| `process::spawn` | 已删除：产品里没有任何"启动客户端后写 live"的路径 |
+
+要恢复切换，必须改代码补上完整隔离并重新做真机验收，不能靠配置。
+
+### 9.2 只读接口不再写 live
+
+`list` / `status` 之前会调用 `recover_pending()`。这意味着用户只是打开账号页面，
+就可能触发一次 live 认证文件回滚，而且恢复前没有再次确认客户端已退出。
+
+现在 `list` / `status` 只返回 `pendingSwitches`（journal id / profile / phase），
+零写入；恢复只走显式 `qoder.profiles.recover`：
+
+```text
+for each active journal:
+    找到对应版本的客户端可执行文件   找不到 → 拒绝（无法证明已退出）
+    pgrep 状态 = Stopped            Running / Unknown → 拒绝
+    rollback(按 manifest 恢复 + 校验)
+任一条失败 → 整个调用返回错误 + blocked 明细（不静默跳过）
+```
+
+### 9.3 保存快照是文件组事务
+
+`capture` 之前是"两个文件各自 rename"，第二个失败会留下 auth 新、overlay 旧的半套快照。
+现在：
+
+```text
+stage   复制 live 组到 <snapshot>/.aicc-capture-new-<id>/，逐个校验 sha256
+journal 写 <snapshot>/.aicc-capture.json（上一份文件名 + 哈希）
+commit  上一代整体挪进 .aicc-capture-old-<id>/，新一代挪到正式位置
+verify  全组逐字节比对 live
+失败    按 journal 把上一份完整快照搬回来；恢复不了就如实报错
+崩溃    下次 capture 先 heal：恢复到上一份完整快照再重新保存；
+        journal 存在时 inspect 拒绝读取，profile 标记 snapshotIncomplete
+```
+
+### 9.4 故障注入覆盖
+
+| 场景 | 断言 |
+| --- | --- |
+| 设置 `AICC_QODER_ENABLE_SWITCH=1` | `switchEnabled` 仍为 false；`open`/`activate` 拒绝 |
+| 拒绝切换 | live 哈希不变、无备份目录、无 journal、无运行记录 |
+| 有未完成 journal 时 `list` / `status` | 只报告 `pendingSwitches`，live 与 journal 都不变 |
+| `recover` 时 pgrep 不可用 | 拒绝恢复，live 不变 |
+| `recover` 时客户端在跑 | 拒绝恢复，live 不变 |
+| 客户端确认退出后 `recover` | live 恢复原值，journal 清空 |
+| 保存快照第二个文件复制失败 | 上一份完整快照原样保留 |
+| 保存快照第二个文件提交失败 | auth 与 overlay 一起回到上一份 |
+| 保存过程崩溃（有 journal + old/） | 下次 capture 先修复再提交，`healedCapture` 非空 |
+| CN 未复验 | `parallelInstances=unknown`，切换恒拒绝 |

@@ -7,7 +7,10 @@ import Foundation
 ///
 /// - `liveDir`：客户端真实数据目录（同版本共享）
 /// - `snapshotDir`：AICC 自己管的快照目录（每个 Profile 独占）
-/// - 切换账号 = 退出客户端 → 存回当前账号 → 写回目标快照 → 再启动
+///
+/// ⚠️ 快照只包含认证文件组，**不等于完整 Profile 隔离**：
+/// `main.sqlite` / `Local State` / Cookies 里仍有账号绑定数据。
+/// 所以本阶段 `switchEnabled` 恒为 false，`open` / `activate` 一律拒绝。
 ///
 /// 模型永远不含令牌，只有指纹（sha256 前 8 位）与到期时间。
 struct QoderProfile: Identifiable, Equatable {
@@ -27,8 +30,10 @@ struct QoderProfile: Identifiable, Equatable {
     let expiresAt: String?
     let managed: Bool
     let lastOpenedAt: String?
-    /// 快照里有没有认证文件。
+    /// 快照里有没有认证文件（上一次保存被中断时为 false）。
     let snapshotReady: Bool
+    /// 上一次保存快照没有完成，快照可能只有半套文件。
+    let snapshotIncomplete: Bool
     /// live 当前登录的是不是这个 Profile（按文件指纹比对）。
     let active: Bool
     /// 这个版本能不能做真实快照切换（默认关闭，原因见 switchBlockedReason）。
@@ -66,6 +71,7 @@ struct QoderProfile: Identifiable, Equatable {
         self.managed = json["managed"] as? Bool ?? true
         self.lastOpenedAt = json["lastOpenedAt"] as? String
         self.snapshotReady = json["snapshotReady"] as? Bool ?? false
+        self.snapshotIncomplete = json["snapshotIncomplete"] as? Bool ?? false
         self.active = json["active"] as? Bool ?? false
         self.switchEnabled = json["switchEnabled"] as? Bool ?? false
         self.switchBlockedReason = json["switchBlockedReason"] as? String
@@ -139,9 +145,9 @@ struct QoderProfile: Identifiable, Equatable {
         return authFingerprint
     }
 
-    /// 主按钮文案。切换默认关闭时按钮禁用，只保留"保存快照"这类安全动作。
+    /// 主按钮文案。本阶段切换恒为关闭，所以恒为"切换未开放"并禁用。
     var primaryActionTitle: String {
-        if !switchEnabled { return "切换暂不可用" }
+        if !switchEnabled { return "切换未开放" }
         if runtime.isRunning && active { return "已在此账号" }
         if !snapshotReady { return "登录并保存" }
         return active ? "打开" : "切换并打开"
@@ -256,7 +262,7 @@ enum ConsoleAccountSection: String, CaseIterable, Identifiable {
         switch self {
         case .workbuddy: return "扫码或从 Magpie 导入的 WorkBuddy 账号"
         case .qoderCN: return "国内版 Qoder，一个账号一份认证快照"
-        case .qoderGlobal: return "国际版 Qoder，与 CN 的账号和快照完全隔离"
+        case .qoderGlobal: return "国际版 Qoder，快照与 CN 分开存放"
         }
     }
 
@@ -266,5 +272,25 @@ enum ConsoleAccountSection: String, CaseIterable, Identifiable {
         case .qoderCN: return .cn
         case .qoderGlobal: return .global
         }
+    }
+}
+
+/// 未完成的切换日志（只读接口报出来的，恢复需要显式确认）。
+struct QoderPendingSwitch: Identifiable, Equatable {
+    let id: String
+    let profileId: String
+    let edition: String
+    let phase: String
+
+    init?(json: [String: Any]) {
+        guard let id = json["journalId"] as? String else { return nil }
+        self.id = id
+        self.profileId = json["profileId"] as? String ?? ""
+        self.edition = json["edition"] as? String ?? ""
+        self.phase = json["phase"] as? String ?? ""
+    }
+
+    var editionName: String {
+        QoderEdition(rawValue: edition)?.displayName ?? edition
     }
 }

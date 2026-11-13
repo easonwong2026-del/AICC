@@ -284,6 +284,7 @@ impl crate::storage::Db {
 
     // ---- 运行记录 ----
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_runtime(&mut self, record: &RuntimeRecord) -> RpcResult<()> {
         self.conn.execute(
             "INSERT INTO qoder_runtime (profile_id, pid, executable, launched_at)

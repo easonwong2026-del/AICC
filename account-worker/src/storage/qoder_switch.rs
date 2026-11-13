@@ -44,6 +44,7 @@ pub struct SwitchJournal {
 
 impl crate::storage::Db {
     /// 开一条切换日志。同一版本已有未完成日志时直接拒绝（并发保护）。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn begin_switch(&mut self, journal: &SwitchJournal) -> RpcResult<()> {
         let files_json = serde_json::to_string(&journal.files)
             .map_err(|e| RpcError::internal(format!("序列化文件清单失败：{e}")))?;

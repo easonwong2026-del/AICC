@@ -55,19 +55,19 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `providers.qoder.inspect` | 解密 `auth.v1.dat` 并给令牌指纹 | 否 |
 | `providers.qoder_global.presence` / `inspect` | 国际版同名的只读检查，**与 CN 分开**：自己的路径、自己的钥匙串条目 | 否 |
 | `qoder.editions.detect` | 报两个版本各自的 Bundle ID、安装路径、客户端版本、数据目录、是否允许并行实例、是否在本机复验过 | 否 |
-| `qoder.profiles.list` | 列出 Profile（可带 `edition` 过滤）；附带快照是否就绪、live 当前是否就是这个账号、运行状态 | 否 |
+| `qoder.profiles.list` | 列出 Profile（可带 `edition` 过滤）；附带快照是否就绪、live 当前是否就是这个账号、运行状态；**只读**：未完成切换只放在 `pendingSwitches` 里报告，不恢复 | 否 |
 | `qoder.profiles.scan` | 把客户端当前登录的账号登记成 Profile：复制一份快照，**不移动、不覆盖、不要求重新登录** | 否 |
 | `qoder.profiles.create` | 新建 Profile（AICC 托管的空快照目录） | 否 |
 | `qoder.profiles.import` | 登记一份已有账号快照目录（必须有 `auth.v1.dat`；`..` 与重复目录会被拒） | 否 |
 | `qoder.profiles.inspect` | 用对应版本的适配器解密**快照**，写回指纹/到期/身份；**不回传令牌** | 否 |
-| `qoder.profiles.capture` | 把客户端此刻的登录态存进该 Profile 的快照；**无法证明 live 属于该 Profile 时拒绝覆盖**（只写快照，不碰 live） | 否 |
+| `qoder.profiles.capture` | 把客户端此刻的登录态按**文件组事务**存进快照（暂存 → 校验 → 上一代备份 → 提交 → 全组校验；失败整体回退）；无法证明 live 属于该 Profile 时拒绝覆盖 | 否 |
 | `qoder.profiles.rename` | 只改 AICC 里的显示名 | 否 |
-| `qoder.profiles.open` | 快照切换并启动：**默认拒绝**（`AICC_QODER_ENABLE_SWITCH=1` 且版本已复验才放行）。放行时走"备份 → 暂存 → 校验 → 提交 → 启动核实"的文件组事务，失败按备份回滚 | 否 |
+| `qoder.profiles.open` | **本阶段永久拒绝**：返回 `switchEnabled:false, permanent:true`，不探测进程、不建备份、不读写 live（没有任何环境变量开关） | 否 |
 | `qoder.profiles.close` | 只关 AICC 自己拉起的进程；`force` 才升级 SIGKILL | 否 |
-| `qoder.profiles.activate` | 切换（等价于 `open`，`open` 内部已包含"先关后写"） | 否 |
+| `qoder.profiles.activate` | 与 `open` 相同，**永久拒绝** | 否 |
 | `qoder.profiles.remove` | 移除登记；`purge=true` 才删**AICC 快照**，客户端数据目录永远不动 | 否 |
-| `qoder.profiles.status` | 运行状态汇总（`running` / `stopped` / `unknown` 三态，每次都重新核实 PID） | 否 |
-| `qoder.profiles.recover` | 恢复上一次崩溃遗留的未完成切换（按备份回滚），没有记录时零写入 | 否 |
+| `qoder.profiles.status` | 运行状态汇总（`running` / `stopped` / `unknown` 三态，每次都重新核实 PID）；**只读**，未完成切换放在 `pendingSwitches` 里 | 否 |
+| `qoder.profiles.recover` | **显式**恢复未完成切换：必须能证明对应客户端已退出（`pgrep` 退出码 1），`Running` / `Unknown` / 找不到客户端都拒绝；任一条恢复失败返回错误 + `blocked` 明细 | 否 |
 | `auth.workbuddy.start` / `poll` / `cancel` | 官方 OAuth 扫码：发起、轮询、取消（PR1b-1） | 是 |
 | `auth.workbuddy.refresh` | 刷新令牌；`auth_source=magpie` 的账号改为重新同步 | 是 |
 | `auth.workbuddy.status` | 用当前选用的授权探测一次登录态（只读）：先 `Valid/Unauthorized/Transient` 分类，再过 401 才切源 | 是 |
