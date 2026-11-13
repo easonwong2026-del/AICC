@@ -7,6 +7,7 @@
 mod app;
 mod auth;
 mod clock;
+mod growth;
 mod handlers;
 mod paths;
 mod providers;

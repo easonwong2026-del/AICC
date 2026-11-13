@@ -55,6 +55,8 @@ pub const METHODS: &[&str] = &[
     "travel.setEnabled",
     "travel.auto.status",
     "travel.auto.tick",
+    // ---- 成长中心（PR #67：只读）----
+    "growth.scan",
 ];
 
 pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult<Value> {
@@ -231,7 +233,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
             let key = require_str(params, "key")?;
             let value = require_str(params, "value")?;
             require_setting_key(&key)?;
-            let mut mirror_errors: Vec<Value> = Vec::new();
+            let mirror_errors: Vec<Value>;
             match key.as_str() {
                 crate::auth::broker::PREFERRED_SETTING => {
                     // 与授权写入串行：切首选来源的同时在跑 resync，镜像会来回翻。
@@ -277,6 +279,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                 "kind": kind,
                 "deleted": report.record_deleted,
                 "removedKeys": report.removed_keys.len(),
+                // 镜像没同步上不影响删除本身，但必须让调用方看见。
+                "mirrorError": report.mirror_error,
             }))
         }
 
@@ -409,6 +413,50 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
         "travel.auto.status" => Ok(travel_scheduler::auto_status(app)),
 
         "travel.auto.tick" => Ok(travel_scheduler::run_tick(app).await),
+
+        // ---- 成长中心（PR #67：只读）----
+        //
+        // 一次调用扫完（或扫指定）账号，返回每个账号的任务、积分、能量、连签
+        // 与旅行状态。**这里没有任何写接口**：接受任务、领奖在 #68，
+        // 每个都会有自己的开关与验收。
+        //
+        // 与签到 / 旅行共用同一把凭据锁：扫描虽然只读，但读的是同一份 access，
+        // 不能与「正在轮换令牌」的写入撞在一起。
+        "growth.scan" => {
+            let ids: Vec<String> = params
+                .get("accountIds")
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let scans = crate::growth::scan_fleet(app, &ids).await;
+            let overview = crate::growth::overview(&scans);
+            // 扫描日志：只记结论，不记令牌与任务正文。
+            let summary: Vec<String> = scans
+                .iter()
+                .map(|scan| {
+                    format!(
+                        "{}={}(tasks {}, claimable {}, errors {})",
+                        scan.account_id,
+                        scan.state,
+                        scan.counts.total,
+                        scan.counts.claimable,
+                        scan.errors.len()
+                    )
+                })
+                .collect();
+            log_note(&format!("成长中心扫描：{}", summary.join("; ")));
+            Ok(json!({
+                "scans": scans,
+                "overview": overview,
+                "scannedAt": crate::clock::now_rfc3339(),
+                "readOnly": true,
+            }))
+        }
 
         "auth.magpie.import" => {
             let keys: Vec<String> = params
