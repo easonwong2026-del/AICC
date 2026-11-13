@@ -334,6 +334,82 @@ final class AccountWorkerManager: ObservableObject {
         )
     }
 
+    // MARK: - 每日签到（PR #69）
+
+    /// 查今日签到状态。默认会真的问一次服务端（只读 POST）；`cached` 时不联网。
+    ///
+    /// 超时 90 秒：账号之间串行，每个账号一次状态查询。
+    func checkinStatus(accountIds: [String] = [], cached: Bool = false) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        var params: [String: Any] = [:]
+        if !accountIds.isEmpty { params["accountIds"] = accountIds }
+        if cached { params["cached"] = true }
+        return try await client.call(
+            "checkin.status",
+            params: params,
+            timeout: cached ? 15 : 90
+        )
+    }
+
+    /// 用户显式点「立即签到」。不受自动开关约束，但仍然先查服务端。
+    func checkinRun(accountId: String) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call(
+            "checkin.run",
+            params: ["accountId": accountId],
+            timeout: 60
+        )
+    }
+
+    /// 批量：只签服务端确认未签到的账号。
+    func checkinRunPending(accountIds: [String] = []) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call(
+            "checkin.runPending",
+            params: accountIds.isEmpty ? [:] : ["accountIds": accountIds],
+            timeout: 180
+        )
+    }
+
+    /// 单账号自动签到开关。**不碰授权版本**（worker 里走专用写入）。
+    func checkinSetEnabled(accountId: String, enabled: Bool) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call(
+            "checkin.setEnabled",
+            params: ["accountId": accountId, "enabled": enabled],
+            timeout: 15
+        )
+    }
+
+    func checkinAutoStatus() async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call("checkin.auto.status", timeout: 10)
+    }
+
+    /// 跑一轮自动签到。`force` 只跳过时间判断，不绕过账号开关。
+    func checkinTick(force: Bool = false) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call(
+            "checkin.auto.tick",
+            params: force ? ["force": true] : [:],
+            timeout: 180
+        )
+    }
+
+    func checkinRecords(accountId: String? = nil, limit: Int = 30) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        var params: [String: Any] = ["limit": limit]
+        if let accountId { params["accountId"] = accountId }
+        return try await client.call("checkin.records", params: params, timeout: 15)
+    }
+
     private func ensureRunning() async throws {
         if case .running = state { return }
         await refresh()
