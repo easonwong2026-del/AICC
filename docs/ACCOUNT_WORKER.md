@@ -66,6 +66,13 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `travel.claim` | 手动领取奖励（只有 arrived 才提交） | 是 |
 | `travel.auto.status` | 调度器信息：承载进程、间隔、上次 tick | 否 |
 | `travel.auto.tick` | 立刻跑一轮自动检查（调试 / 手动触发） | 是 |
+| `checkin.status` | 今日签到状态（只读）：默认向服务端查每个账号，`cached` 时只读本地 | 是（只读语义） |
+| `checkin.run` | 用户显式签到单账号：先查状态，已签到就返回 `already` | 是（仅未签到时） |
+| `checkin.runPending` | 用户显式批量签到：只处理服务端确认未签到的账号 | 是（仅未签到时） |
+| `checkin.setEnabled` | 每账号自动签到开关（默认关）；**不动 `auth_epoch`** | 否 |
+| `checkin.auto.status` | 计划时间、下次执行、尝试次数与每账号状态 | 否 |
+| `checkin.auto.tick` | 跑一轮自动签到；`force` 只跳过时间判断，不绕过开关与每日次数上限 | 是（开关打开时） |
+| `checkin.records` | 签到历史与每次尝试（`checkin_records` + `task_executions`） | 否 |
 
 `health` **故意不做**钥匙串探针：否则每次启动 App 都会弹一次系统授权框。
 需要验证凭据存储时显式调 `secure.status`（设置页有按钮）。探针的读写删三步全成功才报 `ok`，
@@ -201,6 +208,26 @@ AICC 的取法是**只读文件、只借 access**：
   `auth_mirror_auth_id` 一起写，并且旧别名键同步指向同一份授权；
 - 探测用 `Valid / Unauthorized / Transient` 三分类，只有明确的 401 触发切源，
   429 / 5xx / 超时 / 判不出来的 403 不改状态。
+
+## 5.7 WorkBuddy 每日签到（PR #69）
+
+签到是**独立模块**（`account-worker/src/checkin/`），不并入成长中心自动接单：
+用户可以只开签到，不碰旅行和成长中心。
+
+三条铁律，改动前先读：
+
+1. **服务端是唯一事实来源。** 每轮先查 `today_checked_in`，已签到就跳过写请求；
+   缺这个布尔值一律 `unknown`、**不提交**（上游用 `unwrap_or(false)`，AICC 不复用）。
+2. **只有回查确认才记成功。** HTTP 200 / 业务码 0 都只算"已受理"，
+   回查 `today_checked_in == true` 才落 `claimed` 与奖励；奖励缺失存 NULL。
+3. **签到开关不走 `accounts.upsert`。** `upsert` 每次都推进 `auth_epoch`，
+   点一下开关会把在途的凭据快照全废掉。用 `Db::set_checkin_enabled()`。
+
+接口证据（含未验证项）、状态机、调度参数与数据库变更全部在
+[`docs/WORKBUDDY_CHECKIN_API.md`](WORKBUDDY_CHECKIN_API.md)。
+
+数据库到 **v10**：`checkin_records` 加 `error_kind` / `execution_source` 两列，
+每次尝试复用 `task_executions`（`task_kind = 'daily_checkin'`）。
 
 ## 6. PR1a 交付范围
 

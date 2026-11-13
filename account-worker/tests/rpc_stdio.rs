@@ -662,3 +662,117 @@ fn authorization_delete_only_removes_the_requested_kind() {
 
     session.call(8, "worker.shutdown", json!({}));
 }
+
+// ---------------------------------------------------------------------------
+// PR #69：每日签到
+// ---------------------------------------------------------------------------
+
+/// 开关是一次普通写入：**不许推进 auth_epoch**（PRD §2 的那个坑）。
+#[test]
+fn checkin_switch_over_rpc_does_not_bump_the_credential_epoch() {
+    let mut session = Session::start();
+    let created = session.call(
+        1,
+        "accounts.upsert",
+        json!({"platform": "workbuddy", "uid": "wb-checkin-1", "nickname": "卡里"}),
+    );
+    let id = created["result"]["id"].as_str().expect("id").to_string();
+    let epoch = created["result"]["authEpoch"].clone();
+
+    let on = session.call(
+        2,
+        "checkin.setEnabled",
+        json!({"accountId": id, "enabled": true}),
+    );
+    assert_eq!(on["result"]["enabled"], json!(true), "{on}");
+    assert_eq!(on["result"]["auto"]["enabledAccounts"], json!(1));
+
+    let after = session.call(3, "accounts.get", json!({"id": id}));
+    assert_eq!(after["result"]["checkinEnabled"], json!(true));
+    assert_eq!(
+        after["result"]["authEpoch"], epoch,
+        "开关不是凭据变更，不许动 auth_epoch"
+    );
+
+    let off = session.call(
+        4,
+        "checkin.setEnabled",
+        json!({"accountId": id, "enabled": false}),
+    );
+    assert_eq!(off["result"]["enabled"], json!(false));
+    assert_eq!(off["result"]["auto"]["enabledAccounts"], json!(0));
+
+    let missing = session.call(
+        5,
+        "checkin.setEnabled",
+        json!({"accountId": "nope", "enabled": true}),
+    );
+    assert_eq!(missing["error"]["code"], json!(1003), "{missing}");
+
+    session.call(6, "worker.shutdown", json!({}));
+}
+
+/// `cached: true` 的只读状态：不联网、不带令牌、没有账号也不是错误。
+#[test]
+fn cached_checkin_status_is_offline_and_token_free() {
+    let mut session = Session::with_magpie();
+    session.call(1, "auth.magpie.import", json!({}));
+
+    let reply = session.call(2, "checkin.status", json!({"cached": true}));
+    let accounts = reply["result"]["accounts"].as_array().expect("accounts");
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(reply["result"]["cached"], json!(true));
+    assert_eq!(reply["result"]["counts"]["checked"], json!(0));
+    assert_eq!(
+        accounts[0]["state"],
+        json!("unknown"),
+        "本地没记录就是未知，不猜"
+    );
+
+    let text = reply.to_string();
+    assert!(
+        !text.contains(&"a".repeat(200)),
+        "不许把 access token 带进响应"
+    );
+    assert!(!text.contains("refresh"), "不许出现 refresh");
+
+    session.call(3, "worker.shutdown", json!({}));
+}
+
+/// 没开任何账号的自动签到时，一轮 tick 立刻返回，不发请求。
+#[test]
+fn checkin_tick_without_enabled_accounts_is_idle() {
+    let mut session = Session::start();
+    let reply = session.call(1, "checkin.auto.tick", json!({}));
+    assert_eq!(
+        reply["result"]["skipped"],
+        json!("no_accounts_enabled"),
+        "{reply}"
+    );
+    let status = session.call(2, "checkin.auto.status", json!({}));
+    assert_eq!(status["result"]["planTime"], json!("09:00"));
+    assert_eq!(status["result"]["enabled"], json!(false));
+    session.call(3, "worker.shutdown", json!({}));
+}
+
+/// 签到记录是空的就返回空数组，不编造历史。
+#[test]
+fn checkin_records_start_empty() {
+    let mut session = Session::start();
+    let created = session.call(
+        1,
+        "accounts.upsert",
+        json!({"platform": "workbuddy", "uid": "wb-checkin-2"}),
+    );
+    let id = created["result"]["id"].as_str().expect("id").to_string();
+
+    let reply = session.call(2, "checkin.records", json!({"accountId": id}));
+    assert_eq!(reply["result"]["records"].as_array().unwrap().len(), 0);
+    assert_eq!(reply["result"]["attempts"].as_array().unwrap().len(), 0);
+
+    // 参数不全会给明确的 invalid_params，而不是 panic 或空成功。
+    let bad = session.call(3, "checkin.run", json!({}));
+    assert_eq!(bad["error"]["code"], json!(-32602), "{bad}");
+
+    session.call(4, "worker.shutdown", json!({}));
+}

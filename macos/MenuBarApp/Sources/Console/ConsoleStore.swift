@@ -44,6 +44,18 @@ final class ConsoleStore: ObservableObject {
     /// 最近一次手动检查 / 开关动作的一句话结果。
     @Published private(set) var growthNotice: String?
 
+    /// 每日签到（PR #69）。首屏先用本地缓存出图，联网查询由用户点按钮触发。
+    @Published private(set) var checkin: CheckinFleetStatus = .empty
+    @Published private(set) var checkinAuto: CheckinAutoStatus = .unknown
+    @Published private(set) var checkinError: String?
+    @Published private(set) var checkinLoading = false
+    /// 正在执行动作的账号，用来禁用该行按钮。
+    @Published private(set) var checkinActing: String?
+    /// 批量操作进行中。
+    @Published private(set) var checkinBatching = false
+    /// 最近一次动作的一句话结果。
+    @Published private(set) var checkinNotice: String?
+
     let worker: AccountWorkerManager
     private let settings: AppSettings
 
@@ -272,6 +284,102 @@ final class ConsoleStore: ObservableObject {
         for scan in growthResult.scans {
             guard let runs = try? await worker.growthRuns(accountId: scan.accountId) else { continue }
             growthRuns[scan.accountId] = GrowthRuns(json: runs)
+        }
+    }
+
+    // MARK: - 每日签到（PR #69）
+
+    /// 读签到状态。`cached: true` 只读本地库（不联网），用于首屏与快速刷新。
+    ///
+    /// 默认不联网：一次 refresh 要给每个账号发一个只读状态请求，
+    /// 静默轮询会把接口打成筛子，也违背"我没让它联网"的预期。
+    func loadCheckin(cached: Bool = true, silent: Bool = false) async {
+        guard !checkinLoading else { return }
+        checkinLoading = true
+        defer { checkinLoading = false }
+        do {
+            let json = try await worker.checkinStatus(cached: cached)
+            checkin = CheckinFleetStatus(json: json)
+            checkinError = nil
+            if !silent { checkinNotice = nil }
+            await loadCheckinAuto()
+        } catch {
+            if !silent {
+                checkinError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            }
+        }
+    }
+
+    /// 联网刷新全部账号的今日状态（只读，不提交任何签到）。
+    func refreshCheckinStatus() async {
+        await loadCheckin(cached: false)
+        if checkinError == nil {
+            let checked = checkin.counts.checked
+            checkinNotice = "已刷新 \(checkin.counts.accounts) 个账号，今日 \(checked) 个已签到"
+        }
+    }
+
+    func loadCheckinAuto() async {
+        do {
+            checkinAuto = CheckinAutoStatus(json: try await worker.checkinAutoStatus())
+        } catch {
+            // 次要信息，读不到就保持原样，不把整页打成错误态。
+        }
+    }
+
+    func setCheckinEnabled(_ row: CheckinAccountRow, enabled: Bool) async {
+        checkinActing = row.accountId
+        defer { checkinActing = nil }
+        do {
+            _ = try await worker.checkinSetEnabled(accountId: row.accountId, enabled: enabled)
+            checkinNotice = enabled
+                ? "已开启 \(row.nickname) 的自动签到：每天 09:00 后检查一次"
+                : "已关闭 \(row.nickname) 的自动签到"
+            // 开关是本地状态，读缓存就够，不必再打一次接口。
+            await loadCheckin(cached: true, silent: true)
+            await refreshAccounts()
+        } catch {
+            checkinNotice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    /// 单账号「立即签到」：用户显式操作，不受自动开关限制。
+    func runCheckin(_ row: CheckinAccountRow) async {
+        checkinActing = row.accountId
+        defer { checkinActing = nil }
+        do {
+            let json = try await worker.checkinRun(accountId: row.accountId)
+            let state = CheckinState(raw: json["state"] as? String)
+            let credits = CheckinJSON.int(json["credits"])
+            switch state {
+            case .claimed:
+                checkinNotice = credits.map { "\(row.nickname) 签到成功 +\($0)" }
+                    ?? "\(row.nickname) 签到成功（服务端未返回奖励数额）"
+            case .already:
+                checkinNotice = "\(row.nickname) 今天已经签过了，本次没有重复提交"
+            case .unknown:
+                checkinNotice = "\(row.nickname) 已提交但服务端没确认，等下一轮重查"
+            default:
+                let detail = json["errorDetail"] as? String
+                checkinNotice = detail.map { "\(row.nickname) 未完成：\($0)" }
+                    ?? "\(row.nickname) 未完成（\(state.title)）"
+            }
+            await loadCheckin(cached: true, silent: true)
+        } catch {
+            checkinNotice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    /// 批量「立即签到未完成账号」。只签服务端确认未签到的那些。
+    func runPendingCheckins() async {
+        checkinBatching = true
+        defer { checkinBatching = false }
+        do {
+            let json = try await worker.checkinRunPending()
+            checkinNotice = json["summary"] as? String ?? "已完成"
+            await loadCheckin(cached: true, silent: true)
+        } catch {
+            checkinNotice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
     }
 

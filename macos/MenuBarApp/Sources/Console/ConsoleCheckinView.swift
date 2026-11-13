@@ -2,8 +2,15 @@ import SwiftUI
 
 /// 签到任务页。
 ///
-/// 本阶段只做**展示**：任务清单与账号对应关系来自 PRD，执行状态来自账号库
-/// （`checkin_enabled`）。没有执行记录就是没有，不伪造"已签到"。
+/// 三块已接入的能力，各自独立开关，互不牵连：
+///
+/// | 区域 | 状态 | 会不会写服务端 |
+/// | --- | --- | --- |
+/// | WorkBuddy 每日签到 | PR #69 接入 | 只在你点按钮或开了自动开关后写，且先查状态 |
+/// | 成长中心 | #67 只读扫描 / #68 自动接单与领奖 | 开关关着时只读 |
+/// | Buddy 旅行 | #64 接入 | 是你点按钮或开自动开关后才会请求 |
+///
+/// 没有执行记录就是没有，不伪造"已签到"。
 struct ConsoleCheckinView: View {
     @ObservedObject var store: ConsoleStore
 
@@ -18,9 +25,9 @@ struct ConsoleCheckinView: View {
     }
 
     private let tasks: [TaskDefinition] = [
-        .init(id: "wb-daily", title: "WorkBuddy 每日签到", detail: "查询当日状态并领取",
-              symbol: "calendar.badge.checkmark", platform: "WorkBuddy"),
-        .init(id: "wb-growth", title: "成长中心任务", detail: "任务、积分、能量与连签（只读）",
+        .init(id: "wb-daily", title: "WorkBuddy 每日签到", detail: "查询当日状态并领取，多账号独立开关",
+              symbol: "calendar.badge.checkmark", platform: "WorkBuddy", wired: true),
+        .init(id: "wb-growth", title: "成长中心任务", detail: "任务、积分、能量与连签，可自动接单与领奖",
               symbol: "sparkles", platform: "WorkBuddy", wired: true),
         .init(id: "wb-travel", title: "Buddy 旅行", detail: "派出、到达与奖励领取",
               symbol: "airplane", platform: "WorkBuddy", wired: true),
@@ -30,13 +37,22 @@ struct ConsoleCheckinView: View {
 
     @State private var platformFilter: ConsolePlatformFilter = .all
 
+    private var wiredCount: Int { tasks.filter(\.wired).count }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             notice
             taskSection
+            ConsoleCheckinSection(store: store)
             ConsoleGrowthSection(store: store)
             ConsoleTravelSection(store: store)
             accountSection
+        }
+        .task {
+            // 首屏只读本地记录：不联网、不提交任何东西。
+            if store.checkin.rows.isEmpty {
+                await store.loadCheckin(cached: true)
+            }
         }
     }
 
@@ -44,7 +60,7 @@ struct ConsoleCheckinView: View {
         HStack(spacing: 9) {
             Image(systemName: "info.circle")
                 .font(.system(size: 11))
-            Text("成长中心已接入只读扫描：只查任务与奖励状态，不会接受任务或领奖。Buddy 旅行已接入：只在你点按钮或开启自动开关后才会请求服务端。签到尚未接入。")
+            Text("WorkBuddy 每日签到已接入：每个账号一个开关，默认关闭；每天 09:00（北京时间）后检查一次，服务端已签到就跳过。成长中心可自动接单与领奖，Buddy 旅行按开关执行。所有写操作都只在 AICC 运行时发生。")
                 .font(.system(size: 11))
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
@@ -60,7 +76,7 @@ struct ConsoleCheckinView: View {
 
     private var taskSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ConsoleSectionTitle(title: "任务", detail: "共 \(tasks.count) 项 · 1 项已接入")
+            ConsoleSectionTitle(title: "任务", detail: "共 \(tasks.count) 项 · \(wiredCount) 项已接入")
             ConsoleCard(padding: 0) {
                 VStack(spacing: 0) {
                     ForEach(Array(tasks.enumerated()), id: \.element.id) { index, task in
@@ -106,21 +122,33 @@ struct ConsoleCheckinView: View {
 
             Button(task.wired ? "查看" : "立即执行") {
                 Task {
-                    // 两个已接入的任务分别对应下方两块区域：成长中心只读扫描、
-                    // 旅行读本地快照。点错区域比点错按钮更容易让人困惑，所以分开调。
-                    if task.id == "wb-growth" {
+                    // 已接入的任务各自对应下方一块区域。签到与成长中心都要联网，
+                    // 所以点「查看」触发的是对应区域的读取动作，而不是假按钮。
+                    switch task.id {
+                    case "wb-daily":
+                        await store.refreshCheckinStatus()
+                    case "wb-growth":
                         await store.loadGrowth()
-                    } else {
+                    default:
                         await store.loadTravel()
                     }
                 }
             }
             .buttonStyle(ConsoleSecondaryButtonStyle())
             .disabled(!task.wired)
-            .help(task.id == "wb-growth" ? "扫描成长中心（只读）" : (task.wired ? "刷新下方的 Buddy 旅行区域" : "后续版本接入"))
+            .help(taskHelp(task))
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 11)
+    }
+
+    private func taskHelp(_ task: TaskDefinition) -> String {
+        switch task.id {
+        case "wb-daily": return "向服务端查一次今日签到状态（只读，不会签到）"
+        case "wb-growth": return "扫描成长中心（只读）"
+        case "wb-travel": return "刷新下方的 Buddy 旅行区域"
+        default: return "后续版本接入"
+        }
     }
 
     private var accountSection: some View {
@@ -164,7 +192,9 @@ struct ConsoleCheckinView: View {
     }
 
     private func accountRow(_ account: ConsoleAccount) -> some View {
-        HStack(spacing: 10) {
+        // 签到那一列优先用真实结论；本地没记录就说"暂无记录"，不写"已签到"。
+        let checkinRow = store.checkin.row(account.id)
+        return HStack(spacing: 10) {
             Image(systemName: account.symbolName)
                 .font(.system(size: 11))
                 .foregroundStyle(ConsoleTheme.secondaryText)
@@ -177,13 +207,18 @@ struct ConsoleCheckinView: View {
                 .font(.system(size: 10))
                 .foregroundStyle(ConsoleTheme.tertiaryText)
             Spacer(minLength: 8)
-            Text(account.checkinEnabled ? "签到已开启" : "签到未开启")
+            Text(checkinRow?.state.title ?? "暂无记录")
                 .font(.system(size: 10))
                 .foregroundStyle(ConsoleTheme.secondaryText)
-            Text("暂无执行记录")
+            Text(checkinRow == nil ? "—" : checkinRow!.creditsText)
                 .font(.system(size: 10))
+                .monospacedDigit()
                 .foregroundStyle(ConsoleTheme.tertiaryText)
-                .frame(width: 92, alignment: .trailing)
+                .frame(width: 52, alignment: .trailing)
+            Text(account.checkinEnabled ? "自动签到已开" : "自动签到未开")
+                .font(.system(size: 10))
+                .foregroundStyle(ConsoleTheme.secondaryText)
+                .frame(width: 96, alignment: .trailing)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)

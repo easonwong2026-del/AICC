@@ -62,6 +62,14 @@ pub const METHODS: &[&str] = &[
     "growth.auto.setEnabled",
     "growth.auto.tick",
     "growth.runs",
+    // ---- WorkBuddy 每日签到（PR #69）----
+    "checkin.status",
+    "checkin.run",
+    "checkin.runPending",
+    "checkin.setEnabled",
+    "checkin.auto.status",
+    "checkin.auto.tick",
+    "checkin.records",
 ];
 
 pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult<Value> {
@@ -508,6 +516,80 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                     "grantedEnergy": energy,
                 }))
             })
+        }
+
+        // ---- WorkBuddy 每日签到（PR #69）----
+        //
+        // 三个只读、三个显式写、一个调度。规则：
+        // - `checkin.status` 只查状态，**不提交**；`cached` 时连网络都不碰。
+        // - `checkin.run` / `checkin.runPending` 是用户点的按钮，不受自动开关约束，
+        //   但仍然先查服务端状态，已签到就返回 already，不会重复提交。
+        // - 返回里没有任何令牌，也不接受外部 URL。
+        "checkin.status" => {
+            let ids = string_list(params, "accountIds");
+            let cached = params
+                .get("cached")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Ok(crate::checkin::fleet_status(app, &ids, cached).await)
+        }
+
+        "checkin.run" => {
+            let id = require_str(params, "accountId")?;
+            let outcome = crate::checkin::run_one(app, &id).await?;
+            log_note(&format!(
+                "手动签到 {}：{}",
+                id,
+                outcome.get("state").and_then(Value::as_str).unwrap_or("?")
+            ));
+            Ok(outcome)
+        }
+
+        "checkin.runPending" => {
+            let ids = string_list(params, "accountIds");
+            let result = crate::checkin::run_pending(app, &ids).await;
+            log_note(&format!(
+                "批量签到：{}",
+                result.get("summary").and_then(Value::as_str).unwrap_or("?")
+            ));
+            Ok(result)
+        }
+
+        "checkin.setEnabled" => {
+            let id = require_str(params, "accountId")?;
+            let enabled = require_bool(params, "enabled")?;
+            // 专用写入：不走 accounts.upsert，所以不动 auth_epoch（PRD §2）。
+            crate::checkin::scheduler::set_enabled(app, &id, enabled)?;
+            log_note(&format!(
+                "账号 {id} 的自动签到{}",
+                if enabled { "已开启" } else { "已关闭" }
+            ));
+            Ok(json!({
+                "accountId": id,
+                "enabled": enabled,
+                "auto": crate::checkin::scheduler::auto_status(app),
+            }))
+        }
+
+        "checkin.auto.status" => Ok(crate::checkin::scheduler::auto_status(app)),
+
+        // `force` 只跳过"到点没到点"，**不绕过账号开关**。
+        "checkin.auto.tick" => {
+            let force = params
+                .get("force")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Ok(crate::checkin::scheduler::run_tick(app, force).await)
+        }
+
+        "checkin.records" => {
+            let id = params.get("accountId").and_then(Value::as_str);
+            let limit = params
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(30)
+                .min(200) as u32;
+            crate::checkin::records(app, id, limit)
         }
 
         "auth.magpie.import" => {
@@ -1491,6 +1573,21 @@ fn require_str(params: &Value, key: &str) -> RpcResult<String> {
         .map(str::to_string)
         .filter(|v| !v.trim().is_empty())
         .ok_or_else(|| RpcError::invalid_params(format!("缺少参数 {key}")))
+}
+
+/// 可选的字符串数组参数。缺省 / `null` / 类型不对都当空数组（= 全部）。
+fn string_list(params: &Value, key: &str) -> Vec<String> {
+    params
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
