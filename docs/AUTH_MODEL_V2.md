@@ -258,6 +258,7 @@ v7 之后进入双写期：所有授权操作走 Broker / Authorization Service�
 - 下线镜像列（或标 `deprecated` 保留一版）。
 
 本 PR 的代码里**不出现 v8 迁移**，`LATEST_VERSION` 停在 7。
+（后续：#67/#68 用到 v9，#69 用到 v10；v8 仍然空着留给这里的钥匙串清理。）
 
 ### 5.6 回滚路径（G3）
 
