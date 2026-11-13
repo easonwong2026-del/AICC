@@ -270,7 +270,8 @@ enum ConsolePlatformFilter: String, CaseIterable, Identifiable {
     /// 老口径：只看 `accounts` 表里的账号（WorkBuddy）。
     func includes(_ account: ConsoleAccount) -> Bool {
         switch self {
-        case .all, .workbuddy: return true
+        case .all: return true
+        case .workbuddy: return account.platform == "workbuddy"
         case .qoder: return account.platform == "qoder_cn"
         case .qoderGlobal: return account.platform == "qoder_global"
         }
