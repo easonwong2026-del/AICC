@@ -408,7 +408,8 @@ WorkBuddy AI 是另一个站点，拿它的授权请求这些接口，轻则 401
 | `qoder_cn` / `qoder_global` | **无** | `unverified`，零请求 |
 
 接口细节与实测证据见 `docs/WORKBUDDY_QUOTA_API.md`；Qoder 的阻塞依据见
-`docs/QODER_QUOTA_BLOCKER.md`。
+`docs/QODER_QUOTA_BLOCKER.md`。真机界面截图见
+`docs/verification/quota-board-m4-2026-11-14.png`（5 个真实账号，钥匙串直读，非注入令牌）。
 
 统一模型（`quota.board` 每行）：
 
