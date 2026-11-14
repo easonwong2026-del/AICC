@@ -172,6 +172,11 @@ struct ConsoleAccount: Identifiable, Equatable {
 
     var isWorkbuddyAI: Bool { platform == "workbuddy" && provider == "workbuddy_ai" }
 
+    var workbuddyVariant: WorkbuddyVariant? {
+        guard platform == "workbuddy" else { return nil }
+        return provider == "workbuddy_ai" ? .ai : .cn
+    }
+
     /// 签到 / 成长 / 旅行 / 授权检查目前只实现了**国内版**协议。
     /// 界面据此把入口显示为"暂不支持"，而不是发一个注定失败的请求。
     var supportsCNTasks: Bool { platform == "workbuddy" && provider == "workbuddy" }
@@ -348,13 +353,53 @@ struct WorkbuddyLoginStart: Equatable {
     let loginId: String
     let verificationUri: String
     let expiresIn: Int
+    /// `cn` / `ai`。登录会话本身绑死档位：轮询成功后的账号 provider 由它决定。
+    let variant: WorkbuddyVariant
 
     static func parse(_ json: [String: Any]) -> WorkbuddyLoginStart? {
         guard let loginId = json["loginId"] as? String, !loginId.isEmpty else { return nil }
         let uri = (json["verificationUri"] as? String) ?? (json["qrPayload"] as? String) ?? ""
         guard !uri.isEmpty else { return nil }
         let expires = (json["expiresIn"] as? NSNumber)?.intValue ?? 600
-        return WorkbuddyLoginStart(loginId: loginId, verificationUri: uri, expiresIn: expires)
+        let variant = (json["variant"] as? String).flatMap(WorkbuddyVariant.init(rawValue:)) ?? .cn
+        return WorkbuddyLoginStart(
+            loginId: loginId,
+            verificationUri: uri,
+            expiresIn: expires,
+            variant: variant
+        )
+    }
+}
+
+/// WorkBuddy 的两个站点。**同一套 `platform`，不同 `provider`**：
+/// 登录、令牌、接口域名全部按它隔离，混用会把国际版令牌发到国内域名。
+enum WorkbuddyVariant: String, CaseIterable, Identifiable {
+    case cn
+    case ai
+
+    var id: String { rawValue }
+
+    /// 界面上的名字。国际版必须写全，不能只叫 "WorkBuddy"。
+    var title: String {
+        switch self {
+        case .cn: return "WorkBuddy"
+        case .ai: return "WorkBuddy AI"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .cn: return "国内版 · workbuddy.cn"
+        case .ai: return "国际版 · workbuddy.ai"
+        }
+    }
+
+    /// `accounts.provider` 的值。
+    var provider: String {
+        switch self {
+        case .cn: return "workbuddy"
+        case .ai: return "workbuddy_ai"
+        }
     }
 }
 

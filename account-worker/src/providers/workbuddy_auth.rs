@@ -242,6 +242,36 @@ fn expires_at_ms(data: &Value, absolute: &str, relative: &str) -> Option<i64> {
     })
 }
 
+/// AICC 的 `accounts.provider` 值。
+///
+/// 两个站点共用 `platform = "workbuddy"`，靠 provider 区分：这是 v13 定下的模型，
+/// 签到 / 成长 / 旅行 / 授权检查都按它判断能不能走国内版接口。
+pub fn provider_of(variant: WbVariant) -> &'static str {
+    match variant {
+        WbVariant::Cn => "workbuddy",
+        WbVariant::Ai => "workbuddy_ai",
+    }
+}
+
+/// 严格解析 RPC 参数里的 `variant`（`cn` / `ai`）。
+///
+/// 不用 `WbVariant::parse`：它对未知值一律回落国内版，那会让"写错参数"
+/// 变成"悄悄用国内版登录国际账号"。
+pub fn parse_variant(raw: &str) -> Option<WbVariant> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "cn" => Some(WbVariant::Cn),
+        "ai" | "intl" | "global" => Some(WbVariant::Ai),
+        _ => None,
+    }
+}
+
+/// 会话属于哪个档位。轮询成功后按它决定 `provider`，避免把国际版令牌
+/// 记成国内版账号。
+pub fn session_variant(login_id: &str) -> Option<WbVariant> {
+    let map = sessions().lock().expect("sessions");
+    map.get(login_id).map(|session| session.variant)
+}
+
 /// 钥匙串里的键名。按 uid 隔离，换账号不会互相覆盖。
 pub fn ms_to_rfc3339(ms: i64) -> Option<String> {
     chrono::DateTime::from_timestamp_millis(ms)

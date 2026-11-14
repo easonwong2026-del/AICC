@@ -69,7 +69,7 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `qoder.profiles.remove` | 移除登记；`purge=true` 才删**AICC 快照**，客户端数据目录永远不动 | 否 |
 | `qoder.profiles.status` | 运行状态汇总（`running` / `stopped` / `unknown` 三态，每次都重新核实 PID）；**只读**，未完成切换放在 `pendingSwitches` 里 | 否 |
 | `qoder.profiles.recover` | **显式**恢复未完成切换：必须能证明对应客户端已退出（`pgrep` 退出码 1），`Running` / `Unknown` / 找不到客户端都拒绝；任一条恢复失败返回错误 + `blocked` 明细 | 否 |
-| `auth.workbuddy.start` / `poll` / `cancel` | 官方 OAuth 扫码：发起、轮询、取消（PR1b-1） | 是 |
+| `auth.workbuddy.start` / `poll` / `cancel` | 官方 OAuth：发起、轮询、取消（PR1b-1）。`start` 接受 `variant`（`cn` / `ai`，**严格解析**，非法值直接报参数错）；返回值带 `provider`，轮询成功后账号按**会话档位**落 `accounts.provider`。同一 URL 既能在浏览器打开也能渲染成二维码 | 是 |
 | `auth.workbuddy.refresh` | 刷新令牌；`auth_source=magpie` 的账号改为重新同步 | 是 |
 | `auth.workbuddy.status` | 用当前选用的授权探测一次登录态（只读）：先 `Valid/Unauthorized/Transient` 分类，再过 401 才切源 | 是 |
 | `providers.magpie.accounts` | 列出 Magpie 里已登录的**四个 provider**（`workbuddy` / `workbuddy-ai` / `qoder` / `qoder-cn`）账号，逐条带 `platform` / `provider` / `edition` / `importTarget`，并标出哪些已导入；**不含令牌** | 否 |
@@ -360,3 +360,24 @@ WorkBuddy AI 是另一个站点，拿它的授权请求这些接口，轻则 401
 
 `accounts.upsert` 未传 `provider` 时**继承库里已有值**：改备注不会把国际版
 账号降级成国内版，也不会误报 `uid_conflict`。
+
+## 10. WorkBuddy 双站点登录（PR #72）
+
+国内版（`copilot.tencent.com` / `www.codebuddy.cn`）与国际版（`www.workbuddy.ai`）
+是**两个站点**：OAuth 的 `platform` 参数、API 域名、`X-Domain` 都不一样。AICC 用
+`accounts.platform = "workbuddy"` + `accounts.provider`（`workbuddy` / `workbuddy_ai`）
+表示它们，这是 v13 定下的模型。
+
+| 环节 | 行为 |
+| --- | --- |
+| 发起 `auth.workbuddy.start` | `variant` 决定站点；不会因为"看起来像"而回落 |
+| 登录页 | `verificationUri` 同一份：界面主按钮用系统浏览器打开，次选渲染成二维码 |
+| 轮询 | 会话绑死档位；`poll` 从**会话**取档位决定 provider，不看请求参数 |
+| 令牌落库 | access / refresh 进钥匙串（按 uid 隔离），`accounts.provider` 按档位写 |
+| domain 校验 | `matches_domain` 拒绝跨档响应（国际版登录返回国内 domain 直接失败） |
+| UID 冲突 | 同一 UID 已在另一站点 → `uid_conflict`，凭据回滚，账号行不改写 |
+| 刷新 `auth.workbuddy.refresh` | **国际版仍返回 unsupported**：刷新端点没有真机证据，不拿好授权冒险 |
+| 签到 / 成长 / 旅行 / 授权检查 | 国际版仍 `unsupported_provider`，等真实协议证据后再逐项放开 |
+
+界面：添加账号面板顶部有 `WorkBuddy` / `WorkBuddy AI` 分段选择，切换即重开会话；
+账号卡按 provider 显示独立名称与图标，国际版的签到一栏写「暂不支持」。

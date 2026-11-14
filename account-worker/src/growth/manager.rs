@@ -209,6 +209,20 @@ pub async fn run_account(
     options: Options,
     gate: WriteGate<'_>,
 ) -> AccountRun {
+    let transport = LiveTransport::new(access, uid, domain);
+    run_account_guarded(app, account_id, nickname, &transport, options, gate).await
+}
+
+/// 与 `run_account` 同一条路径，但传输层可注入 —— 测试用它证明
+/// "被拒绝时**一个请求都没发**"，而不是只看返回值。
+pub async fn run_account_guarded<T: Transport>(
+    app: &App,
+    account_id: &str,
+    nickname: &str,
+    transport: &T,
+    options: Options,
+    gate: WriteGate<'_>,
+) -> AccountRun {
     // 第二道闸门：真正的写入口再确认一次版本。调度器已经筛过，但这里是
     // "拿凭据 → 发请求"之间唯一的位置，不能只依赖上游筛选。
     //
@@ -241,8 +255,7 @@ pub async fn run_account(
             "WorkBuddy AI（国际版）的成长中心接口尚未接入，未发送任何请求",
         );
     }
-    let transport = LiveTransport::new(access, uid, domain);
-    run_account_with(app, account_id, nickname, &transport, options, gate).await
+    run_account_with(app, account_id, nickname, transport, options, gate).await
 }
 
 /// 拒绝执行：**一个请求都不发**，但要说清为什么。

@@ -383,11 +383,21 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
 
         // ---- WorkBuddy 扫码登录（PR1b-1）----
         "auth.workbuddy.start" => {
-            let info = workbuddy_auth::start(WbVariant::Cn)
+            // 档位必须显式给且严格解析：默认国内版只为兼容旧调用方，
+            // 但写错值不能悄悄回落（那会用国内版登录国际账号）。
+            let raw = params
+                .get("variant")
+                .and_then(Value::as_str)
+                .unwrap_or("cn");
+            let variant = workbuddy_auth::parse_variant(raw)
+                .ok_or_else(|| RpcError::invalid_params("variant 只支持 cn / ai"))?;
+            let info = workbuddy_auth::start(variant)
                 .await
                 .map_err(auth_rpc_error)?;
             Ok(json!({
                 "platform": "workbuddy",
+                "provider": workbuddy_auth::provider_of(variant),
+                "variant": variant.as_str(),
                 "loginId": info.login_id,
                 "verificationUri": info.verification_uri,
                 "expiresIn": info.expires_in,
@@ -404,23 +414,28 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                     "state": poll_state(&err.kind),
                     "error": { "kind": err.kind, "message": err.message },
                 })),
-                workbuddy_auth::Polled::Token(payload) => match persist_login(app, &payload) {
-                    Ok(result) => {
-                        workbuddy_auth::complete(&login_id, result.clone());
-                        Ok(result)
+                workbuddy_auth::Polled::Token(payload) => {
+                    // 档位来自**会话**，不是请求参数：浏览器可能刚被切换过。
+                    let variant =
+                        workbuddy_auth::session_variant(&login_id).unwrap_or(WbVariant::Cn);
+                    match persist_login(app, &payload, variant) {
+                        Ok(result) => {
+                            workbuddy_auth::complete(&login_id, result.clone());
+                            Ok(result)
+                        }
+                        Err(err) => {
+                            workbuddy_auth::fail(
+                                &login_id,
+                                workbuddy_auth::KIND_NETWORK,
+                                err.message.clone(),
+                            );
+                            Ok(json!({
+                                "state": "failed",
+                                "error": { "kind": "storage", "message": err.message },
+                            }))
+                        }
                     }
-                    Err(err) => {
-                        workbuddy_auth::fail(
-                            &login_id,
-                            workbuddy_auth::KIND_NETWORK,
-                            err.message.clone(),
-                        );
-                        Ok(json!({
-                            "state": "failed",
-                            "error": { "kind": "storage", "message": err.message },
-                        }))
-                    }
-                },
+                }
             }
         }
 
@@ -1403,7 +1418,11 @@ fn poll_state(kind: &str) -> &'static str {
 /// 只写 `own`：从 Magpie 导入过的那份 `magpie/access` 一个字节都不动（G1）。
 /// 回滚策略：入库失败时恢复登录前的自有凭据快照，而不是清空 —— 用户原来能用的那套
 /// 不能因为一次失败登录被删掉。
-fn persist_login(app: &App, payload: &workbuddy_auth::TokenPayload) -> RpcResult<Value> {
+fn persist_login(
+    app: &App,
+    payload: &workbuddy_auth::TokenPayload,
+    variant: WbVariant,
+) -> RpcResult<Value> {
     // 整个落库过程都在锁里：钥匙串写入 + 数据库写入必须成对出现，
     // 否则并发的 resync / refresh 会看到中间态。
     let _guard = auth_write_guard();
@@ -1419,7 +1438,7 @@ fn persist_login(app: &App, payload: &workbuddy_auth::TokenPayload) -> RpcResult
         payload.refresh_token.as_deref(),
     )?;
 
-    let (mut value, existed) = match write_login_row(app, payload) {
+    let (mut value, existed) = match write_login_row(app, payload, variant) {
         Ok(pair) => pair,
         Err(err) => return Err(fail_login(app, &snapshot, err)),
     };
@@ -1476,18 +1495,41 @@ fn fail_login(app: &App, snapshot: &crate::auth::service::Snapshot, err: RpcErro
 ///
 /// 只写用户可编辑的字段：授权相关的四列由 `service::sync_mirror` 从授权行派生（G6）。
 /// 返回 (响应体, 是否新账号)。
-fn write_login_row(app: &App, payload: &workbuddy_auth::TokenPayload) -> RpcResult<(Value, bool)> {
+fn write_login_row(
+    app: &App,
+    payload: &workbuddy_auth::TokenPayload,
+    variant: WbVariant,
+) -> RpcResult<(Value, bool)> {
     let uid = payload.profile.uid.clone();
     let domain = Some(payload.domain.clone()).filter(|d| !d.is_empty());
+    // 档位决定 provider：两个站点共用 platform，只有这一列能区分。
+    let provider = workbuddy_auth::provider_of(variant);
 
     let (existed, record) = app.with_db(|db| {
-        let existed = db.find_account("workbuddy", &uid)?.is_some();
+        // 同一个 UID 已经属于另一个站点：明确冲突，不合并、不改写。
+        let existing = db.find_account("workbuddy", &uid)?;
+        if let Some(record) = &existing {
+            if record.provider != provider {
+                return Err(RpcError::invalid_params(format!(
+                    "同一 UID 已属于 {}，不能再作为 {provider} 登录；两个服务是不同账号",
+                    record.provider
+                ))
+                .with_data(json!({
+                    "code": "uid_conflict",
+                    "existingProvider": record.provider,
+                    "requestedProvider": provider,
+                    "uid": uid,
+                })));
+            }
+        }
+        let existed = existing.is_some();
         let record = db.upsert_account(&AccountInput {
             platform: "workbuddy".to_string(),
             uid: uid.clone(),
             nickname: payload.profile.nickname.clone(),
             email: payload.profile.email.clone(),
             auth_domain: domain.clone(),
+            provider: Some(provider.to_string()),
             ..Default::default()
         })?;
         Ok((existed, record))
@@ -1908,6 +1950,73 @@ mod tests {
 
     /// `auth.workbuddy.refresh` 也是国内版协议：国际版必须**在查授权之前**被挡住，
     /// 而且不能因为一次"刷新"把一份好授权标成 invalid。
+    /// 档位解析必须严格：写错值不能被"回落国内版"掩盖。
+    #[test]
+    fn variant_parsing_is_strict() {
+        use wb_switch_core::modules::variant::WbVariant as V;
+        assert_eq!(workbuddy_auth::parse_variant("cn"), Some(V::Cn));
+        assert_eq!(workbuddy_auth::parse_variant(" CN "), Some(V::Cn));
+        assert_eq!(workbuddy_auth::parse_variant("ai"), Some(V::Ai));
+        assert_eq!(workbuddy_auth::parse_variant("intl"), Some(V::Ai));
+        assert_eq!(workbuddy_auth::parse_variant("bogus"), None);
+        assert_eq!(workbuddy_auth::parse_variant(""), None);
+    }
+
+    #[test]
+    fn provider_mapping_matches_the_v13_model() {
+        use wb_switch_core::modules::variant::WbVariant as V;
+        assert_eq!(workbuddy_auth::provider_of(V::Cn), "workbuddy");
+        assert_eq!(workbuddy_auth::provider_of(V::Ai), "workbuddy_ai");
+    }
+
+    /// `auth.workbuddy.start` 的 variant 参数在**发请求之前**就要校验：
+    /// 这里用非法值调用真实派发入口，必须直接报参数错，不会有任何网络行为。
+    #[tokio::test]
+    async fn start_rejects_an_unknown_variant_without_a_request() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let err = dispatch(&app, "auth.workbuddy.start", &json!({ "variant": "lite" }))
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("variant"), "{}", err.message);
+    }
+
+    /// 国际版登录：账号记成 `workbuddy_ai`，凭据进的是同一套按 uid 隔离的键；
+    /// 同一 UID 换档位登录必须冲突并**回滚**已写入的凭据。
+    #[test]
+    fn ai_login_marks_the_provider_and_refuses_to_cross_variants() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "ai-login-uid";
+        persist_login(
+            &app,
+            &payload(uid, "ai-access", Some("ai-refresh")),
+            WbVariant::Ai,
+        )
+        .expect("ai login");
+
+        let record = account(&app, uid);
+        assert_eq!(record.provider, "workbuddy_ai");
+        assert_eq!(record.platform, "workbuddy");
+        assert_eq!(own_access(&app, &record.id).as_deref(), Some("ai-access"));
+
+        // 同一个 UID 用国内版再登录：明确冲突。
+        let err = persist_login(
+            &app,
+            &payload(uid, "cn-access", Some("cn-refresh")),
+            WbVariant::Cn,
+        )
+        .unwrap_err();
+        assert_eq!(err.data.as_ref().unwrap()["code"], json!("uid_conflict"));
+
+        // 冲突发生在凭据写入之后，必须回滚回去。
+        assert_eq!(
+            own_access(&app, &record.id).as_deref(),
+            Some("ai-access"),
+            "冲突时不能把已有凭据覆盖掉"
+        );
+        assert_eq!(own_refresh(&app, &record.id).as_deref(), Some("ai-refresh"));
+        assert_eq!(account(&app, uid).provider, "workbuddy_ai");
+    }
+
     #[tokio::test]
     async fn ai_account_refresh_is_unsupported_and_keeps_the_authorization() {
         let (app, _dir) = test_app(SecureStore::memory());
@@ -1921,9 +2030,13 @@ mod tests {
             })
         })
         .expect("account");
-        // persist_login 不传 provider，走的是"继承已有值"，账号仍是国际版。
-        persist_login(&app, &payload(uid, "own-access", Some("own-refresh")))
-            .expect("persist login");
+        // 国际版登录走 `WbVariant::Ai`：provider 由档位决定，不是继承来的。
+        persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Ai,
+        )
+        .expect("persist login");
 
         let record = account(&app, uid);
         assert_eq!(record.provider, "workbuddy_ai");
@@ -2031,8 +2144,12 @@ mod tests {
     fn own_login_writes_only_the_own_keys() {
         let (app, _dir) = test_app(SecureStore::memory());
         let uid = "6f1c2d94-1111-2222-3333-444455556666";
-        let out =
-            persist_login(&app, &payload(uid, "own-access", Some("own-refresh"))).expect("persist");
+        let out = persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("persist");
         assert_eq!(out["state"], json!("success"));
 
         let acc = account(&app, uid);
@@ -2166,7 +2283,12 @@ mod tests {
         let uid = "6f1c2d94-3333-4444-5555-666677778888";
 
         import_logins(&app, vec![magpie_login(uid, "borrowed-1")], &[]).expect("import");
-        persist_login(&app, &payload(uid, "own-access", Some("own-refresh"))).expect("login");
+        persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
         import_logins(&app, vec![magpie_login(uid, "borrowed-2")], &[]).expect("re-import");
 
         let acc = account(&app, uid);
@@ -2194,7 +2316,12 @@ mod tests {
         let (app, _dir) = test_app(SecureStore::memory());
         let uid = "6f1c2d94-4444-5555-6666-777788889999";
         import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
-        persist_login(&app, &payload(uid, "own-access", Some("own-refresh"))).expect("login");
+        persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
         let acc = account(&app, uid);
 
         // 默认 magpie 优先
@@ -2225,7 +2352,12 @@ mod tests {
         let (app, _dir) = test_app(SecureStore::memory());
         let uid = "6f1c2d94-5555-6666-7777-888899990000";
         import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
-        persist_login(&app, &payload(uid, "own-access", Some("own-refresh"))).expect("login");
+        persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
         let acc = account(&app, uid);
 
         let magpie_row = app
@@ -2296,8 +2428,13 @@ mod tests {
     fn login_without_refresh_drops_the_stale_one() {
         let (app, _dir) = test_app(SecureStore::memory());
         let uid = "6f1c2d94-aaaa-bbbb-cccc-ddddeeeeffff";
-        persist_login(&app, &payload(uid, "first-access", Some("first-refresh"))).expect("first");
-        persist_login(&app, &payload(uid, "second-access", None)).expect("second");
+        persist_login(
+            &app,
+            &payload(uid, "first-access", Some("first-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("first");
+        persist_login(&app, &payload(uid, "second-access", None), WbVariant::Cn).expect("second");
 
         let acc = account(&app, uid);
         assert!(
@@ -2311,8 +2448,12 @@ mod tests {
     fn keychain_failure_leaves_no_half_account() {
         let (app, _dir) = test_app(SecureStore::failing());
         let uid = "6f1c2d94-9999-8888-7777-666655554444";
-        let err =
-            persist_login(&app, &payload(uid, "access", Some("refresh"))).expect_err("must fail");
+        let err = persist_login(
+            &app,
+            &payload(uid, "access", Some("refresh")),
+            WbVariant::Cn,
+        )
+        .expect_err("must fail");
         assert_eq!(err.code, crate::rpc::E_SECURESTORE);
         assert!(
             app.with_db(|db| db.find_account("workbuddy", uid))
@@ -2336,8 +2477,12 @@ mod tests {
             .unwrap();
         app.secure.arm();
 
-        let err = persist_login(&app, &payload(uid, "new-access", Some("new-refresh-boom")))
-            .expect_err("refresh 写不进去就该失败");
+        let err = persist_login(
+            &app,
+            &payload(uid, "new-access", Some("new-refresh-boom")),
+            WbVariant::Cn,
+        )
+        .expect_err("refresh 写不进去就该失败");
         assert_eq!(err.data.as_ref().unwrap()["stage"], json!("own/refresh"));
         assert_eq!(own_access(&app, &account_id).as_deref(), Some("old-access"));
         assert_eq!(
@@ -2359,8 +2504,12 @@ mod tests {
             .unwrap();
         app.secure.arm();
 
-        let err = persist_login(&app, &payload(uid, "new-access-boom", Some("new-refresh")))
-            .expect_err("access 写不进去就该失败");
+        let err = persist_login(
+            &app,
+            &payload(uid, "new-access-boom", Some("new-refresh")),
+            WbVariant::Cn,
+        )
+        .expect_err("access 写不进去就该失败");
         assert_eq!(err.data.as_ref().unwrap()["stage"], json!("own/access"));
         assert_eq!(own_access(&app, &account_id).as_deref(), Some("old-access"));
         assert_eq!(
@@ -2383,7 +2532,8 @@ mod tests {
             .unwrap();
         app.secure.arm();
 
-        let err = persist_login(&app, &payload(uid, "new-access", None)).expect_err("必须失败");
+        let err = persist_login(&app, &payload(uid, "new-access", None), WbVariant::Cn)
+            .expect_err("必须失败");
         assert_eq!(
             err.data.as_ref().unwrap()["kind"],
             json!("stale_refresh_not_cleared")
@@ -2411,8 +2561,12 @@ mod tests {
         })
         .expect("install trigger");
 
-        let err = persist_login(&app, &payload(uid, "own-access", Some("own-refresh")))
-            .expect_err("库里写不进去就该失败");
+        let err = persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect_err("库里写不进去就该失败");
         assert_eq!(err.code, crate::rpc::E_STORAGE);
 
         assert_eq!(
@@ -2439,8 +2593,12 @@ mod tests {
             .unwrap();
         app.secure.arm();
 
-        let err = persist_login(&app, &payload(uid, "new-access", Some("new-refresh")))
-            .expect_err("读不到旧凭据就不能写");
+        let err = persist_login(
+            &app,
+            &payload(uid, "new-access", Some("new-refresh")),
+            WbVariant::Cn,
+        )
+        .expect_err("读不到旧凭据就不能写");
         assert_eq!(
             err.data.as_ref().unwrap()["kind"],
             json!("snapshot_unreadable")
@@ -2465,8 +2623,12 @@ mod tests {
             .unwrap();
         app.secure.arm();
 
-        let err = persist_login(&app, &payload(uid, "new-access", Some("new-refresh")))
-            .expect_err("写不进去就该失败");
+        let err = persist_login(
+            &app,
+            &payload(uid, "new-access", Some("new-refresh")),
+            WbVariant::Cn,
+        )
+        .expect_err("写不进去就该失败");
         assert_eq!(
             err.data.as_ref().unwrap()["kind"],
             json!("rollback_incomplete"),
@@ -2483,7 +2645,12 @@ mod tests {
     fn resync_refuses_an_account_without_magpie_authorization() {
         let (app, _dir) = test_app(SecureStore::memory());
         let uid = "6f1c2d94-1234-5678-90ab-cdef12345678";
-        persist_login(&app, &payload(uid, "own-access", Some("own-refresh"))).expect("persist");
+        persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("persist");
         let acc = account(&app, uid);
 
         let err = resync_magpie_access(&app, &acc).expect_err("没有 magpie 授权必须被拒绝");
@@ -2522,7 +2689,12 @@ mod tests {
         let uid = "6f1c2d94-eeee-0001-0002-000000000001";
         import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
         let stale = account(&app, uid);
-        persist_login(&app, &payload(uid, "own-access", Some("own-refresh"))).expect("login");
+        persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
         let acc = account(&app, uid);
 
         let err = resync_magpie_access(&app, &stale).expect_err("旧快照必须被拒绝");
@@ -2537,7 +2709,7 @@ mod tests {
         let (app, _dir) = test_app(SecureStore::memory());
         let uid = "6f1c2d94-eeee-0001-0002-000000000004";
         // 登录时服务端没发 refresh → 只留 access
-        persist_login(&app, &payload(uid, "access-only", None)).expect("login");
+        persist_login(&app, &payload(uid, "access-only", None), WbVariant::Cn).expect("login");
         let acc = account(&app, uid);
         let account_id = acc.id.clone();
 
@@ -2569,7 +2741,12 @@ mod tests {
         let uid = "6f1c2d94-eeee-0001-0002-000000000003";
         import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
         let stale = account(&app, uid);
-        persist_login(&app, &payload(uid, "own-access", Some("own-refresh"))).expect("login");
+        persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
         let acc = account(&app, uid);
 
         let out = persist_rotated_tokens(
@@ -2591,7 +2768,12 @@ mod tests {
     fn rotation_failure_marks_invalid_and_drops_the_dead_refresh() {
         let (app, _dir) = test_app(SecureStore::faulty(&["/own/refresh"], &[]));
         let uid = "6f1c2d94-aaaa-0001-0002-000000000005";
-        persist_login(&app, &payload(uid, "old-access", Some("dead-refresh"))).expect("login");
+        persist_login(
+            &app,
+            &payload(uid, "old-access", Some("dead-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
         let acc = account(&app, uid);
         let account_id = acc.id.clone();
         app.secure.arm();
@@ -2665,7 +2847,7 @@ mod tests {
         let uid = "6f1c2d94-7777-0001-0002-000000000002";
         import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
         // 自有授权有 access、没有 refresh：refresh 一定失败，且不需要联网
-        persist_login(&app, &payload(uid, "own-access", None)).expect("login");
+        persist_login(&app, &payload(uid, "own-access", None), WbVariant::Cn).expect("login");
         broker::set_preferred_source(&app, "own").expect("prefer own");
         let acc = account(&app, uid);
 
@@ -2697,7 +2879,7 @@ mod tests {
 
         let (app, _dir) = test_app(SecureStore::memory());
         let uid = "6f1c2d94-7777-0001-0002-000000000003";
-        persist_login(&app, &payload(uid, "own-access", None)).expect("login");
+        persist_login(&app, &payload(uid, "own-access", None), WbVariant::Cn).expect("login");
         broker::set_preferred_source(&app, "own").expect("prefer own");
         let acc = account(&app, uid);
 
@@ -2719,7 +2901,12 @@ mod tests {
         let (app, _dir) = test_app(SecureStore::memory());
         let uid = "6f1c2d94-9999-0001-0002-000000000001";
         import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
-        persist_login(&app, &payload(uid, "own-access", Some("own-refresh"))).expect("login");
+        persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
         let acc = account(&app, uid);
 
         let report = service::delete_authorization(&app, &acc.id, "own").expect("delete");
@@ -2746,7 +2933,12 @@ mod tests {
         let (app, _dir) = test_app(SecureStore::memory());
         let uid = "6f1c2d94-9999-0001-0002-000000000002";
         import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
-        persist_login(&app, &payload(uid, "own-access", Some("own-refresh"))).expect("login");
+        persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
         let acc = account(&app, uid);
 
         let failed = service::purge_account_keys(&app, &acc);
@@ -2799,7 +2991,12 @@ mod tests {
         let (app, _dir) = test_app(SecureStore::memory());
         let uid = "6f1c2d94-9999-0001-0002-000000000005";
         import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
-        persist_login(&app, &payload(uid, "own-access", Some("own-refresh"))).expect("login");
+        persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
         let acc = account(&app, uid);
 
         service::delete_authorization(&app, &acc.id, "own").expect("delete");
@@ -2821,7 +3018,12 @@ mod tests {
         let (app, _dir) = test_app(SecureStore::memory());
         let uid = "6f1c2d94-9999-0001-0002-000000000006";
         import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
-        persist_login(&app, &payload(uid, "own-access", Some("own-refresh"))).expect("login");
+        persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
         let acc = account(&app, uid);
         assert_eq!(acc.auth_source, "magpie");
         assert_eq!(legacy_access(&app, uid).as_deref(), Some("borrowed"));
@@ -2854,7 +3056,12 @@ mod tests {
     fn failed_key_deletion_is_reported_and_record_survives() {
         let (app, _dir) = test_app(SecureStore::faulty(&[], &["/own/access"]));
         let uid = "6f1c2d94-9999-0001-0002-000000000003";
-        persist_login(&app, &payload(uid, "own-access", Some("own-refresh"))).expect("login");
+        persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
         let acc = account(&app, uid);
         app.secure.arm();
 

@@ -182,6 +182,45 @@ final class ConsoleModelsTests: XCTestCase {
         XCTAssertEqual(start.loginId, "wb1b_abc")
         XCTAssertEqual(start.expiresIn, 600)
         XCTAssertTrue(start.verificationUri.contains("codebuddy.cn"))
+        // 老助手不带 variant：按国内版处理，不能猜成国际版。
+        XCTAssertEqual(start.variant, .cn)
+    }
+
+    func testLoginStartCarriesTheSelectedVariant() throws {
+        let start = try XCTUnwrap(WorkbuddyLoginStart.parse([
+            "loginId": "wb1b_ai",
+            "verificationUri": "https://www.workbuddy.ai/login?state=1",
+            "expiresIn": 600,
+            "variant": "ai",
+            "provider": "workbuddy_ai",
+        ]))
+        XCTAssertEqual(start.variant, .ai)
+        XCTAssertEqual(start.variant.provider, "workbuddy_ai")
+        XCTAssertEqual(start.variant.title, "WorkBuddy AI")
+    }
+
+    func testVariantNamesAndProvidersStayDistinct() {
+        XCTAssertEqual(WorkbuddyVariant.cn.provider, "workbuddy")
+        XCTAssertEqual(WorkbuddyVariant.ai.provider, "workbuddy_ai")
+        XCTAssertNotEqual(WorkbuddyVariant.cn.title, WorkbuddyVariant.ai.title)
+        XCTAssertTrue(WorkbuddyVariant.ai.subtitle.contains("workbuddy.ai"))
+    }
+
+    /// 账号卡必须能看出是哪个站点，且国际版不能显示成国内版。
+    func testAccountCarriesTheProvider() {
+        let cn = ConsoleAccount(
+            id: "a1", platform: "workbuddy", provider: "workbuddy", uid: "u1", nickname: "国内号"
+        )
+        let ai = ConsoleAccount(
+            id: "a2", platform: "workbuddy", provider: "workbuddy_ai", uid: "u2", nickname: "海外号"
+        )
+        XCTAssertEqual(cn.platformName, "WorkBuddy")
+        XCTAssertEqual(ai.platformName, "WorkBuddy AI")
+        XCTAssertEqual(ai.workbuddyVariant, .ai)
+        XCTAssertEqual(cn.workbuddyVariant, .cn)
+        XCTAssertTrue(cn.supportsCNTasks)
+        XCTAssertFalse(ai.supportsCNTasks, "国际版的签到 / 成长接口还没接")
+        XCTAssertTrue(ai.isWorkbuddyAI)
     }
 
     func testLoginStartRejectsIncompletePayload() {
