@@ -14,8 +14,10 @@
 | **官方 PAT**（用户在账户设置里生成） | 未实现，规划中 | 国际 `qoder.com/account/integrations`、国内 `qoder.cn/account/integrations` |
 | **OIDC `/oauth/authorize`**（本文实测的那条） | **不可用**，仅此一条 | 见 §2 |
 
-额度看板对 Qoder 两版返回 `status = "unverified"`、**零请求**，原因是**本机既没有
-Qoder 账号凭据，也没有一条跑通的 Credits 请求**，不是"Qoder 官方没有登录方式"。
+> **2026-11-14 更新（PR #75）**：CN 侧已经接上 `campaigns` 查询/领取适配器，
+> 看板行改为展示"当日奖励"（`credits` 块），余额仍然留空——没有已证实的余额接口。
+> International 维持零请求、`unverified`。当前状态与验收方法见
+> `docs/QODER_CREDITS.md`。下面 §1～§4 保留为当时的阻塞记录。
 
 ## 2. OIDC 这条路为什么走不通（实测）
 

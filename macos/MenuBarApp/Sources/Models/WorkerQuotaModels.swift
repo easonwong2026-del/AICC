@@ -29,6 +29,8 @@ public struct WorkerQuotaRow: Identifiable, Equatable {
     public let cached: Bool
     /// 数据来自旧快照（本次刷新失败）。界面必须标出来，不能当成实时值。
     public let stale: Bool
+    /// Qoder 专用：当日奖励活动的状态。**不是余额**，不能与 `remaining` 相加。
+    public let credits: QoderCreditsInfo?
 
     public var id: String { "\(provider):\(accountId)" }
 
@@ -58,6 +60,7 @@ public struct WorkerQuotaRow: Identifiable, Equatable {
         self.error = json["error"] as? String
         self.cached = (json["cached"] as? Bool) ?? false
         self.stale = (json["stale"] as? Bool) ?? false
+        self.credits = QoderCreditsInfo(json: json["credits"] as? [String: Any])
     }
 
     /// JSON 里的数值可能是字符串（服务端返回 `"4597.75000075"`）。
@@ -86,6 +89,7 @@ public struct WorkerQuotaRow: Identifiable, Equatable {
         case "own": return "自有授权"
         case "magpie": return "Magpie 借用"
         case "own_browser": return "浏览器登录"
+        case "own_pat": return "PAT"
         default: return source
         }
     }

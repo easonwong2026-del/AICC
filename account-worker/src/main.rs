@@ -8,6 +8,7 @@ mod app;
 mod auth;
 mod checkin;
 mod clock;
+mod credits;
 mod growth;
 mod handlers;
 mod paths;
@@ -192,6 +193,20 @@ fn serve() {
                                 .and_then(Value::as_str)
                                 .unwrap_or("已完成");
                             log(&format!("每日签到检查：{summary}"));
+                        }
+                    });
+
+                    // Qoder 每日 Credits 也挂同一个心跳。**没开开关就一个请求都不发**；
+                    // 自己限速（20 分钟）+ 当天已领到就停手，所以不会把接口打成筛子。
+                    let credits_app = Arc::clone(&app);
+                    tokio::task::spawn(async move {
+                        let result = credits::run_tick(&credits_app, false).await;
+                        if result.get("skipped").is_none() {
+                            log(&format!(
+                                "Qoder 领取检查：{} 个账号，实际执行 {}",
+                                result.get("accounts").and_then(Value::as_u64).unwrap_or(0),
+                                result.get("ran").and_then(Value::as_u64).unwrap_or(0)
+                            ));
                         }
                     });
                 }

@@ -95,6 +95,44 @@ impl crate::storage::Db {
         Ok(changed > 0)
     }
 
+    /// Qoder 服务账号的版本。**核验的是 `qoder_accounts.qoder_auth_epoch`（v16）**，
+    /// 不是 `accounts.auth_epoch`：Qoder 账号不在 `accounts` 表里。
+    ///
+    /// 为什么必须单独一条语句：账号 id 是 `(edition, uid)` 的确定性哈希，
+    /// 删掉再导入会**复用同一个 id**，而 `provider` 也不会变。没有版本核验，
+    /// 一条"用旧令牌取到"的晚到快照会被当成新账号刚取过的数据。
+    pub fn save_qoder_quota_snapshot(
+        &mut self,
+        account_id: &str,
+        provider: &str,
+        status: &str,
+        payload: &Value,
+        expected_epoch: Option<i64>,
+    ) -> RpcResult<bool> {
+        let captured_at = crate::clock::now_rfc3339();
+        let id = format!("{account_id}:{captured_at}");
+        let changed = self.conn.execute(
+            "INSERT OR REPLACE INTO quota_snapshots
+                 (id, account_id, provider, captured_at, status, payload)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6
+             WHERE EXISTS (
+                 SELECT 1 FROM qoder_accounts
+                 WHERE id = ?2 AND edition = ?3
+                   AND (?7 IS NULL OR auth_epoch = ?7)
+             )",
+            rusqlite::params![
+                id,
+                account_id,
+                provider,
+                captured_at,
+                status,
+                payload.to_string(),
+                expected_epoch
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// 最新一行。界面默认路径：有缓存先用缓存，避免每次打开都打网络。
     pub fn latest_quota_snapshot(&self, account_id: &str) -> RpcResult<Option<QuotaSnapshot>> {
         let mut stmt = self.conn.prepare(
@@ -402,5 +440,50 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM quota_snapshots", [], |row| row.get(0))
             .unwrap();
         assert_eq!(n, 0, "账号删掉后不应留下孤儿快照");
+    }
+
+    /// Qoder 服务账号在另一张表里：**不能**复用 `accounts` 的核验，
+    /// 否则每次写入都会因为"accounts 里找不到这个 id"被静默丢掉。
+    #[test]
+    fn qoder_snapshots_are_verified_against_qoder_accounts() {
+        let (_dir, mut db, _wb) = fresh();
+        let qoder = db
+            .upsert_qoder_account("qoder_cn", "u-q", Some("积分号"), None)
+            .unwrap();
+        let epoch = db.qoder_auth_epoch(&qoder.id).unwrap().unwrap();
+
+        assert!(db
+            .save_qoder_quota_snapshot(
+                &qoder.id,
+                "qoder_cn",
+                "ok",
+                &json!({"unit": "credits"}),
+                Some(epoch)
+            )
+            .unwrap());
+        assert!(db.latest_quota_snapshot(&qoder.id).unwrap().is_some());
+
+        // 版本对不上（期间重新授权过）：拒绝写入。
+        assert!(!db
+            .save_qoder_quota_snapshot(
+                &qoder.id,
+                "qoder_cn",
+                "ok",
+                &json!({"unit": "credits", "stale": true}),
+                Some(epoch + 1)
+            )
+            .unwrap());
+
+        // CN 与 International 不能共用快照：provider 必须与 edition 一致。
+        assert!(!db
+            .save_qoder_quota_snapshot(&qoder.id, "qoder_global", "ok", &json!({}), Some(epoch))
+            .unwrap());
+
+        // 账号删掉后同样不许再写。
+        db.delete_qoder_account(&qoder.id).unwrap();
+        assert!(!db
+            .save_qoder_quota_snapshot(&qoder.id, "qoder_cn", "ok", &json!({}), Some(epoch))
+            .unwrap());
+        assert!(db.latest_quota_snapshot(&qoder.id).unwrap().is_none());
     }
 }

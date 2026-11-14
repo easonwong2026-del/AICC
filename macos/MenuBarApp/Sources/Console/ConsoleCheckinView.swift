@@ -31,8 +31,10 @@ struct ConsoleCheckinView: View {
               symbol: "sparkles", platform: "WorkBuddy", wired: true),
         .init(id: "wb-travel", title: "Buddy 旅行", detail: "派出、到达与奖励领取",
               symbol: "airplane", platform: "WorkBuddy", wired: true),
-        .init(id: "qoder-credits", title: "Qoder CN 每日 Credits", detail: "每天 100 Credits，10:00 刷新",
-              symbol: "circle.dotted.circle", platform: "Qoder CN"),
+        // 奖励数量**不写死 100**：以服务端活动当天返回为准；窗口也以服务端为准。
+        .init(id: "qoder-credits", title: "Qoder CN 每日 Credits",
+              detail: "按服务端活动窗口领取（参考实现称北京时间每天 10:00 刷新，仅作说明）",
+              symbol: "circle.dotted.circle", platform: "Qoder CN", wired: true),
     ]
 
     @State private var platformFilter: ConsolePlatformFilter = .all
@@ -44,6 +46,7 @@ struct ConsoleCheckinView: View {
             notice
             taskSection
             ConsoleCheckinSection(store: store)
+            ConsoleCreditsSection(store: store)
             ConsoleGrowthSection(store: store)
             ConsoleTravelSection(store: store)
             accountSection

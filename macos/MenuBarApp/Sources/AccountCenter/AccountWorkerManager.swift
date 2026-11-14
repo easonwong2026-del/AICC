@@ -309,6 +309,63 @@ final class AccountWorkerManager: ObservableObject {
         return result["removed"] as? Bool ?? false
     }
 
+    // MARK: - Qoder 每日 Credits（PR #75）
+
+    /// 只读查询今天的活动。**不发写请求**。
+    func qoderCreditsStatus(accountId: String) async throws -> QoderCreditsReport {
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        let result = try await client.call(
+            "qoder.credits.status",
+            params: ["accountId": accountId],
+            timeout: 30
+        )
+        return QoderCreditsReport(json: result)
+    }
+
+    /// 手动领取。**这是有副作用的调用**：只有用户在界面上点了才发。
+    func qoderCreditsClaim(accountId: String) async throws -> QoderCreditsReport {
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        let result = try await client.call(
+            "qoder.credits.claim",
+            params: ["accountId": accountId],
+            timeout: 45
+        )
+        return QoderCreditsReport(json: result)
+    }
+
+    func qoderCreditsRuns(accountId: String, limit: Int = 10) async throws -> [QoderCreditRun] {
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        let result = try await client.call(
+            "qoder.credits.runs",
+            params: ["accountId": accountId, "limit": limit],
+            timeout: 20
+        )
+        let rows = (result["runs"] as? [[String: Any]]) ?? []
+        return rows.compactMap { QoderCreditRun(json: $0) }
+    }
+
+    func qoderCreditsAutoStatus() async throws -> [QoderCreditsAutoItem] {
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        let result = try await client.call(
+            "qoder.credits.auto.status",
+            params: [:],
+            timeout: 20
+        )
+        let rows = (result["accounts"] as? [[String: Any]]) ?? []
+        return rows.compactMap { QoderCreditsAutoItem(json: $0) }
+    }
+
+    /// 打开 / 关闭自动领取。助手侧对"未验证的版本"会直接拒绝，
+    /// 所以这里的错误是业务结论，不是通信故障。
+    func setQoderCreditsAuto(accountId: String, enabled: Bool) async throws {
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        _ = try await client.call(
+            "qoder.credits.auto.setEnabled",
+            params: ["accountId": accountId, "enabled": enabled],
+            timeout: 20
+        )
+    }
+
     // MARK: - 从 Magpie 导入（PR1b-1）
 
     /// 读取 Magpie 里已登录的 WorkBuddy 账号（只读，不含令牌）。

@@ -1,16 +1,27 @@
-//! Qoder 两版的额度适配器：**只读能力尚未验证，一个请求都不发**。
+//! Qoder 两版在额度看板上的行。
 //!
-//! 为什么这里什么都没有（2026-11-14 实测，记录在 `docs/QODER_QUOTA_BLOCKER.md`）：
+//! ## 为什么这里只有"奖励"，没有"余额"
 //!
-//! - 两版都有官方 OIDC（国际 `https://qoder.com`，国内 issuer `https://qoder.cn`），
-//!   但 token 端点只声明 `client_secret_post` / `private_key_jwt`，**没有 `none`**；
-//!   AICC 手上没有 Qoder 侧注册的 client_id，拿不到 access token。
-//! - Qoder 的 Credits / 每日领取 / 成长任务属于**账号级业务接口**，与 OIDC 的
-//!   userinfo 是两套东西；没有公开文档，也没有可复现的成功请求。
+//! WorkBuddy 的看板行有 `total / used / remaining`（资源额度）。Qoder 这边
+//! **没有任何已证实的余额接口**：能拿到的是"每天的活动里有没有可领的 Credits"。
+//! 把每日奖励塞进 `remaining` 会让用户以为账户里只剩 100，这是最坏的误导。
 //!
-//! 所以本模块只回答"为什么没有数"，绝不返回 `0`：0 会被当成"额度用完了"。
-//! 一旦有人拿到真实成功响应，把 `verified()` 改成查表、补一个解析函数即可，
-//! 上层 (`super::board`) 与界面都不用改。
+//! 所以 Qoder 行的形状是：
+//!
+//! | 字段 | 含义 |
+//! | --- | --- |
+//! | `unit = "credits"` | 计量单位，与 WorkBuddy 的 credits/tokens **不相加** |
+//! | `total / used / remaining = null` | 余额未知，**不是 0** |
+//! | `credits` | 当日活动的真实状态（可领 / 已领 / 无活动 / 未验证） |
+//!
+//! ## 三种"没有数"，三种说法
+//!
+//! 1. `unverified`：这个版本没有适配器（International），或本机没有账号级凭据
+//!    ——**零请求**；
+//! 2. `unauthorized`：请求发了，401/403 被拒；
+//! 3. `error`：网络 / 5xx / 结构不认识。
+//!
+//! 把它们混成一句"暂不可用"会让用户永远不知道该去重新授权还是等一会儿。
 
 use serde_json::{json, Value};
 
@@ -40,12 +51,117 @@ pub fn unverified_row(
         "usage": Value::Null,
         "syncAt": crate::clock::now_rfc3339(),
         "error": detail,
+        // Qoder 没有"余额"这个概念，`credits` 明确为 null 而不是空对象。
+        "credits": Value::Null,
+        "cached": false,
+        "stale": false,
     })
+}
+
+/// 把 `credits::status` 的结论折成看板的一行。
+///
+/// `status` 与 `credits.state` 是两件事：行状态回答"这一格能不能信"，
+/// `credits.state` 回答"今天的活动是什么情况"。
+pub fn row_from_status(
+    account_id: &str,
+    provider: &str,
+    nickname: &str,
+    source: &str,
+    status: &Value,
+) -> Value {
+    let state = status
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("error");
+    let (row_status, reason) = match state {
+        "claimable" | "already" | "nothing" => ("ok", "ok"),
+        "unsupported" => ("unverified", "unsupported"),
+        "no_credential" => ("unverified", "no_credential"),
+        "unauthorized" => ("unauthorized", "unauthorized"),
+        "error" => ("error", "error"),
+        other => ("error", other),
+    };
+    let error = status
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .map(crate::rpc::sanitize)
+        .unwrap_or_default();
+    // 同步时间用服务端这次查询的时间；没有就退到"现在"。
+    let sync_at = status
+        .get("checkedAt")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let sync_at = if sync_at.is_empty() {
+        crate::clock::now_rfc3339()
+    } else {
+        sync_at
+    };
+
+    json!({
+        "accountId": account_id,
+        "provider": provider,
+        "nickname": nickname,
+        "source": source,
+        "status": row_status,
+        "reason": reason,
+        // 余额未知：null，不是 0。
+        "unit": json!("credits"),
+        "total": Value::Null,
+        "used": Value::Null,
+        "remaining": Value::Null,
+        "plan": Value::Null,
+        "isPaid": Value::Null,
+        "usage": Value::Null,
+        "credits": {
+            "state": state,
+            "claimable": status.get("claimable").cloned().unwrap_or(Value::Null),
+            "claimed": status.get("claimed").cloned().unwrap_or(Value::Null),
+            "pending": status.get("pending").cloned().unwrap_or(Value::Null),
+            "today": status.get("today").cloned().unwrap_or(Value::Null),
+            "supported": status.get("supported").cloned().unwrap_or(json!(false)),
+            "autoEnabled": status.get("autoEnabled").cloned().unwrap_or(Value::Null),
+        },
+        "syncAt": sync_at,
+        "error": if error.is_empty() || row_status == "ok" {
+            Value::Null
+        } else {
+            json!(error)
+        },
+        "cached": false,
+        "stale": false,
+    })
+}
+
+/// 从缓存行构造（`refresh=false` 且快照够新时走这条）。
+pub fn cached_row(payload: &Value, captured_at: &str, stale: bool) -> Option<Value> {
+    if !payload.is_object() {
+        return None;
+    }
+    let mut row = payload.clone();
+    row["cached"] = json!(true);
+    row["stale"] = json!(stale);
+    row["capturedAt"] = json!(captured_at);
+    Some(row)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn status(state: &str) -> Value {
+        json!({
+            "state": state,
+            "claimable": 1,
+            "claimed": 0,
+            "pending": 0,
+            "supported": true,
+            "today": {"campaignId": "c1", "credits": 100},
+            "checkedAt": "2026-11-14T10:00:00Z",
+            "error": {"kind": "x", "message": "原因"},
+        })
+    }
 
     #[test]
     fn only_the_two_qoder_editions_are_known() {
@@ -63,6 +179,53 @@ mod tests {
         assert!(row["total"].is_null());
         assert!(row["remaining"].is_null());
         assert!(row["used"].is_null());
+        assert!(row["credits"].is_null());
         assert_eq!(row["error"], "阻塞原因");
+    }
+
+    #[test]
+    fn claimable_row_carries_the_reward_not_a_balance() {
+        let row = row_from_status("qa_1", "qoder_cn", "号", "own_pat", &status("claimable"));
+        assert_eq!(row["status"], "ok");
+        assert_eq!(row["unit"], "credits");
+        // 余额永不伪造。
+        assert!(row["total"].is_null());
+        assert!(row["remaining"].is_null());
+        // 奖励是独立一块，界面不会把它当余额相加。
+        assert_eq!(row["credits"]["claimable"], 1);
+        assert_eq!(row["credits"]["today"]["credits"], 100);
+        assert!(row["error"].is_null());
+    }
+
+    #[test]
+    fn unsupported_and_missing_credential_are_unverified_not_errors() {
+        for state in ["unsupported", "no_credential"] {
+            let row = row_from_status("qa_1", "qoder_global", "号", "unknown", &status(state));
+            assert_eq!(row["status"], "unverified", "{state}");
+            assert_eq!(row["reason"], state);
+            assert_eq!(row["error"], "原因");
+        }
+    }
+
+    #[test]
+    fn unauthorized_is_its_own_status() {
+        let row = row_from_status(
+            "qa_1",
+            "qoder_cn",
+            "号",
+            "own_browser",
+            &status("unauthorized"),
+        );
+        assert_eq!(row["status"], "unauthorized");
+    }
+
+    #[test]
+    fn cached_row_keeps_the_snapshot_time() {
+        let payload = row_from_status("qa_1", "qoder_cn", "号", "own_pat", &status("already"));
+        let row = cached_row(&payload, "2026-11-14T09:00:00Z", true).unwrap();
+        assert_eq!(row["cached"], true);
+        assert_eq!(row["stale"], true);
+        assert_eq!(row["capturedAt"], "2026-11-14T09:00:00Z");
+        assert!(cached_row(&Value::Null, "x", false).is_none());
     }
 }

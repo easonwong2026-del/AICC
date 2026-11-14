@@ -187,13 +187,13 @@ pub fn qoder_auth_id(account_id: &str, source: &str) -> String {
     format!("qz_{hex}")
 }
 
-const ACCOUNT_COLUMNS: &str =
+pub(crate) const ACCOUNT_COLUMNS: &str =
     "id, edition, uid, nickname, email, created_at, updated_at, auth_epoch";
 
 const AUTH_COLUMNS: &str = "id, account_id, source, source_key, secret_ref, auth_status, \
      token_expires_at, fingerprint, created_at, updated_at";
 
-fn map_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<QoderAccountRecord> {
+pub(crate) fn map_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<QoderAccountRecord> {
     Ok(QoderAccountRecord {
         id: row.get(0)?,
         edition: row.get(1)?,

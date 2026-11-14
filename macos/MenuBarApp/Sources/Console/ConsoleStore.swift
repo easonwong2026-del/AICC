@@ -396,6 +396,92 @@ final class ConsoleStore: ObservableObject {
         }
     }
 
+    // MARK: - Qoder 每日 Credits（PR #75）
+
+    /// 自动领取总览。每个账号独立开关，默认关闭。
+    @Published private(set) var qoderCreditsAuto: [QoderCreditsAutoItem] = []
+    @Published private(set) var qoderCreditsError: String?
+    @Published private(set) var qoderCreditsLoading = false
+    /// 正在执行动作的账号 id（查询 / 领取 / 切换开关），用来禁用该行按钮。
+    @Published private(set) var qoderCreditsBusy: String?
+    /// 每个账号最近一条领取结果，按需加载。
+    @Published private(set) var qoderCreditsRuns: [String: [QoderCreditRun]] = [:]
+    /// 最近一次动作的一句话结论（成功/失败都给一句）。
+    @Published private(set) var qoderCreditsNotice: String?
+
+    func refreshQoderCredits(silent: Bool = false) async {
+        if qoderCreditsLoading { return }
+        qoderCreditsLoading = true
+        defer { qoderCreditsLoading = false }
+        do {
+            qoderCreditsAuto = try await worker.qoderCreditsAutoStatus()
+            qoderCreditsError = nil
+            if !silent {
+                qoderCreditsNotice = nil
+            }
+        } catch {
+            qoderCreditsAuto = []
+            qoderCreditsError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    /// 只读检查今天有没有可领的活动。**不发写请求**。
+    @discardableResult
+    func checkQoderCredits(accountId: String) async -> QoderCreditsReport? {
+        qoderCreditsBusy = accountId
+        qoderCreditsNotice = nil
+        defer { qoderCreditsBusy = nil }
+        do {
+            let report = try await worker.qoderCreditsStatus(accountId: accountId)
+            qoderCreditsNotice = report.statusText
+            await loadQoderCreditRuns(accountId: accountId)
+            return report
+        } catch {
+            qoderCreditsNotice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return nil
+        }
+    }
+
+    /// 手动领取。用户点了才发，不在任何自动路径上。
+    @discardableResult
+    func claimQoderCredits(accountId: String) async -> QoderCreditsReport? {
+        qoderCreditsBusy = accountId
+        qoderCreditsNotice = nil
+        defer { qoderCreditsBusy = nil }
+        do {
+            let report = try await worker.qoderCreditsClaim(accountId: accountId)
+            qoderCreditsNotice = report.claimText
+            await loadQoderCreditRuns(accountId: accountId)
+            // 领完之后顺手刷新额度缓存：Qoder 那一行的"今日已领"要跟着变。
+            await refreshWorkerQuota(force: true)
+            return report
+        } catch {
+            qoderCreditsNotice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return nil
+        }
+    }
+
+    func setQoderCreditsAuto(accountId: String, enabled: Bool) async {
+        qoderCreditsBusy = accountId
+        qoderCreditsNotice = nil
+        defer { qoderCreditsBusy = nil }
+        do {
+            try await worker.setQoderCreditsAuto(accountId: accountId, enabled: enabled)
+            qoderCreditsNotice = enabled ? "已开启自动领取（默认每天检查一次）" : "已关闭自动领取"
+        } catch {
+            qoderCreditsNotice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+        await refreshQoderCredits(silent: true)
+    }
+
+    func loadQoderCreditRuns(accountId: String) async {
+        do {
+            qoderCreditsRuns[accountId] = try await worker.qoderCreditsRuns(accountId: accountId, limit: 5)
+        } catch {
+            // 记录拿不到不影响领取本身，安静失败。
+        }
+    }
+
     func refreshQuota(force: Bool = true) async {
         guard !loadingQuota else { return }
         loadingQuota = true
