@@ -17,6 +17,8 @@ struct ConsoleAccountsView: View {
     @State private var showMagpie = false
     @State private var showQoderSheet = false
     @State private var qoderSheetEdition: QoderEdition = .global
+    /// 设备授权面板的版本选择：nil 表示面板没开。
+    @State private var qoderLoginEdition: QoderEdition?
     @State private var renaming: QoderProfile?
     @State private var renameText = ""
     @State private var removing: QoderProfile?
@@ -101,6 +103,12 @@ struct ConsoleAccountsView: View {
         }
         .sheet(isPresented: $showQoderSheet) {
             QoderProfileSheet(store: store, initialEdition: qoderSheetEdition)
+        }
+        // 设备授权面板：独立组件，按版本打开（CN / International 各自一套站点）。
+        .sheet(item: $qoderLoginEdition) { edition in
+            QoderDeviceAuthSheet(store: store, initialEdition: edition) {
+                Task { await store.refreshQoder(silent: true) }
+            }
         }
         .alert("重命名 Profile", isPresented: Binding(
             get: { renaming != nil },
@@ -207,6 +215,10 @@ struct ConsoleAccountsView: View {
             .disabled(store.qoderActing != nil)
             .help("把本机已有的 Qoder CN / International 配置登记成 Profile，不移动、不覆盖")
 
+            Button("Qoder 授权") { qoderLoginEdition = .global }
+                .buttonStyle(ConsoleSecondaryButtonStyle())
+                .help("用浏览器给 Qoder CN / International 授权账号，不需要安装客户端")
+
             Button("从 Magpie 导入") { showMagpie = true }
                 .buttonStyle(ConsoleSecondaryButtonStyle())
                 .help("复用 Magpie 已登录的 WorkBuddy 账号（只复制访问令牌）")
@@ -305,9 +317,7 @@ struct ConsoleAccountsView: View {
                 }
                 ForEach(QoderEdition.allCases) { edition in
                     if filter.edition == nil || filter.edition == edition {
-                        if !visibleServiceAccounts(edition).isEmpty {
-                            qoderServiceSection(edition)
-                        }
+                        qoderServiceSection(edition)
                         qoderSection(edition)
                     }
                 }
@@ -352,16 +362,30 @@ struct ConsoleAccountsView: View {
     private func qoderServiceSection(_ edition: QoderEdition) -> some View {
         let accounts = visibleServiceAccounts(edition)
         VStack(alignment: .leading, spacing: 10) {
-            ConsoleSectionTitle(
-                title: "\(edition.displayName) 账号",
-                detail: "\(accounts.count) 个服务账号"
-            )
-            LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 300), spacing: ConsoleTheme.cardSpacing)],
-                spacing: ConsoleTheme.cardSpacing
-            ) {
-                ForEach(accounts) { account in
-                    qoderServiceCard(account)
+            HStack(alignment: .center, spacing: 8) {
+                ConsoleSectionTitle(
+                    title: "\(edition.displayName) 账号",
+                    detail: "\(accounts.count) 个服务账号"
+                )
+                Button("浏览器授权") { qoderLoginEdition = edition }
+                    .buttonStyle(ConsoleSecondaryButtonStyle())
+                    .help("不装 Qoder 客户端，用浏览器给 \(edition.displayName) 授权一个账号")
+            }
+            if accounts.isEmpty {
+                ConsoleCard {
+                    Text("还没有 \(edition.displayName) 服务账号。"
+                        + "可以点「浏览器授权」，或从 Magpie 导入已登录的账号。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(ConsoleTheme.secondaryText)
+                }
+            } else {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 300), spacing: ConsoleTheme.cardSpacing)],
+                    spacing: ConsoleTheme.cardSpacing
+                ) {
+                    ForEach(accounts) { account in
+                        qoderServiceCard(account)
+                    }
                 }
             }
         }

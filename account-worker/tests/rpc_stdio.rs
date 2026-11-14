@@ -776,3 +776,87 @@ fn checkin_records_start_empty() {
 
     session.call(4, "worker.shutdown", json!({}));
 }
+
+// ---------------------------------------------------------------------------
+// PR #73：Qoder 设备授权（CN / International 独立）
+// ---------------------------------------------------------------------------
+
+/// 发起阶段**不联网**：只生成 PKCE 并返回对应站点的登录页。
+/// 含糊的 edition 不能被默认成任何一个站；取消后轮询立刻是终态。
+#[test]
+fn qoder_device_auth_start_is_offline_and_edition_scoped() {
+    let mut session = Session::start();
+
+    let cn = session.call(1, "qoder.auth.start", json!({"edition": "qoder_cn"}));
+    assert_eq!(cn["result"]["edition"], json!("qoder_cn"), "{cn}");
+    assert_eq!(cn["result"]["displayName"], json!("Qoder CN"), "{cn}");
+    let cn_url = cn["result"]["verificationUri"]
+        .as_str()
+        .expect("verificationUri")
+        .to_string();
+    assert!(
+        cn_url.starts_with("https://qoder.cn/device/selectAccounts?"),
+        "{cn_url}"
+    );
+    for part in [
+        "challenge_method=S256",
+        "client_id=e883ade2",
+        "machine_id=",
+        "nonce=",
+        // 两站的 CLI 都不带 redirect_uri。
+        "redirect_uri",
+    ] {
+        let present = cn_url.contains(part);
+        assert_eq!(
+            present,
+            part != "redirect_uri",
+            "参数 {part} 与预期不符：{cn_url}"
+        );
+    }
+    // 二维码内容就是同一个地址，不允许另给一份。
+    assert_eq!(cn["result"]["qrPayload"], cn["result"]["verificationUri"]);
+
+    let login_id = cn["result"]["loginId"]
+        .as_str()
+        .expect("loginId")
+        .to_string();
+    let cancelled = session.call(2, "qoder.auth.cancel", json!({"loginId": login_id}));
+    assert_eq!(cancelled["result"]["cancelled"], json!(true), "{cancelled}");
+    // 重复取消是幂等的 false。
+    let again = session.call(3, "qoder.auth.cancel", json!({"loginId": login_id}));
+    assert_eq!(again["result"]["cancelled"], json!(false), "{again}");
+
+    let global = session.call(4, "qoder.auth.start", json!({"edition": "qoder_global"}));
+    let global_url = global["result"]["verificationUri"]
+        .as_str()
+        .expect("verificationUri");
+    assert!(
+        global_url.starts_with("https://qoder.com/device/selectAccounts?"),
+        "{global_url}"
+    );
+    assert!(global_url.contains("client_id=732aef47"), "{global_url}");
+    assert_ne!(
+        global["result"]["loginId"],
+        json!(login_id),
+        "每次发起都是新会话"
+    );
+
+    // 含糊的 `qoder` 不能被默认成国内版或国际版。
+    let bad = session.call(5, "qoder.auth.start", json!({"edition": "qoder"}));
+    assert_eq!(bad["error"]["code"], json!(-32602), "{bad}");
+
+    // 已取消的会话：轮询直接终态，不发网络、不落库。
+    let polled = session.call(6, "qoder.auth.poll", json!({"loginId": login_id}));
+    assert_eq!(polled["result"]["state"], json!("cancelled"), "{polled}");
+    // 不存在的会话也一样。
+    let unknown = session.call(7, "qoder.auth.poll", json!({"loginId": "qd1_missing"}));
+    assert_eq!(unknown["result"]["state"], json!("finished"), "{unknown}");
+
+    let accounts = session.call(8, "qoder.accounts.list", json!({}));
+    assert_eq!(
+        accounts["result"]["accounts"],
+        json!([]),
+        "没有完成授权就不该有账号"
+    );
+    session.call(9, "worker.shutdown", json!({}));
+}

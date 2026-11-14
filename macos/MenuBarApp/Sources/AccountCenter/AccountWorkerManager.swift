@@ -210,6 +210,48 @@ final class AccountWorkerManager: ObservableObject {
         return WorkbuddyLoginPhase.parse(result)
     }
 
+    // MARK: - Qoder 设备授权（PR #73）
+
+    /// 发起一次设备授权。发起阶段不联网，助手没起会先拉起来。
+    func startQoderLogin(edition: QoderEdition) async throws -> QoderLoginStart {
+        if case .running = state {} else {
+            await refresh()
+        }
+        guard case .running = state, let client, client.isRunning else {
+            throw AccountWorkerFailure.notRunning
+        }
+        let result = try await client.call(
+            "qoder.auth.start",
+            params: ["edition": edition.rawValue],
+            timeout: 15
+        )
+        guard let start = QoderLoginStart.parse(result) else {
+            throw AccountWorkerFailure.malformedLine
+        }
+        return start
+    }
+
+    /// 轮询一次。返回 `.pending` 时调用方应继续等。
+    func pollQoderLogin(_ loginId: String) async throws -> QoderLoginPhase {
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        let result = try await client.call(
+            "qoder.auth.poll",
+            params: ["loginId": loginId],
+            timeout: 20
+        )
+        return QoderLoginPhase.parse(result)
+    }
+
+    /// 取消是一次性通知，失败也不该打断界面。
+    func cancelQoderLogin(_ loginId: String) async {
+        guard let client, client.isRunning else { return }
+        _ = try? await client.call(
+            "qoder.auth.cancel",
+            params: ["loginId": loginId],
+            timeout: 5
+        )
+    }
+
     // MARK: - 从 Magpie 导入（PR1b-1）
 
     /// 读取 Magpie 里已登录的 WorkBuddy 账号（只读，不含令牌）。
