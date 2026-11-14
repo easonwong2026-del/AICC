@@ -170,6 +170,14 @@ fn text(value: Option<&Value>) -> Option<String> {
     }
 }
 
+/// 完整性感知的累加：任一侧是 `None`，结果就是 `None`。
+fn add(sum: Option<f64>, value: Option<f64>) -> Option<f64> {
+    match (sum, value) {
+        (Some(a), Some(b)) => Some(a + b),
+        _ => None,
+    }
+}
+
 /// 单位规范化：去空白、转小写、去掉末尾的 `s`。
 ///
 /// `CapacityUnit` 在同一个账号的两个包里会分别写 `credit` 和 `credits`
@@ -209,9 +217,12 @@ pub fn parse_summary(body: &Value) -> Result<Quota, Failure> {
         .unwrap_or_else(|| "credits".to_string());
     let group = canonical_unit(&unit);
 
-    let mut sum_total = 0.0;
-    let mut sum_used = 0.0;
-    let mut sum_remaining = 0.0;
+    // 三个字段各自累计，而且**按完整性**累计：只要有一个计入的包缺这个字段，
+    // 这一项就整体是 `None`。用 `unwrap_or(0)` 会把"不知道"写成"确实是 0"，
+    // 那比不显示更糟——界面会把它画成"额度用完了"。
+    let mut sum_total: Option<f64> = Some(0.0);
+    let mut sum_used: Option<f64> = Some(0.0);
+    let mut sum_remaining: Option<f64> = Some(0.0);
     let mut counted = 0usize;
     for pkg in &packages {
         let pkg_unit = text(pkg.get("CapacityUnit")).unwrap_or_else(|| unit.clone());
@@ -223,13 +234,14 @@ pub fn parse_summary(body: &Value) -> Result<Quota, Failure> {
         let total = number(pkg.get("CycleTotalCapacity"));
         let used = number(pkg.get("CycleUsedCapacity"));
         let remaining = number(pkg.get("CycleRemainCapacity"));
-        if total.is_none() && remaining.is_none() {
+        if total.is_none() && used.is_none() && remaining.is_none() {
+            // 三个字段全缺 = 这一包没有任何可用信息，不参与计数。
             continue;
         }
-        sum_total += total.unwrap_or(0.0);
-        sum_used += used.unwrap_or(0.0);
-        sum_remaining += remaining.unwrap_or(0.0);
         counted += 1;
+        sum_total = add(sum_total, total);
+        sum_used = add(sum_used, used);
+        sum_remaining = add(sum_remaining, remaining);
     }
 
     // 实测结论（2026-11-14，国内版）：`TotalCredits` **是"可用额度合计"，不是总容量**。
@@ -237,11 +249,12 @@ pub fn parse_summary(body: &Value) -> Result<Quota, Failure> {
     // 正好等于 4597.75+500+100 = 5197.75。所以它只能当 remaining 的兜底，
     // 拿来当 total 会把"还能用多少"写成"一共有多少"。
     let server_available = number(data.get("TotalCredits"));
-    let total = (counted > 0).then_some(sum_total);
-    let used = (counted > 0).then_some(sum_used);
+    let total = (counted > 0).then(|| sum_total).flatten();
+    let used = (counted > 0).then(|| sum_used).flatten();
     let remaining = if counted > 0 {
-        Some(sum_remaining)
+        sum_remaining
     } else {
+        // 一个包都没有时才退到服务端的"可用额度"字段（它本身就是剩余口径）。
         server_available
     };
 
@@ -314,17 +327,15 @@ fn retcode(body: &Value) -> String {
     format!("缺少 data（code={code} msg={msg}）")
 }
 
-/// 一次取齐额度 + 用量。`days <= 0` 时跳过用量（只要余额）。
-pub async fn fetch(
+/// 额度摘要（余额）。**独立成败**：用量挂了不该让余额也消失。
+pub async fn fetch_quota(
     account: &crate::storage::AccountRecord,
     access: &str,
-    days: i64,
-) -> Result<(Quota, Option<Usage>), Failure> {
+) -> Result<Quota, Failure> {
     let base = base_for(&account.provider)
         .ok_or_else(|| Failure::Unparsable(format!("未知档位：{}", account.provider)))?;
     let client = client()?;
-
-    let summary_body = post_json(
+    let body = post_json(
         &client,
         &format!("{base}{SUMMARY_PATH}"),
         access,
@@ -332,14 +343,21 @@ pub async fn fetch(
         json!({}),
     )
     .await?;
-    let quota = parse_summary(&summary_body)?;
+    parse_summary(&body)
+}
 
-    if days <= 0 {
-        return Ok((quota, None));
-    }
+/// 用量明细。失败只影响 `usage` 这一段，由调用方单独报告。
+pub async fn fetch_usage(
+    account: &crate::storage::AccountRecord,
+    access: &str,
+    days: i64,
+) -> Result<Usage, Failure> {
+    let base = base_for(&account.provider)
+        .ok_or_else(|| Failure::Unparsable(format!("未知档位：{}", account.provider)))?;
+    let client = client()?;
     let today = crate::clock::beijing_date();
     let from = crate::clock::beijing_date_offset_days(-(days - 1));
-    let usage_body = post_json(
+    let body = post_json(
         &client,
         &format!("{base}{USAGE_PATH}"),
         access,
@@ -352,8 +370,7 @@ pub async fn fetch(
         }),
     )
     .await?;
-    let usage = parse_usage(&usage_body, days)?;
-    Ok((quota, Some(usage)))
+    parse_usage(&body, days)
 }
 
 #[cfg(test)]
@@ -437,6 +454,34 @@ mod tests {
         assert_eq!(q.total, Some(4913.0));
         assert_eq!(q.remaining, Some(4597.75000075));
         assert_eq!(q.used, Some(315.24999925));
+    }
+
+    #[test]
+    fn a_missing_field_stays_unknown_instead_of_becoming_zero() {
+        // 第二个包缺 `CycleUsedCapacity`：已用额度整体未知，不能变成"已用 10"。
+        let body = json!({"code":0,"data":{
+            "Packages":[
+                {"CycleTotalCapacity":"100","CycleRemainCapacity":"90","CycleUsedCapacity":"10","CapacityUnit":"credits"},
+                {"CycleTotalCapacity":"100","CycleRemainCapacity":"100","CapacityUnit":"credits"}
+            ],
+            "TotalCredits":"190"
+        }});
+        let q = parse_summary(&body).unwrap();
+        assert_eq!(q.total, Some(200.0), "两个包都有 total，可以相加");
+        assert_eq!(q.used, None, "缺一个 used 就不能给出总数");
+        assert_eq!(q.remaining, Some(190.0));
+
+        // 缺 total 时同理：总额未知，但已用/剩余仍然准确。
+        let body = json!({"code":0,"data":{
+            "Packages":[
+                {"CycleRemainCapacity":"90","CycleUsedCapacity":"10","CapacityUnit":"credits"}
+            ],
+            "TotalCredits":"90"
+        }});
+        let q = parse_summary(&body).unwrap();
+        assert_eq!(q.total, None);
+        assert_eq!(q.used, Some(10.0));
+        assert_eq!(q.remaining, Some(90.0));
     }
 
     #[test]
