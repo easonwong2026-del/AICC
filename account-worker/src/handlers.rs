@@ -70,6 +70,13 @@ pub const METHODS: &[&str] = &[
     "qoder.auth.pat.save",
     "qoder.auth.pat.check",
     "qoder.auth.pat.remove",
+    // ---- Qoder 每日 Credits（PR #75）----
+    "qoder.credits.status",
+    "qoder.credits.claim",
+    "qoder.credits.runs",
+    "qoder.credits.auto.status",
+    "qoder.credits.auto.setEnabled",
+    "qoder.credits.auto.tick",
     "auth.workbuddy.start",
     "auth.workbuddy.poll",
     "auth.workbuddy.cancel",
@@ -519,6 +526,50 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                 "removed": removed.removed,
                 "secretDeleted": removed.secret_deleted,
             }))
+        }
+
+        // ---- Qoder 每日 Credits（PR #75）----
+        //
+        // 查询是只读的、领取是有副作用的、自动领取是**默认关闭**的。
+        // 三者分开成不同方法，界面上的按钮也就能分开。
+        "qoder.credits.status" => {
+            let account_id = require_str(params, "accountId")?;
+            crate::credits::status(app, &account_id).await
+        }
+
+        "qoder.credits.claim" => {
+            let account_id = require_str(params, "accountId")?;
+            crate::credits::claim(app, &account_id, "manual").await
+        }
+
+        "qoder.credits.runs" => {
+            let account_id = params
+                .get("accountId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(20) as u32;
+            crate::credits::runs(app, account_id, limit)
+        }
+
+        "qoder.credits.auto.status" => crate::credits::auto_status(app),
+
+        "qoder.credits.auto.setEnabled" => {
+            let account_id = require_str(params, "accountId")?;
+            let enabled = params
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| RpcError::invalid_params("缺少参数 enabled（布尔）"))?;
+            crate::credits::set_auto(app, &account_id, enabled)
+        }
+
+        "qoder.credits.auto.tick" => {
+            // `force` 只跳过 20 分钟的最小间隔，不绕过账号开关。
+            let force = params
+                .get("force")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Ok(crate::credits::run_tick(app, force).await)
         }
 
         // ---- WorkBuddy 扫码登录（PR1b-1）----

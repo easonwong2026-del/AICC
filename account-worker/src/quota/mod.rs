@@ -161,13 +161,17 @@ pub async fn board(app: &Arc<App>, params: BoardParams) -> RpcResult<Value> {
             .ok()
             .flatten()
             .unwrap_or_else(|| "unknown".to_string());
-        rows.push(qoder::unverified_row(
-            &account.id,
-            provider,
-            &account.nickname,
-            &source,
-            QODER_BLOCKER,
-        ));
+        // Qoder 账号很少，串行就够；每个账号仍受整轮 deadline 约束。
+        rows.push(
+            qoder_row(
+                app,
+                account,
+                &source,
+                params.refresh.unwrap_or(false),
+                deadline,
+            )
+            .await,
+        );
     }
 
     rows.sort_by_key(|row| {
@@ -182,20 +186,134 @@ pub async fn board(app: &Arc<App>, params: BoardParams) -> RpcResult<Value> {
         )
     });
 
+    // 明确告诉界面：这些平台一个网络请求都没发，不是"暂时取不到"。
+    // 现在按实际结果算：任何一行拿到 `ok`，就不再算"未验证"。
+    let unverified: Vec<&str> = PROVIDERS
+        .iter()
+        .copied()
+        .filter(|provider| {
+            rows.iter()
+                .filter(|row| row["provider"].as_str() == Some(provider))
+                .all(|row| row["status"].as_str() == Some("unverified"))
+        })
+        .collect();
+
     Ok(json!({
         "rows": rows,
         "days": days,
         "today": crate::clock::beijing_date(),
         "cacheTtlSeconds": CACHE_TTL_SECS,
-        // 明确告诉界面：这些平台一个网络请求都没发，不是"暂时取不到"。
-        "unverifiedProviders": qoder::PROVIDERS,
+        "unverifiedProviders": unverified,
         "budgetSeconds": BOARD_BUDGET.as_secs(),
     }))
 }
 
-/// Qoder 的阻塞原因。写死在代码里而不是从数据库读：它是能力事实，不是配置。
-const QODER_BLOCKER: &str = "Qoder 官方 OIDC 未提供公开客户端注册（token 端点无 none 认证方式），\
-且 Credits 业务接口无公开文档与成功样本；本版零请求，不显示为 0";
+/// 一个 Qoder 账号的一行。
+///
+/// 三条规则：
+/// 1. **缓存优先**：5 分钟内且没要求刷新就直接返回快照，避免每次开面板都打网络；
+/// 2. **`refresh` 只影响这一次**：它不写回任何开关，也不改账号状态；
+/// 3. **写入要过版本核验**：`auth_epoch` 对不上就不写（换过授权 / 删过号）。
+async fn qoder_row(
+    app: &Arc<App>,
+    account: &crate::storage::qoder_accounts::QoderAccountRecord,
+    source: &str,
+    refresh: bool,
+    deadline: tokio::time::Instant,
+) -> Value {
+    let cached = app
+        .with_db(|db| db.latest_quota_snapshot(&account.id))
+        .ok()
+        .flatten();
+
+    if !refresh {
+        if let Some(snapshot) = cached
+            .as_ref()
+            .filter(|s| snapshot_age_secs(&s.captured_at) <= CACHE_TTL_SECS)
+        {
+            if let Some(row) = qoder::cached_row(
+                &parse_payload(&snapshot.payload),
+                &snapshot.captured_at,
+                false,
+            ) {
+                return row;
+            }
+        }
+    }
+
+    if tokio::time::Instant::now() >= deadline {
+        return qoder_cached_or_blocked(account, source, cached.as_ref(), "本轮刷新超出时间预算");
+    }
+
+    let status =
+        match tokio::time::timeout_at(deadline, crate::credits::status(app, &account.id)).await {
+            Ok(Ok(value)) => value,
+            Ok(Err(err)) => {
+                return qoder_cached_or_blocked(account, source, cached.as_ref(), &err.message)
+            }
+            Err(_) => {
+                return qoder_cached_or_blocked(
+                    account,
+                    source,
+                    cached.as_ref(),
+                    "Qoder 查询超出本轮时间预算",
+                )
+            }
+        };
+
+    let row = qoder::row_from_status(
+        &account.id,
+        &account.edition,
+        &account.nickname,
+        source,
+        &status,
+    );
+
+    // 只有真的拿到过服务端结论（含"今天没有活动"）才落缓存：
+    // 401 / 网络错误的行不该变成历史记录。
+    if matches!(row["status"].as_str(), Some("ok")) {
+        app.with_db(|db| {
+            db.save_qoder_quota_snapshot(
+                &account.id,
+                &account.edition,
+                "ok",
+                &row,
+                Some(account.auth_epoch),
+            )
+            .map(|_| ())
+        })
+        .ok();
+    }
+
+    row
+}
+
+/// 取不到时：有旧快照就降级成 `stale`，没有就给出一句能行动的原因。
+fn qoder_cached_or_blocked(
+    account: &crate::storage::qoder_accounts::QoderAccountRecord,
+    source: &str,
+    cached: Option<&crate::storage::quota::QuotaSnapshot>,
+    detail: &str,
+) -> Value {
+    if let Some(snapshot) = cached {
+        if let Some(mut row) = qoder::cached_row(
+            &parse_payload(&snapshot.payload),
+            &snapshot.captured_at,
+            true,
+        ) {
+            row["status"] = json!("stale");
+            row["error"] = json!(crate::rpc::sanitize(detail));
+            return row;
+        }
+    }
+    qoder::unverified_row(
+        &account.id,
+        &account.edition,
+        &account.nickname,
+        source,
+        &crate::rpc::sanitize(detail),
+    )
+}
 
 fn wanted(
     provider: Option<&str>,

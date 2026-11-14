@@ -13,6 +13,7 @@
 pub mod magpie;
 pub mod qoder;
 pub mod qoder_auth;
+pub mod qoder_credits;
 pub mod qoder_crypto;
 pub mod qoder_edition;
 pub mod qoder_global;

@@ -73,6 +73,15 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `qoder.auth.start` | 发起 Qoder **设备授权**（PR #73）：`edition` 只接受 `qoder_cn` / `qoder_global`，本地生成 PKCE + nonce + machine_id，返回该站点的 `/device/selectAccounts` 登录页。**不联网** | 否 |
 | `qoder.auth.poll` | 轮询设备码：只有 `200` 且带非空 `token` 才算完成，其余（含 4xx、网络抖动）都继续等，15 分钟 TTL 兜底；成功后令牌进钥匙串、账号与 `own_browser` 授权入库，**版本取自会话**（提交门禁，无默认值兜底） | 是 |
 | `qoder.auth.cancel` | 取消一次设备授权；只对仍在等待的会话生效，已进入落库的会话取消落空 | 否 |
+| `qoder.auth.pat.save` | 保存 PAT（PR #73 备用入口）：**先真打一次 `userinfo` 换身份**，拿不到 uid 就不入库；令牌只进钥匙串（`qoder/<id>/pat/token`），授权行是独立的 `own_pat` 来源。返回体把 `identity=verified` 与 `credits=unknown` 分开报 | 是 |
+| `qoder.auth.pat.check` | 重新验证已存 PAT（一次 `userinfo`）；401/403 把该来源标 `invalid`，**只改状态、不推进 `auth_epoch`** | 是 |
+| `qoder.auth.pat.remove` | 只删 `own_pat` 这一份来源与它的钥匙串条目；浏览器授权与 Magpie 关联不受影响 | 否 |
+| `qoder.credits.status` | 只读查询 Qoder CN 今日活动（可领 / 已领 / 无活动 / 未支持）；International **零请求**并返回 `unsupported` | 是 |
+| `qoder.credits.claim` | 手动领取：只领服务端标记为可领的活动，**POST 超时先回查**、401/403 不重试，执行后回查确认 | 是 |
+| `qoder.credits.runs` | 某账号最近的领取记录（`ok` / `already` / `rejected` / `rate_limited` …），含来源与错误分类 | 否 |
+| `qoder.credits.auto.status` | 各账号的自动领取开关与最近一条记录 | 否 |
+| `qoder.credits.auto.setEnabled` | 打开 / 关闭某账号的自动领取；**未验证的版本直接拒绝开启** | 否 |
+| `qoder.credits.auto.tick` | 跑一轮自动领取（心跳用它）：不绕过账号开关，20 分钟限速，当天已领到就停手 | 是 |
 | `auth.workbuddy.refresh` | 刷新令牌；`auth_source=magpie` 的账号改为重新同步 | 是 |
 | `auth.workbuddy.status` | 用当前选用的授权探测一次登录态（只读）：先 `Valid/Unauthorized/Transient` 分类，再过 401 才切源 | 是 |
 | `providers.magpie.accounts` | 列出 Magpie 里已登录的**四个 provider**（`workbuddy` / `workbuddy-ai` / `qoder` / `qoder-cn`）账号，逐条带 `platform` / `provider` / `edition` / `importTarget`，并标出哪些已导入；**不含令牌** | 否 |

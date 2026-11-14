@@ -71,6 +71,61 @@ struct ConsoleQuotaView: View {
         }
     }
 
+    /// Qoder 卡片里的 Credits 区块。
+    ///
+    /// 只有四个字要记：**这是奖励，不是余额**。所以这里没有进度条、没有"总额"，
+    /// 只有一个状态 + 一个可点性明确的按钮。
+    @ViewBuilder
+    private func creditsBlock(_ credits: QoderCreditsInfo, row: WorkerQuotaRow) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(credits.summary)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(credits.state == "error" || credits.state == "unauthorized"
+                        ? ConsoleTheme.warning : ConsoleTheme.text)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                if credits.state == "claimable" || credits.state == "already" {
+                    ConsoleBadge(text: "每日奖励", tint: ConsoleTheme.secondaryText)
+                }
+            }
+            if let end = credits.windowEnd {
+                Text("活动窗口截止 \(Self.localTimestamp(Self.epochToRFC3339(end)))（服务端时间）")
+                    .font(.system(size: 10))
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+            }
+            HStack(spacing: 8) {
+                Button("检查") {
+                    Task { await store.checkQoderCredits(accountId: row.accountId) }
+                }
+                .buttonStyle(ConsoleSecondaryButtonStyle())
+                .disabled(store.qoderCreditsBusy == row.accountId || !credits.supported)
+
+                Button("领取今日") {
+                    Task { await store.claimQoderCredits(accountId: row.accountId) }
+                }
+                .buttonStyle(ConsolePrimaryButtonStyle())
+                .disabled(store.qoderCreditsBusy == row.accountId || !credits.canClaim)
+                .help(credits.canClaim
+                    ? "领取服务端当前标记为可领的活动"
+                    : "当前没有可领取的活动；先点「检查」看服务端状态")
+
+                if store.qoderCreditsBusy == row.accountId {
+                    ProgressView().controlSize(.mini)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    /// Unix 秒 → RFC3339，交给 `localTimestamp` 统一按本机时区显示。
+    static func epochToRFC3339(_ seconds: Int) -> String {
+        let date = Date(timeIntervalSince1970: TimeInterval(seconds))
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
+    }
+
     /// RFC3339（UTC）→ 本机时区的 `MM-dd HH:mm`。解析不了就原样显示前 16 位。
     static func localTimestamp(_ raw: String) -> String {
         let parser = ISO8601DateFormatter()
@@ -106,6 +161,11 @@ struct ConsoleQuotaView: View {
                     }
                 }
 
+                // Qoder 没有余额接口：这里显示的是**当日活动**，不是余额。
+                // 与上面的 total/remaining 是两种量，界面上不合并、不相加。
+                if let credits = row.credits {
+                    creditsBlock(credits, row: row)
+                } else {
                 switch row.status {
                 case "ok", "stale":
                     if let text = row.remainingText {
@@ -160,6 +220,7 @@ struct ConsoleQuotaView: View {
                     Text("读取失败")
                         .font(.system(size: 12))
                         .foregroundStyle(ConsoleTheme.danger)
+                }
                 }
 
                 HStack(spacing: 6) {

@@ -17,6 +17,7 @@ pub mod authz;
 pub mod checkin;
 pub mod growth;
 pub mod qoder_accounts;
+pub mod qoder_credits;
 pub mod qoder_profiles;
 pub mod qoder_switch;
 pub mod quota;
@@ -311,6 +312,15 @@ CREATE INDEX IF NOT EXISTS idx_quota_snapshots_account ON quota_snapshots (accou
 /// 检测现状，重复执行必须是空操作——人工把 `user_version` 回拨、或者迁移事务
 /// 已提交但版本号没写下去时，再来一次不能炸在 `duplicate column name` 上。
 ///
+/// v17：Qoder 每日 Credits 领取（PR #75）。
+///
+/// 一个开关 + 一张账。**不复用 `task_executions`**：那张表是 WorkBuddy 签到 /
+/// 旅行 / 成长共用的"一次任务运行"，没有 `campaign_id` 与 `credits` 两列，
+/// 塞进去要么丢信息要么靠拼字符串查；也不复用 `credit_snapshots`（上游 wb-switch
+/// 的账，另一套单位语义）。
+///
+/// 步骤是 Rust（`qoder_credits::migrate_v17`）：先检测有没有那一列，
+/// 重复执行必须是空操作。表结构见那个函数。
 /// 一次迁移里的一步：纯 SQL，或者需要 Rust 参与的数据迁移。
 enum MigrationStep {
     Sql(&'static str),
@@ -404,9 +414,14 @@ const MIGRATIONS: &[Migration] = &[
         version: 16,
         steps: &[MigrationStep::Rust(qoder_accounts::rebuild_v16)],
     },
+    // v17：Qoder 每日 Credits 领取记录 + 每账号开关。只追加列、只建新表。
+    Migration {
+        version: 17,
+        steps: &[MigrationStep::Rust(qoder_credits::migrate_v17)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 16;
+pub const LATEST_VERSION: i64 = 17;
 
 pub struct Db {
     conn: Connection,
@@ -611,6 +626,7 @@ impl Db {
             "account_authorizations",
             "qoder_accounts",
             "qoder_authorizations",
+            "qoder_credit_runs",
             "quota_snapshots",
         ] {
             let sql = format!("SELECT COUNT(*) FROM {table}");
