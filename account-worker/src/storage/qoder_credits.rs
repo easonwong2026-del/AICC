@@ -59,6 +59,35 @@ pub(super) fn migrate_v17(tx: &rusqlite::Transaction<'_>) -> crate::rpc::RpcResu
     Ok(())
 }
 
+/// v18 迁移步骤：给领取账加上**活动周期**两列。
+///
+/// 为什么需要：`campaignId` 由服务端生成，同一个 id 在不同周期可能被复用
+/// （参考实现把"日窗"当成活动周期）。只按 `campaignId` 去重会出现两种错：
+///
+/// - 跨周期复用同一个 id → 次日被当成"已经领过"，**领不到**；
+/// - 没有周期信息时无法区分"这一期领过"和"上一期领过"。
+///
+/// 于是去重键变成 `(account_id, campaign_id, period_start)`。
+/// 两列都可空：服务端不给窗口时就不参与去重（宁可多一次幂等 POST，
+/// 也不能凭空挡住一次合法的领取）。
+///
+/// 与 v16 / v17 一样先检测再动手：`user_version` 被回拨后重复执行不能炸。
+pub(super) fn migrate_v18(tx: &rusqlite::Transaction<'_>) -> crate::rpc::RpcResult<()> {
+    for column in ["period_start", "period_end"] {
+        let exists: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('qoder_credit_runs') WHERE name = ?1",
+            [column],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            tx.execute_batch(&format!(
+                "ALTER TABLE qoder_credit_runs ADD COLUMN {column} INTEGER;"
+            ))?;
+        }
+    }
+    Ok(())
+}
+
 /// 一次领取尝试的结论。取值与 `qoder_credits::Outcome` 一一对应。
 pub const OUTCOMES: &[&str] = &[
     "ok",
@@ -83,6 +112,9 @@ pub struct CreditRun {
     pub account_id: String,
     pub campaign_id: Option<String>,
     pub campaign_key: Option<String>,
+    /// 服务端给的活动窗口（Unix 秒）。`None` = 服务端没给，不参与去重。
+    pub period_start: Option<i64>,
+    pub period_end: Option<i64>,
     pub outcome: String,
     pub credits: Option<i64>,
     pub http_status: Option<i64>,
@@ -100,6 +132,8 @@ impl CreditRun {
             "accountId": self.account_id,
             "campaignId": self.campaign_id,
             "campaignKey": self.campaign_key,
+            "periodStart": self.period_start,
+            "periodEnd": self.period_end,
             "outcome": self.outcome,
             "credits": self.credits,
             "httpStatus": self.http_status,
@@ -146,7 +180,8 @@ fn run_uid(
 }
 
 const COLUMNS: &str = "id, account_id, campaign_id, campaign_key, outcome, credits, \
-     http_status, auth_source, error_kind, error_detail, trigger, executed_at";
+     http_status, auth_source, error_kind, error_detail, trigger, executed_at, \
+     period_start, period_end";
 
 fn map_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<CreditRun> {
     Ok(CreditRun {
@@ -154,6 +189,8 @@ fn map_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<CreditRun> {
         account_id: row.get(1)?,
         campaign_id: row.get(2)?,
         campaign_key: row.get(3)?,
+        period_start: row.get(12)?,
+        period_end: row.get(13)?,
         outcome: row.get(4)?,
         credits: row.get(5)?,
         http_status: row.get(6)?,
@@ -170,6 +207,8 @@ pub struct RunInput<'a> {
     pub account_id: &'a str,
     pub campaign_id: Option<&'a str>,
     pub campaign_key: Option<&'a str>,
+    pub period_start: Option<i64>,
+    pub period_end: Option<i64>,
     pub outcome: &'a str,
     pub credits: Option<i64>,
     pub http_status: Option<i64>,
@@ -204,9 +243,10 @@ impl crate::storage::Db {
         // 记录不是业务状态：账号已经被删掉时**不写孤儿行**，但也不报错打断领取。
         let inserted = self.conn.execute(
             "INSERT OR IGNORE INTO qoder_credit_runs (
-                 uid, account_id, campaign_id, campaign_key, outcome, credits,
-                 http_status, auth_source, error_kind, error_detail, trigger, executed_at)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
+                 uid, account_id, campaign_id, campaign_key, period_start, period_end,
+                 outcome, credits, http_status, auth_source, error_kind, error_detail,
+                 trigger, executed_at)
+             SELECT ?1, ?2, ?3, ?4, ?13, ?14, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
              WHERE EXISTS (SELECT 1 FROM qoder_accounts WHERE id = ?2)",
             params![
                 uid,
@@ -220,7 +260,9 @@ impl crate::storage::Db {
                 input.error_kind,
                 input.error_detail,
                 input.trigger,
-                executed_at
+                executed_at,
+                input.period_start,
+                input.period_end
             ],
         )?;
         if inserted == 0 {
@@ -271,14 +313,30 @@ impl crate::storage::Db {
         Ok(out)
     }
 
-    /// 这个账号在该活动上是否已经**成功**领过（`ok` / `already`）。
+    /// 这个账号在**这一期**活动上是否已经成功领过（`ok` / `already`）。
     ///
-    /// 自动领取拿它做同周期去重：宁可少发一次 POST，也不重复提交。
-    pub fn qoder_credit_claimed(&self, account_id: &str, campaign_id: &str) -> RpcResult<bool> {
+    /// 去重键是 `(account_id, campaign_id, period_start)`：
+    ///
+    /// - 服务端复用 `campaignId` 时，新周期 `period_start` 不同 → **不**算领过，
+    ///   次日仍能领；
+    /// - 同一周期重复调用 → 算领过，不重复提交。
+    ///
+    /// `period_start` 为 `None`（服务端没给窗口）时**永不匹配**：
+    /// 宁可多一次幂等 POST，也不能因为认不出周期而挡掉一次合法领取。
+    pub fn qoder_credit_claimed(
+        &self,
+        account_id: &str,
+        campaign_id: &str,
+        period_start: Option<i64>,
+    ) -> RpcResult<bool> {
+        let Some(period) = period_start else {
+            return Ok(false);
+        };
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM qoder_credit_runs
-             WHERE account_id = ?1 AND campaign_id = ?2 AND outcome IN ('ok', 'already')",
-            params![account_id, campaign_id],
+             WHERE account_id = ?1 AND campaign_id = ?2 AND period_start IS ?3
+               AND outcome IN ('ok', 'already')",
+            params![account_id, campaign_id, period],
             |row| row.get(0),
         )?;
         Ok(count > 0)
@@ -346,6 +404,8 @@ mod tests {
             account_id,
             campaign_id: Some("c-1"),
             campaign_key: Some("daily"),
+            period_start: Some(1_700_000_000),
+            period_end: Some(1_700_086_400),
             outcome,
             credits,
             http_status: Some(200),
@@ -409,15 +469,36 @@ mod tests {
     fn claim_dedupe_only_counts_successful_runs() {
         let (mut db, _dir) = db();
         let id = account(&mut db);
+        let period = Some(1_700_000_000);
         // 失败不算"领过"：否则一次 429 会让当天再也领不到。
         db.record_qoder_credit_run(run(&id, "rate_limited", None))
             .unwrap();
-        assert!(!db.qoder_credit_claimed(&id, "c-1").unwrap());
+        assert!(!db.qoder_credit_claimed(&id, "c-1", period).unwrap());
         db.record_qoder_credit_run(run(&id, "ok", Some(100)))
             .unwrap();
-        assert!(db.qoder_credit_claimed(&id, "c-1").unwrap());
+        assert!(db.qoder_credit_claimed(&id, "c-1", period).unwrap());
         // 另一个活动不受影响。
-        assert!(!db.qoder_credit_claimed(&id, "c-2").unwrap());
+        assert!(!db.qoder_credit_claimed(&id, "c-2", period).unwrap());
+    }
+
+    /// 服务端复用同一个 `campaignId` 时，**下一期必须还能领**。
+    #[test]
+    fn the_same_campaign_id_in_a_new_period_is_not_considered_claimed() {
+        let (mut db, _dir) = db();
+        let id = account(&mut db);
+        db.record_qoder_credit_run(run(&id, "ok", Some(100)))
+            .unwrap();
+
+        // 同一期：领过了。
+        assert!(db
+            .qoder_credit_claimed(&id, "c-1", Some(1_700_000_000))
+            .unwrap());
+        // 次日同一个 id、窗口不同：不该被挡住。
+        assert!(!db
+            .qoder_credit_claimed(&id, "c-1", Some(1_700_086_400))
+            .unwrap());
+        // 服务端没给窗口：不参与去重（宁可多一次幂等 POST）。
+        assert!(!db.qoder_credit_claimed(&id, "c-1", None).unwrap());
     }
 
     #[test]
