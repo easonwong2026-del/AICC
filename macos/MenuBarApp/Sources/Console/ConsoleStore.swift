@@ -150,6 +150,11 @@ final class ConsoleStore: ObservableObject {
     func refreshQoder(silent: Bool = false) async {
         guard !qoderLoading else { return }
         qoderLoading = true
+        guard await ensureWorkerReady() else {
+            if !silent { qoderError = workerFailureText }
+            qoderLoading = false
+            return
+        }
         defer { qoderLoading = false }
         do {
             async let editionsRaw = worker.qoderEditionsDetect()
@@ -441,20 +446,7 @@ final class ConsoleStore: ObservableObject {
         loadingAccounts = true
         defer { loadingAccounts = false }
 
-        // 助手没起就起一次；起不来时把原因原样带到界面上。
-        if case .running = worker.state {} else {
-            await worker.refresh()
-        }
-        // 另一个页面可能正在拉起助手，`refresh()` 会立刻返回 .starting。
-        // 这种情况等它落定，别把"启动中"当成错误甩给用户。
-        if case .starting = worker.state {
-            for _ in 0..<20 {
-                try? await Task.sleep(nanoseconds: 200_000_000)
-                if case .starting = worker.state { continue }
-                break
-            }
-        }
-        guard case .running = worker.state else {
+        guard await ensureWorkerReady() else {
             accountsError = workerFailureText
             accounts = []
             lastAccountsRefresh = Date()
@@ -480,6 +472,10 @@ final class ConsoleStore: ObservableObject {
         let window = days ?? workerQuotaWindowDays
         loadingWorkerQuota = true
         defer { loadingWorkerQuota = false }
+        guard await ensureWorkerReady() else {
+            workerQuotaError = workerFailureText
+            return
+        }
         do {
             workerQuotaRows = try await worker.workerQuota(days: window, refresh: force)
             workerQuotaWindowDays = window
@@ -497,6 +493,10 @@ final class ConsoleStore: ObservableObject {
     @Published private(set) var tasksOverviewError: String?
 
     func refreshTasksOverview() async {
+        guard await ensureWorkerReady() else {
+            tasksOverviewError = workerFailureText
+            return
+        }
         do {
             let value = try await worker.tasksOverview()
             tasksOverview = value
@@ -619,6 +619,10 @@ final class ConsoleStore: ObservableObject {
         guard !travelLoading else { return }
         travelLoading = true
         defer { travelLoading = false }
+        guard await ensureWorkerReady() else {
+            travelError = workerFailureText
+            return
+        }
         do {
             let summary = try await worker.travelSummary()
             travelRows = summary.rows
@@ -762,6 +766,10 @@ final class ConsoleStore: ObservableObject {
         guard !checkinLoading else { return }
         checkinLoading = true
         defer { checkinLoading = false }
+        guard await ensureWorkerReady() else {
+            if !silent { checkinError = workerFailureText }
+            return
+        }
         do {
             let json = try await worker.checkinStatus(cached: cached)
             checkin = CheckinFleetStatus(json: json)
@@ -846,6 +854,27 @@ final class ConsoleStore: ObservableObject {
         } catch {
             checkinNotice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
+    }
+
+    /// 确保账号助手已经起好再发 RPC。
+    ///
+    /// 控制台各页会在首屏并行取数，页面自己的 `.task` 可能早于
+    /// `loadIfNeeded()` 里的进程启动，此时 RPC 直接抛 "未运行"，
+    /// 界面上就会留下一条再也不消失的错误。所有入口先过这道门。
+    @discardableResult
+    func ensureWorkerReady() async -> Bool {
+        if case .running = worker.state { return true }
+        await worker.refresh()
+        // `refresh()` 在别的页面已经开始启动时会立刻返回 .starting：等它落定。
+        if case .starting = worker.state {
+            for _ in 0..<25 {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                if case .starting = worker.state { continue }
+                break
+            }
+        }
+        if case .running = worker.state { return true }
+        return false
     }
 
     private var workerFailureText: String {        switch worker.state {

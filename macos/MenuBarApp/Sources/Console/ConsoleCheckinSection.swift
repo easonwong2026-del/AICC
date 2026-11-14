@@ -87,11 +87,17 @@ struct ConsoleCheckinSection: View {
     private var card: some View {
         ConsoleCard(padding: 0) {
             if status.rows.isEmpty {
-                ConsoleEmptyState(
-                    symbol: "calendar.badge.checkmark",
-                    title: "还没有可签到的账号",
-                    message: "先到「AI 账号」页添加或从 Magpie 导入 WorkBuddy 账号。"
-                )
+                // 正在读 ≠ 没有账号：首屏助手还没回话时不能写成"还没有账号"。
+                if store.checkinLoading {
+                    ConsoleLoadingRow(text: "正在读取签到状态…")
+                        .padding(.horizontal, 4)
+                } else {
+                    ConsoleEmptyState(
+                        symbol: "calendar.badge.checkmark",
+                        title: "还没有可签到的账号",
+                        message: "先到「AI 账号」页添加或从 Magpie 导入 WorkBuddy 账号。"
+                    )
+                }
             } else {
                 VStack(spacing: 0) {
                     columnHeader
