@@ -158,6 +158,24 @@ fn kind_of(err: &CheckinError) -> State {
     }
 }
 
+/// 这个账号能不能进签到流程。返回 `Some((错误码, 说明))` 表示不能。
+///
+/// **两个条件都要看**：`platform == workbuddy` 只说明是 WorkBuddy 家族，
+/// 国内版和国际版是两套 API；国际版的签到协议还没验证，一律 `unsupported`。
+fn unsupported_reason(account: &AccountRecord) -> Option<(&'static str, String)> {
+    if account.platform != "workbuddy" {
+        return Some(("unsupported_platform", "签到只支持 WorkBuddy".into()));
+    }
+    if !account.supports_workbuddy_cn_apis() {
+        return Some((
+            "unsupported_provider",
+            "WorkBuddy AI（国际版）的签到接口尚未接入：\nAICC 不会把国际版授权发往国内版接口"
+                .into(),
+        ));
+    }
+    None
+}
+
 /// 生产入口：解析凭据，然后用真实传输层跑一遍。
 pub async fn run_account(
     app: &Arc<App>,
@@ -165,10 +183,12 @@ pub async fn run_account(
     source: Source,
     gate: WriteGate<'_>,
 ) -> AccountOutcome {
-    if account.platform != "workbuddy" {
+    // 只支持 WorkBuddy **国内版**：国际版是另一个站点，协议还没接。
+    // 这里必须挡在取凭据之前——否则国际版令牌会被发到国内域。
+    if let Some(reason) = unsupported_reason(account) {
         return AccountOutcome::new(account, source)
             .state(State::Unsupported)
-            .error("unsupported_platform", Some("签到只支持 WorkBuddy".into()));
+            .error(reason.0, Some(reason.1));
     }
     // 自动轮次先看开关：关着就一个请求都不发（连状态查询也不发）。
     // 手动轮次不看：用户点了按钮就是显式授权。
@@ -211,12 +231,12 @@ pub async fn run_account_with<T: Transport>(
     let today = beijing_date();
     let mut outcome = AccountOutcome::new(account, source);
 
-    if account.platform != "workbuddy" {
-        // 别的平台不签也不记账：往 `checkin_records` 里塞一行 Qoder 的"跳过"
+    if let Some(reason) = unsupported_reason(account) {
+        // 别的平台/版本不签也不记账：往 `checkin_records` 里塞一行"跳过"
         // 只会让历史查询出现永远不会有意义的数据。
         return outcome
             .state(State::Unsupported)
-            .error("unsupported_platform", Some("签到只支持 WorkBuddy".into()));
+            .error(reason.0, Some(reason.1));
     }
     if source == Source::Auto && !account.checkin_enabled {
         outcome = outcome

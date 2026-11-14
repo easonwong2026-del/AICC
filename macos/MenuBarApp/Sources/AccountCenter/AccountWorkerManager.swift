@@ -427,6 +427,18 @@ final class AccountWorkerManager: ObservableObject {
         return try await client.call("qoder.profiles.list", params: params, timeout: 15)
     }
 
+    /// Qoder CN / Global 的**平台服务账号**（不是本机快照）。
+    ///
+    /// 导入 Magpie 的 Qoder 账号后，账号只存在于这一步的返回值里：
+    /// 本机有没有装客户端都不影响。
+    func qoderAccountsList(edition: String? = nil) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        var params: [String: Any] = [:]
+        if let edition { params["edition"] = edition }
+        return try await client.call("qoder.accounts.list", params: params, timeout: 15)
+    }
+
     /// 扫描本机已有的配置目录，登记成 Profile（不移动、不覆盖）。
     func qoderProfilesScan() async throws -> [String: Any] {
         try await ensureRunning()

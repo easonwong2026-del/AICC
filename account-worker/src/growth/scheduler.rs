@@ -177,6 +177,17 @@ pub async fn run_tick(app: &std::sync::Arc<App>, force: bool) -> Value {
         if account.platform != "workbuddy" {
             continue;
         }
+        // 国际版：协议未接入，连扫描都不做，更不会接单/领奖。
+        if !account.supports_workbuddy_cn_apis() {
+            runs.push(json!({
+                "accountId": account.id,
+                "nickname": account.nickname,
+                "state": "unsupported",
+                "reason": "unsupported_provider",
+                "detail": "WorkBuddy AI（国际版）的成长中心接口尚未接入，未发送任何请求",
+            }));
+            continue;
+        }
         // 切到下一个账号之前重新确认：用户可能刚在界面上关掉。
         if !should_start_account(options, gate()) {
             runs.push(json!({
@@ -479,5 +490,31 @@ mod tests {
                 .is_none(),
             "只读检查不许推进 last_tick"
         );
+    }
+
+    /// 国际版成长中心接口没接入：扫描必须直接返回 unsupported，
+    /// **连凭据都不取**（取凭据本身会读钥匙串 / Magpie），更不会发请求。
+    #[tokio::test]
+    async fn growth_scan_marks_workbuddy_ai_unsupported_without_a_request() {
+        use crate::storage::AccountInput;
+        let (app, _dir) = test_app();
+        let row = app
+            .with_db(|db| {
+                db.upsert_account(&AccountInput {
+                    platform: "workbuddy".to_string(),
+                    uid: "ai-growth-uid".to_string(),
+                    nickname: Some("国际版".to_string()),
+                    provider: Some("workbuddy_ai".to_string()),
+                    ..Default::default()
+                })
+            })
+            .expect("account");
+
+        let scan = crate::growth::scan_account(&app, &row).await;
+        assert_eq!(scan.state, "unsupported");
+        assert!(scan.tasks.is_empty());
+        assert!(scan.auth_source.is_none(), "没有取过凭据");
+        assert_eq!(scan.errors.len(), 1);
+        assert_eq!(scan.errors[0].kind, "unsupported_provider");
     }
 }

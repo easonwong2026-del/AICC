@@ -91,6 +91,11 @@ struct ConsoleAccount: Identifiable, Equatable {
 
     let id: String
     let platform: String
+    /// WorkBuddy 的服务标识：`workbuddy`（国内版）/ `workbuddy_ai`（国际版）。
+    ///
+    /// 两个站点共用同一套表与授权，所以 `platform` 都是 `workbuddy`；
+    /// 靠这个字段区分版本，界面上必须显示出来。
+    let provider: String
     let uid: String
     let nickname: String
     let authStatus: String
@@ -108,6 +113,7 @@ struct ConsoleAccount: Identifiable, Equatable {
     init(
         id: String,
         platform: String,
+        provider: String = "workbuddy",
         uid: String,
         nickname: String,
         authStatus: String = "unknown",
@@ -119,6 +125,7 @@ struct ConsoleAccount: Identifiable, Equatable {
     ) {
         self.id = id
         self.platform = platform
+        self.provider = provider
         self.uid = uid
         let trimmed = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
         self.nickname = trimmed.isEmpty ? "未命名账号" : trimmed
@@ -138,6 +145,7 @@ struct ConsoleAccount: Identifiable, Equatable {
         self.init(
             id: id,
             platform: platform,
+            provider: json["provider"] as? String ?? "workbuddy",
             uid: uid,
             nickname: json["nickname"] as? String ?? "",
             authStatus: json["authStatus"] as? String ?? "unknown",
@@ -150,12 +158,27 @@ struct ConsoleAccount: Identifiable, Equatable {
         )
     }
 
+    /// 国际版必须是独立名字：只写 "WorkBuddy" 用户分不出这是哪个站点。
     var platformName: String {
-        platform == "workbuddy" ? "WorkBuddy" : (platform == "qoder_cn" ? "Qoder CN" : platform)
+        switch platform {
+        case "workbuddy":
+            return provider == "workbuddy_ai" ? "WorkBuddy AI" : "WorkBuddy"
+        case "qoder_cn":
+            return "Qoder CN"
+        default:
+            return platform
+        }
     }
 
+    var isWorkbuddyAI: Bool { platform == "workbuddy" && provider == "workbuddy_ai" }
+
+    /// 签到 / 成长 / 旅行 / 授权检查目前只实现了**国内版**协议。
+    /// 界面据此把入口显示为"暂不支持"，而不是发一个注定失败的请求。
+    var supportsCNTasks: Bool { platform == "workbuddy" && provider == "workbuddy" }
+
     var symbolName: String {
-        platform == "workbuddy" ? "bubble.left.and.bubble.right.fill" : "chevron.left.forwardslash.chevron.right"
+        guard platform == "workbuddy" else { return "chevron.left.forwardslash.chevron.right" }
+        return isWorkbuddyAI ? "globe.asia.australia.fill" : "bubble.left.and.bubble.right.fill"
     }
 
     var authLabel: String {

@@ -25,6 +25,11 @@ pub use scanner::{AccountScan, Counts, FieldError};
 /// 扫一个账号。取不到凭据时返回一个非错误态的占位结果 ——
 /// "没有授权"是账号的合法状态，不是扫描失败。
 pub async fn scan_account(app: &Arc<App>, account: &AccountRecord) -> AccountScan {
+    // 成长中心只实现了国内版（`www.codebuddy.cn`）。国际版是另一个站点：
+    // 拿它的授权去请求国内接口只会 401，还会把授权状态搞脏。
+    if !account.supports_workbuddy_cn_apis() {
+        return unsupported(account);
+    }
     let resolved = match broker::resolve(app, account) {
         Ok(broker::Outcome::Resolved(resolved)) => resolved,
         Ok(broker::Outcome::Unavailable { reason, detail }) => {
@@ -46,6 +51,17 @@ pub async fn scan_account(app: &Arc<App>, account: &AccountRecord) -> AccountSca
     result.auth_source = Some(resolved.kind);
     result.degraded = resolved.degraded;
     result
+}
+
+/// 版本不支持：**没有发任何请求**，也没有碰授权状态。
+fn unsupported(account: &AccountRecord) -> AccountScan {
+    let mut scan = unavailable(
+        account,
+        "unsupported_provider",
+        "WorkBuddy AI（国际版）的成长中心接口尚未接入；AICC 没有向任何接口发送请求",
+    );
+    scan.state = "unsupported";
+    scan
 }
 
 fn unavailable(account: &AccountRecord, reason: &str, detail: &str) -> AccountScan {

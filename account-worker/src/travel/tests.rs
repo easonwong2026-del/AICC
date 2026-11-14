@@ -171,6 +171,7 @@ fn account() -> AccountRecord {
         travel_enabled: true,
         auth_epoch: 0,
         auth_mirror_auth_id: None,
+        provider: "workbuddy".to_string(),
     }
 }
 

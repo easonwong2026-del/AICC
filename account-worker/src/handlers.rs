@@ -59,6 +59,8 @@ pub const METHODS: &[&str] = &[
     "qoder.profiles.remove",
     "qoder.profiles.status",
     "qoder.profiles.recover",
+    // ---- Qoder 平台账号（PR #71，v13）----
+    "qoder.accounts.list",
     "auth.workbuddy.start",
     "auth.workbuddy.poll",
     "auth.workbuddy.cancel",
@@ -376,6 +378,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
         "qoder.profiles.status" => qoder_manager::status(app, params),
 
         "qoder.profiles.recover" => qoder_manager::recover(app, params),
+
+        "qoder.accounts.list" => qoder_accounts_list(app, params),
 
         // ---- WorkBuddy 扫码登录（PR1b-1）----
         "auth.workbuddy.start" => {
@@ -842,6 +846,19 @@ async fn workbuddy_account_status(app: &App, id: &str) -> RpcResult<Value> {
     if account.platform != "workbuddy" {
         return Err(RpcError::invalid_params("目前只支持查询 WorkBuddy 账号"));
     }
+    // 国际版：探测端点、请求头、账号域全都不一样，用国内版探针去问只会把
+    // 一份好授权误判成 invalid。**不取凭据、不发请求、不改任何状态。**
+    if !account.supports_workbuddy_cn_apis() {
+        return Ok(json!({
+            "state": "unsupported",
+            "provider": account.provider,
+            "error": {
+                "kind": "unsupported_provider",
+                "message": "WorkBuddy AI（国际版）的授权检查接口尚未接入；AICC 没有向任何接口发送请求",
+            },
+            "authorizationSummary": broker::summary(app, &account),
+        }));
+    }
 
     let mut resolved = match broker::resolve(app, &account)? {
         broker::Outcome::Resolved(resolved) => resolved,
@@ -936,13 +953,56 @@ async fn workbuddy_account_status(app: &App, id: &str) -> RpcResult<Value> {
     }))
 }
 
-/// 列出 Magpie 里的 WorkBuddy 账号，并标出哪些已经在 AICC 账号库里。
+/// `qoder.accounts.list`：Qoder CN / Global 平台账号 + 各自的授权来源。
+///
+/// 与 `qoder.profiles.list` 是两件事：这里是在线服务账号（不依赖客户端），
+/// 那边是本机客户端的认证快照。界面上必须分开显示，不能互相顶替。
+fn qoder_accounts_list(app: &App, params: &Value) -> RpcResult<Value> {
+    let edition = params
+        .get("edition")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(edition) = edition {
+        if !crate::storage::qoder_accounts::EDITIONS.contains(&edition) {
+            return Err(RpcError::invalid_params(
+                "edition 只支持 qoder_cn / qoder_global",
+            ));
+        }
+    }
+    let accounts = app.with_db(|db| db.list_qoder_accounts(edition))?;
+    let mut items = Vec::with_capacity(accounts.len());
+    for account in accounts {
+        let authorizations = app.with_db(|db| db.list_qoder_authorizations(&account.id))?;
+        let mut value = account.to_json();
+        value["authorizations"] = json!(authorizations
+            .iter()
+            .map(|row| row.to_json())
+            .collect::<Vec<_>>());
+        value["sources"] = json!(authorizations
+            .iter()
+            .map(|row| row.source.clone())
+            .collect::<Vec<_>>());
+        items.push(value);
+    }
+    Ok(json!({ "accounts": items }))
+}
+
+/// 列出 Magpie 里的四平台账号，并标出哪些已经在 AICC 里。
+///
+/// 判定"已导入"按平台分两套：
+/// - WorkBuddy（国内版 / 国际版）：`accounts` 表的 `(provider, uid)`；
+/// - Qoder（CN / Global）：`qoder_accounts` 表的 `(edition, uid)`。
+///
+/// **只读**：这里不写任何表，也不碰 Magpie 的文件。
 fn magpie_preview(app: &App) -> Value {
     let mut report = magpie::preview();
     if report.get("available").and_then(Value::as_bool) != Some(true) {
         return report;
     }
-    let known: std::collections::HashMap<String, (String, String)> = app
+
+    // WorkBuddy：provider + uid → (id, 实际使用的来源)
+    let workbuddy: std::collections::HashMap<(String, String), (String, String)> = app
         .with_db(|db| {
             db.list_accounts(&AccountFilter {
                 platform: Some("workbuddy".to_string()),
@@ -951,16 +1011,50 @@ fn magpie_preview(app: &App) -> Value {
         })
         .unwrap_or_default()
         .into_iter()
-        .map(|a| (a.uid, (a.auth_source, a.id)))
+        .map(|a| ((a.provider.clone(), a.uid.clone()), (a.id, a.auth_source)))
+        .collect();
+
+    // Qoder：edition + uid → 账号 id
+    let qoder: std::collections::HashMap<(String, String), String> = app
+        .with_db(|db| db.list_qoder_accounts(None))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|a| ((a.edition.clone(), a.uid.clone()), a.id))
         .collect();
 
     if let Some(accounts) = report.get_mut("accounts").and_then(Value::as_array_mut) {
         for item in accounts.iter_mut() {
             let uid = item.get("uid").and_then(Value::as_str).unwrap_or_default();
-            let hit = known.get(uid);
+            let platform = item
+                .get("platform")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let is_qoder = platform.starts_with("qoder");
+            let hit = if is_qoder {
+                let edition = item
+                    .get("edition")
+                    .and_then(Value::as_str)
+                    .unwrap_or(platform);
+                qoder
+                    .get(&(edition.to_string(), uid.to_string()))
+                    .map(|id| (id.clone(), "magpie".to_string()))
+            } else {
+                let provider = item
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .unwrap_or("workbuddy");
+                workbuddy
+                    .get(&(provider.to_string(), uid.to_string()))
+                    .cloned()
+            };
             item["imported"] = json!(hit.is_some());
-            item["importedSource"] = json!(hit.map(|(source, _)| source.clone()));
-            item["accountId"] = json!(hit.map(|(_, id)| id.clone()));
+            item["importedSource"] = json!(hit.as_ref().map(|(_, source)| source.clone()));
+            item["accountId"] = json!(hit.map(|(id, _)| id));
+            item["importTarget"] = json!(if is_qoder {
+                "qoder_accounts"
+            } else {
+                "accounts"
+            });
         }
     }
     report
@@ -1025,6 +1119,16 @@ fn import_logins(app: &App, logins: Vec<magpie::MagpieLogin>, keys: &[String]) -
         if !keys.is_empty() && !keys.iter().any(|k| k == &login.key) {
             continue;
         }
+        // Qoder（CN / Global）走自己的两张表：不进 accounts、不碰钥匙串。
+        // 过期也照样登记，界面上标"需重新登录"比"账号凭空消失"更好用。
+        if login.edition().is_some() {
+            match import_qoder_login(app, &login) {
+                Ok(value) => imported.push(value),
+                Err(reason) => skipped.push(reason),
+            }
+            continue;
+        }
+
         if login.expires_at_ms.map(|at| at <= now).unwrap_or(false) {
             skipped.push(json!({ "key": login.key, "reason": "token_expired" }));
             continue;
@@ -1038,6 +1142,21 @@ fn import_logins(app: &App, logins: Vec<magpie::MagpieLogin>, keys: &[String]) -
         let _guard = auth_write_guard();
 
         let existing = app.with_db(|db| db.find_account("workbuddy", &login.uid))?;
+        let provider = login.account_provider().unwrap_or("workbuddy");
+        if let Some(record) = &existing {
+            if record.provider != provider {
+                skipped.push(json!({
+                    "key": login.key,
+                    "uid": login.uid,
+                    "reason": "uid_conflict",
+                    "message": format!(
+                        "同一 UID 已属于 {}，不能再作为 {} 导入；两个服务是不同账号",
+                        record.provider, provider
+                    ),
+                }));
+                continue;
+            }
+        }
         let keep_nickname = existing
             .as_ref()
             .map(|record| !record.nickname.trim().is_empty())
@@ -1049,7 +1168,7 @@ fn import_logins(app: &App, logins: Vec<magpie::MagpieLogin>, keys: &[String]) -
                 login
                     .nickname
                     .clone()
-                    .unwrap_or_else(|| magpie::short_uid(&login.uid)),
+                    .unwrap_or_else(|| magpie::short_uid_for(login.provider.label, &login.uid)),
             )
         };
         let expires_at = login.expires_at_ms.and_then(workbuddy_auth::ms_to_rfc3339);
@@ -1061,6 +1180,7 @@ fn import_logins(app: &App, logins: Vec<magpie::MagpieLogin>, keys: &[String]) -
                 uid: login.uid.clone(),
                 nickname: nickname.clone(),
                 auth_domain: domain.clone(),
+                provider: Some(provider.to_string()),
                 ..Default::default()
             })
         }) {
@@ -1115,6 +1235,73 @@ fn import_logins(app: &App, logins: Vec<magpie::MagpieLogin>, keys: &[String]) -
         "skipped": skipped,
         "accounts": imported,
         "source": magpie::SOURCE_MAGPIE,
+    }))
+}
+
+/// 把一条 Magpie 的 Qoder 账号登记进 `qoder_accounts` / `qoder_authorizations`。
+///
+/// 三条硬规则：
+/// 1. **不复制令牌**。`magpie` 来源的行里 `secret_ref` 恒为空，用的时候重新读
+///    Magpie 的当前文件；Magpie 的 refresh token 只归 Magpie 刷新。
+/// 2. 不覆盖另一个来源。同一个账号的 `own_browser` 授权行完全不受影响。
+/// 3. 昵称只在为空时补：用户改过的名字不会被下一次导入冲掉（在存储层实现）。
+fn import_qoder_login(app: &App, login: &magpie::MagpieLogin) -> Result<Value, Value> {
+    let edition = login.edition().ok_or_else(|| {
+        json!({ "key": login.key, "reason": "unsupported_platform", "message": "不是 Qoder 账号" })
+    })?;
+    let expires_at = login.expires_at_ms.and_then(workbuddy_auth::ms_to_rfc3339);
+    let status = if login
+        .expires_at_ms
+        .map(|at| at <= magpie::now_ms())
+        .unwrap_or(false)
+    {
+        "expired"
+    } else {
+        "valid"
+    };
+    let nickname = login
+        .nickname
+        .clone()
+        .unwrap_or_else(|| magpie::short_uid_for(login.provider.label, &login.uid));
+
+    let account = app
+        .with_db(|db| db.upsert_qoder_account(edition, &login.uid, Some(&nickname), None))
+        .map_err(|err| {
+            json!({
+                "key": login.key,
+                "uid": login.uid,
+                "reason": "storage",
+                "message": crate::rpc::sanitize(&err.message),
+            })
+        })?;
+
+    let authorization = app
+        .with_db(|db| {
+            db.upsert_qoder_authorization(
+                &account.id,
+                crate::storage::qoder_accounts::SOURCE_MAGPIE,
+                Some(&login.key),
+                None,
+                status,
+                expires_at.as_deref(),
+                None,
+            )
+        })
+        .map_err(|err| {
+            json!({
+                "key": login.key,
+                "uid": login.uid,
+                "reason": "storage",
+                "message": crate::rpc::sanitize(&err.message),
+            })
+        })?;
+
+    Ok(json!({
+        "account": account.to_json(),
+        "authorization": authorization.to_json(),
+        "platform": login.platform(),
+        "edition": edition,
+        "provider": Value::Null,
     }))
 }
 
@@ -1425,6 +1612,19 @@ pub(crate) async fn refresh_account(app: &App, id: &str) -> RpcResult<Value> {
     if account.platform != "workbuddy" {
         return Err(RpcError::invalid_params("目前只支持刷新 WorkBuddy 账号"));
     }
+    // 刷新也是国内版协议（`WbVariant::Cn` 的 token 端点 + 国内 domain）。
+    // 国际版走这里只会浪费一次请求，失败时还会把一份好授权标成 invalid。
+    // **不查授权、不读钥匙串、不改状态。**
+    if !account.supports_workbuddy_cn_apis() {
+        return Ok(json!({
+            "state": "unsupported",
+            "provider": account.provider,
+            "error": {
+                "kind": "unsupported_provider",
+                "message": "WorkBuddy AI（国际版）的令牌刷新接口尚未接入；AICC 没有发送请求，也没有改动授权状态",
+            },
+        }));
+    }
     let own = app.with_db(|db| db.find_authorization(&account.id, crate::auth::ids::KIND_OWN))?;
     let Some(own) = own else {
         return resync_magpie_access(app, &account);
@@ -1697,9 +1897,98 @@ mod tests {
     fn magpie_login(uid: &str, access: &str) -> magpie::MagpieLogin {
         magpie::MagpieLogin {
             key: format!("workbuddy#{uid}"),
+            provider: magpie::provider_of("workbuddy").unwrap(),
             uid: uid.to_string(),
             nickname: Some("借来的".to_string()),
             domain: "www.workbuddy.cn".to_string(),
+            access_token: access.to_string(),
+            expires_at_ms: Some(1_795_525_945_623),
+        }
+    }
+
+    /// `auth.workbuddy.refresh` 也是国内版协议：国际版必须**在查授权之前**被挡住，
+    /// 而且不能因为一次"刷新"把一份好授权标成 invalid。
+    #[tokio::test]
+    async fn ai_account_refresh_is_unsupported_and_keeps_the_authorization() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "ai-refresh-uid";
+        app.with_db(|db| {
+            db.upsert_account(&AccountInput {
+                platform: "workbuddy".to_string(),
+                uid: uid.to_string(),
+                provider: Some("workbuddy_ai".to_string()),
+                ..Default::default()
+            })
+        })
+        .expect("account");
+        // persist_login 不传 provider，走的是"继承已有值"，账号仍是国际版。
+        persist_login(&app, &payload(uid, "own-access", Some("own-refresh")))
+            .expect("persist login");
+
+        let record = account(&app, uid);
+        assert_eq!(record.provider, "workbuddy_ai");
+        let before = app
+            .with_db(|db| db.find_authorization(&record.id, ids::KIND_OWN))
+            .unwrap()
+            .expect("own authorization");
+
+        let out = refresh_account(&app, &record.id).await.expect("refresh");
+
+        assert_eq!(out["state"], json!("unsupported"));
+        assert_eq!(out["error"]["kind"], json!("unsupported_provider"));
+        let after = app
+            .with_db(|db| db.find_authorization(&record.id, ids::KIND_OWN))
+            .unwrap()
+            .expect("own authorization");
+        assert_eq!(after.status, before.status, "没发请求就不许把授权标成失效");
+        assert_eq!(after.version, before.version, "授权没有被写过");
+        assert_eq!(
+            own_access(&app, &record.id).as_deref(),
+            Some("own-access"),
+            "钥匙串里的令牌一个字节都没动"
+        );
+        assert_eq!(
+            own_refresh(&app, &record.id).as_deref(),
+            Some("own-refresh")
+        );
+    }
+
+    #[tokio::test]
+    async fn ai_account_status_is_unsupported_and_changes_nothing() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let record = app
+            .with_db(|db| {
+                db.upsert_account(&AccountInput {
+                    platform: "workbuddy".to_string(),
+                    uid: "ai-status-uid".to_string(),
+                    provider: Some("workbuddy_ai".to_string()),
+                    ..Default::default()
+                })
+            })
+            .expect("account");
+        let before = record.auth_status.clone();
+
+        let out = workbuddy_account_status(&app, &record.id)
+            .await
+            .expect("status");
+
+        assert_eq!(out["state"], json!("unsupported"));
+        assert_eq!(out["error"]["kind"], json!("unsupported_provider"));
+        assert_eq!(out["provider"], json!("workbuddy_ai"));
+        let after = app
+            .with_db(|db| db.get_account(&record.id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.auth_status, before, "没发请求就不许改授权状态");
+    }
+
+    fn magpie_login_with(key: &str, uid: &str, access: &str) -> magpie::MagpieLogin {
+        magpie::MagpieLogin {
+            key: key.to_string(),
+            provider: magpie::provider_of(key).expect("provider"),
+            uid: uid.to_string(),
+            nickname: None,
+            domain: String::new(),
             access_token: access.to_string(),
             expires_at_ms: Some(1_795_525_945_623),
         }
@@ -1777,6 +2066,97 @@ mod tests {
                 .is_err(),
             "magpie/refresh 这个键不允许存在"
         );
+    }
+
+    #[test]
+    fn qoder_accounts_go_to_their_own_tables_without_a_secret() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let out = import_logins(
+            &app,
+            vec![magpie_login_with("qoder-cn", "qn-uid-1", "qd-access")],
+            &[],
+        )
+        .expect("import");
+        assert_eq!(out["imported"], json!(1), "{out}");
+
+        // accounts 表里不能出现 Qoder 平台服务账号。
+        assert!(
+            app.with_db(|db| db.list_accounts(&AccountFilter::default()))
+                .unwrap()
+                .is_empty(),
+            "Qoder 账号不能写进 accounts"
+        );
+
+        let accounts = app.with_db(|db| db.list_qoder_accounts(None)).unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].edition, "qoder_cn");
+
+        let auths = app
+            .with_db(|db| db.list_qoder_authorizations(&accounts[0].id))
+            .unwrap();
+        assert_eq!(auths.len(), 1);
+        assert_eq!(auths[0].source, "magpie");
+        assert_eq!(auths[0].source_key.as_deref(), Some("qoder-cn"));
+        assert!(auths[0].secret_ref.is_none(), "magpie 来源不许持有凭据");
+        assert_eq!(
+            out["accounts"][0]["authorization"]["hasSecret"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn qoder_global_and_cn_are_separate_accounts() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        import_logins(
+            &app,
+            vec![
+                magpie_login_with("qoder", "shared-uid", "a"),
+                magpie_login_with("qoder-cn", "shared-uid", "b"),
+            ],
+            &[],
+        )
+        .unwrap();
+        let accounts = app.with_db(|db| db.list_qoder_accounts(None)).unwrap();
+        assert_eq!(accounts.len(), 2, "同一 UID 在两个版本是两个账号");
+    }
+
+    #[test]
+    fn workbuddy_ai_import_marks_the_provider() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let out = import_logins(
+            &app,
+            vec![magpie_login_with("workbuddy-ai", "ai-uid-1", "ai-access")],
+            &[],
+        )
+        .expect("import");
+        assert_eq!(out["imported"], json!(1), "{out}");
+        let record = account(&app, "ai-uid-1");
+        assert_eq!(record.platform, "workbuddy");
+        assert_eq!(record.provider, "workbuddy_ai");
+    }
+
+    #[test]
+    fn same_uid_in_the_other_provider_is_a_conflict_not_a_merge() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        import_logins(
+            &app,
+            vec![magpie_login_with("workbuddy", "same-uid", "cn")],
+            &[],
+        )
+        .unwrap();
+        let out = import_logins(
+            &app,
+            vec![magpie_login_with("workbuddy-ai", "same-uid", "ai")],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(out["imported"], json!(0), "{out}");
+        assert_eq!(out["skipped"][0]["reason"], json!("uid_conflict"));
+        let accounts = app
+            .with_db(|db| db.list_accounts(&AccountFilter::default()))
+            .unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].provider, "workbuddy", "已有账号不被改写");
     }
 
     /// 核心场景：先导入、再扫码、再导入 —— 三份操作互不覆盖。

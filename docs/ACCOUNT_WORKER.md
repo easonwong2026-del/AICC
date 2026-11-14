@@ -72,8 +72,9 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `auth.workbuddy.start` / `poll` / `cancel` | 官方 OAuth 扫码：发起、轮询、取消（PR1b-1） | 是 |
 | `auth.workbuddy.refresh` | 刷新令牌；`auth_source=magpie` 的账号改为重新同步 | 是 |
 | `auth.workbuddy.status` | 用当前选用的授权探测一次登录态（只读）：先 `Valid/Unauthorized/Transient` 分类，再过 401 才切源 | 是 |
-| `providers.magpie.accounts` | 列出 Magpie 里已登录的 WorkBuddy 账号（**不含令牌**） | 否 |
-| `auth.magpie.import` | 把 Magpie 的 access token 搬进 AICC 钥匙串 | 否 |
+| `providers.magpie.accounts` | 列出 Magpie 里已登录的**四个 provider**（`workbuddy` / `workbuddy-ai` / `qoder` / `qoder-cn`）账号，逐条带 `platform` / `provider` / `edition` / `importTarget`，并标出哪些已导入；**不含令牌** | 否 |
+| `auth.magpie.import` | 按平台分流：WorkBuddy（CN/AI）把 access 搬进钥匙串 + `accounts`；Qoder（CN/Global）只登记 `qoder_accounts` + `qoder_authorizations`（`magpie` 来源**不复制令牌**） | 否 |
+| `qoder.accounts.list` | Qoder CN / Global 的**平台服务账号** + 各自授权来源（`magpie` / `own_browser`）；与 `qoder.profiles.list` 是两件事 | 否 |
 | `travel.summary` | 旅行快照汇总（账号 + 开关 + 运行信息），**只读本地库** | 否 |
 | `travel.events` | 某账号的旅行事件日志（派出 / 领取 / 失败） | 否 |
 | `travel.setEnabled` | 每账号的自动旅行开关（默认关） | 否 |
@@ -297,3 +298,65 @@ SKIP_RUST_HELPER=1 bash macos/build-aicc-swiftui.sh
 - `cargo build` 会在 `account-worker/target/` 留产物，已在 `.gitignore` 里排除。
 - 上游 `codebuddy_*` / `limits` / `session` 等模块仍把客户端路径挂在 `home_dir()` 上；
   PR1a 用不到，PR2 读会话目录前必须逐个确认是否也要走 `client_home_dir()`。
+
+## 9. 四平台账号导入（v13，PR #71）
+
+### 9.1 账号存放位置
+
+| 平台 | 表 | 身份键 | 依赖客户端 |
+| --- | --- | --- | --- |
+| WorkBuddy 国内版 | `accounts`（`provider='workbuddy'`） | `platform + uid` | 否 |
+| WorkBuddy AI 国际版 | `accounts`（`provider='workbuddy_ai'`） | 同上 | 否 |
+| Qoder CN | `qoder_accounts` + `qoder_authorizations` | `edition + uid` | 否 |
+| Qoder Global | 同上（`edition='qoder_global'`） | 同上 | 否 |
+| Qoder 本机客户端 | `qoder_profiles` | `profile_id` | **是** |
+
+两条线刻意分开：
+
+- `qoder_profiles` 是**本机客户端**的认证快照，用来回答"本机现在登录的是谁"；
+- `qoder_accounts` 是**平台服务**上的账号，网页授权和 Magpie 导入都只写这里。
+
+所以**不装 Qoder 客户端也能把账号导进来**，界面上一个账号可能只有服务账号、没有本机快照。
+
+### 9.2 provider 与 UID 冲突
+
+`accounts.platform` 的 CHECK 只有 `workbuddy` / `qoder_cn`（v1 的既有约束，不重建），
+WorkBuddy 国内版与国际版共用 `platform='workbuddy'`，靠 `provider` 区分服务。
+
+代价写清楚：UNIQUE 仍然是 `(platform, uid)`。**同一个 UID 在两个站点都存在时，
+第二个导入会返回 `uid_conflict` 并跳过**，不会自动合并、也不会改写已有账号。
+真出现这种情况再评估是否重建主表。
+
+### 9.3 授权来源与所有权
+
+| 来源 | 存什么 | 谁刷新 |
+| --- | --- | --- |
+| `magpie`（WorkBuddy） | access token 进钥匙串，`magpie/refresh` 键**不存在** | Magpie |
+| `magpie`（Qoder） | 只登记 `source_key`，**不复制令牌** | Magpie |
+| `own_browser`（Qoder） | 令牌在钥匙串，表里只有 `secret_ref` 与指纹 | AICC（单账号互斥） |
+
+`qoder_authorizations` 上 `(account_id, source)` 唯一：重导只更新元数据，
+另一个来源的行完全不动。`magpie` 来源带 `secret_ref` 会被直接拒绝。
+
+### 9.4 版本隔离（WorkBuddy AI 不进入国内版流程）
+
+签到、成长、旅行、授权检查目前**只实现国内版协议**：端点写死在
+`copilot.tencent.com` / `www.codebuddy.cn`，请求头与签到日界线也是国内版的。
+WorkBuddy AI 是另一个站点，拿它的授权请求这些接口，轻则 401，重则把国际版
+令牌发到国内域名。因此这些入口一律以 `AccountRecord::supports_workbuddy_cn_apis()`
+（`platform == "workbuddy" && provider == "workbuddy"`）为准，**只看 platform 不算数**。
+
+| 入口 | 行为 |
+| --- | --- |
+| `checkin::manager::run_account(_with)` | 取凭据**之前**返回 `unsupported`，`error_kind = unsupported_provider` |
+| `checkin::scheduler::enabled_accounts` | 国际版不进自动轮次 |
+| `checkin::scheduler::auto_status` | 仍然列出国际版（用户要看得见），`supported=false`、`nextRunAt=null` |
+| `checkin::scheduler::still_enabled`（POST 前最后一道） | 开关 **和** 版本都要满足 |
+| `growth::scan_account` | 直接返回 `state=unsupported`，**连凭据都不取** |
+| `growth::scheduler` / `growth::manager::run_account` | 调度跳过 + 写入口再挡一次 |
+| `travel::scheduler` / `travel::service` | 标 `unsupported`，不写旅行状态 |
+| `workbuddy_account_status` | 返回 `state=unsupported`，不探测、不改授权状态 |
+| 账号卡 | `provider=workbuddy_ai` 显示为 **WorkBuddy AI**，签到一栏写「暂不支持」 |
+
+`accounts.upsert` 未传 `provider` 时**继承库里已有值**：改备注不会把国际版
+账号降级成国内版，也不会误报 `uid_conflict`。

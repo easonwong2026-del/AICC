@@ -59,6 +59,9 @@ final class ConsoleStore: ObservableObject {
     /// Qoder 双版本多账号（PR #70）。Profile 是 Qoder 的唯一数据源，
     /// 老的 `accounts` 表只留给 WorkBuddy。
     @Published private(set) var qoderProfiles: [QoderProfile] = []
+    /// Qoder 的**平台服务账号**（PR #71，v13）：Magpie 导入 / 网页授权都只写这里，
+    /// 与上面的本机快照是两回事，界面上分组显示。
+    @Published private(set) var qoderServiceAccounts: [QoderServiceAccount] = []
     @Published private(set) var qoderEditions: [QoderEditionInfo] = []
     /// 未完成的切换日志：只用于提示，恢复必须由用户显式确认。
     @Published private(set) var qoderPendingSwitches: [QoderPendingSwitch] = []
@@ -109,11 +112,14 @@ final class ConsoleStore: ObservableObject {
         do {
             async let editionsRaw = worker.qoderEditionsDetect()
             async let profilesRaw = worker.qoderProfilesList()
-            let (editionsJSON, profilesJSON) = try await (editionsRaw, profilesRaw)
+            async let accountsRaw = worker.qoderAccountsList()
+            let (editionsJSON, profilesJSON, accountsJSON) = try await (editionsRaw, profilesRaw, accountsRaw)
             qoderEditions = (editionsJSON["editions"] as? [[String: Any]] ?? [])
                 .compactMap(QoderEditionInfo.init(json:))
             qoderProfiles = (profilesJSON["profiles"] as? [[String: Any]] ?? [])
                 .compactMap(QoderProfile.init(json:))
+            qoderServiceAccounts = (accountsJSON["accounts"] as? [[String: Any]] ?? [])
+                .compactMap(QoderServiceAccount.init(json:))
             let pending = profilesJSON["pendingSwitches"] as? [String: Any] ?? [:]
             qoderPendingSwitches = (pending["items"] as? [[String: Any]] ?? [])
                 .compactMap(QoderPendingSwitch.init(json:))

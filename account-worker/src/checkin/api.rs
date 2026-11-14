@@ -12,6 +12,11 @@
 //! `wb-switch-core` 与 `changexbc/workbuddy-switch` 一致的做法，AICC 沿用。
 //! 证据等级见 `docs/WORKBUDDY_CHECKIN_API.md`。
 //!
+//! ⚠️ **本模块只实现 WorkBuddy 国内版**：端点写死在 `WORKBUDDY_API_ENDPOINT`
+//! （`copilot.tencent.com`），请求头与签到日界线也都是国内版的。调用方
+//! **必须**先确认 `account.supports_workbuddy_cn_apis()`：WorkBuddy AI 是另一个
+//! 站点，把它的令牌发到这里等于把凭据发到错误域名。
+//!
 //! 三个不可妥协的判定：
 //!
 //! 1. **缺 `today_checked_in` 就是 `unknown`**，不是 `false`。`wb-switch-core` 的
