@@ -1048,6 +1048,9 @@ pub fn adopt(app: &App, params: &Value) -> RpcResult<Value> {
         )));
     }
 
+    // 复制**之前**先记下来源哈希：只有和复制后的值比对，才能证明源目录没被改动。
+    let source_before = switch::file_sha256(&auth_path_in(&source));
+
     let target = snapshot_dir(app, &profile.profile_id);
     let target_real = resolve_real(&target)?;
     let live = resolve_real(Path::new(&profile.live_dir))?;
@@ -1123,12 +1126,12 @@ pub fn adopt(app: &App, params: &Value) -> RpcResult<Value> {
             return Err(err);
         }
     };
-    let source_hash = switch::file_sha256(&auth_path_in(&source));
+    let source_after = switch::file_sha256(&auth_path_in(&source));
     Ok(json!({
         "profile": profile_json(app, &updated)?,
         "adopted": true,
         "sourceDir": source.to_string_lossy(),
-        "sourceUnchanged": source_hash == switch::file_sha256(&auth_path_in(&source)),
+        "sourceUnchanged": source_before.is_some() && source_before == source_after,
         "edition": edition.as_str(),
     }))
 }
