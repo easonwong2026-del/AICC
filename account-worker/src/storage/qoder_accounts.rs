@@ -343,6 +343,8 @@ impl crate::storage::Db {
     }
 
     pub fn delete_qoder_account(&mut self, id: &str) -> RpcResult<bool> {
+        // 与 accounts 一样：快照表无外键，删账号时显式清快照。
+        self.purge_account_quota_snapshots(id)?;
         let changed = self
             .conn
             .execute("DELETE FROM qoder_accounts WHERE id = ?1", params![id])?;

@@ -19,6 +19,7 @@ pub mod growth;
 pub mod qoder_accounts;
 pub mod qoder_profiles;
 pub mod qoder_switch;
+pub mod quota;
 pub mod travel;
 
 pub use authz::AuthorizationRecord;
@@ -270,6 +271,31 @@ CREATE TABLE IF NOT EXISTS qoder_authorizations (\
 );\
 CREATE INDEX IF NOT EXISTS idx_qoder_auth_account ON qoder_authorizations (account_id);";
 
+/// v14：额度快照缓存（M4 额度看板）。
+///
+/// 只建一张新表，不动任何已有表：额度是**观测数据**，不是业务状态，
+/// 因此不写进 `accounts`，也不改 `credit_snapshots`（那张是上游 wb-switch 的账，
+/// 由 vendored 模块自己维护文件版快照）。
+///
+/// `payload` 存整行 JSON 而不是拆列：四平台的计量单位不同（credits / tokens /
+/// unknown），拆成 `total/used/remaining` 三列会诱导"跨单位相加"这种错误。
+/// 时间范围查询走 `captured_at` 索引。
+///
+/// **`account_id` 刻意没有外键**：四平台里 WorkBuddy 账号在 `accounts`，
+/// Qoder 服务账号在 `qoder_accounts`，一张缓存表没法同时对两张表建外键。
+/// 代价是删除账号时要显式清快照（`delete_account` / `delete_qoder_account`
+/// 已各加一条 DELETE），另外 90 天裁剪兜底。
+const MIGRATION_V14_SQL: &str = "\
+CREATE TABLE IF NOT EXISTS quota_snapshots (\
+    id          TEXT PRIMARY KEY,\
+    account_id  TEXT NOT NULL,\
+    provider    TEXT NOT NULL,\
+    captured_at TEXT NOT NULL,\
+    status      TEXT NOT NULL,\
+    payload     TEXT NOT NULL\
+);\
+CREATE INDEX IF NOT EXISTS idx_quota_snapshots_account ON quota_snapshots (account_id, captured_at);";
+
 /// 一次迁移里的一步：纯 SQL，或者需要 Rust 参与的数据迁移。
 enum MigrationStep {
     Sql(&'static str),
@@ -346,9 +372,21 @@ const MIGRATIONS: &[Migration] = &[
         version: 13,
         steps: &[MigrationStep::Sql(MIGRATION_V13_SQL)],
     },
+    // v14：额度快照缓存（M4）。只建新表。
+    Migration {
+        version: 14,
+        steps: &[MigrationStep::Sql(MIGRATION_V14_SQL)],
+    },
+    // v15：把 v14 原来那条只指向 `accounts` 的外键去掉——一张缓存表要同时装
+    // WorkBuddy 与 Qoder 服务账号，外键在这里是错的。v14 也曾带过这条外键，
+    // 所以这一步同时负责**修复已经跑过旧 v14 的库**（新建库上是空操作）。
+    Migration {
+        version: 15,
+        steps: &[MigrationStep::Rust(quota::rebuild_v15)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 13;
+pub const LATEST_VERSION: i64 = 15;
 
 pub struct Db {
     conn: Connection,
@@ -553,6 +591,7 @@ impl Db {
             "account_authorizations",
             "qoder_accounts",
             "qoder_authorizations",
+            "quota_snapshots",
         ] {
             let sql = format!("SELECT COUNT(*) FROM {table}");
             let n: i64 = self.conn.query_row(&sql, [], |row| row.get(0))?;
@@ -782,6 +821,9 @@ impl Db {
     }
 
     pub fn delete_account(&mut self, id: &str) -> RpcResult<bool> {
+        // 快照表没有外键（要同时装 Qoder 服务账号），所以这里必须显式清。
+        // 账号 id 是 uid 的确定性哈希，重加同一账号会复用同一 id。
+        self.purge_account_quota_snapshots(id)?;
         let n = self
             .conn
             .execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
