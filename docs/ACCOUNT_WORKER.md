@@ -90,6 +90,8 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `checkin.auto.status` | 计划时间、下次执行、尝试次数与每账号状态 | 否 |
 | `checkin.auto.tick` | 跑一轮自动签到；`force` 只跳过时间判断，不绕过开关与每日次数上限 | 是（开关打开时） |
 | `checkin.records` | 签到历史与每次尝试（`checkin_records` + `task_executions`） | 否 |
+| `quota.board` | 四平台额度看板（`days` / `provider` / `accountId` / `refresh`）。WorkBuddy CN/AI 走官方只读接口，**Qoder 两版零请求返回 `unverified`**；`refresh=false` 时优先用 `quota_snapshots` 缓存 | 是（只读语义） |
+| `quota.history` | 某账号的额度快照历史（`days` 默认 30，上限 90），按时间升序 | 否 |
 
 `health` **故意不做**钥匙串探针：否则每次启动 App 都会弹一次系统授权框。
 需要验证凭据存储时显式调 `secure.status`（设置页有按钮）。探针的读写删三步全成功才报 `ok`，
@@ -385,3 +387,37 @@ WorkBuddy AI 是另一个站点，拿它的授权请求这些接口，轻则 401
 
 界面：添加账号面板顶部有 `WorkBuddy` / `WorkBuddy AI` 分段选择，切换即重开会话；
 账号卡按 provider 显示独立名称与图标，国际版**不显示签到一栏**（产品里没有签到，不是"暂不支持"）。
+
+## 11. 四平台额度看板（v14）
+
+一段话：额度是**观测数据**，不是业务状态。所以它不进 `accounts`，只在
+`quota_snapshots`（v14）里留快照，读取路径完全不碰账号与授权。
+
+| 平台 | 数据来源 | 状态 |
+| --- | --- | --- |
+| `workbuddy`（国内版） | `www.codebuddy.cn` 官方只读接口 | `ok`（真实账号实测） |
+| `workbuddy_ai`（国际版） | `www.workbuddy.ai` 官方只读接口 | `ok`（真实账号实测） |
+| `qoder_cn` / `qoder_global` | **无** | `unverified`，零请求 |
+
+接口细节与实测证据见 `docs/WORKBUDDY_QUOTA_API.md`；Qoder 的阻塞依据见
+`docs/QODER_QUOTA_BLOCKER.md`。
+
+统一模型（`quota.board` 每行）：
+
+| 字段 | 语义 |
+| --- | --- |
+| `accountId` / `provider` / `nickname` | 账号身份 |
+| `source` | 这次用的是哪份授权（`own` / `magpie` / Qoder 的 `magpie` `own_browser`） |
+| `status` | `ok` / `unauthorized` / `rate_limited` / `error` / `unverified` |
+| `unit` / `total` / `used` / `remaining` | **单位原样带出，不同单位不相加**；未知一律 `null`，不是 0 |
+| `plan` / `isPaid` | 订阅名与是否付费（服务端字段直出） |
+| `usage` | `windowDays` / `requests` / `credits` / `truncated` / 按模型的明细 |
+| `syncAt` / `capturedAt` / `error` | 抓取时间、快照时间、失败原因（已过 `sanitize`） |
+
+三条硬规则：
+
+1. **未知不当 0**：`Packages` 为空、字段解析失败、平台未接入，都返回 `null`。
+   界面显示"未知"或"未接入"，绝不显示一个看起来像用完的 0。
+2. **失败行不落库**：只有 `ok` 行写进 `quota_snapshots`；一次临时 429 不该变成历史记录。
+3. **只读**：`quota.board` / `quota.history` 不写 `last_used_at`、不改 `auth_status`、
+   不刷新令牌。取数失败只影响这一行。
