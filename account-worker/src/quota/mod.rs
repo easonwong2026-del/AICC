@@ -248,6 +248,7 @@ async fn workbuddy_row(
             &account,
             &account.auth_source,
             cached.as_ref(),
+            days,
             "timeout",
             "本轮刷新超出时间预算，未查询该账号",
         );
@@ -267,6 +268,7 @@ async fn workbuddy_row(
                 &account,
                 &account.auth_source,
                 cached.as_ref(),
+                days,
                 status,
                 &detail,
             );
@@ -282,6 +284,7 @@ async fn workbuddy_row(
                     &account,
                     &source,
                     cached.as_ref(),
+                    days,
                     failure.status(),
                     &failure.detail(),
                 );
@@ -291,6 +294,7 @@ async fn workbuddy_row(
                     &account,
                     &source,
                     cached.as_ref(),
+                    days,
                     "timeout",
                     "额度查询超出本轮时间预算",
                 );
@@ -337,8 +341,9 @@ async fn usage_only_row(
 ) -> Value {
     let mut row = match cached_row(snapshot, false) {
         Some(row) => row,
-        // 快照内容坏掉（不是对象）就退回完整刷新路径。
-        None => Box::pin(workbuddy_row(app, account.clone(), days, true, deadline)).await,
+        // 快照内容坏掉（不是对象）就退回完整刷新；**必须立刻返回**，
+        // 否则会继续走下面的用量请求，白打一次网络还可能把结果又存一遍。
+        None => return Box::pin(workbuddy_row(app, account.clone(), days, true, deadline)).await,
     };
 
     let access = match resolve_access(app, account, deadline).await {
@@ -464,10 +469,14 @@ fn cached_row(snapshot: &crate::storage::quota::QuotaSnapshot, stale: bool) -> O
 }
 
 /// 取数失败：有旧快照就降级成 `stale`，没有才真正报错。
+///
+/// 降级同样要守**窗口规则**：旧快照里的用量属于它自己那次统计窗口，
+/// 与本次请求的 `days` 不一致时必须置空，否则界面会把 7 天的消耗挂在 30 天的查询下。
 fn degraded_or_error(
     account: &AccountRecord,
     source: &str,
     cached: Option<&crate::storage::quota::QuotaSnapshot>,
+    days: i64,
     reason: &str,
     detail: &str,
 ) -> Value {
@@ -477,10 +486,27 @@ fn degraded_or_error(
             row["status"] = json!("stale");
             row["error"] = json!(crate::rpc::sanitize(detail));
             row["reason"] = json!(reason);
+            drop_mismatched_usage(&mut row, days);
             return row;
         }
     }
     error_row(account, source, status_for(reason), reason, detail)
+}
+
+/// 旧行的用量窗口与本次请求不符时清空用量并说明。余额不受影响。
+fn drop_mismatched_usage(row: &mut Value, days: i64) {
+    let cached_window = row["usage"]["windowDays"].as_i64();
+    if row["usage"].is_null() || cached_window == Some(days) {
+        return;
+    }
+    let explain = match cached_window {
+        Some(window) => {
+            format!("旧快照的用量是 {window} 天窗口，与本次请求的 {days} 天不一致，已隐藏")
+        }
+        None => format!("旧快照没有可用的 {days} 天用量，已隐藏"),
+    };
+    row["usage"] = Value::Null;
+    row["usageError"] = json!(explain);
 }
 
 /// `reason` 来自 `Failure::status()` 或本地分类，这里只做一次归一。
@@ -637,7 +663,14 @@ mod tests {
             "accountId": "a1", "provider": "workbuddy", "status": "ok",
             "unit": "credits", "total": 100.0, "remaining": 90.0,
         }));
-        let row = degraded_or_error(&account(), "magpie", Some(&cached), "rate_limited", "429");
+        let row = degraded_or_error(
+            &account(),
+            "magpie",
+            Some(&cached),
+            7,
+            "rate_limited",
+            "429",
+        );
         assert_eq!(row["status"], "stale");
         assert_eq!(row["stale"], true);
         assert_eq!(row["cached"], true);
@@ -647,9 +680,83 @@ mod tests {
         assert_eq!(row["reason"], "rate_limited");
     }
 
+    /// 降级到旧快照时也要守窗口：30 天的请求不能把 7 天的消耗一起端上来。
+    #[test]
+    fn a_stale_row_hides_usage_from_another_window() {
+        let cached = snapshot(json!({
+            "accountId": "a1", "provider": "workbuddy", "status": "ok",
+            "unit": "credits", "total": 100.0, "remaining": 90.0,
+            "usage": {"windowDays": 7, "requests": 42, "credits": 1.5},
+        }));
+
+        let row = degraded_or_error(
+            &account(),
+            "magpie",
+            Some(&cached),
+            30,
+            "rate_limited",
+            "429",
+        );
+        assert_eq!(row["status"], "stale");
+        assert_eq!(row["remaining"], 90.0, "余额照旧保留");
+        assert!(row["usage"].is_null(), "七天用量不能挂在三十天窗口下");
+        let why = row["usageError"].as_str().unwrap_or_default();
+        assert!(why.contains("7") && why.contains("30"), "{why}");
+
+        // 窗口一致时旧用量可以照常显示。
+        let same = degraded_or_error(
+            &account(),
+            "magpie",
+            Some(&cached),
+            7,
+            "rate_limited",
+            "429",
+        );
+        assert_eq!(same["usage"]["windowDays"], 7);
+        assert_eq!(same["usage"]["requests"], 42);
+    }
+
+    /// 快照内容坏掉时退回完整刷新，并**直接返回**那条结果。
+    #[tokio::test]
+    async fn a_broken_snapshot_falls_back_to_a_full_refresh() {
+        let (app, _dir) = test_app();
+        let record = app
+            .with_db(|db| {
+                db.upsert_account(&crate::storage::AccountInput {
+                    platform: "workbuddy".into(),
+                    uid: "u-broken".into(),
+                    nickname: None,
+                    email: None,
+                    group_id: None,
+                    auth_ref: None,
+                    profile_ref: None,
+                    auth_status: None,
+                    checkin_enabled: None,
+                    token_expires_at: None,
+                    auth_domain: None,
+                    auth_source: None,
+                    travel_enabled: None,
+                    provider: Some("workbuddy".into()),
+                })
+            })
+            .unwrap();
+        // 存一条"不是对象"的 payload：解析成功但不是可用的行。
+        app.with_db(|db| {
+            db.save_quota_snapshot(&record.id, "workbuddy", "ok", &json!([1, 2]), None)
+                .map(|_| ())
+        })
+        .unwrap();
+
+        // 预算已耗尽 → 完整刷新路径立刻返回 timeout 行（不会去发用量请求）。
+        let deadline = tokio::time::Instant::now();
+        let row = workbuddy_row(&app, record, 7, false, deadline).await;
+        assert_eq!(row["status"], "timeout");
+        assert_eq!(row["cached"], false, "坏缓存不能被当命中");
+    }
+
     #[test]
     fn failure_without_a_snapshot_is_a_real_error() {
-        let row = degraded_or_error(&account(), "magpie", None, "unauthorized", "凭据不在");
+        let row = degraded_or_error(&account(), "magpie", None, 7, "unauthorized", "凭据不在");
         assert_eq!(row["status"], "unauthorized");
         assert!(row["remaining"].is_null());
         assert_eq!(row["stale"], false);

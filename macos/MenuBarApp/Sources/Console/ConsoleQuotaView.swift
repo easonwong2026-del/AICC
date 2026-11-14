@@ -71,6 +71,23 @@ struct ConsoleQuotaView: View {
         }
     }
 
+    /// RFC3339（UTC）→ 本机时区的 `MM-dd HH:mm`。解析不了就原样显示前 16 位。
+    static func localTimestamp(_ raw: String) -> String {
+        let parser = ISO8601DateFormatter()
+        parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var date = parser.date(from: raw)
+        if date == nil {
+            parser.formatOptions = [.withInternetDateTime]
+            date = parser.date(from: raw)
+        }
+        guard let date else {
+            return raw.prefix(16).replacingOccurrences(of: "T", with: " ")
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM-dd HH:mm"
+        return formatter.string(from: date)
+    }
+
     private func workerQuotaCard(_ row: WorkerQuotaRow) -> some View {
         ConsoleCard {
             VStack(alignment: .leading, spacing: 10) {
@@ -148,7 +165,9 @@ struct ConsoleQuotaView: View {
                 HStack(spacing: 6) {
                     Text(row.sourceName)
                     if let capturedAt = row.capturedAt, !capturedAt.isEmpty {
-                        Text("· 数据于 \(capturedAt.prefix(16).replacingOccurrences(of: "T", with: " "))")
+                        // 快照时间是 RFC3339 UTC，界面要显示本机时间，否则用户会以为
+                        // 数据是九小时前的（+8 时区）。
+                        Text("· 数据于 \(Self.localTimestamp(capturedAt))")
                     }
                     Spacer(minLength: 0)
                 }
