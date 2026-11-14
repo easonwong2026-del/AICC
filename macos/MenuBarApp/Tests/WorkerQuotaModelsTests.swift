@@ -67,6 +67,45 @@ final class WorkerQuotaModelsTests: XCTestCase {
         XCTAssertEqual(parsed?.usage?.models.first?.model, "hy4-free")
     }
 
+    func testStaleRowStillShowsTheOldNumbers() {
+        // 刷新失败但旧数据还在：额度要显示，同时必须标过期。
+        let parsed = row([
+            "accountId": "a", "provider": "workbuddy", "status": "stale",
+            "total": 100, "remaining": 90, "unit": "credits",
+            "stale": true, "cached": true,
+            "capturedAt": "2026-11-14T08:00:00Z",
+            "error": "被限流（429），稍后再试",
+        ])
+        XCTAssertEqual(parsed?.status, "stale")
+        XCTAssertTrue(parsed?.stale ?? false)
+        XCTAssertTrue(parsed?.hasQuota ?? false, "过期数据仍然是有额度的")
+        XCTAssertEqual(parsed?.remainingText, "90")
+        XCTAssertEqual(parsed?.error, "被限流（429），稍后再试")
+    }
+
+    func testUsageErrorIsSeparateFromTheBalance() {
+        // 额度成功、用量失败：余额有效，错误单独带着。
+        let parsed = row([
+            "accountId": "a", "provider": "workbuddy_ai", "status": "ok",
+            "total": 350, "remaining": 350,
+            "usage": NSNull(),
+            "usageError": "被限流（429），稍后再试",
+        ])
+        XCTAssertEqual(parsed?.status, "ok")
+        XCTAssertNil(parsed?.usage)
+        XCTAssertEqual(parsed?.usageError, "被限流（429），稍后再试")
+        XCTAssertNil(parsed?.error, "用量失败不该把整行标成失败")
+    }
+
+    func testFailureRowHasNoQuota() {
+        let parsed = row([
+            "accountId": "a", "provider": "workbuddy", "status": "unauthorized",
+            "stale": false,
+        ])
+        XCTAssertFalse(parsed?.hasQuota ?? true)
+        XCTAssertFalse(parsed?.stale ?? true)
+    }
+
     func testMissingFieldsRejectTheRow() {
         XCTAssertNil(row(["provider": "workbuddy"]))
         XCTAssertNil(row(["accountId": "a", "provider": "workbuddy"]))

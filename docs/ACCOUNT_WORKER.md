@@ -391,7 +391,15 @@ WorkBuddy AI 是另一个站点，拿它的授权请求这些接口，轻则 401
 ## 11. 四平台额度看板（v14）
 
 一段话：额度是**观测数据**，不是业务状态。所以它不进 `accounts`，只在
-`quota_snapshots`（v14）里留快照，读取路径完全不碰账号与授权。
+`quota_snapshots`（v14 建表，v15 去掉外键）里留快照，读取路径完全不碰账号与授权。
+
+**为什么 v15 要改 v14 的表**：v14 最初把 `account_id` 建成指向 `accounts(id)` 的外键，
+但四平台里 WorkBuddy 账号在 `accounts`、Qoder 服务账号在 `qoder_accounts` ——
+一张"通用"缓存表没法同时对两张表建外键。SQLite 改不了外键，所以 v15 是一步
+**按需重建**的 Rust 迁移：检测到还有外键就建新表搬数据，新建库上是空操作。
+代价是没有级联：`delete_account` / `delete_qoder_account` 各加一条显式清快照
+（账号 id 是 uid 的确定性哈希，重加同一账号会复用同一 id，残留快照会被当成"刚取过"），
+外加 90 天裁剪兜底。
 
 | 平台 | 数据来源 | 状态 |
 | --- | --- | --- |
@@ -410,14 +418,27 @@ WorkBuddy AI 是另一个站点，拿它的授权请求这些接口，轻则 401
 | `source` | 这次用的是哪份授权（`own` / `magpie` / Qoder 的 `magpie` `own_browser`） |
 | `status` | `ok` / `unauthorized` / `rate_limited` / `error` / `unverified` |
 | `unit` / `total` / `used` / `remaining` | **单位原样带出，不同单位不相加**；未知一律 `null`，不是 0 |
+| `usage` / `usageError` | 用量与它的失败原因。**用量失败不影响余额**，两件事分开显示 |
+| `cached` / `stale` / `capturedAt` | 来自缓存 / 来自旧快照 / 快照时间 |
 | `plan` / `isPaid` | 订阅名与是否付费（服务端字段直出） |
 | `usage` | `windowDays` / `requests` / `credits` / `truncated` / 按模型的明细 |
 | `syncAt` / `capturedAt` / `error` | 抓取时间、快照时间、失败原因（已过 `sanitize`） |
 
-三条硬规则：
+六条硬规则：
 
-1. **未知不当 0**：`Packages` 为空、字段解析失败、平台未接入，都返回 `null`。
-   界面显示"未知"或"未接入"，绝不显示一个看起来像用完的 0。
-2. **失败行不落库**：只有 `ok` 行写进 `quota_snapshots`；一次临时 429 不该变成历史记录。
-3. **只读**：`quota.board` / `quota.history` 不写 `last_used_at`、不改 `auth_status`、
+1. **未知不当 0**：`Packages` 为空、**某个包缺 `CycleTotalCapacity` / `CycleUsedCapacity`**、
+   平台未接入，都返回 `null`。聚合是**按字段完整性**做的——三个字段各自累计，
+   有一个参与计数的包缺该字段，这一项整体为 `null`。用 `unwrap_or(0)` 会把
+   "不知道"写成"确实是 0"，界面就会画成"额度用完了"。
+2. **部分成功**：额度与用量是两次独立请求。额度成功、用量 429/超时/解析失败时，
+   余额照常返回，失败只写进 `usageError`。
+3. **缓存 5 分钟**：`refresh=false` 且快照在 300 秒内 → 直接用，不打网络。
+   超过就重取。`refresh=true` 一定重取。
+4. **刷新失败不丢数据**：有旧快照时返回旧数据并标 `status="stale"` + `stale=true`
+   + `error`（本次失败原因）；没有旧快照才是真正的失败行。失败行**不落库**——
+   一次临时 429 不该变成历史记录。
+5. **批量有界**：3 路并发（`MAX_CONCURRENT`）、整轮 20 秒硬预算（`BOARD_BUDGET`），
+   超预算的账号直接返回"缓存 + 过期"或 `timeout`，不拖累已经拿到的账号。
+   Swift 侧 RPC 超时 45 秒，**必须大于**助手的预算。
+6. **只读**：`quota.board` / `quota.history` 不写 `last_used_at`、不改 `auth_status`、
    不刷新令牌。取数失败只影响这一行。

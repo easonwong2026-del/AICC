@@ -285,14 +285,15 @@ final class AccountWorkerManager: ObservableObject {
     // MARK: - 四平台额度（M4）
 
     /// 统一额度看板。`refresh` 时会真的打网络；否则优先用库里的快照。
-    /// 四平台里 Qoder 两版返回 `unverified` 且零请求，超时给 30 秒（两个站点各一次）。
+    /// 四平台里 Qoder 两版返回 `unverified` 且零请求。助手侧有 20 秒硬预算 + 3 路并发，
+    /// 这里给 45 秒是留余量：RPC 超时不应该先于助手的预算触发。
     func workerQuota(days: Int = 7, refresh: Bool) async throws -> [WorkerQuotaRow] {
         try await ensureRunning()
         guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
         let result = try await client.call(
             "quota.board",
             params: ["days": days, "refresh": refresh],
-            timeout: 30
+            timeout: 45
         )
         let rows = (result["rows"] as? [[String: Any]]) ?? []
         return rows.compactMap { WorkerQuotaRow(json: $0) }

@@ -81,13 +81,16 @@ struct ConsoleQuotaView: View {
                         .lineLimit(1)
                     ConsoleBadge(text: row.providerName, tint: ConsoleTheme.secondaryText)
                     Spacer(minLength: 0)
-                    if row.cached {
+                    if row.stale {
+                        // 旧数据 + 这次为什么没取到，两件事都要可见。
+                        ConsoleBadge(text: "过期", tint: ConsoleTheme.danger)
+                    } else if row.cached {
                         ConsoleBadge(text: "缓存", tint: ConsoleTheme.warning)
                     }
                 }
 
                 switch row.status {
-                case "ok":
+                case "ok", "stale":
                     if let text = row.remainingText {
                         HStack(alignment: .firstTextBaseline, spacing: 6) {
                             Text(text)
@@ -122,6 +125,11 @@ struct ConsoleQuotaView: View {
                         Text("近 \(usage.windowDays) 天 \(usage.requests) 次请求 · 消耗 \(WorkerQuotaRow.format(usage.credits))\(usage.truncated ? "（已截断）" : "")")
                             .font(.system(size: 10))
                             .foregroundStyle(ConsoleTheme.tertiaryText)
+                    } else if let usageError = row.usageError, !usageError.isEmpty {
+                        // 余额拿到了、用量没拿到：单独一行说明，不影响上面的额度。
+                        Text("用量读取失败：\(usageError)")
+                            .font(.system(size: 10))
+                            .foregroundStyle(ConsoleTheme.warning)
                     }
                 case "unverified":
                     Text("未接入（已验证为零请求）")
@@ -137,9 +145,15 @@ struct ConsoleQuotaView: View {
                         .foregroundStyle(ConsoleTheme.danger)
                 }
 
-                Text(row.sourceName)
-                    .font(.system(size: 10))
-                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                HStack(spacing: 6) {
+                    Text(row.sourceName)
+                    if let capturedAt = row.capturedAt, !capturedAt.isEmpty {
+                        Text("· 数据于 \(capturedAt.prefix(16).replacingOccurrences(of: "T", with: " "))")
+                    }
+                    Spacer(minLength: 0)
+                }
+                .font(.system(size: 10))
+                .foregroundStyle(ConsoleTheme.tertiaryText)
 
                 if let error = row.error, !error.isEmpty {
                     Text(error)
