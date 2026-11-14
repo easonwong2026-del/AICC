@@ -83,6 +83,19 @@ final class QoderCreditsModelsTests: XCTestCase {
         XCTAssertEqual(report.claimText, "请求超时")
     }
 
+    /// 并发时第二个调用会拿到 `busy`：这**不是失败**，文案不能说"领取失败"。
+    func testBusyIsAWaitingStateNotAFailure() {
+        let report = QoderCreditsReport(json: [
+            "accountId": "qa_1",
+            "state": "busy",
+            "claimed": false,
+            "error": ["kind": "busy", "message": "这个账号正在领取，请稍后再试"],
+        ])
+        XCTAssertEqual(report.claimText, "这个账号正在领取，请稍后再试")
+        XCTAssertEqual(report.info?.summary, "这个账号正在领取，稍后再试")
+        XCTAssertFalse(report.isInformative, "busy 不属于「有数可看」")
+    }
+
     func testRunsKeepFailuresVisible() throws {
         let failed = try XCTUnwrap(QoderCreditRun(json: [
             "id": 7,
