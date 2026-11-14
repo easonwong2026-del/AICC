@@ -19,6 +19,11 @@ struct ConsoleAccountsView: View {
     @State private var qoderSheetEdition: QoderEdition = .global
     /// 设备授权面板的版本选择：nil 表示面板没开。
     @State private var qoderLoginEdition: QoderEdition?
+    /// PAT 备用授权面板的版本选择：nil 表示面板没开。
+    @State private var qoderPatEdition: QoderEdition?
+    /// 正在被操作的服务账号（检测 / 移除 PAT）。
+    @State private var qoderBusyAccount: String?
+    @State private var qoderPatNotice: String?
     @State private var renaming: QoderProfile?
     @State private var renameText = ""
     @State private var removing: QoderProfile?
@@ -110,6 +115,12 @@ struct ConsoleAccountsView: View {
         // 设备授权面板：独立组件，按版本打开（CN / International 各自一套站点）。
         .sheet(item: $qoderLoginEdition) { edition in
             QoderDeviceAuthSheet(store: store, initialEdition: edition) {
+                Task { await store.refreshQoder(silent: true) }
+            }
+        }
+        // PAT 是**备用**入口，与设备授权并存：两条来源各自一行，互不覆盖。
+        .sheet(item: $qoderPatEdition) { edition in
+            QoderPatSheet(store: store, initialEdition: edition) {
                 Task { await store.refreshQoder(silent: true) }
             }
         }
@@ -380,6 +391,9 @@ struct ConsoleAccountsView: View {
                 Button("浏览器授权") { qoderLoginEdition = edition }
                     .buttonStyle(ConsoleSecondaryButtonStyle())
                     .help("不装 Qoder 客户端，用浏览器给 \(edition.displayName) 授权一个账号")
+                Button("PAT") { qoderPatEdition = edition }
+                    .buttonStyle(ConsoleSecondaryButtonStyle())
+                    .help("用 \(edition.displayName) 账户页生成的 Personal Access Token 授权（备用方式）")
             }
             if accounts.isEmpty {
                 ConsoleCard {
@@ -445,6 +459,25 @@ struct ConsoleAccountsView: View {
                     }
                     Spacer(minLength: 0)
                 }
+                if account.hasPAT {
+                    HStack(spacing: 8) {
+                        Button("检测 PAT") { Task { await checkPat(account) } }
+                            .buttonStyle(ConsoleSecondaryButtonStyle())
+                            .disabled(qoderBusyAccount == account.id)
+                        Button("移除 PAT") { Task { await removePat(account) } }
+                            .buttonStyle(ConsoleSecondaryButtonStyle())
+                            .disabled(qoderBusyAccount == account.id)
+                        if qoderBusyAccount == account.id {
+                            ProgressView().controlSize(.mini)
+                        } else if let notice = qoderPatNotice {
+                            Text(notice)
+                                .font(.system(size: 10))
+                                .foregroundStyle(ConsoleTheme.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
             }
         }
     }
@@ -455,6 +488,39 @@ struct ConsoleAccountsView: View {
         case .warn: return ConsoleTheme.warning
         case .muted: return ConsoleTheme.tertiaryText
         }
+    }
+
+    /// 重新验证一份已存的 PAT。成功的结论只有"身份仍然对得上"，
+    /// **不代表** Credits 接口的权限也还在。
+    private func checkPat(_ account: QoderServiceAccount) async {
+        qoderBusyAccount = account.id
+        qoderPatNotice = nil
+        defer { qoderBusyAccount = nil }
+        do {
+            switch try await store.worker.checkQoderPat(accountId: account.id) {
+            case .success(let name):
+                qoderPatNotice = "PAT 身份有效：\(name)（Credits 权限另需检测）"
+            case .failure(let error):
+                qoderPatNotice = "\(error.message)\(error.hint.isEmpty ? "" : " " + error.hint)"
+            }
+        } catch {
+            qoderPatNotice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+        await store.refreshQoder(silent: true)
+    }
+
+    /// 只删 PAT 这一份来源：浏览器授权与 Magpie 关联都不受影响。
+    private func removePat(_ account: QoderServiceAccount) async {
+        qoderBusyAccount = account.id
+        qoderPatNotice = nil
+        defer { qoderBusyAccount = nil }
+        do {
+            _ = try await store.worker.removeQoderPat(accountId: account.id)
+            qoderPatNotice = "已移除 PAT，其余来源保持不变"
+        } catch {
+            qoderPatNotice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+        await store.refreshQoder(silent: true)
     }
 
     @ViewBuilder

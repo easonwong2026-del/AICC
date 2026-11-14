@@ -259,6 +259,56 @@ final class AccountWorkerManager: ObservableObject {
         )
     }
 
+    // MARK: - Qoder PAT 备用授权（PR #73）
+
+    /// 保存 PAT。**令牌只走这一次 RPC**，助手直接写钥匙串，返回值里没有令牌。
+    ///
+    /// 失败不抛 `AccountWorkerFailure`：`rejected` / `forbidden` / `network` 都是
+    /// 用户能自己处理的业务结论，界面要按类型给下一步，而不是"助手出错了"。
+    func saveQoderPat(edition: QoderEdition, token: String) async throws -> Result<QoderPatResult, QoderPatFailure> {
+        if case .running = state {} else {
+            await refresh()
+        }
+        guard case .running = state, let client, client.isRunning else {
+            throw AccountWorkerFailure.notRunning
+        }
+        let result = try await client.call(
+            "qoder.auth.pat.save",
+            params: ["edition": edition.rawValue, "token": token],
+            timeout: 30
+        )
+        if let saved = QoderPatResult.parse(result) {
+            return .success(saved)
+        }
+        return .failure(QoderPatFailure.parse(result))
+    }
+
+    /// 重新检测已存的 PAT 是否还有效（只打一次 `userinfo`）。
+    func checkQoderPat(accountId: String) async throws -> Result<String, QoderPatFailure> {
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        let result = try await client.call(
+            "qoder.auth.pat.check",
+            params: ["accountId": accountId],
+            timeout: 25
+        )
+        if result["state"] as? String == "valid" {
+            let identity = result["identity"] as? [String: Any]
+            let name = (identity?["name"] as? String) ?? (identity?["email"] as? String) ?? "有效"
+            return .success(name)
+        }
+        return .failure(QoderPatFailure.parse(result))
+    }
+
+    func removeQoderPat(accountId: String) async throws -> Bool {
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        let result = try await client.call(
+            "qoder.auth.pat.remove",
+            params: ["accountId": accountId],
+            timeout: 15
+        )
+        return result["removed"] as? Bool ?? false
+    }
+
     // MARK: - 从 Magpie 导入（PR1b-1）
 
     /// 读取 Magpie 里已登录的 WorkBuddy 账号（只读，不含令牌）。

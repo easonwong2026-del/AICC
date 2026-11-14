@@ -16,6 +16,10 @@
 //!   refresh token 由 Magpie 刷新，AICC 复制一份再刷新只会互相踢下线。
 //!   `secret_ref` 在这类行里恒为空。
 //! - `own_browser`：令牌在钥匙串，这里只有 `secret_ref`（钥匙串键）与指纹。
+//! - `own_pat`：用户在 Qoder 账户设置里自建的 Personal Access Token。同样只在
+//!   钥匙串里存一份（`qoder/<account_id>/pat/token`），且**不会刷新**——
+//!   它是长期凭据，失效只能由用户重新生成。与 `own_browser` 是两行，
+//!   互不覆盖：浏览器授权过期不该把 PAT 一起标脏，反之亦然。
 //!
 //! 同一账号可以有多个来源并存：两行分别存在，互不覆盖。
 
@@ -28,11 +32,73 @@ use crate::rpc::{RpcError, RpcResult};
 
 pub const SOURCE_MAGPIE: &str = "magpie";
 pub const SOURCE_OWN_BROWSER: &str = "own_browser";
-pub const SOURCES: &[&str] = &[SOURCE_MAGPIE, SOURCE_OWN_BROWSER];
+pub const SOURCE_OWN_PAT: &str = "own_pat";
+pub const SOURCES: &[&str] = &[SOURCE_MAGPIE, SOURCE_OWN_BROWSER, SOURCE_OWN_PAT];
 pub const EDITIONS: &[&str] = &["qoder_cn", "qoder_global"];
 pub const AUTH_STATUSES: &[&str] = &[
     "unknown", "valid", "expired", "invalid", "denied", "missing",
 ];
+
+/// v16 迁移步骤：给账号加 `auth_epoch`，并把授权表的 `source` CHECK 扩到
+/// `own_pat`。**两步都先检测再动手**，重复执行是空操作。
+///
+/// 为什么要检测而不是直接写 SQL：`user_version` 可能被人工回拨，或者上一次
+/// 迁移事务已提交但版本号写入失败；那种库再跑一遍 `ALTER TABLE ... ADD COLUMN`
+/// 会以 `duplicate column name` 直接崩掉，用户看到的是"数据库坏了"。
+pub(super) fn rebuild_v16(tx: &rusqlite::Transaction<'_>) -> RpcResult<()> {
+    let has_epoch: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('qoder_accounts') WHERE name = 'auth_epoch'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_epoch == 0 {
+        tx.execute_batch(
+            "ALTER TABLE qoder_accounts ADD COLUMN auth_epoch INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+
+    let table_sql: String = tx.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'qoder_authorizations'",
+        [],
+        |row| row.get(0),
+    )?;
+    if table_sql.contains("own_pat") {
+        return Ok(());
+    }
+
+    // 先建新表、搬数据、再改名：`foreign_keys=ON` 下这张表是**子表**
+    // （引用 `qoder_accounts`），搬数据时父行仍在，外键检查能过。
+    //
+    // 注意：这段是**多行字符串**，不要改成行尾反斜杠续行——那会把相邻两行
+    // 粘成一个 token（`updated_at)SELECT`），SQL 直接语法错误（v15 踩过一次）。
+    tx.execute_batch(
+        "CREATE TABLE qoder_authorizations_v16 (
+             id               TEXT PRIMARY KEY,
+             account_id       TEXT NOT NULL REFERENCES qoder_accounts(id) ON DELETE CASCADE,
+             source           TEXT NOT NULL CHECK (source IN ('magpie', 'own_browser', 'own_pat')),
+             source_key       TEXT,
+             secret_ref       TEXT,
+             auth_status      TEXT NOT NULL DEFAULT 'unknown'
+                              CHECK (auth_status IN ('unknown','valid','expired','invalid','denied','missing')),
+             token_expires_at TEXT,
+             fingerprint      TEXT,
+             created_at       TEXT NOT NULL,
+             updated_at       TEXT NOT NULL,
+             UNIQUE (account_id, source)
+         );
+         INSERT INTO qoder_authorizations_v16 (
+             id, account_id, source, source_key, secret_ref, auth_status,
+             token_expires_at, fingerprint, created_at, updated_at)
+         SELECT id, account_id, source, source_key, secret_ref, auth_status,
+                token_expires_at, fingerprint, created_at, updated_at
+           FROM qoder_authorizations;
+         DROP TABLE qoder_authorizations;
+         ALTER TABLE qoder_authorizations_v16 RENAME TO qoder_authorizations;
+         CREATE INDEX IF NOT EXISTS idx_qoder_auth_account
+             ON qoder_authorizations (account_id);",
+    )?;
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,6 +110,12 @@ pub struct QoderAccountRecord {
     pub email: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// 凭据版本号（v16）。**任何一次授权写入或删除都会 +1**。
+    ///
+    /// 用途与 `accounts.auth_epoch` 完全一致：额度取数有两三次网络往返，
+    /// 期间用户可能重新授权甚至删号；账号 id 是 `(edition, uid)` 的确定性哈希，
+    /// 删了再导入会**复用同一个 id**，晚到的快照会被当成"刚取过"。
+    pub auth_epoch: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -115,7 +187,8 @@ pub fn qoder_auth_id(account_id: &str, source: &str) -> String {
     format!("qz_{hex}")
 }
 
-const ACCOUNT_COLUMNS: &str = "id, edition, uid, nickname, email, created_at, updated_at";
+const ACCOUNT_COLUMNS: &str =
+    "id, edition, uid, nickname, email, created_at, updated_at, auth_epoch";
 
 const AUTH_COLUMNS: &str = "id, account_id, source, source_key, secret_ref, auth_status, \
      token_expires_at, fingerprint, created_at, updated_at";
@@ -129,6 +202,7 @@ fn map_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<QoderAccountRecord> 
         email: row.get(4)?,
         created_at: row.get(5)?,
         updated_at: row.get(6)?,
+        auth_epoch: row.get(7)?,
     })
 }
 
@@ -254,7 +328,7 @@ impl crate::storage::Db {
     ) -> RpcResult<QoderAuthRecord> {
         if !SOURCES.contains(&source) {
             return Err(RpcError::invalid_params(format!(
-                "source 只支持 magpie / own_browser，收到 {source}"
+                "source 只支持 magpie / own_browser / own_pat，收到 {source}"
             )));
         }
         if !AUTH_STATUSES.contains(&auth_status) {
@@ -275,7 +349,10 @@ impl crate::storage::Db {
         }
         let id = qoder_auth_id(account_id, source);
         let now = now_rfc3339();
-        self.conn.execute(
+        // 授权写入与 `auth_epoch` 推进必须同一个事务：否则会出现"授权换了、
+        // 版本号没动"的窗口，在途的旧额度快照就能合法写回。
+        let tx = self.conn.transaction()?;
+        tx.execute(
             "INSERT INTO qoder_authorizations (
                  id, account_id, source, source_key, secret_ref, auth_status,
                  token_expires_at, fingerprint, created_at, updated_at
@@ -299,8 +376,36 @@ impl crate::storage::Db {
                 now
             ],
         )?;
+        tx.execute(
+            "UPDATE qoder_accounts SET auth_epoch = auth_epoch + 1, updated_at = ?1 WHERE id = ?2",
+            params![now, account_id],
+        )?;
+        tx.commit()?;
         self.get_qoder_authorization(account_id, source)?
             .ok_or_else(|| RpcError::storage("写入后读不到 Qoder 授权"))
+    }
+
+    /// 只改授权状态（例如 401 后标 `invalid`），**不推进版本号**。
+    ///
+    /// 状态是观测结论，不是新的凭据事实：把"我刚被拒绝"也当成授权变更，
+    /// 会让同一轮里已经拿到的正常快照白白作废。
+    pub fn set_qoder_auth_status(
+        &mut self,
+        account_id: &str,
+        source: &str,
+        auth_status: &str,
+    ) -> RpcResult<bool> {
+        if !AUTH_STATUSES.contains(&auth_status) {
+            return Err(RpcError::invalid_params(format!(
+                "authStatus 取值非法：{auth_status}"
+            )));
+        }
+        let changed = self.conn.execute(
+            "UPDATE qoder_authorizations SET auth_status = ?1, updated_at = ?2
+             WHERE account_id = ?3 AND source = ?4",
+            params![auth_status, now_rfc3339(), account_id, source],
+        )?;
+        Ok(changed > 0)
     }
 
     pub fn get_qoder_authorization(
@@ -335,11 +440,32 @@ impl crate::storage::Db {
         account_id: &str,
         source: &str,
     ) -> RpcResult<bool> {
-        let changed = self.conn.execute(
+        let tx = self.conn.transaction()?;
+        let changed = tx.execute(
             "DELETE FROM qoder_authorizations WHERE account_id = ?1 AND source = ?2",
             params![account_id, source],
         )?;
+        if changed > 0 {
+            // 删掉一份来源也是授权事实变化：在途快照作废，账号若已无任何来源，
+            // 更不该留下"旧令牌取回的数"。
+            tx.execute(
+                "UPDATE qoder_accounts SET auth_epoch = auth_epoch + 1, updated_at = ?1
+                 WHERE id = ?2",
+                params![now_rfc3339(), account_id],
+            )?;
+        }
+        tx.commit()?;
         Ok(changed > 0)
+    }
+
+    /// 当前授权版本号。取数前读一次，写快照时带上做原子核验。
+    pub fn qoder_auth_epoch(&self, account_id: &str) -> RpcResult<Option<i64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT auth_epoch FROM qoder_accounts WHERE id = ?1")?;
+        Ok(stmt
+            .query_row(params![account_id], |row| row.get::<_, i64>(0))
+            .optional()?)
     }
 
     pub fn delete_qoder_account(&mut self, id: &str) -> RpcResult<bool> {

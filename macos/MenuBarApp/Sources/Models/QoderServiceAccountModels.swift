@@ -71,6 +71,18 @@ struct QoderServiceAccount: Identifiable, Equatable {
         authorizations.filter { $0.isLinkedOnly }
     }
 
+    /// 这个账号是否有一份 AICC 自己持有的 PAT。
+    ///
+    /// PAT 与浏览器授权是两条独立的来源：有 PAT 不代表浏览器授权也有效，
+    /// 所以界面上不合并成"已登录"一个状态。
+    var hasPAT: Bool {
+        authorizations.contains { $0.source == "own_pat" }
+    }
+
+    var patAuth: QoderAuthorization? {
+        authorizations.first { $0.source == "own_pat" }
+    }
+
     /// 界面上的授权状态。
     ///
     /// 只有"自己拿着凭据"才算**有效**；仅仅在 Magpie 里有一条关联，
@@ -118,16 +130,17 @@ struct QoderAuthorization: Equatable {
         switch source {
         case "magpie": return "Magpie"
         case "own_browser": return "浏览器登录"
+        case "own_pat": return "PAT"
         default: return source
         }
     }
 
-    /// 只有自有授权、且凭据真的存下来了，才算"可用"。
+    /// 只有自有授权（浏览器或 PAT）、且凭据真的存下来了，才算"可用"。
     ///
     /// Magpie 来源的令牌归 Magpie 刷新，AICC 手里没有任何凭据可验证，
     /// 因此不能把它当成"认证有效"，只能说"已关联"。
     var isUsable: Bool {
-        source == "own_browser" && hasSecret && authStatus == "valid"
+        (source == "own_browser" || source == "own_pat") && hasSecret && authStatus == "valid"
     }
 
     /// Magpie 关联：知道这个账号在 Magpie 里登录过，但还没实时验证。

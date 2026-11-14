@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::app::App;
 use crate::providers::qoder_edition::QoderEdition;
-use crate::providers::{magpie, qoder, qoder_auth, workbuddy, workbuddy_auth};
+use crate::providers::{magpie, qoder, qoder_auth, qoder_pat, workbuddy, workbuddy_auth};
 use crate::qoder_profiles::manager as qoder_manager;
 use crate::rpc::{RpcError, RpcResult};
 use crate::securestore::SecretErrorKind;
@@ -66,6 +66,10 @@ pub const METHODS: &[&str] = &[
     "qoder.auth.start",
     "qoder.auth.poll",
     "qoder.auth.cancel",
+    // ---- Qoder PAT 备用授权（PR #73 第二轮）----
+    "qoder.auth.pat.save",
+    "qoder.auth.pat.check",
+    "qoder.auth.pat.remove",
     "auth.workbuddy.start",
     "auth.workbuddy.poll",
     "auth.workbuddy.cancel",
@@ -456,6 +460,65 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
         "qoder.auth.cancel" => {
             let login_id = require_str(params, "loginId")?;
             Ok(json!({ "cancelled": qoder_auth::cancel(&login_id) }))
+        }
+
+        // ---- Qoder PAT 备用授权 ----
+        //
+        // 三条规则决定了这里的形状：
+        // 1. **令牌只从请求进、只往钥匙串去**：不回显、不进错误信息、不进数据库。
+        // 2. **落库前必须真打一次 userinfo**：拿不到 uid 就不写。
+        // 3. **"身份已验证" ≠ "能领 Credits"**：返回体里分开报，后者恒为 unknown。
+        "qoder.auth.pat.save" => {
+            let edition = require_edition(params)?;
+            let raw = require_str(params, "token")?;
+            let token =
+                qoder_pat::normalize(&raw).map_err(|err| RpcError::invalid_params(err.message))?;
+            match qoder_pat::verify(edition, &token).await {
+                Ok(identity) => {
+                    let saved = qoder_pat::persist(app, edition, &token, &identity)?;
+                    let mut value = saved.to_json();
+                    value["saved"] = json!(true);
+                    value["state"] = json!("verified_identity");
+                    Ok(value)
+                }
+                Err(err) => Ok(json!({
+                    "saved": false,
+                    "state": "failed",
+                    "error": err.to_json(),
+                })),
+            }
+        }
+
+        "qoder.auth.pat.check" => {
+            let account_id = require_str(params, "accountId")?;
+            let account = app
+                .with_db(|db| db.get_qoder_account(&account_id))?
+                .ok_or_else(|| RpcError::not_found(format!("Qoder 账号不存在：{account_id}")))?;
+            let edition = QoderEdition::parse(&account.edition)
+                .ok_or_else(|| RpcError::invalid_params("账号的 edition 非法"))?;
+            match qoder_pat::recheck(app, edition, &account_id).await {
+                Ok(identity) => Ok(json!({
+                    "state": "valid",
+                    "identity": {
+                        "uid": identity.uid,
+                        "name": identity.name,
+                        "email": identity.email,
+                    },
+                })),
+                Err(err) => Ok(json!({
+                    "state": "failed",
+                    "error": err.to_json(),
+                })),
+            }
+        }
+
+        "qoder.auth.pat.remove" => {
+            let account_id = require_str(params, "accountId")?;
+            let removed = qoder_pat::remove(app, &account_id)?;
+            Ok(json!({
+                "removed": removed.removed,
+                "secretDeleted": removed.secret_deleted,
+            }))
         }
 
         // ---- WorkBuddy 扫码登录（PR1b-1）----
@@ -1980,6 +2043,16 @@ fn require_str(params: &Value, key: &str) -> RpcResult<String> {
         .map(str::to_string)
         .filter(|v| !v.trim().is_empty())
         .ok_or_else(|| RpcError::invalid_params(format!("缺少参数 {key}")))
+}
+
+/// 必须显式给出、且只能是两个合法版本之一。
+///
+/// **绝不回落**到任何一个默认版本：那会用错站点去验凭据，
+/// 把一次国内版操作记成国际版（或反过来）。
+fn require_edition(params: &Value) -> RpcResult<QoderEdition> {
+    let raw = require_str(params, "edition")?;
+    QoderEdition::parse(&raw)
+        .ok_or_else(|| RpcError::invalid_params("edition 只支持 qoder_cn / qoder_global"))
 }
 
 /// 可选的字符串数组参数。缺省 / `null` / 类型不对都当空数组（= 全部）。

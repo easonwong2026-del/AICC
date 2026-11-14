@@ -86,7 +86,65 @@ Authorization: Bearer <device token>
 | TTL | 15 分钟（与 CLI 一致）；等待期间过期由门禁判 `Expired` |
 | 终态 | `complete` / `fail` 只覆盖 `Pending` / `Committing`，不会把已取消的会话"抢救"回来 |
 
-## 4. 本阶段不做（明确排除）
+## 4. PAT 备用授权（同一 PR 第二轮）
+
+浏览器授权依赖 Qoder 的登录页与回调，遇到 SSO / 网络策略就走不通。PAT 是第二条路：
+用户在**自己站点**的账户页生成一张长期令牌，粘进 AICC。
+
+| 项 | 值 |
+| --- | --- |
+| 生成入口（CN） | `https://qoder.cn/account/integrations` |
+| 生成入口（International） | `https://qoder.com/account/integrations` |
+| 官方文档 | <https://docs.qoder.com/cli/authentication> |
+| 验身份 | `GET {openapi}/api/v1/userinfo`（`Authorization: Bearer <PAT>`） |
+| 钥匙串键 | `qoder/<account_id>/pat/token` |
+| 授权行 | `qoder_authorizations`，`source = own_pat` |
+| 刷新 | **不做**。PAT 失效只能由用户重新生成 |
+
+### 4.1 两条来源互不覆盖
+
+`(account_id, source)` 唯一，所以 PAT 与 `own_browser` 是**两行**：
+
+- 删掉 PAT 不动浏览器授权，反之亦然；
+- 浏览器 token 过期不会把 PAT 标成 expired；
+- 同一账号的 Magpie 关联（`source = magpie`，无凭据）完全独立。
+
+`own_pat` 是 v16 新加的取值。SQLite 改不了 `CHECK`，所以 v16 **重建了
+`qoder_authorizations`**（先建新表、搬数据、再改名）。迁移是 Rust 步骤而不是纯 SQL：
+两步都先检测再动手，重复执行必须是空操作。
+
+### 4.2 "保存成功" ≠ "登录完成"
+
+落库前会真打一次 `userinfo`，拿不到 uid 就**不入库**（`profile_missing`）。
+但 `userinfo` 通得过只证明"这张令牌属于这个账号"，**不证明**它能调用 Credits 接口。
+所以 RPC 返回体把两件事分开：
+
+```json
+{ "saved": true, "identity": "verified", "credits": "unknown",
+  "warning": "PAT 已保存并通过身份验证；它是否能领取 Credits 需要单独检测" }
+```
+
+界面同样只说"已保存并验证身份"，后续权限由额度页的检测接口回答。
+
+### 4.3 失败类型与下一步
+
+| `error.kind` | 含义 | 界面下一步 |
+| --- | --- | --- |
+| `malformed` | 空 / 太短 / 带空格换行 | 重新复制 |
+| `rejected` | 401：撤销、过期，或**不属于这个站点** | 确认站点后重新生成 |
+| `forbidden` | 403：权限范围不够 | 勾选账号读取权限后重新生成 |
+| `profile_missing` | 200 但没有 uid | 换浏览器授权 |
+| `network` | 超时 / 连接失败 | 重试，**令牌不用换** |
+
+**不做任何跨站回落**：CN 的 PAT 发到 International 只会 401，换域名重试等于把令牌
+发到错误的站点。
+
+### 4.4 本轮不做
+
+PAT 不参与自动刷新、不写进任何配置或日志、不在 Android / Widget 侧提供输入入口。
+`qoder_profiles` 那条本机客户端快照线仍然只读。
+
+## 5. 本阶段不做（明确排除）
 
 | 不做 | 原因 |
 | --- | --- |
@@ -96,13 +154,16 @@ Authorization: Bearer <device token>
 | VPC / 企业专属域 | 只在 `qoder.cn` / `qoder.com` 两个公有站点上实现；企业域需要额外探测规则 |
 | QwenWork | 第三个站点，不在 #73 范围 |
 
-## 5. 验收
+## 6. 验收
 
 1. CN 与 International 各自发起，登录页分别落在 `qoder.cn` / `qoder.com`，client id 不同。
 2. 同一 UID 在两个站 → 两行账号、两套钥匙串键，互不覆盖。
 3. 取消 / 过期 / 不存在的会话，轮询返回终态且**不写库、不发网络**。
 4. 未完成授权前 `qoder.accounts.list` 不出现新账号。
 5. 令牌不出现在 SQLite、RPC 响应、日志里；对外只有 `hasSecret` 与指纹。
+6. PAT：保存后 `qoder.accounts.list` 里该账号出现 `own_pat` 一行；删除后只剩原来源；
+   错误 PAT（跨站 / 被撤销）返回 `rejected` 且**不写库、不写钥匙串**。
 
-**待真机**：真实账号的浏览器换票、`userinfo` 实际字段、`token_expires_at` 的实际形态。
+**待真机**：真实账号的浏览器换票、`userinfo` 实际字段、`token_expires_at` 的实际形态、
+真实 PAT 的 `userinfo` 权限范围。
 在拿到真实响应之前，本模块的任何"成功"都只代表本地状态机正确，不代表服务端已验证。
