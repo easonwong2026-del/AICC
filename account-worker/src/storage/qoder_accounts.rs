@@ -408,6 +408,40 @@ impl crate::storage::Db {
         Ok(changed > 0)
     }
 
+    /// 带版本核验的状态更新：**只有账号的授权版本仍是 `expected_epoch` 时才写**。
+    ///
+    /// 为什么必须有它：一次网络请求要几秒，期间用户可能已经换了一份新 PAT。
+    /// 旧请求回来把新授权标成 `invalid`，用户看到的是"刚存就失效"，而真正
+    /// 失效的是那张已经被替换掉的旧令牌。核验与写入是同一条语句，没有插队窗口。
+    ///
+    /// 返回 `false` 表示"账号的授权已经变了"，此时**什么都不写**。
+    pub fn set_qoder_auth_status_if_current(
+        &mut self,
+        account_id: &str,
+        source: &str,
+        auth_status: &str,
+        expected_epoch: i64,
+    ) -> RpcResult<bool> {
+        if !AUTH_STATUSES.contains(&auth_status) {
+            return Err(RpcError::invalid_params(format!(
+                "authStatus 取值非法：{auth_status}"
+            )));
+        }
+        let changed = self.conn.execute(
+            "UPDATE qoder_authorizations SET auth_status = ?1, updated_at = ?2
+             WHERE account_id = ?3 AND source = ?4
+               AND EXISTS (SELECT 1 FROM qoder_accounts WHERE id = ?3 AND auth_epoch = ?5)",
+            params![
+                auth_status,
+                now_rfc3339(),
+                account_id,
+                source,
+                expected_epoch
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
     pub fn get_qoder_authorization(
         &self,
         account_id: &str,
