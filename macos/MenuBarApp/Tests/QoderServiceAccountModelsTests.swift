@@ -32,7 +32,8 @@ final class QoderServiceAccountModelsTests: XCTestCase {
         XCTAssertEqual(account.editionName, "Qoder International")
         XCTAssertEqual(account.displayName, "海外号")
         XCTAssertEqual(account.authorizations.count, 1)
-        XCTAssertEqual(account.statusLabel, "有效")
+        // 默认 fixture 只有 Magpie 关联：不能因此显示"有效"。
+        XCTAssertEqual(account.statusLabel, "已关联（未校验）")
     }
 
     func testCnAndGlobalShareNoLabels() throws {
