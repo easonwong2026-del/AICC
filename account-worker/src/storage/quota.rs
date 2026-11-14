@@ -55,29 +55,44 @@ pub(super) fn rebuild_v15(tx: &rusqlite::Transaction<'_>) -> crate::rpc::RpcResu
 impl crate::storage::Db {
     /// 落一行快照。`payload` 是整行 JSON，主键由（账号, 秒级时间）拼成，
     /// 同一账号同一秒重复抓取会覆盖而不是堆积。
+    ///
+    /// **写入时原子核验账号身份**：`expected_epoch` 给出时，只有该账号仍然存在、
+    /// `provider` 未变、`auth_epoch` 未变才写入。取数有两三次网络往返，期间账号
+    /// 可能被删除或重新授权；而账号 id 是 uid 的确定性哈希，重新导入会**复用同一个
+    /// id**，一条晚到的快照会立刻被当成新账号"刚取过的数据"。
+    ///
+    /// 返回 `true` 表示真的写进去了；`false` 表示账号已经变了，什么都没写。
     pub fn save_quota_snapshot(
         &mut self,
         account_id: &str,
         provider: &str,
         status: &str,
         payload: &Value,
-    ) -> RpcResult<()> {
+        expected_epoch: Option<i64>,
+    ) -> RpcResult<bool> {
         let captured_at = crate::clock::now_rfc3339();
         let id = format!("{account_id}:{captured_at}");
-        self.conn.execute(
-            "INSERT OR REPLACE INTO quota_snapshots \
-             (id, account_id, provider, captured_at, status, payload) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        // 核验与写入是同一条语句，不存在"先查再写"之间被插队的窗口。
+        let changed = self.conn.execute(
+            "INSERT OR REPLACE INTO quota_snapshots
+                 (id, account_id, provider, captured_at, status, payload)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6
+             WHERE EXISTS (
+                 SELECT 1 FROM accounts
+                 WHERE id = ?2 AND provider = ?3
+                   AND (?7 IS NULL OR auth_epoch = ?7)
+             )",
             rusqlite::params![
                 id,
                 account_id,
                 provider,
                 captured_at,
                 status,
-                payload.to_string()
+                payload.to_string(),
+                expected_epoch
             ],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     /// 最新一行。界面默认路径：有缓存先用缓存，避免每次打开都打网络。
@@ -176,7 +191,7 @@ mod tests {
     #[test]
     fn latest_returns_the_newest_row() {
         let (_dir, mut db, id) = fresh();
-        db.save_quota_snapshot(&id, "workbuddy", "ok", &json!({"total": 1}))
+        db.save_quota_snapshot(&id, "workbuddy", "ok", &json!({"total": 1}), None)
             .unwrap();
         let latest = db.latest_quota_snapshot(&id).unwrap().expect("有快照");
         assert_eq!(latest.status, "ok");
@@ -187,19 +202,90 @@ mod tests {
     fn history_is_scoped_to_the_account() {
         let (_dir, mut db, id) = fresh();
         let other = db.upsert_account(&account("u2", "workbuddy_ai")).unwrap();
-        db.save_quota_snapshot(&id, "workbuddy", "ok", &json!({"total": 1}))
+        db.save_quota_snapshot(&id, "workbuddy", "ok", &json!({"total": 1}), None)
             .unwrap();
-        db.save_quota_snapshot(&other.id, "workbuddy_ai", "ok", &json!({"total": 2}))
+        db.save_quota_snapshot(&other.id, "workbuddy_ai", "ok", &json!({"total": 2}), None)
             .unwrap();
         let rows = db.quota_history(&id, "1970-01-01T00:00:00Z").unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provider, "workbuddy");
     }
 
+    /// 账号在取数期间被删掉：晚到的快照**不许写**，否则重新导入同一个账号
+    /// （id 是 uid 哈希，会复用）时会立刻拿到这份旧数据。
+    #[test]
+    fn a_snapshot_is_not_written_after_the_account_disappears() {
+        let (_dir, mut db, id) = fresh();
+        let epoch: i64 = db
+            .conn
+            .query_row(
+                "SELECT auth_epoch FROM accounts WHERE id = ?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(db
+            .save_quota_snapshot(&id, "workbuddy", "ok", &json!({"total": 1}), Some(epoch))
+            .unwrap());
+        db.delete_account(&id).unwrap();
+        let written = db
+            .save_quota_snapshot(&id, "workbuddy", "ok", &json!({"total": 999}), Some(epoch))
+            .unwrap();
+        assert!(!written, "账号已删除，写入必须被拒");
+        assert!(db.latest_quota_snapshot(&id).unwrap().is_none());
+    }
+
+    /// 重新授权会让 `auth_epoch` 前进：旧授权下拿到的额度不许覆盖新会话。
+    #[test]
+    fn a_snapshot_with_a_stale_epoch_is_rejected() {
+        let (_dir, mut db, id) = fresh();
+        let current_epoch: i64 = db
+            .conn
+            .query_row(
+                "SELECT auth_epoch FROM accounts WHERE id = ?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            db.save_quota_snapshot(
+                &id,
+                "workbuddy",
+                "ok",
+                &json!({"total": 1}),
+                Some(current_epoch + 1)
+            )
+            .unwrap()
+                == false
+        );
+        assert!(db
+            .save_quota_snapshot(
+                &id,
+                "workbuddy",
+                "ok",
+                &json!({"total": 2}),
+                Some(current_epoch)
+            )
+            .unwrap());
+        let kept = db.latest_quota_snapshot(&id).unwrap().unwrap();
+        assert!(kept.payload.contains("\"total\":2"));
+    }
+
+    /// provider 变了（国内版 / 国际版互转）也不许把旧快照落到新身份上。
+    #[test]
+    fn a_snapshot_with_a_different_provider_is_rejected() {
+        let (_dir, mut db, id) = fresh();
+        let written = db
+            .save_quota_snapshot(&id, "workbuddy_ai", "ok", &json!({"total": 1}), None)
+            .unwrap();
+        assert!(!written);
+        assert!(db.latest_quota_snapshot(&id).unwrap().is_none());
+    }
+
     #[test]
     fn pruning_keeps_rows_after_the_cutoff() {
         let (_dir, mut db, id) = fresh();
-        db.save_quota_snapshot(&id, "workbuddy", "ok", &json!({}))
+        db.save_quota_snapshot(&id, "workbuddy", "ok", &json!({}), None)
             .unwrap();
         let removed = db.prune_quota_snapshots("2000-01-01T00:00:00Z").unwrap();
         assert_eq!(removed, 0);
@@ -308,7 +394,7 @@ mod tests {
     #[test]
     fn deleting_the_account_cascades_to_snapshots() {
         let (_dir, mut db, id) = fresh();
-        db.save_quota_snapshot(&id, "workbuddy", "ok", &json!({}))
+        db.save_quota_snapshot(&id, "workbuddy", "ok", &json!({}), None)
             .unwrap();
         assert!(db.delete_account(&id).unwrap());
         let n: i64 = db
