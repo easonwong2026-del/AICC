@@ -373,7 +373,10 @@ WorkBuddy AI 是另一个站点，拿它的授权请求这些接口，轻则 401
 | --- | --- |
 | 发起 `auth.workbuddy.start` | `variant` 决定站点；不会因为"看起来像"而回落 |
 | 登录页 | `verificationUri` 同一份：界面主按钮用系统浏览器打开，次选渲染成二维码 |
+| 登录地址校验 | `is_trusted_login_url`：只接受**本站点域名下的 https**；界面打开前与编码二维码前再各挡一次（防 `javascript:` / 仿冒域 / 跨站点） |
 | 轮询 | 会话绑死档位；`poll` 从**会话**取档位决定 provider，不看请求参数 |
+| 落库门禁 | `begin_commit` 原子抢占：只有仍 `Pending` 的会话能落库，并把会话里**不可变**的档位带出；抢不到（取消 / 过期 / 已结束）就拒绝写库，**没有"取不到版本就默认国内版"的兜底** |
+| 取消 / 超时 | `cancel` 只对 `Pending` 生效；已进 `Committing` 的会话取消落空，不会出现"界面已取消但账号已写入" |
 | 令牌落库 | access / refresh 进钥匙串（按 uid 隔离），`accounts.provider` 按档位写 |
 | domain 校验 | `matches_domain` 拒绝跨档响应（国际版登录返回国内 domain 直接失败） |
 | UID 冲突 | 同一 UID 已在另一站点 → `uid_conflict`，凭据回滚，账号行不改写 |
@@ -381,4 +384,4 @@ WorkBuddy AI 是另一个站点，拿它的授权请求这些接口，轻则 401
 | 签到 / 成长 / 旅行 / 授权检查 | 国际版**没有这些任务**，永久 `unsupported_provider`；列表里也不出现 |
 
 界面：添加账号面板顶部有 `WorkBuddy` / `WorkBuddy AI` 分段选择，切换即重开会话；
-账号卡按 provider 显示独立名称与图标，国际版的签到一栏写「暂不支持」。
+账号卡按 provider 显示独立名称与图标，国际版**不显示签到一栏**（产品里没有签到，不是"暂不支持"）。

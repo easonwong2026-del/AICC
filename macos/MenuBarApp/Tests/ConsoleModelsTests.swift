@@ -229,6 +229,30 @@ final class ConsoleModelsTests: XCTestCase {
         XCTAssertNil(WorkbuddyLoginStart.parse(["loginId": "", "verificationUri": "https://x"]))
     }
 
+    /// 登录地址来自服务端：只有本站点的 https 页面能交给系统浏览器、能编码成二维码。
+    func testTrustedLoginURLRejectsOtherSchemesAndHosts() {
+        let cn = WorkbuddyVariant.cn
+        let ai = WorkbuddyVariant.ai
+        XCTAssertNotNil(cn.trustedLoginURL("https://www.codebuddy.cn/login?state=1"))
+        XCTAssertNotNil(cn.trustedLoginURL("https://sso.codebuddy.cn:8443/login"))
+        XCTAssertNotNil(ai.trustedLoginURL("https://www.workbuddy.ai/login?state=1"))
+
+        // 非 https：明文 http / javascript / file 都不许交给系统。
+        XCTAssertNil(cn.trustedLoginURL("http://www.codebuddy.cn/login"))
+        XCTAssertNil(cn.trustedLoginURL("javascript:alert(1)"))
+        XCTAssertNil(cn.trustedLoginURL("file:///etc/passwd"))
+        XCTAssertNil(cn.trustedLoginURL("www.codebuddy.cn/login"))
+
+        // 域名仿冒 / userinfo 伪装。
+        XCTAssertNil(cn.trustedLoginURL("https://www.codebuddy.cn.evil.com/login"))
+        XCTAssertNil(cn.trustedLoginURL("https://evil.com/?codebuddy.cn"))
+        XCTAssertNil(cn.trustedLoginURL("https://www.codebuddy.cn@evil.com/login"))
+
+        // 跨站点：国内版会话不许打开国际版登录页，反之亦然。
+        XCTAssertNil(cn.trustedLoginURL("https://www.workbuddy.ai/login?state=1"))
+        XCTAssertNil(ai.trustedLoginURL("https://www.codebuddy.cn/login?state=1"))
+    }
+
     func testLoginPhaseMapping() {
         XCTAssertEqual(WorkbuddyLoginPhase.parse(["state": "pending"]), .pending)
         XCTAssertEqual(WorkbuddyLoginPhase.parse(["state": "success", "reused": true]), .success(reused: true))

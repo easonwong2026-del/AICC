@@ -117,7 +117,12 @@ struct AddWorkbuddyAccountSheet: View {
     }
 
     private func openInBrowser() {
-        guard let start, let url = URL(string: start.verificationUri) else { return }
+        // 地址来自服务端：只接受本站点的 https 登录页，其余 scheme / 域名一律不打开。
+        guard let start, let url = variant.trustedLoginURL(start.verificationUri) else {
+            failure = "登录地址不可信，已拒绝打开"
+            phase = .failed(kind: "untrusted_url", message: failure ?? "登录地址不可信")
+            return
+        }
         NSWorkspace.shared.open(url)
     }
 
@@ -128,7 +133,10 @@ struct AddWorkbuddyAccountSheet: View {
                 .overlay(
                     RoundedRectangle(cornerRadius: 12).strokeBorder(ConsoleTheme.border, lineWidth: 1)
                 )
-            if let start, let image = Self.qrImage(from: start.verificationUri) {
+            // 二维码内容同样按可信域名过滤：扫出去的就是这个字符串，不能是任意链接。
+            if let start,
+               let url = variant.trustedLoginURL(start.verificationUri),
+               let image = Self.qrImage(from: url.absoluteString) {
                 Image(nsImage: image)
                     .interpolation(.none)
                     .resizable()

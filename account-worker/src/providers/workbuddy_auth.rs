@@ -33,6 +33,8 @@ pub const KIND_PROFILE_MISSING: &str = "profile_missing";
 pub const KIND_UNKNOWN_LOGIN: &str = "unknown_login";
 /// 会话已经结束（成功过），界面应改为刷新账号列表。
 pub const KIND_FINISHED: &str = "finished";
+/// 服务端给的登录地址不在本档位可信域名内，拒绝交给系统浏览器打开。
+pub const KIND_UNTRUSTED_URL: &str = "untrusted_url";
 
 /// 解密后的账号资料。令牌单独放在 `TokenPayload` 里，不和资料混在一起。
 #[derive(Clone)]
@@ -54,6 +56,8 @@ pub struct TokenPayload {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Phase {
     Pending,
+    /// 已通过提交门禁（`begin_commit`），正在落库。此时取消不再生效。
+    Committing,
     Success,
     Cancelled,
     Expired,
@@ -265,11 +269,34 @@ pub fn parse_variant(raw: &str) -> Option<WbVariant> {
     }
 }
 
-/// 会话属于哪个档位。轮询成功后按它决定 `provider`，避免把国际版令牌
-/// 记成国内版账号。
-pub fn session_variant(login_id: &str) -> Option<WbVariant> {
-    let map = sessions().lock().expect("sessions");
-    map.get(login_id).map(|session| session.variant)
+/// 登录地址是否可信：**必须 https**，且主机属于该档位的产品域。
+///
+/// 这个字符串是服务端给的，界面会直接丢给系统浏览器，因此不能只做格式检查：
+/// `javascript:` / 第三方域名 / 主域名后缀仿冒（`www.codebuddy.cn.evil.com`）
+/// 都必须拦在这里。落库前会话里的档位是唯一判据，这里也按档位限制域名。
+pub fn is_trusted_login_url(variant: WbVariant, raw: &str) -> bool {
+    let url = raw.trim();
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("https") {
+        return false;
+    }
+    // authority 截止到 path / query / fragment 前的第一个分隔符。
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // userinfo 形式（`https://a@b/`）里真正的目标是 `@` 之后那一段，取最后一段。
+    let host_port = authority.rsplit('@').next().unwrap_or("");
+    let host = host_port.split(':').next().unwrap_or("").to_ascii_lowercase();
+    if host.is_empty() || host.contains('\\') || host.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let domains: &[&str] = match variant {
+        WbVariant::Cn => &["codebuddy.cn", "workbuddy.cn"],
+        WbVariant::Ai => &["codebuddy.ai", "workbuddy.ai"],
+    };
+    domains
+        .iter()
+        .any(|root| host == *root || host.ends_with(&format!(".{root}")))
 }
 
 /// 钥匙串里的键名。按 uid 隔离，换账号不会互相覆盖。
@@ -299,6 +326,17 @@ pub async fn start(variant: WbVariant) -> Result<StartInfo, AuthError> {
     } else {
         auth_url
     };
+    // 界面会把这个地址交给系统浏览器打开：先按档位校验协议与域名。
+    // 失败时直接拒绝发起会话，不留一个"能轮询但链接不可信"的账号。
+    if !is_trusted_login_url(variant, &auth_url) {
+        return Err(AuthError::new(
+            KIND_UNTRUSTED_URL,
+            format!(
+                "服务端返回的登录地址不在 {} 的可信域名内，已拒绝打开",
+                variant.api_endpoint()
+            ),
+        ));
+    }
 
     let mut map = sessions().lock().expect("sessions");
     map.insert(
@@ -330,6 +368,8 @@ pub fn snapshot(login_id: &str) -> Option<(Phase, Option<Value>, Option<Value>)>
 pub fn cancel(login_id: &str) -> bool {
     let mut map = sessions().lock().expect("sessions");
     match map.get_mut(login_id) {
+        // 只对 `Pending` 生效：已经进入 `Committing` 的会话正在落库，取消必须落空，
+        // 否则界面会显示"已取消"而账号其实已经写进去了。
         Some(session) if session.phase == Phase::Pending => {
             session.phase = Phase::Cancelled;
             true
@@ -338,17 +378,106 @@ pub fn cancel(login_id: &str) -> bool {
     }
 }
 
-pub fn complete(login_id: &str, result: Value) {
+/// 一次性提交门禁：只有**仍处于 `Pending`** 的会话才允许落库，并把会话里
+/// 不可变的档位一并带出。
+///
+/// `poll()` 要等网络，期间 `cancel()` 可能把会话改成取消、TTL 也可能刚好到期。
+/// 落库前必须在这里做原子判定并抢占到 `Committing`：抢不到就绝不写库。
+/// 这也是档位的唯一取法——以前调用方用 `session_variant(..).unwrap_or(Cn)`
+/// 兜底，会把取不到版本的会话悄悄记成国内版账号。
+pub fn begin_commit(login_id: &str) -> Result<WbVariant, AuthError> {
     let mut map = sessions().lock().expect("sessions");
-    if let Some(session) = map.get_mut(login_id) {
-        session.phase = Phase::Success;
-        session.result = Some(result);
+    let Some(session) = map.get_mut(login_id) else {
+        return Err(AuthError::new(
+            KIND_UNKNOWN_LOGIN,
+            "登录请求不存在或已结束",
+        ));
+    };
+    if session.created.elapsed().as_secs() as i64 > SESSION_TTL_SECONDS {
+        session.phase = Phase::Expired;
+        return Err(AuthError::new(KIND_EXPIRED, "二维码已过期，请重新获取"));
+    }
+    match session.phase {
+        Phase::Pending => {
+            session.phase = Phase::Committing;
+            Ok(session.variant)
+        }
+        Phase::Cancelled => Err(AuthError::new(KIND_CANCELLED, "登录已取消")),
+        Phase::Expired => Err(AuthError::new(KIND_EXPIRED, "二维码已过期，请重新获取")),
+        Phase::Failed => Err(failure_of(session)),
+        Phase::Committing | Phase::Success => {
+            Err(AuthError::new(KIND_FINISHED, "该登录请求已完成"))
+        }
     }
 }
 
+/// 会话失败时对外暴露的稳定错误。只保留界面需要区分的两类原因，
+/// 其余一律归到网络错误（与改造前一致）。
+fn failure_of(session: &Session) -> AuthError {
+    let error = session.error.clone().unwrap_or_default();
+    let kind = error
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or(KIND_NETWORK);
+    let kind: &'static str = if kind == KIND_DOMAIN_MISMATCH {
+        KIND_DOMAIN_MISMATCH
+    } else if kind == KIND_PROFILE_MISSING {
+        KIND_PROFILE_MISSING
+    } else if kind == KIND_CANCELLED {
+        KIND_CANCELLED
+    } else if kind == KIND_EXPIRED {
+        KIND_EXPIRED
+    } else {
+        KIND_NETWORK
+    };
+    AuthError::new(
+        kind,
+        error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("登录失败"),
+    )
+}
+
+/// 会话仍在等待吗？`poll` 等待网络期间可能被 `cancel()` 结束。
+fn ensure_pending(login_id: &str) -> Result<(), AuthError> {
+    let map = sessions().lock().expect("sessions");
+    let Some(session) = map.get(login_id) else {
+        return Err(AuthError::new(
+            KIND_UNKNOWN_LOGIN,
+            "登录请求不存在或已结束",
+        ));
+    };
+    match session.phase {
+        Phase::Pending => Ok(()),
+        Phase::Cancelled => Err(AuthError::new(KIND_CANCELLED, "登录已取消")),
+        Phase::Expired => Err(AuthError::new(KIND_EXPIRED, "二维码已过期，请重新获取")),
+        Phase::Failed => Err(failure_of(session)),
+        Phase::Committing | Phase::Success => {
+            Err(AuthError::new(KIND_FINISHED, "该登录请求已完成"))
+        }
+    }
+}
+
+/// 落库成功。只有通过门禁（或仍 `Pending` 的单测路径）的会话能被标记成功，
+/// 已取消 / 已过期的会话不会被"抢救"回来。
+pub fn complete(login_id: &str, result: Value) {
+    let mut map = sessions().lock().expect("sessions");
+    if let Some(session) = map.get_mut(login_id) {
+        if matches!(session.phase, Phase::Committing | Phase::Pending) {
+            session.phase = Phase::Success;
+            session.result = Some(result);
+        }
+    }
+}
+
+/// 落库失败 / 网络失败。只覆盖还在流程中的会话，不会把已取消改写成失败。
 pub fn fail(login_id: &str, kind: &'static str, message: impl Into<String>) {
     let mut map = sessions().lock().expect("sessions");
     if let Some(session) = map.get_mut(login_id) {
+        if !matches!(session.phase, Phase::Pending | Phase::Committing) {
+            return;
+        }
         session.phase = if kind == KIND_EXPIRED {
             Phase::Expired
         } else {
@@ -374,25 +503,10 @@ pub async fn poll(login_id: &str) -> Polled {
                 return Polled::Failed(AuthError::new(KIND_EXPIRED, "二维码已过期，请重新获取"));
             }
             Phase::Failed => {
-                let error = session.error.clone().unwrap_or_default();
-                let kind = error
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .unwrap_or(KIND_NETWORK);
-                let kind: &'static str = if kind == KIND_DOMAIN_MISMATCH {
-                    KIND_DOMAIN_MISMATCH
-                } else if kind == KIND_PROFILE_MISSING {
-                    KIND_PROFILE_MISSING
-                } else {
-                    KIND_NETWORK
-                };
-                return Polled::Failed(AuthError::new(
-                    kind,
-                    error
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("登录失败"),
-                ));
+                return Polled::Failed(failure_of(session));
+            }
+            Phase::Committing => {
+                return Polled::Failed(AuthError::new(KIND_FINISHED, "该登录请求已完成"));
             }
             Phase::Success => {
                 return Polled::Failed(AuthError::new(KIND_FINISHED, "该登录请求已完成"));
@@ -420,6 +534,13 @@ pub async fn poll(login_id: &str) -> Polled {
         Polled::Failed(err) => return Polled::Failed(err),
         Polled::Token(payload) => payload,
     };
+
+    // 上面 `call` 是 await 点：等待期间用户可能已经点了取消，会话可能已成终态。
+    // 这里先确认会话还在等待，避免为一次已取消的登录继续拉资料、更避免把令牌交出去
+    // （真正的落库门禁在 `begin_commit`，这里只是尽早止损）。
+    if let Err(err) = ensure_pending(login_id) {
+        return Polled::Failed(err);
+    }
 
     // 档位一致性：拿国内版的 state 换到国际版令牌会让后续请求被网关拒绝。
     if !variant.matches_domain(&payload.domain) {
@@ -684,5 +805,145 @@ mod tests {
         assert!(!cancel(&id), "重复取消应是幂等的 false");
         assert_eq!(snapshot(&id).unwrap().0, Phase::Cancelled);
         sessions().lock().unwrap().remove(&id);
+    }
+
+    fn seed(login_id: &str, variant: WbVariant, phase: Phase, age: Duration) {
+        sessions().lock().unwrap().insert(
+            login_id.to_string(),
+            Session {
+                state: "st".into(),
+                variant,
+                created: Instant::now() - age,
+                phase,
+                result: None,
+                error: None,
+            },
+        );
+    }
+
+    #[test]
+    fn commit_gate_returns_the_session_variant_and_is_one_shot() {
+        let id = "commit-ai";
+        seed(id, WbVariant::Ai, Phase::Pending, Duration::ZERO);
+        // 档位只能从会话里取：这是 provider=workbuddy_ai 的唯一来源。
+        assert!(matches!(begin_commit(id), Ok(WbVariant::Ai)));
+        assert_eq!(snapshot(id).unwrap().0, Phase::Committing);
+        // 第二次提交拿不到门禁，落库不会重复发生。
+        assert_eq!(begin_commit(id).unwrap_err().kind, KIND_FINISHED);
+        // 进入提交后取消必须落空，否则界面说"已取消"而账号其实已写进去。
+        assert!(!cancel(id), "Committing 会话不能再被取消");
+        sessions().lock().unwrap().remove(id);
+    }
+
+    #[test]
+    fn cancelled_or_expired_sessions_can_never_commit() {
+        // 取消发生在 `poll` 等网络期间：令牌回来了也不许落库。
+        seed("commit-cancelled", WbVariant::Ai, Phase::Cancelled, Duration::ZERO);
+        assert_eq!(
+            begin_commit("commit-cancelled").unwrap_err().kind,
+            KIND_CANCELLED
+        );
+
+        // TTL 在等待期间走完：同样是终态，不许落库。
+        seed(
+            "commit-expired",
+            WbVariant::Cn,
+            Phase::Pending,
+            Duration::from_secs(SESSION_TTL_SECONDS as u64 + 1),
+        );
+        assert_eq!(
+            begin_commit("commit-expired").unwrap_err().kind,
+            KIND_EXPIRED
+        );
+        assert_eq!(snapshot("commit-expired").unwrap().0, Phase::Expired);
+
+        // 会话不存在（进程重启 / 已被清理）：报 unknown_login，而不是默认国内版。
+        assert_eq!(
+            begin_commit("commit-missing").unwrap_err().kind,
+            KIND_UNKNOWN_LOGIN
+        );
+
+        for id in ["commit-cancelled", "commit-expired"] {
+            sessions().lock().unwrap().remove(id);
+        }
+    }
+
+    #[test]
+    fn pending_recheck_rejects_a_session_cancelled_during_the_await() {
+        seed("poll-cancelled", WbVariant::Ai, Phase::Cancelled, Duration::ZERO);
+        assert_eq!(ensure_pending("poll-cancelled").unwrap_err().kind, KIND_CANCELLED);
+        seed("poll-pending", WbVariant::Ai, Phase::Pending, Duration::ZERO);
+        assert!(ensure_pending("poll-pending").is_ok());
+        for id in ["poll-cancelled", "poll-pending"] {
+            sessions().lock().unwrap().remove(id);
+        }
+    }
+
+    #[test]
+    fn complete_and_fail_never_revive_a_terminal_session() {
+        // 已取消的会话收到落库成功回执：仍必须留在 Cancelled。
+        seed("done-cancelled", WbVariant::Cn, Phase::Cancelled, Duration::ZERO);
+        complete("done-cancelled", json!({"ok": true}));
+        assert_eq!(snapshot("done-cancelled").unwrap().0, Phase::Cancelled);
+        fail("done-cancelled", KIND_NETWORK, "boom");
+        assert_eq!(snapshot("done-cancelled").unwrap().0, Phase::Cancelled);
+
+        // 门禁之后落库失败：Committing → Failed，可以正常报错。
+        seed("done-committing", WbVariant::Cn, Phase::Pending, Duration::ZERO);
+        assert!(begin_commit("done-committing").is_ok());
+        fail("done-committing", KIND_NETWORK, "boom");
+        assert_eq!(snapshot("done-committing").unwrap().0, Phase::Failed);
+
+        for id in ["done-cancelled", "done-committing"] {
+            sessions().lock().unwrap().remove(id);
+        }
+    }
+
+    #[test]
+    fn login_url_must_be_https_on_the_variant_domain() {
+        // 正常形态：官方站点，可带端口与路径参数。
+        assert!(is_trusted_login_url(
+            WbVariant::Cn,
+            "https://www.codebuddy.cn/login?state=st-1"
+        ));
+        assert!(is_trusted_login_url(
+            WbVariant::Ai,
+            "https://www.workbuddy.ai/login?state=st-1"
+        ));
+        assert!(is_trusted_login_url(
+            WbVariant::Cn,
+            "https://sso.codebuddy.cn:8443/login"
+        ));
+        assert!(
+            !is_trusted_login_url(WbVariant::Cn, "https://HTTPS://X"),
+            "协议名大小写要在正确的位置，不能把 host 当协议"
+        );
+
+        // 协议不是 https：`javascript:` / 明文 http 一律拒绝。
+        assert!(!is_trusted_login_url(WbVariant::Cn, "javascript:alert(1)"));
+        assert!(!is_trusted_login_url(
+            WbVariant::Cn,
+            "http://www.codebuddy.cn/login"
+        ));
+        assert!(!is_trusted_login_url(WbVariant::Cn, "codebuddy.cn/login"));
+
+        // 域名仿冒与跨档位域名。
+        assert!(!is_trusted_login_url(
+            WbVariant::Cn,
+            "https://www.codebuddy.cn.evil.com/login"
+        ));
+        assert!(!is_trusted_login_url(
+            WbVariant::Cn,
+            "https://evil.com/?codebuddy.cn"
+        ));
+        assert!(!is_trusted_login_url(
+            WbVariant::Cn,
+            "https://www.codebuddy.cn@evil.com/login"
+        ));
+        assert!(!is_trusted_login_url(
+            WbVariant::Ai,
+            "https://www.codebuddy.cn/login"
+        ));
+        assert!(!is_trusted_login_url(WbVariant::Ai, ""));
     }
 }

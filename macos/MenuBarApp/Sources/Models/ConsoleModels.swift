@@ -401,6 +401,29 @@ enum WorkbuddyVariant: String, CaseIterable, Identifiable {
         case .ai: return "workbuddy_ai"
         }
     }
+
+    /// 允许交给系统浏览器打开的登录域名（按站点隔离）。
+    ///
+    /// 登录地址来自服务端响应：协议与域名任何一项不符都不许打开，
+    /// 否则一个 `javascript:` 或第三方域名的返回值就等于把任意链接塞给系统。
+    var trustedLoginDomains: [String] {
+        switch self {
+        case .cn: return ["codebuddy.cn", "workbuddy.cn"]
+        case .ai: return ["codebuddy.ai", "workbuddy.ai"]
+        }
+    }
+
+    /// 服务端给的登录地址 → 可安全打开 / 可编码成二维码的 URL。
+    func trustedLoginURL(_ raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed),
+              url.scheme?.lowercased() == "https",
+              let host = url.host?.lowercased(),
+              !host.isEmpty
+        else { return nil }
+        let allowed = trustedLoginDomains.contains { host == $0 || host.hasSuffix("." + $0) }
+        return allowed ? url : nil
+    }
 }
 
 /// 轮询结果。失败也要区分类型：取消 / 过期 / 网络 / 档位不符，界面提示不一样。

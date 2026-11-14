@@ -415,9 +415,18 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                     "error": { "kind": err.kind, "message": err.message },
                 })),
                 workbuddy_auth::Polled::Token(payload) => {
-                    // 档位来自**会话**，不是请求参数：浏览器可能刚被切换过。
-                    let variant =
-                        workbuddy_auth::session_variant(&login_id).unwrap_or(WbVariant::Cn);
+                    // 档位从**会话**里原子取，取不到就说明会话已取消 / 过期 / 结束，
+                    // 直接拒绝落库。这里不允许任何"取不到就当国内版"的兜底：
+                    // 那会把一次已取消的国际版登录记成国内版账号。
+                    let variant = match workbuddy_auth::begin_commit(&login_id) {
+                        Ok(variant) => variant,
+                        Err(err) => {
+                            return Ok(json!({
+                                "state": poll_state(err.kind),
+                                "error": { "kind": err.kind, "message": err.message },
+                            }))
+                        }
+                    };
                     match persist_login(app, &payload, variant) {
                         Ok(result) => {
                             workbuddy_auth::complete(&login_id, result.clone());
