@@ -125,13 +125,28 @@ AICC **不伪造这些值**：拿不到就是拿不到，不猜。如果真实�
 
 | 情况 | 判定 | 结果 |
 | --- | --- | --- |
-| 账号已删除 | `qoder_auth_epoch` 读不到 | `reason = account_removed` |
+| 账号已删除 | 读不到生命周期 | `reason = account_removed` |
+| **删号后用同一个 UID 重新登录** | `generation` 与请求发起时不同 | `reason = account_replaced` |
 | 授权被替换 / 重新保存 | `auth_epoch` 与请求发起时不同 | `reason = authorization_changed` |
 | 自动开关被关（仅自动路径） | `credits_auto_enabled = 0` | `reason = auto_disabled` |
 
 手动路径不受开关影响（用户自己点的，本来就代表"现在就要"）。
 
-### 5.5 去重键包含活动周期（v18）
+**为什么第二行必须单独判**：Qoder 账号 id 是 `(edition, uid)` 的确定性哈希，删掉
+再用同一个 UID 登录会复用同一个 id，而新行的 `auth_epoch` 从 0 重新开始——如果
+旧请求记的也是 0（新账号还没换过授权），只比 `auth_epoch` 会判定"没变化"。
+所以核验的是 `QoderLifecycle`（`generation` + `auth_epoch`，v19）。
+
+### 5.5 领取记录也核对生命周期
+
+`record()` 写 `qoder_credit_runs` 时，`INSERT … SELECT … WHERE EXISTS` 里除了
+账号 id 还要求 `generation` 相符。否则旧请求的返回会在**新账号**的账本里留下一条
+`ok`/`already`：去重会认为"今天已经领过"，新账号当天就再也领不到。
+
+写不进去时按"记录失败"处理并打一行日志，不改变本次领取的业务结果——POST 确实
+发出去过，那是既成事实。
+
+### 5.6 去重键包含活动周期（v18）
 
 `campaignId` 由服务端生成，**同一个 id 可能在不同周期被复用**。只按 id 去重时，
 次日会被当成"已经领过"而领不到。
@@ -144,7 +159,7 @@ AICC **不伪造这些值**：拿不到就是拿不到，不猜。如果真实�
 | 同一 id、`startAt` 不同（次日） | **不算**（允许领） |
 | 服务端没给 `startAt` | **不算**（宁可多一次幂等 POST，也不能挡住合法领取） |
 
-## 6. 存储（v17 / v18）
+## 6. 存储（v17 / v18 / v19）
 
 | 对象 | 位置 |
 | --- | --- |
@@ -161,17 +176,24 @@ AICC **不伪造这些值**：拿不到就是拿不到，不猜。如果真实�
 ### 6.1 快照并发安全
 
 `accounts.auth_epoch`（v5）对 Qoder 不适用——Qoder 账号在 `qoder_accounts`。
-v16 给那张表加了同名字段，授权写入/删除都会 +1；额度写入前原子核验
-`(id, edition, auth_epoch)`：
+v16 给那张表加了同名字段，授权写入/删除都会 +1；v19 又加了 `generation`
+（建行时随机生成，**永不回退、删号重建必换**）。额度写入前原子核验
+`(id, edition, generation, auth_epoch)`：
 
 ```sql
 INSERT INTO quota_snapshots (...) SELECT ...
 WHERE EXISTS (SELECT 1 FROM qoder_accounts
-              WHERE id = ?2 AND edition = ?3 AND auth_epoch = ?7)
+              WHERE id = ?2 AND edition = ?3
+                AND generation = ?7 AND auth_epoch = ?8)
 ```
 
-覆盖四种情况：账号被删（无父行）、重新授权（版本变）、同 uid 重新导入（版本变）、
-CN/International 串号（`edition` 不匹配）。四种都有单测。
+覆盖五种情况：账号被删（无父行）、重新授权（`auth_epoch` 变）、
+**同 uid 删号重建（`generation` 变，`auth_epoch` 可能相同）**、
+CN/International 串号（`edition` 不匹配）、旧生命周期晚到（两者都不匹配）。
+五种都有单测。
+
+`generation` 不能省：账号 id 由 `(edition, uid)` 决定，重建后完全相同，
+而新行的 `auth_epoch` 从 0 开始——与"刚建好还没换过授权"的旧请求记的值一样。
 
 ## 7. 界面
 

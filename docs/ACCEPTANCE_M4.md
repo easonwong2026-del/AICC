@@ -35,6 +35,28 @@
 | #75 | 查询活动与 POST 之间，用户可能关掉自动开关、删号或换授权，旧快照仍会被提交 | 每个 POST 前 `pre_post_stop()` 重新核对 `auth_epoch` / 账号存在 / 自动开关，任一漂移就停下并写明原因 |
 | #75 | 去重只看 `campaignId`，服务端复用 id 时会挡住次日领取 | v18 给领取账加 `period_start` / `period_end`，去重键变成 `(账号, campaign, period_start)`；未知周期不算领过 |
 
+## 1.3 第三轮：账号生命周期的 P0（同 PR #77 内收口）
+
+| 事实 | 后果 |
+| --- | --- |
+| Qoder 账号 id = `sha256(edition + uid)` | **删号后同一个 UID 登录会复用同一个 id** |
+| 新行的 `auth_epoch` 从 0 重新开始 | 旧请求记的也是 0 时，"版本核验"会判定没变过 |
+| 于是旧请求的返回可以写进新账号 | 新账号莫名"今天已领"（当天再也领不到）、快照显示的是上一个账号的数据 |
+
+处理：v19 给 `qoder_accounts` 加 `generation`（建行时随机、删号重建必换、永不回退），
+所有"晚到的写入"改核 `QoderLifecycle = (generation, auth_epoch)`：
+
+| 写入点 | 核验方式 |
+| --- | --- |
+| Credits 每次 POST 前 | `pre_post_stop()` 先比 `generation`（→ `account_replaced`），再比 `auth_epoch`（→ `authorization_changed`），账号没了（→ `account_removed`） |
+| 额度快照 | `save_qoder_quota_snapshot()` 的 `WHERE EXISTS` 同时要求 `generation` 与 `auth_epoch` |
+| 领取记录 | `record_qoder_credit_run()` 的 `WHERE EXISTS` 要求 `generation` 相符；对不上按"记录失败"打日志，不改本次业务结果 |
+| 401 后的授权状态 | `set_qoder_auth_status_if_current()` 同一条 `UPDATE … WHERE EXISTS` |
+
+确定性回归：假 transport 在**POST 返回之前**执行"删号 + 同 UID 重新登录"，断言
+第二个活动不再提交、新账号账本为空、旧生命周期快照写不进去
+（`a_request_in_flight_across_a_delete_and_relogin_touches_nothing_new`）。
+
 ## 2. 四平台能力矩阵
 
 图例：**已实现** = 代码 + 单测完成；**已验证** = 有真实凭据的成功响应；
@@ -86,6 +108,7 @@
 | v16 | `qoder_accounts.auth_epoch`；重建 `qoder_authorizations` 以接受 `own_pat` | 是（Rust 步骤，先检测） | `v15_upgrade_keeps_qoder_authorizations_and_accepts_pat` |
 | v17 | `qoder_accounts.credits_auto_enabled` + `qoder_credit_runs` | 是（先检测列） | 同上（同一条用例覆盖到最新版本） |
 | v18 | `qoder_credit_runs.period_start` / `period_end`（去重键含周期） | 是（逐列检测） | 同上 |
+| v19 | `qoder_accounts.generation`（生命周期标识，回填旧行为随机值） | 是（先检测列 + 只补空值） | `v19_backfills_a_generation_for_existing_accounts` |
 
 回滚策略：
 

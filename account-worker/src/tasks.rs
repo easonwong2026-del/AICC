@@ -333,6 +333,7 @@ mod tests {
         app.with_db(|db| {
             db.record_qoder_credit_run(crate::storage::qoder_credits::RunInput {
                 account_id: &account.id,
+                generation: &account.generation,
                 campaign_id: Some("c-1"),
                 campaign_key: Some("daily"),
                 period_start: Some(1_700_000_000),
@@ -350,6 +351,7 @@ mod tests {
         app.with_db(|db| {
             db.record_qoder_credit_run(crate::storage::qoder_credits::RunInput {
                 account_id: &account.id,
+                generation: &account.generation,
                 campaign_id: Some("c-1"),
                 campaign_key: Some("daily"),
                 period_start: Some(1_700_000_000),
@@ -383,6 +385,7 @@ mod tests {
             app.with_db(|db| {
                 db.record_qoder_credit_run(crate::storage::qoder_credits::RunInput {
                     account_id: &account.id,
+                    generation: &account.generation,
                     campaign_id: Some("c-1"),
                     campaign_key: Some("daily"),
                     period_start: Some(1_700_000_000),

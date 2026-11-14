@@ -204,6 +204,7 @@ mod tests {
             )?;
             db.record_qoder_credit_run(RunInput {
                 account_id: &account.id,
+                generation: &account.generation,
                 campaign_id: Some("c-1"),
                 campaign_key: Some("daily"),
                 period_start: Some(1_700_000_000),
@@ -355,22 +356,120 @@ mod tests {
     fn deleting_advances_the_epoch_so_late_writes_are_rejected() {
         let (app, _dir) = test_app();
         let id = seed_full(&app);
-        let before = app.with_db(|db| db.qoder_auth_epoch(&id)).unwrap().unwrap();
+        let before = app.with_db(|db| db.qoder_lifecycle(&id)).unwrap().unwrap();
 
         // 先停掉自动领取，再单独走一遍"推进版本"的路径（与 delete 内部一致）。
         app.with_db(|db| db.set_qoder_credits_auto(&id, false))
             .unwrap();
         app.with_db(|db| db.bump_qoder_auth_epoch(&id)).unwrap();
-        let after = app.with_db(|db| db.qoder_auth_epoch(&id)).unwrap().unwrap();
-        assert!(after > before);
+        let after = app.with_db(|db| db.qoder_lifecycle(&id)).unwrap().unwrap();
+        assert!(after.auth_epoch > before.auth_epoch);
+        assert_eq!(
+            after.generation, before.generation,
+            "推进 epoch 不换生命周期"
+        );
         assert!(!app
             .with_db(|db| db.save_qoder_quota_snapshot(
                 &id,
                 "qoder_cn",
                 "ok",
                 &json!({}),
-                Some(before)
+                Some(&before)
             ))
             .unwrap());
+    }
+
+    /// 删号后用同一个 UID 重新登录：**旧生命周期的一切写入都必须落不下来**。
+    ///
+    /// 这是本 PR 修的那个 P0 的核心断言：新账号的 id 与旧的一样，`auth_epoch`
+    /// 也是 0（与旧账号初始值相同），只有 `generation` 不同。快照与领取记录
+    /// 都要靠它把旧数据挡在新账号之外。
+    #[test]
+    fn writes_from_the_old_lifecycle_are_rejected_after_a_relogin() {
+        let (app, _dir) = test_app();
+        let old_id = seed_full(&app);
+        let old_life = app
+            .with_db(|db| db.qoder_lifecycle(&old_id))
+            .unwrap()
+            .unwrap();
+
+        // 删掉再重新登录（同一个 uid → 同一个 id）。
+        delete(&app, &old_id).unwrap();
+        let fresh = app
+            .with_db(|db| db.upsert_qoder_account("qoder_cn", "u-del", Some("重新登录"), None))
+            .unwrap();
+        let new_life = app
+            .with_db(|db| db.qoder_lifecycle(&fresh.id))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(fresh.id, old_id);
+        // epoch 归零：这里旧账号有两份来源所以是 2；若旧账号只换过一次授权，
+        // 新值就会与旧值都是 0——那正是只比 epoch 挡不住的场景（见 credits 的并发用例）。
+        assert_eq!(new_life.auth_epoch, 0, "重建后 epoch 从 0 重新开始");
+        assert_ne!(new_life.generation, old_life.generation);
+
+        // 旧生命周期的额度快照写不进来。
+        assert!(!app
+            .with_db(|db| db.save_qoder_quota_snapshot(
+                &old_id,
+                "qoder_cn",
+                "ok",
+                &json!({"stale": true}),
+                Some(&old_life)
+            ))
+            .unwrap());
+        assert!(
+            app.with_db(|db| db.latest_quota_snapshot(&old_id))
+                .unwrap()
+                .is_none(),
+            "新账号不该看到旧生命周期的快照"
+        );
+
+        // 旧生命周期的领取记录也写不进来（否则新账号"今天已经领过"）。
+        let err = app
+            .with_db(|db| {
+                db.record_qoder_credit_run(RunInput {
+                    account_id: &old_id,
+                    generation: &old_life.generation,
+                    campaign_id: Some("c-9"),
+                    campaign_key: Some("daily"),
+                    period_start: Some(1_700_000_000),
+                    period_end: Some(1_700_086_400),
+                    outcome: "ok",
+                    credits: Some(100),
+                    http_status: Some(200),
+                    auth_source: Some(SOURCE_OWN_PAT),
+                    error_kind: None,
+                    error_detail: None,
+                    trigger: "manual",
+                })
+            })
+            .err()
+            .expect("旧生命周期不许记账");
+        assert_eq!(err.code, crate::rpc::E_NOT_FOUND);
+        assert!(app
+            .with_db(|db| db.list_qoder_credit_runs(Some(&old_id), 10))
+            .unwrap()
+            .is_empty());
+
+        // 新生命周期自己的写入照常。
+        assert!(app
+            .with_db(|db| db.record_qoder_credit_run(RunInput {
+                account_id: &fresh.id,
+                generation: &new_life.generation,
+                campaign_id: Some("c-9"),
+                campaign_key: Some("daily"),
+                period_start: Some(1_700_000_000),
+                period_end: Some(1_700_086_400),
+                outcome: "ok",
+                credits: Some(100),
+                http_status: Some(200),
+                auth_source: Some(SOURCE_OWN_PAT),
+                error_kind: None,
+                error_detail: None,
+                trigger: "manual",
+            }))
+            .is_ok());
     }
 }

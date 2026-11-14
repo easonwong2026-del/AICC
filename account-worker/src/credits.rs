@@ -26,7 +26,9 @@ use crate::providers::qoder_credits::{self as api, CreditsError, Snapshot};
 use crate::providers::qoder_edition::QoderEdition;
 use crate::providers::qoder_pat;
 use crate::rpc::{RpcError, RpcResult};
-use crate::storage::qoder_accounts::{QoderAccountRecord, SOURCE_OWN_BROWSER, SOURCE_OWN_PAT};
+use crate::storage::qoder_accounts::{
+    QoderAccountRecord, QoderLifecycle, SOURCE_OWN_BROWSER, SOURCE_OWN_PAT,
+};
 use crate::storage::qoder_credits::{RunInput, OUTCOMES};
 
 /// 自动领取同一账号两次尝试之间的最小间隔。
@@ -259,8 +261,8 @@ pub async fn status(app: &Arc<App>, account_id: &str) -> RpcResult<Value> {
         }
     };
 
-    // 请求发起时的授权版本：401 回来时要确认"还是这份授权"。
-    let epoch = account.auth_epoch;
+    // 请求发起时的生命周期：401 回来时要确认"还是这个账号、这份授权"。
+    let lifecycle = QoderLifecycle::of(&account);
 
     match api::fetch_campaigns(edition, &resolved.token).await {
         Ok(body) => {
@@ -281,7 +283,7 @@ pub async fn status(app: &Arc<App>, account_id: &str) -> RpcResult<Value> {
             }
         }
         Err(err) => {
-            note_auth_failure(app, &account, &resolved, &err, epoch);
+            note_auth_failure(app, &account, &resolved, &err, &lifecycle);
             Ok(failure_status(&account, &resolved, &err))
         }
     }
@@ -303,25 +305,27 @@ fn failure_status(account: &QoderAccountRecord, resolved: &Resolved, err: &Credi
     })
 }
 
-/// 只有 **401** 才把来源标成 `invalid`，而且必须核对授权版本。
+/// 只有 **401** 才把来源标成 `invalid`，而且必须核对生命周期。
 ///
-/// 两层理由：
+/// 三层理由：
 /// 1. **403 不是"凭据坏了"**，是权限范围问题（PAT 没勾对应权限、或触发了风控）。
 ///    标成 invalid 会让用户白去重新生成一张本来没问题的令牌。
-/// 2. 一次请求要几秒，期间用户可能已经换了新 PAT。旧请求的结果不能把新授权标脏，
-///    所以写入走 `set_qoder_auth_status_if_current(.., epoch)`，对不上就什么都不写。
+/// 2. 一次请求要几秒，期间用户可能已经换了新 PAT。旧请求的结果不能把新授权标脏。
+/// 3. 同一段时间里账号也可能被删掉再重建（同一个 UID、同一个 id）。那种情况下
+///    `auth_epoch` 又回到 0，只比 epoch 会把新账号的凭据标成 invalid——
+///    所以核验的是 `QoderLifecycle`（`generation` + `auth_epoch`）。
 ///
-/// 不删凭据：用户可能只是 PAT 被撤销，删掉就再也查不出原因了。
+/// 对不上就什么都不写。不删凭据：用户可能只是 PAT 被撤销，删掉就再也查不出原因了。
 fn note_auth_failure(
     app: &App,
     account: &QoderAccountRecord,
     resolved: &Resolved,
     err: &CreditsError,
-    epoch: i64,
+    lifecycle: &QoderLifecycle,
 ) {
     if matches!(err, CreditsError::Unauthorized) {
         app.with_db(|db| {
-            db.set_qoder_auth_status_if_current(&account.id, resolved.source, "invalid", epoch)
+            db.set_qoder_auth_status_if_current(&account.id, resolved.source, "invalid", lifecycle)
         })
         .ok();
     }
@@ -343,22 +347,35 @@ fn record(app: &App, input: RunInput<'_>) {
     }
 }
 
-/// 每次 POST 之前必须重新确认的三件事：**账号还在、授权没换、开关还开着**。
+/// 每次 POST 之前必须重新确认的三件事：**还是同一个账号、授权没换、开关还开着**。
 ///
-/// 前两者是同一个网络等待窗口里的两个事故：用户可能在等结果时删了账号，
-/// 也可能换了一份新 PAT。任一发生，都不能再拿旧快照里的活动去提交——
-/// 提交的是旧凭据名下的活动，新授权会莫名其妙多出一笔领取记录。
+/// 这三件事都发生在同一个网络等待窗口里：用户可能在等结果时删了账号，
+/// 也可能删掉又用同一个 UID 重新登录，还可能换了一份新 PAT。任一发生，都不能
+/// 再拿旧快照里的活动去提交——提交的是旧凭据名下的活动，新账号会莫名其妙
+/// 多出一笔领取记录。
+///
+/// 注意第二种必须靠 `generation`：账号 id 由 `(edition, uid)` 决定，重建后完全
+/// 相同，`auth_epoch` 也从 0 重新开始，只比 epoch 是**看不出变化**的。
 ///
 /// 返回 `Some(reason)` 表示必须停手，理由直接进结果给人看。
-fn pre_post_stop(app: &App, account_id: &str, trigger: &str, epoch: i64) -> Option<&'static str> {
+fn pre_post_stop(
+    app: &App,
+    account_id: &str,
+    trigger: &str,
+    lifecycle: &QoderLifecycle,
+) -> Option<&'static str> {
     let current = app
-        .with_db(|db| db.qoder_auth_epoch(account_id))
+        .with_db(|db| db.qoder_lifecycle(account_id))
         .ok()
         .flatten();
     let Some(current) = current else {
         return Some("account_removed");
     };
-    if current != epoch {
+    // 先比生命周期：重建过的账号 epoch 也是 0，只比 epoch 会误判成"没变过"。
+    if current.generation != lifecycle.generation {
+        return Some("account_replaced");
+    }
+    if current.auth_epoch != lifecycle.auth_epoch {
         return Some("authorization_changed");
     }
     if trigger == "auto" {
@@ -440,6 +457,7 @@ pub async fn claim_with(
             app,
             RunInput {
                 account_id: &account.id,
+                generation: &account.generation,
                 campaign_id: None,
                 campaign_key: None,
                 period_start: None,
@@ -499,7 +517,7 @@ pub async fn claim_with(
         }
     }
 
-    let epoch = account.auth_epoch;
+    let lifecycle = QoderLifecycle::of(&account);
     let now = now_secs();
     let snapshot = match transport.campaigns(edition, &resolved.token).await {
         Ok(body) => match api::parse_campaigns(&body) {
@@ -511,6 +529,7 @@ pub async fn claim_with(
                     app,
                     RunInput {
                         account_id: &account.id,
+                        generation: &account.generation,
                         campaign_id: None,
                         campaign_key: None,
                         period_start: None,
@@ -534,12 +553,13 @@ pub async fn claim_with(
             }
         },
         Err(err) => {
-            note_auth_failure(app, &account, &resolved, &err, epoch);
+            note_auth_failure(app, &account, &resolved, &err, &lifecycle);
             let detail = err.detail();
             record(
                 app,
                 RunInput {
                     account_id: &account.id,
+                    generation: &account.generation,
                     campaign_id: None,
                     campaign_key: None,
                     period_start: None,
@@ -571,6 +591,7 @@ pub async fn claim_with(
                 app,
                 RunInput {
                     account_id: &account.id,
+                    generation: &account.generation,
                     campaign_id: Some(&campaign.id),
                     campaign_key: Some(&campaign.key),
                     period_start: campaign.start_at,
@@ -611,7 +632,7 @@ pub async fn claim_with(
 
         // 这是最后一个能反悔的位置：POST 一旦发出去就是既成事实。
         // 账号被删、授权被换、开关被关，任何一种都停下来，不再提交。
-        if let Some(reason) = pre_post_stop(app, &account.id, trigger, epoch) {
+        if let Some(reason) = pre_post_stop(app, &account.id, trigger, &lifecycle) {
             results.push(json!({
                 "campaignId": campaign.id,
                 "outcome": "skipped",
@@ -631,6 +652,7 @@ pub async fn claim_with(
                     app,
                     RunInput {
                         account_id: &account.id,
+                        generation: &account.generation,
                         campaign_id: Some(&campaign.id),
                         campaign_key: Some(&campaign.key),
                         period_start: campaign.start_at,
@@ -664,6 +686,7 @@ pub async fn claim_with(
                                     app,
                                     RunInput {
                                         account_id: &account.id,
+                                        generation: &account.generation,
                                         campaign_id: Some(&campaign.id),
                                         campaign_key: Some(&campaign.key),
                                         period_start: campaign.start_at,
@@ -695,6 +718,7 @@ pub async fn claim_with(
                                 app,
                                 RunInput {
                                     account_id: &account.id,
+                                    generation: &account.generation,
                                     campaign_id: Some(&item.id),
                                     campaign_key: Some(&item.key),
                                     period_start: item.start_at,
@@ -719,12 +743,13 @@ pub async fn claim_with(
                     }
                 }
 
-                note_auth_failure(app, &account, &resolved, &err, epoch);
+                note_auth_failure(app, &account, &resolved, &err, &lifecycle);
                 let detail = err.detail();
                 record(
                     app,
                     RunInput {
                         account_id: &account.id,
+                        generation: &account.generation,
                         campaign_id: Some(&campaign.id),
                         campaign_key: Some(&campaign.key),
                         period_start: campaign.start_at,
@@ -1059,29 +1084,29 @@ mod tests {
         assert!(try_claim_lock("qa_lock").is_some());
     }
 
-    /// POST 前的最后一道闸：账号还在、授权没换、开关还开着。
+    /// POST 前的最后一道闸：**还是同一个账号**、授权没换、开关还开着。
     #[test]
     fn the_pre_post_gate_stops_on_every_drift() {
         let (app, _dir) = test_app();
         let account = seed_account(&app, "qoder_cn");
-        let epoch = app
-            .with_db(|db| db.qoder_auth_epoch(&account.id))
+        let lifecycle = app
+            .with_db(|db| db.qoder_lifecycle(&account.id))
             .unwrap()
             .unwrap();
 
         // 手动不受开关影响：开关关着也能手动领。
-        assert!(pre_post_stop(&app, &account.id, "manual", epoch).is_none());
+        assert!(pre_post_stop(&app, &account.id, "manual", &lifecycle).is_none());
 
         // 自动：开关关着必须停。
         assert_eq!(
-            pre_post_stop(&app, &account.id, "auto", epoch),
+            pre_post_stop(&app, &account.id, "auto", &lifecycle),
             Some("auto_disabled")
         );
         app.with_db(|db| db.set_qoder_credits_auto(&account.id, true))
             .unwrap();
-        assert!(pre_post_stop(&app, &account.id, "auto", epoch).is_none());
+        assert!(pre_post_stop(&app, &account.id, "auto", &lifecycle).is_none());
 
-        // 授权被换：旧 epoch 的结果不许继续提交。
+        // 授权被换：旧结果不许继续提交。
         let token = "qp_abcdefghijklmnopqrstuvwxyz012345";
         crate::providers::qoder_pat::persist(
             &app,
@@ -1095,21 +1120,51 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            pre_post_stop(&app, &account.id, "manual", epoch),
+            pre_post_stop(&app, &account.id, "manual", &lifecycle),
             Some("authorization_changed")
         );
 
         // 账号被删。
-        let fresh = app
-            .with_db(|db| db.qoder_auth_epoch(&account.id))
-            .unwrap()
-            .unwrap();
         app.with_db(|db| db.delete_qoder_account(&account.id))
             .unwrap();
         assert_eq!(
-            pre_post_stop(&app, &account.id, "manual", fresh),
+            pre_post_stop(&app, &account.id, "manual", &lifecycle),
             Some("account_removed")
         );
+    }
+
+    /// 删号 + 同 UID 重新登录：**id 与 `auth_epoch` 都可能与旧的一模一样**，
+    /// 只有 `generation` 能说明"这不是同一个账号"。闸门必须认出来。
+    #[test]
+    fn the_pre_post_gate_notices_a_recreated_account_with_the_same_id_and_epoch() {
+        let (app, _dir) = test_app();
+        let old = seed_account(&app, "qoder_cn");
+        let old_life = app
+            .with_db(|db| db.qoder_lifecycle(&old.id))
+            .unwrap()
+            .unwrap();
+
+        app.with_db(|db| db.delete_qoder_account(&old.id)).unwrap();
+        let new = seed_account(&app, "qoder_cn");
+        let new_life = app
+            .with_db(|db| db.qoder_lifecycle(&new.id))
+            .unwrap()
+            .unwrap();
+
+        // 这两条正是这个 bug 的前提：id 相同、epoch 相同。
+        assert_eq!(new.id, old.id, "账号 id 由 (edition, uid) 决定，会复用");
+        assert_eq!(new_life.auth_epoch, old_life.auth_epoch);
+        assert_ne!(
+            new_life.generation, old_life.generation,
+            "重建必须换 generation"
+        );
+
+        assert_eq!(
+            pre_post_stop(&app, &old.id, "manual", &old_life),
+            Some("account_replaced"),
+            "旧生命周期不许往新账号里提交"
+        );
+        assert!(pre_post_stop(&app, &old.id, "manual", &new_life).is_none());
     }
 
     // ---- 用假 transport 覆盖网络分支（PR #77）----
@@ -1117,10 +1172,15 @@ mod tests {
     use std::collections::VecDeque;
 
     /// 脚本化的假网络：按顺序吐预设结果，并记下真的提交了哪些活动。
+    type Hook = Box<dyn Fn() + Send + Sync>;
+
     struct FakeTransport {
         campaigns: std::sync::Mutex<VecDeque<Result<Value, CreditsError>>>,
         claims: std::sync::Mutex<VecDeque<Result<api::Claimed, CreditsError>>>,
         claimed_ids: std::sync::Mutex<Vec<String>>,
+        /// 在**每一次 POST 返回之前**执行一次。用来确定性地复现"请求在途时
+        /// 用户改了状态"——不用 sleep，也不依赖线程调度。
+        on_claim: Option<Hook>,
     }
 
     impl FakeTransport {
@@ -1132,7 +1192,14 @@ mod tests {
                 campaigns: std::sync::Mutex::new(campaigns.into()),
                 claims: std::sync::Mutex::new(claims.into()),
                 claimed_ids: std::sync::Mutex::new(Vec::new()),
+                on_claim: None,
             }
+        }
+
+        /// 请求在途时发生的副作用（删号 / 重建 / 换授权）。
+        fn with_on_claim(mut self, hook: impl Fn() + Send + Sync + 'static) -> Self {
+            self.on_claim = Some(Box::new(hook));
+            self
         }
 
         fn claimed_ids(&self) -> Vec<String> {
@@ -1167,11 +1234,18 @@ mod tests {
                 .unwrap()
                 .push(campaign_id.to_string());
             Box::pin(async move {
-                self.claims
+                let reply = self
+                    .claims
                     .lock()
                     .unwrap()
                     .pop_front()
-                    .unwrap_or(Err(CreditsError::Network("脚本用完了".into())))
+                    .unwrap_or(Err(CreditsError::Network("脚本用完了".into())));
+                // 顺序很关键：POST 已经"发出去"了，但结果还没回到调用方。
+                // 这里发生的改动就是"在途窗口"里的那些事。
+                if let Some(hook) = &self.on_claim {
+                    hook();
+                }
+                reply
             })
         }
     }
@@ -1294,10 +1368,16 @@ mod tests {
     fn only_unclaimed_campaigns_are_submitted() {
         let (app, _dir) = test_app();
         let id = claimable_account(&app);
+        let generation = app
+            .with_db(|db| db.get_qoder_account(&id))
+            .unwrap()
+            .expect("账号必须存在")
+            .generation;
         // c1 在本期已经成功过。
         app.with_db(|db| {
             db.record_qoder_credit_run(crate::storage::qoder_credits::RunInput {
                 account_id: &id,
+                generation: &generation,
                 campaign_id: Some("c1"),
                 campaign_key: Some("k-c1"),
                 period_start: Some(1_700_000_000),
@@ -1325,6 +1405,94 @@ mod tests {
         assert_eq!(fake.claimed_ids(), vec!["c2"], "已领过的 c1 不许再提交");
         assert_eq!(value["posted"], 1);
         assert_eq!(value["results"][0]["skipped"], "recorded_this_period");
+    }
+
+    /// 旧请求在途 → 用户删号 → 用同一个 UID 重新登录 → 旧请求返回。
+    ///
+    /// 这是本次修复的那个 P0 的**确定性**复现：钩子在 POST 返回之前完成删号与
+    /// 重建，所以"旧请求返回"必然发生在"新账号已经存在"之后。三件事都必须挡住：
+    ///
+    /// 1. 不再提交后面的活动（POST 前闸门比的是 `generation`）；
+    /// 2. 新账号的账本里不留旧请求的记录（写入时核验 `generation`）；
+    /// 3. 旧生命周期的额度快照写不进去（同一条原子核验）。
+    ///
+    /// 关键在于第 1、2 步单看 `auth_epoch` 是**挡不住**的：重建后的账号 id 相同，
+    /// epoch 也回到 0，和旧请求记下的值一模一样。
+    #[test]
+    fn a_request_in_flight_across_a_delete_and_relogin_touches_nothing_new() {
+        const PAT: &str = "qp_abcdefghijklmnopqrstuvwxyz012345";
+        let (app, _dir) = test_app();
+        let old = claimable_account(&app);
+        let old_life = app.with_db(|db| db.qoder_lifecycle(&old)).unwrap().unwrap();
+
+        let hook_app = Arc::clone(&app);
+        let hook_id = old.clone();
+        let fake = FakeTransport::new(
+            vec![
+                Ok(campaigns_body(&[("c1", "CLAIMABLE"), ("c2", "CLAIMABLE")])),
+                // 执行后的回查：新账号名下没有任何活动。
+                Ok(campaigns_body(&[])),
+            ],
+            vec![Ok(claimed_ok())],
+        )
+        .with_on_claim(move || {
+            // 用户在这个窗口里删掉账号，随后用同一个 UID 重新登录。
+            crate::providers::qoder_admin::delete(&hook_app, &hook_id).expect("删号");
+            crate::providers::qoder_pat::persist(
+                &hook_app,
+                QoderEdition::Cn,
+                PAT,
+                &crate::providers::qoder_auth::Identity {
+                    uid: "u-net".into(),
+                    name: Some("重新登录".into()),
+                    email: None,
+                },
+            )
+            .expect("重新登录");
+        });
+
+        let value = run_claim(&app, &old, &fake);
+
+        // ① 第二个活动再没提交过。
+        assert_eq!(
+            fake.claimed_ids(),
+            vec!["c1"],
+            "账号换了一代之后不许继续提交"
+        );
+        assert_eq!(value["posted"], 1);
+        assert_eq!(value["results"][1]["reason"], "account_replaced");
+
+        // ② 新账号存在，账本是空的。
+        let new_life = app
+            .with_db(|db| db.qoder_lifecycle(&old))
+            .unwrap()
+            .expect("重新登录后账号必须存在");
+        assert_eq!(
+            new_life.auth_epoch, old_life.auth_epoch,
+            "重建后 epoch 从 0 重新开始，与旧值相同——所以它挡不住这个场景"
+        );
+        assert_ne!(new_life.generation, old_life.generation);
+        assert!(
+            app.with_db(|db| db.list_qoder_credit_runs(Some(&old), 10))
+                .unwrap()
+                .is_empty(),
+            "旧请求不许在新账号的账本里留下记录"
+        );
+
+        // ③ 旧生命周期的额度快照写不进来。
+        assert!(!app
+            .with_db(|db| db.save_qoder_quota_snapshot(
+                &old,
+                "qoder_cn",
+                "ok",
+                &json!({"stale": true}),
+                Some(&old_life)
+            ))
+            .unwrap());
+        assert!(app
+            .with_db(|db| db.latest_quota_snapshot(&old))
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1379,6 +1547,7 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             auth_epoch: 0,
+            generation: "gen-test".into(),
         };
         let snapshot = api::classify(Vec::new(), super::now_secs());
         let value = snapshot_json(&account, &snapshot, super::now_secs());

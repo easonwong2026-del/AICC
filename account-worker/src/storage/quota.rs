@@ -8,6 +8,7 @@
 use serde_json::Value;
 
 use crate::rpc::RpcResult;
+use crate::storage::qoder_accounts::QoderLifecycle;
 
 #[derive(Debug, Clone)]
 pub struct QuotaSnapshot {
@@ -95,19 +96,21 @@ impl crate::storage::Db {
         Ok(changed > 0)
     }
 
-    /// Qoder 服务账号的版本。**核验的是 `qoder_accounts.qoder_auth_epoch`（v16）**，
-    /// 不是 `accounts.auth_epoch`：Qoder 账号不在 `accounts` 表里。
+    /// Qoder 服务账号的版本。**核验的是 `qoder_accounts` 的
+    /// `generation` + `auth_epoch`（v19 / v16）**，不是 `accounts.auth_epoch`：
+    /// Qoder 账号不在 `accounts` 表里。
     ///
-    /// 为什么必须单独一条语句：账号 id 是 `(edition, uid)` 的确定性哈希，
-    /// 删掉再导入会**复用同一个 id**，而 `provider` 也不会变。没有版本核验，
-    /// 一条"用旧令牌取到"的晚到快照会被当成新账号刚取过的数据。
+    /// 为什么必须两个都核：账号 id 是 `(edition, uid)` 的确定性哈希，删掉再导入会
+    /// **复用同一个 id**，而 `provider` 也不会变；更麻烦的是新行的 `auth_epoch`
+    /// 从 0 重新开始，只比 epoch 时，旧生命周期里发起的快照会"恰好"通过核验。
+    /// `generation` 每次建行都换，删号重建后旧写入一律落不下来。
     pub fn save_qoder_quota_snapshot(
         &mut self,
         account_id: &str,
         provider: &str,
         status: &str,
         payload: &Value,
-        expected_epoch: Option<i64>,
+        expected: Option<&QoderLifecycle>,
     ) -> RpcResult<bool> {
         let captured_at = crate::clock::now_rfc3339();
         let id = format!("{account_id}:{captured_at}");
@@ -118,7 +121,7 @@ impl crate::storage::Db {
              WHERE EXISTS (
                  SELECT 1 FROM qoder_accounts
                  WHERE id = ?2 AND edition = ?3
-                   AND (?7 IS NULL OR auth_epoch = ?7)
+                   AND (?7 IS NULL OR (generation = ?7 AND auth_epoch = ?8))
              )",
             rusqlite::params![
                 id,
@@ -127,7 +130,8 @@ impl crate::storage::Db {
                 captured_at,
                 status,
                 payload.to_string(),
-                expected_epoch
+                expected.map(|life| life.generation.as_str()),
+                expected.map(|life| life.auth_epoch)
             ],
         )?;
         Ok(changed > 0)
@@ -450,7 +454,7 @@ mod tests {
         let qoder = db
             .upsert_qoder_account("qoder_cn", "u-q", Some("积分号"), None)
             .unwrap();
-        let epoch = db.qoder_auth_epoch(&qoder.id).unwrap().unwrap();
+        let life = db.qoder_lifecycle(&qoder.id).unwrap().unwrap();
 
         assert!(db
             .save_qoder_quota_snapshot(
@@ -458,31 +462,47 @@ mod tests {
                 "qoder_cn",
                 "ok",
                 &json!({"unit": "credits"}),
-                Some(epoch)
+                Some(&life)
             )
             .unwrap());
         assert!(db.latest_quota_snapshot(&qoder.id).unwrap().is_some());
 
         // 版本对不上（期间重新授权过）：拒绝写入。
+        let mut reauthorized = life.clone();
+        reauthorized.auth_epoch += 1;
         assert!(!db
             .save_qoder_quota_snapshot(
                 &qoder.id,
                 "qoder_cn",
                 "ok",
                 &json!({"unit": "credits", "stale": true}),
-                Some(epoch + 1)
+                Some(&reauthorized)
+            )
+            .unwrap());
+
+        // 生命周期对不上（删号后用同一个 UID 重新登录）：同样拒绝。
+        // 注意 epoch 可以完全相同——只比 epoch 是挡不住的。
+        let mut replaced = life.clone();
+        replaced.generation = "another-lifecycle".into();
+        assert!(!db
+            .save_qoder_quota_snapshot(
+                &qoder.id,
+                "qoder_cn",
+                "ok",
+                &json!({"unit": "credits", "stale": true}),
+                Some(&replaced)
             )
             .unwrap());
 
         // CN 与 International 不能共用快照：provider 必须与 edition 一致。
         assert!(!db
-            .save_qoder_quota_snapshot(&qoder.id, "qoder_global", "ok", &json!({}), Some(epoch))
+            .save_qoder_quota_snapshot(&qoder.id, "qoder_global", "ok", &json!({}), Some(&life))
             .unwrap());
 
         // 账号删掉后同样不许再写。
         db.delete_qoder_account(&qoder.id).unwrap();
         assert!(!db
-            .save_qoder_quota_snapshot(&qoder.id, "qoder_cn", "ok", &json!({}), Some(epoch))
+            .save_qoder_quota_snapshot(&qoder.id, "qoder_cn", "ok", &json!({}), Some(&life))
             .unwrap());
         assert!(db.latest_quota_snapshot(&qoder.id).unwrap().is_none());
     }

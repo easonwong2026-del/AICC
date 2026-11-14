@@ -286,14 +286,19 @@ async fn qoder_row(
 
     // 只有真的拿到过服务端结论（含"今天没有活动"）才落缓存：
     // 401 / 网络错误的行不该变成历史记录。
+    //
+    // 落缓存时核对**发起请求时**的生命周期：`account` 是查询前读出来的那一条，
+    // 它带着当时的 `generation`。期间账号被删掉又用同一个 UID 登录时，新账号的
+    // `auth_epoch` 也是 0，只比 epoch 会把这份旧数据写进新账号。
     if matches!(row["status"].as_str(), Some("ok")) {
+        let lifecycle = crate::storage::qoder_accounts::QoderLifecycle::of(account);
         app.with_db(|db| {
             db.save_qoder_quota_snapshot(
                 &account.id,
                 &account.edition,
                 "ok",
                 &row,
-                Some(account.auth_epoch),
+                Some(&lifecycle),
             )
             .map(|_| ())
         })
