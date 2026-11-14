@@ -502,6 +502,21 @@ impl crate::storage::Db {
             .optional()?)
     }
 
+    /// 推进授权版本号，返回新值。
+    ///
+    /// 删号前调用：让**在途**的额度快照与领取请求立刻作废。不回滚——它只让旧
+    /// 请求失效，留着比退回去安全。
+    pub fn bump_qoder_auth_epoch(&mut self, account_id: &str) -> RpcResult<Option<i64>> {
+        let changed = self.conn.execute(
+            "UPDATE qoder_accounts SET auth_epoch = auth_epoch + 1, updated_at = ?1 WHERE id = ?2",
+            params![now_rfc3339(), account_id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.qoder_auth_epoch(account_id)
+    }
+
     pub fn delete_qoder_account(&mut self, id: &str) -> RpcResult<bool> {
         // 与 accounts 一样：快照表无外键，删账号时显式清快照。
         self.purge_account_quota_snapshots(id)?;

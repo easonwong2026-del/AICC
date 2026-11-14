@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::app::App;
 use crate::providers::qoder_edition::QoderEdition;
-use crate::providers::{magpie, qoder, qoder_auth, qoder_pat, workbuddy, workbuddy_auth};
+use crate::providers::{
+    magpie, qoder, qoder_admin, qoder_auth, qoder_pat, workbuddy, workbuddy_auth,
+};
 use crate::qoder_profiles::manager as qoder_manager;
 use crate::rpc::{RpcError, RpcResult};
 use crate::securestore::SecretErrorKind;
@@ -62,6 +64,8 @@ pub const METHODS: &[&str] = &[
     "qoder.profiles.recover",
     // ---- Qoder 平台账号（PR #71，v13）----
     "qoder.accounts.list",
+    // P0（PR #77）：删掉一个 Qoder 服务账号，连同它自己的凭据。
+    "qoder.accounts.delete",
     // ---- Qoder 设备授权（PR #73）----
     "qoder.auth.start",
     "qoder.auth.poll",
@@ -401,6 +405,13 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
         "qoder.profiles.recover" => qoder_manager::recover(app, params),
 
         "qoder.accounts.list" => qoder_accounts_list(app, params),
+
+        // 删号：关自动领取 → 推进授权版本 → 删钥匙串三条键 → 删行（授权/记录级联）。
+        // 顺序写在 `providers/qoder_admin.rs` 顶部，别在这里改。
+        "qoder.accounts.delete" => {
+            let account_id = require_str(params, "accountId")?;
+            Ok(qoder_admin::delete(app, &account_id)?.to_json())
+        }
 
         // ---- Qoder 设备授权（PR #73）----
         //

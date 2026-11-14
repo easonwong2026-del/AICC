@@ -983,7 +983,8 @@ async fn run_account_refuses_when_the_account_is_missing() {
 async fn run_account_refuses_workbuddy_ai_before_any_request() {
     use crate::storage::AccountInput;
     let (app, _dir) = test_app();
-    let mock = Mock::with_tasks(vec![task("a", "TODO", false)]);
+    // 国际版路径不拉任务列表，这个 Mock 只是占位：故意不读它。
+    let _mock = Mock::with_tasks(vec![task("a", "TODO", false)]);
     let id = app
         .with_db(|db| {
             db.upsert_account(&AccountInput {

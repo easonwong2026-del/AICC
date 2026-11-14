@@ -13,10 +13,11 @@
 //! 4. **自动领取默认关闭**，每账号独立开关；同一活动周期成功过一次就不再提交。
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, FixedOffset};
 use serde_json::{json, Value};
 
 use crate::app::App;
@@ -332,8 +333,14 @@ fn note_auth_failure(
 
 fn record(app: &App, input: RunInput<'_>) {
     // 记录失败不该打断领取本身：结果已经拿到了，账可以补，但不能因此报错。
-    app.with_db(|db| db.record_qoder_credit_run(input).map(|_| ()))
-        .ok();
+    // 但**必须留痕**：账写不进去，去重与"今天领过没"会一起失效，
+    // 而界面上什么都看不出来。日志只带错误类与消息，不带令牌/URL。
+    if let Err(err) = app.with_db(|db| db.record_qoder_credit_run(input).map(|_| ())) {
+        crate::handlers::log_note(&format!(
+            "Qoder 领取记录写入失败（领取结果已产生，去重可能失效）：{}",
+            err.message
+        ));
+    }
 }
 
 /// 每次 POST 之前必须重新确认的三件事：**账号还在、授权没换、开关还开着**。
@@ -365,7 +372,63 @@ fn pre_post_stop(app: &App, account_id: &str, trigger: &str, epoch: i64) -> Opti
     None
 }
 
+// ---------------------------------------------------------------------------
+// 可注入的网络层
+// ---------------------------------------------------------------------------
+
+/// 领取流程用到的两个网络动作。
+///
+/// 抽出来只为一件事：**让"401 之后不再提交""POST 超时先回查""逐活动去重"
+/// 这几条能被测试**。真实实现是 `Live`，测试用脚本化的假 transport，
+/// 生产路径一个分支都不改。
+pub trait Transport: Send + Sync {
+    fn campaigns<'a>(
+        &'a self,
+        edition: QoderEdition,
+        token: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, CreditsError>> + Send + 'a>>;
+
+    fn claim<'a>(
+        &'a self,
+        edition: QoderEdition,
+        token: &'a str,
+        campaign_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<api::Claimed, CreditsError>> + Send + 'a>>;
+}
+
+/// 生产实现：直接打官方接口。
+pub struct Live;
+
+impl Transport for Live {
+    fn campaigns<'a>(
+        &'a self,
+        edition: QoderEdition,
+        token: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, CreditsError>> + Send + 'a>> {
+        Box::pin(api::fetch_campaigns(edition, token))
+    }
+
+    fn claim<'a>(
+        &'a self,
+        edition: QoderEdition,
+        token: &'a str,
+        campaign_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<api::Claimed, CreditsError>> + Send + 'a>> {
+        Box::pin(api::claim(edition, token, campaign_id))
+    }
+}
+
+/// 手动 / 自动都走这里。
 pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> RpcResult<Value> {
+    claim_with(app, account_id, trigger, &Live).await
+}
+
+pub async fn claim_with(
+    app: &Arc<App>,
+    account_id: &str,
+    trigger: &'static str,
+    transport: &dyn Transport,
+) -> RpcResult<Value> {
     if !crate::storage::qoder_credits::SOURCES.contains(&trigger) {
         return Err(RpcError::invalid_params("trigger 只支持 manual / auto"));
     }
@@ -438,7 +501,7 @@ pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> R
 
     let epoch = account.auth_epoch;
     let now = now_secs();
-    let snapshot = match api::fetch_campaigns(edition, &resolved.token).await {
+    let snapshot = match transport.campaigns(edition, &resolved.token).await {
         Ok(body) => match api::parse_campaigns(&body) {
             Ok(campaigns) => api::classify(campaigns, now),
             // 结构不认识：绝不能当成"今天没有活动"。
@@ -558,7 +621,10 @@ pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> R
         }
 
         posted += 1;
-        match api::claim(edition, &resolved.token, &campaign.id).await {
+        match transport
+            .claim(edition, &resolved.token, &campaign.id)
+            .await
+        {
             Ok(claimed) => {
                 let outcome = if claimed.replayed { "already" } else { "ok" };
                 record(
@@ -588,7 +654,7 @@ pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> R
             Err(err) => {
                 // 超时 / 网络：**先回查**，服务端很可能已经领了。
                 if matches!(err, CreditsError::Network(_)) {
-                    if let Ok(body) = api::fetch_campaigns(edition, &resolved.token).await {
+                    if let Ok(body) = transport.campaigns(edition, &resolved.token).await {
                         // 回查也看不懂结构：那就没法确认，按原错误记录，不猜。
                         let after = match api::parse_campaigns(&body) {
                             Ok(campaigns) => api::classify(campaigns, now_secs()),
@@ -687,7 +753,7 @@ pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> R
 
     // 执行后立即回查：界面上的"已领取"必须是服务端说的，不是我们推断的。
     // 回查失败或结构不认识时 `after` 为 `None`：界面据此不显示"已领"，也不猜。
-    let confirmed = match api::fetch_campaigns(edition, &resolved.token).await {
+    let confirmed = match transport.campaigns(edition, &resolved.token).await {
         Ok(body) => api::parse_campaigns(&body)
             .ok()
             .map(|campaigns| api::classify(campaigns, now_secs()))
@@ -772,21 +838,15 @@ pub fn auto_status(app: &App) -> RpcResult<Value> {
 // 自动领取（心跳）
 // ---------------------------------------------------------------------------
 
+/// 今天（北京时间）是否已经成功领到过。
+///
+/// 早先是"取最近 5 条再看日期"，当天先成功后又有 5 次失败时，成功那条会被挤出
+/// 窗口，自动化于是每 20 分钟继续探一次。改成按当天零点起的范围直接问库：
+/// 结果与记录条数无关。查询失败按"没领过"处理（宁可多探一次，也不漏领）。
 fn already_done_today(app: &App, account_id: &str) -> bool {
-    let today = crate::clock::beijing_date();
-    let rows = match app.with_db(|db| db.list_qoder_credit_runs(Some(account_id), 5)) {
-        Ok(rows) => rows,
-        Err(_) => return false,
-    };
-    let offset = FixedOffset::east_opt(8 * 3600).expect("UTC+8");
-    rows.iter().any(|row| {
-        if row.outcome != "ok" && row.outcome != "already" {
-            return false;
-        }
-        DateTime::parse_from_rfc3339(&row.executed_at)
-            .map(|at| at.with_timezone(&offset).format("%Y-%m-%d").to_string() == today)
-            .unwrap_or(false)
-    })
+    let since = crate::checkin::scheduler::beijing_day_start_utc(crate::clock::beijing_now());
+    app.with_db(|db| db.qoder_credit_succeeded_since(account_id, &since))
+        .unwrap_or(false)
 }
 
 /// 跑一轮自动领取。与签到 / 成长共用同一个心跳，但**自己判断该不该动**。
@@ -1050,6 +1110,221 @@ mod tests {
             pre_post_stop(&app, &account.id, "manual", fresh),
             Some("account_removed")
         );
+    }
+
+    // ---- 用假 transport 覆盖网络分支（PR #77）----
+
+    use std::collections::VecDeque;
+
+    /// 脚本化的假网络：按顺序吐预设结果，并记下真的提交了哪些活动。
+    struct FakeTransport {
+        campaigns: std::sync::Mutex<VecDeque<Result<Value, CreditsError>>>,
+        claims: std::sync::Mutex<VecDeque<Result<api::Claimed, CreditsError>>>,
+        claimed_ids: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl FakeTransport {
+        fn new(
+            campaigns: Vec<Result<Value, CreditsError>>,
+            claims: Vec<Result<api::Claimed, CreditsError>>,
+        ) -> Self {
+            Self {
+                campaigns: std::sync::Mutex::new(campaigns.into()),
+                claims: std::sync::Mutex::new(claims.into()),
+                claimed_ids: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn claimed_ids(&self) -> Vec<String> {
+            self.claimed_ids.lock().unwrap().clone()
+        }
+    }
+
+    impl Transport for FakeTransport {
+        fn campaigns<'a>(
+            &'a self,
+            _edition: QoderEdition,
+            _token: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, CreditsError>> + Send + 'a>> {
+            Box::pin(async move {
+                self.campaigns
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    // 脚本用完了就当作"今天没有活动"，避免测试因为多一次回查而 panic。
+                    .unwrap_or(Ok(json!({"campaigns": []})))
+            })
+        }
+
+        fn claim<'a>(
+            &'a self,
+            _edition: QoderEdition,
+            _token: &'a str,
+            campaign_id: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<api::Claimed, CreditsError>> + Send + 'a>> {
+            self.claimed_ids
+                .lock()
+                .unwrap()
+                .push(campaign_id.to_string());
+            Box::pin(async move {
+                self.claims
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or(Err(CreditsError::Network("脚本用完了".into())))
+            })
+        }
+    }
+
+    fn campaigns_body(items: &[(&str, &str)]) -> Value {
+        json!({"campaigns": items.iter().map(|(id, status)| json!({
+            "campaignId": id,
+            "campaignKey": format!("k-{id}"),
+            "actionType": "CLAIM_BENEFIT",
+            "claimStatus": status,
+            "startAt": 1_700_000_000,
+            "endAt": 1_900_000_000,
+            "benefit": {"amount": 100}
+        })).collect::<Vec<_>>()})
+    }
+
+    fn claimed_ok() -> api::Claimed {
+        api::Claimed {
+            replayed: false,
+            credits: Some(100),
+            status: "CLAIMED".to_string(),
+        }
+    }
+
+    /// 有一个 PAT 可用的账号（`claim_with` 需要一个能解析出的凭据）。
+    fn claimable_account(app: &Arc<App>) -> String {
+        let account = app
+            .with_db(|db| db.upsert_qoder_account("qoder_cn", "u-net", Some("网络号"), None))
+            .unwrap();
+        crate::providers::qoder_pat::persist(
+            app,
+            QoderEdition::Cn,
+            "qp_abcdefghijklmnopqrstuvwxyz012345",
+            &crate::providers::qoder_auth::Identity {
+                uid: "u-net".into(),
+                name: None,
+                email: None,
+            },
+        )
+        .unwrap();
+        account.id
+    }
+
+    fn run_claim(app: &Arc<App>, id: &str, fake: &FakeTransport) -> Value {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(claim_with(app, id, "manual", fake))
+            .unwrap()
+    }
+
+    /// 401：第一个活动被拒后**立刻停手**，不碰后面的活动，并把来源标成 invalid。
+    #[test]
+    fn unauthorized_stops_the_batch_after_the_first_post() {
+        let (app, _dir) = test_app();
+        let id = claimable_account(&app);
+        let fake = FakeTransport::new(
+            vec![
+                Ok(campaigns_body(&[("c1", "CLAIMABLE"), ("c2", "CLAIMABLE")])),
+                Ok(campaigns_body(&[("c1", "CLAIMABLE"), ("c2", "CLAIMABLE")])),
+            ],
+            vec![Err(CreditsError::Unauthorized)],
+        );
+        let value = run_claim(&app, &id, &fake);
+
+        assert_eq!(fake.claimed_ids(), vec!["c1"], "401 之后不许再提交");
+        assert_eq!(value["state"], "failed");
+        assert_eq!(value["results"][0]["outcome"], "rejected");
+
+        let rows = app.with_db(|db| db.list_qoder_authorizations(&id)).unwrap();
+        assert_eq!(rows[0].auth_status, "invalid");
+    }
+
+    /// 403：同样停手，但**不改授权状态**——权限不足不是凭据失效。
+    #[test]
+    fn forbidden_stops_the_batch_without_marking_the_credential_invalid() {
+        let (app, _dir) = test_app();
+        let id = claimable_account(&app);
+        let fake = FakeTransport::new(
+            vec![
+                Ok(campaigns_body(&[("c1", "CLAIMABLE"), ("c2", "CLAIMABLE")])),
+                Ok(campaigns_body(&[("c1", "CLAIMABLE"), ("c2", "CLAIMABLE")])),
+            ],
+            vec![Err(CreditsError::Forbidden)],
+        );
+        let value = run_claim(&app, &id, &fake);
+
+        assert_eq!(fake.claimed_ids(), vec!["c1"]);
+        assert_eq!(value["results"][0]["outcome"], "forbidden");
+        let rows = app.with_db(|db| db.list_qoder_authorizations(&id)).unwrap();
+        assert_eq!(rows[0].auth_status, "valid", "403 不能把凭据标坏");
+    }
+
+    /// POST 超时：**不重发**，先回查；回查说已领就记 `already`。
+    #[test]
+    fn a_timed_out_post_is_confirmed_by_a_recheck_not_resent() {
+        let (app, _dir) = test_app();
+        let id = claimable_account(&app);
+        let fake = FakeTransport::new(
+            vec![
+                Ok(campaigns_body(&[("c1", "CLAIMABLE")])),
+                // 回查：服务端已经记成已领。
+                Ok(campaigns_body(&[("c1", "CLAIMED")])),
+                // 执行后回查。
+                Ok(campaigns_body(&[("c1", "CLAIMED")])),
+            ],
+            vec![Err(CreditsError::Network("timed out".into()))],
+        );
+        let value = run_claim(&app, &id, &fake);
+
+        assert_eq!(fake.claimed_ids(), vec!["c1"], "超时后只能提交一次");
+        assert_eq!(value["results"][0]["outcome"], "already");
+        assert_eq!(value["results"][0]["confirmedByRecheck"], true);
+        assert_eq!(value["state"], "done");
+    }
+
+    /// 逐活动去重：这一期已经领过的活动不发 POST，没领的照常发。
+    #[test]
+    fn only_unclaimed_campaigns_are_submitted() {
+        let (app, _dir) = test_app();
+        let id = claimable_account(&app);
+        // c1 在本期已经成功过。
+        app.with_db(|db| {
+            db.record_qoder_credit_run(crate::storage::qoder_credits::RunInput {
+                account_id: &id,
+                campaign_id: Some("c1"),
+                campaign_key: Some("k-c1"),
+                period_start: Some(1_700_000_000),
+                period_end: Some(1_900_000_000),
+                outcome: "ok",
+                credits: Some(100),
+                http_status: Some(200),
+                auth_source: Some("own_pat"),
+                error_kind: None,
+                error_detail: None,
+                trigger: "manual",
+            })
+        })
+        .unwrap();
+
+        let fake = FakeTransport::new(
+            vec![
+                Ok(campaigns_body(&[("c1", "CLAIMABLE"), ("c2", "CLAIMABLE")])),
+                Ok(campaigns_body(&[("c1", "CLAIMED"), ("c2", "CLAIMED")])),
+            ],
+            vec![Ok(claimed_ok())],
+        );
+        let value = run_claim(&app, &id, &fake);
+
+        assert_eq!(fake.claimed_ids(), vec!["c2"], "已领过的 c1 不许再提交");
+        assert_eq!(value["posted"], 1);
+        assert_eq!(value["results"][0]["skipped"], "recorded_this_period");
     }
 
     #[test]

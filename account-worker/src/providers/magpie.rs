@@ -310,11 +310,6 @@ pub fn describe(login: &MagpieLogin, now_ms: i64) -> Value {
     })
 }
 
-/// 昵称兜底：`WorkBuddy ab12cd`，比整串 UUID 好认。
-pub fn short_uid(uid: &str) -> String {
-    short_uid_for("WorkBuddy", uid)
-}
-
 pub fn short_uid_for(label: &str, uid: &str) -> String {
     let head: String = uid.chars().take(6).collect();
     if head.len() < uid.len() {
@@ -625,6 +620,6 @@ mod tests {
     #[test]
     fn short_uid_uses_the_provider_label() {
         assert_eq!(short_uid_for("Qoder CN", "abcdef123456"), "Qoder CN abcdef");
-        assert_eq!(short_uid("abc"), "WorkBuddy abc");
+        assert_eq!(short_uid_for("WorkBuddy", "abc"), "WorkBuddy abc");
     }
 }

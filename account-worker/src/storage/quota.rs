@@ -374,7 +374,7 @@ mod tests {
 
         // 插入一行旧数据后再升级。
         {
-            let mut db = Db::open(&path).unwrap();
+            let db = Db::open(&path).unwrap();
             // 先把 user_version 拉回 14 才会真的跑 v15（open 已自动迁移到 15，这里模拟"旧库"）。
             db.conn
                 .execute(

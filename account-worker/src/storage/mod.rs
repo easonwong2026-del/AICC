@@ -479,11 +479,6 @@ impl AccountRecord {
     pub fn supports_workbuddy_cn_apis(&self) -> bool {
         self.platform == "workbuddy" && self.provider == "workbuddy"
     }
-
-    /// 界面上"是不是国际版"。
-    pub fn is_workbuddy_ai(&self) -> bool {
-        self.platform == "workbuddy" && self.provider == "workbuddy_ai"
-    }
 }
 
 /// 账号写入参数。**所有可选字段都是"补丁"语义**：

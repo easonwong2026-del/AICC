@@ -115,14 +115,6 @@ impl QoderEdition {
         }
     }
 
-    /// 模型 / 网关站点（#74 领取 Credits 时用）。
-    pub fn api_base(self) -> &'static str {
-        match self {
-            Self::Cn => "https://gateway.qoder.com.cn",
-            Self::Global => "https://api3.qoder.sh",
-        }
-    }
-
     /// 设备授权用的 client id（各自 CLI 的生产值，互不通用）。
     pub fn client_id(self) -> &'static str {
         match self {

@@ -188,13 +188,21 @@ pub async fn board(app: &Arc<App>, params: BoardParams) -> RpcResult<Value> {
 
     // 明确告诉界面：这些平台一个网络请求都没发，不是"暂时取不到"。
     // 现在按实际结果算：任何一行拿到 `ok`，就不再算"未验证"。
+    // 只有"确实有账号、且这些账号全是 unverified"才算未验证。
+    // 没有任何账号时 `all()` 空集为真——那会被读成"这个平台没接入"，
+    // 而真相是"你还没添加账号"。
     let unverified: Vec<&str> = PROVIDERS
         .iter()
         .copied()
         .filter(|provider| {
-            rows.iter()
+            let scoped: Vec<&Value> = rows
+                .iter()
                 .filter(|row| row["provider"].as_str() == Some(provider))
-                .all(|row| row["status"].as_str() == Some("unverified"))
+                .collect();
+            !scoped.is_empty()
+                && scoped
+                    .iter()
+                    .all(|row| row["status"].as_str() == Some("unverified"))
         })
         .collect();
 

@@ -78,7 +78,10 @@ def refresh_status(force=True):
     global _snapshot
     try:
         snapshot = magpie.collect(force=force)
-    except Exception:
+    except Exception as error:
+        # The collector already logged stage and error type; say once more that
+        # we are serving cache, so an empty card can be traced to a failed read.
+        print(f"[bridge] serving cache after {type(error).__name__}: {error}", file=sys.stderr)
         snapshot = magpie.load_cache() or dict(EMPTY_SNAPSHOT)
     with _lock:
         _snapshot = snapshot

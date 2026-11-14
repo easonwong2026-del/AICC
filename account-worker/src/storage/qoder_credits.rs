@@ -313,6 +313,20 @@ impl crate::storage::Db {
         Ok(out)
     }
 
+    /// `since` 之后（北京时间当天零点起）有没有成功记录。
+    ///
+    /// 与 `qoder_credit_claimed` 的分工：这个回答"今天领到过没有"，
+    /// 不看活动 id、不看条数；那个回答"这一期这个活动领过没有"。
+    pub fn qoder_credit_succeeded_since(&self, account_id: &str, since: &str) -> RpcResult<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM qoder_credit_runs
+             WHERE account_id = ?1 AND executed_at >= ?2 AND outcome IN ('ok', 'already')",
+            params![account_id, since],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     /// 这个账号在**这一期**活动上是否已经成功领过（`ok` / `already`）。
     ///
     /// 去重键是 `(account_id, campaign_id, period_start)`：
@@ -479,6 +493,30 @@ mod tests {
         assert!(db.qoder_credit_claimed(&id, "c-1", period).unwrap());
         // 另一个活动不受影响。
         assert!(!db.qoder_credit_claimed(&id, "c-2", period).unwrap());
+    }
+
+    #[test]
+    fn succeeded_since_answers_by_range_not_by_recent_count() {
+        let (mut db, _dir) = db();
+        let id = account(&mut db);
+        let today = crate::clock::beijing_now().format("%Y-%m-%d").to_string();
+        let since = format!("{today}T00:00:00Z"); // 简化：只验证"范围"语义
+        assert!(!db.qoder_credit_succeeded_since(&id, &since).unwrap());
+
+        db.record_qoder_credit_run(run(&id, "ok", Some(100)))
+            .unwrap();
+        // 再灌 6 条失败记录：旧实现只取最近 5 条，成功那条会被挤出去。
+        for _ in 0..6 {
+            db.record_qoder_credit_run(RunInput {
+                outcome: "network",
+                ..run(&id, "network", None)
+            })
+            .unwrap();
+        }
+        assert!(
+            db.qoder_credit_succeeded_since(&id, &since).unwrap(),
+            "成功记录不该被后续失败挤出窗口"
+        );
     }
 
     /// 服务端复用同一个 `campaignId` 时，**下一期必须还能领**。
