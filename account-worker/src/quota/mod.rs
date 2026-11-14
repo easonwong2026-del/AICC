@@ -261,11 +261,18 @@ async fn qoder_row(
             }
         };
 
+    // 授权来源用**这次真正发请求的那一份**，不是"授权列表里的第一条想当然"。
+    // 列表顺序不代表实际选择：同一账号可能同时有 Magpie 关联、浏览器授权与 PAT。
+    let actual_source = status
+        .get("authSource")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| source.to_string());
     let row = qoder::row_from_status(
         &account.id,
         &account.edition,
         &account.nickname,
-        source,
+        &actual_source,
         &status,
     );
 

@@ -12,7 +12,7 @@
 //!    无法回答；回查活动列表能给出确定结论。
 //! 4. **自动领取默认关闭**，每账号独立开关；同一活动周期成功过一次就不再提交。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -55,6 +55,42 @@ fn mark_attempt(account_id: &str) {
     if let Ok(mut map) = last_attempt().lock() {
         map.insert(account_id.to_string(), Instant::now());
     }
+}
+
+// ---------------------------------------------------------------------------
+// 账号级领取互斥
+// ---------------------------------------------------------------------------
+
+/// 手动与自动**共用同一把锁**。否则用户点「立即领取」的同一秒心跳也跑起来，
+/// 两个请求会同时打同一个活动：服务端幂等会让其中一个变成 `replayed`，
+/// 但"到底提交了几次"就再也说不清了。
+static CLAIMING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn claiming() -> &'static Mutex<HashSet<String>> {
+    CLAIMING.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+struct ClaimLock {
+    account_id: String,
+}
+
+impl Drop for ClaimLock {
+    fn drop(&mut self) {
+        if let Ok(mut set) = claiming().lock() {
+            set.remove(&self.account_id);
+        }
+    }
+}
+
+/// 拿不到就说明这个账号已经有一次领取在跑。`None` 是正常结果，不是错误。
+fn try_claim_lock(account_id: &str) -> Option<ClaimLock> {
+    let mut set = claiming().lock().ok()?;
+    if !set.insert(account_id.to_string()) {
+        return None;
+    }
+    Some(ClaimLock {
+        account_id: account_id.to_string(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -222,47 +258,71 @@ pub async fn status(app: &Arc<App>, account_id: &str) -> RpcResult<Value> {
         }
     };
 
+    // 请求发起时的授权版本：401 回来时要确认"还是这份授权"。
+    let epoch = account.auth_epoch;
+
     match api::fetch_campaigns(edition, &resolved.token).await {
         Ok(body) => {
             let now = now_secs();
-            let snapshot = api::classify(api::parse_campaigns(&body), now);
-            let mut value = snapshot_json(&account, &snapshot, now);
-            value["supported"] = json!(true);
-            value["authSource"] = resolved.to_json();
-            value["refreshHint"] = json!(
-                "以服务端活动窗口（windowEnd）为准；参考实现说北京时间每天 10:00 刷新，仅作说明"
-            );
-            Ok(value)
+            // 结构不认识一律 `error`，**不许**退化成"今天没有活动"。
+            match api::parse_campaigns(&body) {
+                Ok(campaigns) => {
+                    let snapshot = api::classify(campaigns, now);
+                    let mut value = snapshot_json(&account, &snapshot, now);
+                    value["supported"] = json!(true);
+                    value["authSource"] = resolved.to_json();
+                    value["refreshHint"] = json!(
+                        "以服务端活动窗口（windowEnd）为准；参考实现说北京时间每天 10:00 刷新，仅作说明"
+                    );
+                    Ok(value)
+                }
+                Err(err) => Ok(failure_status(&account, &resolved, &err)),
+            }
         }
         Err(err) => {
-            note_auth_failure(app, &account, &resolved, &err);
-            Ok(json!({
-                "accountId": account.id,
-                "edition": account.edition,
-                "supported": true,
-                "state": if matches!(err, CreditsError::Unauthorized) { "unauthorized" } else { "error" },
-                "authSource": resolved.to_json(),
-                "claimable": Value::Null,
-                "claimed": Value::Null,
-                "today": Value::Null,
-                "error": { "kind": err.kind(), "message": err.detail() },
-                "checkedAt": crate::clock::now_rfc3339(),
-            }))
+            note_auth_failure(app, &account, &resolved, &err, epoch);
+            Ok(failure_status(&account, &resolved, &err))
         }
     }
 }
 
-/// 401/403 只改授权状态，不推进 `auth_epoch`、不删凭据：
-/// 用户可能只是 PAT 被撤销，删掉凭据就再也查不出原因。
+/// 查询失败时的统一形状。`state` 只有三种：`unauthorized` / `unsupported` / `error`。
+fn failure_status(account: &QoderAccountRecord, resolved: &Resolved, err: &CreditsError) -> Value {
+    json!({
+        "accountId": account.id,
+        "edition": account.edition,
+        "supported": true,
+        "state": if matches!(err, CreditsError::Unauthorized) { "unauthorized" } else { "error" },
+        "authSource": resolved.to_json(),
+        "claimable": Value::Null,
+        "claimed": Value::Null,
+        "today": Value::Null,
+        "error": { "kind": err.kind(), "message": err.detail() },
+        "checkedAt": crate::clock::now_rfc3339(),
+    })
+}
+
+/// 只有 **401** 才把来源标成 `invalid`，而且必须核对授权版本。
+///
+/// 两层理由：
+/// 1. **403 不是"凭据坏了"**，是权限范围问题（PAT 没勾对应权限、或触发了风控）。
+///    标成 invalid 会让用户白去重新生成一张本来没问题的令牌。
+/// 2. 一次请求要几秒，期间用户可能已经换了新 PAT。旧请求的结果不能把新授权标脏，
+///    所以写入走 `set_qoder_auth_status_if_current(.., epoch)`，对不上就什么都不写。
+///
+/// 不删凭据：用户可能只是 PAT 被撤销，删掉就再也查不出原因了。
 fn note_auth_failure(
     app: &App,
     account: &QoderAccountRecord,
     resolved: &Resolved,
     err: &CreditsError,
+    epoch: i64,
 ) {
-    if matches!(err, CreditsError::Unauthorized | CreditsError::Forbidden) {
-        app.with_db(|db| db.set_qoder_auth_status(&account.id, resolved.source, "invalid"))
-            .ok();
+    if matches!(err, CreditsError::Unauthorized) {
+        app.with_db(|db| {
+            db.set_qoder_auth_status_if_current(&account.id, resolved.source, "invalid", epoch)
+        })
+        .ok();
     }
 }
 
@@ -319,11 +379,66 @@ pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> R
         }
     };
 
+    // 账号级互斥：手动与自动共用同一把锁，避免同一秒各提交一次。
+    let Some(_lock) = try_claim_lock(&account.id) else {
+        return Ok(json!({
+            "accountId": account.id,
+            "state": "busy",
+            "claimed": false,
+            "reason": "another_claim_in_flight",
+            "error": { "kind": "busy", "message": "这个账号正在领取，请稍后再试" },
+        }));
+    };
+
+    // 自动执行在动手前**再确认一次开关**：拿到锁之前用户可能刚把它关掉。
+    if trigger == "auto" {
+        let still_on = app
+            .with_db(|db| db.qoder_credits_auto(&account.id))
+            .unwrap_or(false);
+        if !still_on {
+            return Ok(json!({
+                "accountId": account.id,
+                "state": "skipped",
+                "reason": "auto_disabled",
+                "claimed": false,
+            }));
+        }
+    }
+
+    let epoch = account.auth_epoch;
     let now = now_secs();
     let snapshot = match api::fetch_campaigns(edition, &resolved.token).await {
-        Ok(body) => api::classify(api::parse_campaigns(&body), now),
+        Ok(body) => match api::parse_campaigns(&body) {
+            Ok(campaigns) => api::classify(campaigns, now),
+            // 结构不认识：绝不能当成"今天没有活动"。
+            Err(err) => {
+                let detail = err.detail();
+                record(
+                    app,
+                    RunInput {
+                        account_id: &account.id,
+                        campaign_id: None,
+                        campaign_key: None,
+                        outcome: err.outcome(),
+                        credits: None,
+                        http_status: err.http_status(),
+                        auth_source: Some(resolved.source),
+                        error_kind: Some(err.kind()),
+                        error_detail: Some(detail.as_str()),
+                        trigger,
+                    },
+                );
+                return Ok(json!({
+                    "accountId": account.id,
+                    "state": "failed",
+                    "claimed": false,
+                    "authSource": resolved.to_json(),
+                    "error": { "kind": err.kind(), "message": err.detail() },
+                }));
+            }
+        },
         Err(err) => {
-            note_auth_failure(app, &account, &resolved, &err);
+            note_auth_failure(app, &account, &resolved, &err, epoch);
             let detail = err.detail();
             record(
                 app,
@@ -376,30 +491,25 @@ pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> R
         return Ok(value);
     }
 
-    // 自动化先看"这个周期是否已经成功过"：宁可少发一次 POST。
-    if trigger == "auto" {
-        let already = app
-            .with_db(|db| {
-                let mut all = true;
-                for campaign in &snapshot.todo {
-                    all &= db.qoder_credit_claimed(&account.id, &campaign.id)?;
-                }
-                Ok::<bool, crate::rpc::RpcError>(all)
-            })
-            .unwrap_or(false);
-        if already {
-            return Ok(json!({
-                "accountId": account.id,
-                "state": "skipped",
-                "reason": "already_claimed_this_period",
-                "claimed": false,
-                "authSource": resolved.to_json(),
-            }));
-        }
-    }
-
     let mut results: Vec<Value> = Vec::new();
+    let mut posted = 0usize;
     for campaign in &snapshot.todo {
+        // **逐个活动去重**：这一项这周期已经成功过就不发 POST，
+        // 但其它还没领的照样要领。按整批判断"全都领过没"会让部分已领的场景重复提交。
+        let recorded = app
+            .with_db(|db| db.qoder_credit_claimed(&account.id, &campaign.id))
+            .unwrap_or(false);
+        if recorded {
+            results.push(json!({
+                "campaignId": campaign.id,
+                "outcome": "already",
+                "credits": campaign.credits,
+                "skipped": "recorded_this_period",
+            }));
+            continue;
+        }
+
+        posted += 1;
         match api::claim(edition, &resolved.token, &campaign.id).await {
             Ok(claimed) => {
                 let outcome = if claimed.replayed { "already" } else { "ok" };
@@ -429,7 +539,34 @@ pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> R
                 // 超时 / 网络：**先回查**，服务端很可能已经领了。
                 if matches!(err, CreditsError::Network(_)) {
                     if let Ok(body) = api::fetch_campaigns(edition, &resolved.token).await {
-                        let after = api::classify(api::parse_campaigns(&body), now_secs());
+                        // 回查也看不懂结构：那就没法确认，按原错误记录，不猜。
+                        let after = match api::parse_campaigns(&body) {
+                            Ok(campaigns) => api::classify(campaigns, now_secs()),
+                            Err(err) => {
+                                let detail = err.detail();
+                                record(
+                                    app,
+                                    RunInput {
+                                        account_id: &account.id,
+                                        campaign_id: Some(&campaign.id),
+                                        campaign_key: Some(&campaign.key),
+                                        outcome: err.outcome(),
+                                        credits: None,
+                                        http_status: err.http_status(),
+                                        auth_source: Some(resolved.source),
+                                        error_kind: Some(err.kind()),
+                                        error_detail: Some(detail.as_str()),
+                                        trigger,
+                                    },
+                                );
+                                results.push(json!({
+                                    "campaignId": campaign.id,
+                                    "outcome": err.outcome(),
+                                    "error": { "kind": err.kind(), "message": err.detail() },
+                                }));
+                                continue;
+                            }
+                        };
                         let confirmed = after
                             .claimed
                             .iter()
@@ -462,7 +599,7 @@ pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> R
                     }
                 }
 
-                note_auth_failure(app, &account, &resolved, &err);
+                note_auth_failure(app, &account, &resolved, &err, epoch);
                 let detail = err.detail();
                 record(
                     app,
@@ -493,11 +630,12 @@ pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> R
     }
 
     // 执行后立即回查：界面上的"已领取"必须是服务端说的，不是我们推断的。
+    // 回查失败或结构不认识时 `after` 为 `None`：界面据此不显示"已领"，也不猜。
     let confirmed = match api::fetch_campaigns(edition, &resolved.token).await {
-        Ok(body) => {
-            let after = api::classify(api::parse_campaigns(&body), now_secs());
-            Some(snapshot_json(&account, &after, now_secs()))
-        }
+        Ok(body) => api::parse_campaigns(&body)
+            .ok()
+            .map(|campaigns| api::classify(campaigns, now_secs()))
+            .map(|after| snapshot_json(&account, &after, now_secs())),
         Err(_) => None,
     };
 
@@ -511,6 +649,7 @@ pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> R
         "state": if any_success { "done" } else { "failed" },
         "claimed": any_success,
         "authSource": resolved.to_json(),
+        "posted": posted,
         "results": results,
         "after": confirmed,
         "checkedAt": crate::clock::now_rfc3339(),
@@ -784,6 +923,24 @@ mod tests {
         })
         .unwrap();
         assert!(resolve_token(&app, &account).is_err());
+    }
+
+    /// 手动与自动共用一把锁：同一账号同一时刻只能有一次领取在跑。
+    #[test]
+    fn the_claim_lock_is_per_account_and_released_on_drop() {
+        let first = try_claim_lock("qa_lock");
+        assert!(first.is_some(), "第一次应该拿到锁");
+        assert!(
+            try_claim_lock("qa_lock").is_none(),
+            "同一账号第二次必须被挡"
+        );
+        // 别的账号不受影响。
+        let other = try_claim_lock("qa_other");
+        assert!(other.is_some());
+        drop(other);
+        drop(first);
+        // 放掉之后可以重新拿。
+        assert!(try_claim_lock("qa_lock").is_some());
     }
 
     #[test]
