@@ -184,15 +184,22 @@ final class AccountWorkerManager: ObservableObject {
 
     // MARK: - WorkBuddy 扫码登录（PR1b-1）
 
-    /// 发起一次扫码登录。助手没起会先拉起来；启动失败时抛出。
-    func startWorkbuddyLogin() async throws -> WorkbuddyLoginStart {
+    /// 发起一次登录（浏览器或扫码，同一个会话）。助手没起会先拉起来。
+    ///
+    /// `variant` 决定站点：国内版和国际版是两套 OAuth 与两套 API 域名，
+    /// 不能靠"登录成功后再看 domain"来纠正。
+    func startWorkbuddyLogin(variant: WorkbuddyVariant = .cn) async throws -> WorkbuddyLoginStart {
         if case .running = state {} else {
             await refresh()
         }
         guard case .running = state, let client, client.isRunning else {
             throw AccountWorkerFailure.notRunning
         }
-        let result = try await client.call("auth.workbuddy.start", timeout: 20)
+        let result = try await client.call(
+            "auth.workbuddy.start",
+            params: ["variant": variant.rawValue],
+            timeout: 20
+        )
         guard let start = WorkbuddyLoginStart.parse(result) else {
             throw AccountWorkerFailure.malformedLine
         }

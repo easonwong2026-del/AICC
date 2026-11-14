@@ -172,6 +172,16 @@ struct ConsoleAccount: Identifiable, Equatable {
 
     var isWorkbuddyAI: Bool { platform == "workbuddy" && provider == "workbuddy_ai" }
 
+    /// 是不是 WorkBuddy 的某个站点。`accounts` 里也可能有别的平台，别只按 provider 判。
+    func isWorkbuddy(international: Bool) -> Bool {
+        platform == "workbuddy" && isWorkbuddyAI == international
+    }
+
+    var workbuddyVariant: WorkbuddyVariant? {
+        guard platform == "workbuddy" else { return nil }
+        return provider == "workbuddy_ai" ? .ai : .cn
+    }
+
     /// 签到 / 成长 / 旅行 / 授权检查目前只实现了**国内版**协议。
     /// 界面据此把入口显示为"暂不支持"，而不是发一个注定失败的请求。
     var supportsCNTasks: Bool { platform == "workbuddy" && provider == "workbuddy" }
@@ -257,6 +267,7 @@ struct ConsoleAccount: Identifiable, Equatable {
 enum ConsolePlatformFilter: String, CaseIterable, Identifiable {
     case all
     case workbuddy
+    case workbuddyAI
     case qoder
     case qoderGlobal
 
@@ -266,35 +277,53 @@ enum ConsolePlatformFilter: String, CaseIterable, Identifiable {
         switch self {
         case .all: return "全部"
         case .workbuddy: return "WorkBuddy"
+        case .workbuddyAI: return "WorkBuddy AI"
         case .qoder: return "Qoder CN"
-        case .qoderGlobal: return "International"
+        case .qoderGlobal: return "Qoder Intl"
         }
     }
 
-    /// 这一档是否要画 WorkBuddy 那一段。
-    var showsWorkbuddy: Bool {
+    /// AI 账号页能筛的五档（两个 WorkBuddy 站点分开）。
+    static let accountFilters: [ConsolePlatformFilter] = allCases
+
+    /// 签到页只筛真正有签到任务的对象：国际版没有这些任务，不放进筛选条。
+    static let checkinFilters: [ConsolePlatformFilter] = [.all, .workbuddy, .qoder, .qoderGlobal]
+
+    /// 国内版那一段。
+    var showsWorkbuddyCN: Bool {
         self == .all || self == .workbuddy
+    }
+
+    /// 国际版那一段。
+    var showsWorkbuddyAI: Bool {
+        self == .all || self == .workbuddyAI
+    }
+
+    /// 这一档是否要画任意 WorkBuddy 段。
+    var showsWorkbuddy: Bool {
+        showsWorkbuddyCN || showsWorkbuddyAI
     }
 
     /// 这一档是否要画 Qoder 的两段。
     var showsQoder: Bool {
-        self != .workbuddy
+        self != .workbuddy && self != .workbuddyAI
     }
 
-    /// 只筛某一个 Qoder 版本时返回它；`.all` / `.workbuddy` 返回 nil。
+    /// 只筛某一个 Qoder 版本时返回它。
     var edition: QoderEdition? {
         switch self {
         case .qoder: return .cn
         case .qoderGlobal: return .global
-        case .all, .workbuddy: return nil
+        case .all, .workbuddy, .workbuddyAI: return nil
         }
     }
 
-    /// 老口径：只看 `accounts` 表里的账号（WorkBuddy）。
+    /// 只看 `accounts` 表里的账号（WorkBuddy 两个站点靠 provider 区分）。
     func includes(_ account: ConsoleAccount) -> Bool {
         switch self {
         case .all: return true
-        case .workbuddy: return account.platform == "workbuddy"
+        case .workbuddy: return account.platform == "workbuddy" && !account.isWorkbuddyAI
+        case .workbuddyAI: return account.platform == "workbuddy" && account.isWorkbuddyAI
         case .qoder: return account.platform == "qoder_cn"
         case .qoderGlobal: return account.platform == "qoder_global"
         }
@@ -348,13 +377,85 @@ struct WorkbuddyLoginStart: Equatable {
     let loginId: String
     let verificationUri: String
     let expiresIn: Int
+    /// `cn` / `ai`。登录会话本身绑死档位：轮询成功后的账号 provider 由它决定。
+    let variant: WorkbuddyVariant
 
     static func parse(_ json: [String: Any]) -> WorkbuddyLoginStart? {
         guard let loginId = json["loginId"] as? String, !loginId.isEmpty else { return nil }
         let uri = (json["verificationUri"] as? String) ?? (json["qrPayload"] as? String) ?? ""
         guard !uri.isEmpty else { return nil }
         let expires = (json["expiresIn"] as? NSNumber)?.intValue ?? 600
-        return WorkbuddyLoginStart(loginId: loginId, verificationUri: uri, expiresIn: expires)
+        let variant = (json["variant"] as? String).flatMap(WorkbuddyVariant.init(rawValue:)) ?? .cn
+        return WorkbuddyLoginStart(
+            loginId: loginId,
+            verificationUri: uri,
+            expiresIn: expires,
+            variant: variant
+        )
+    }
+}
+
+/// WorkBuddy 的两个站点。**同一套 `platform`，不同 `provider`**：
+/// 登录、令牌、接口域名全部按它隔离，混用会把国际版令牌发到国内域名。
+enum WorkbuddyVariant: String, CaseIterable, Identifiable {
+    case cn
+    case ai
+
+    var id: String { rawValue }
+
+    /// 界面上的名字。国际版必须写全，不能只叫 "WorkBuddy"。
+    var title: String {
+        switch self {
+        case .cn: return "WorkBuddy"
+        case .ai: return "WorkBuddy AI"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .cn: return "国内版 · workbuddy.cn"
+        case .ai: return "国际版 · workbuddy.ai"
+        }
+    }
+
+    /// `accounts.provider` 的值。
+    var provider: String {
+        switch self {
+        case .cn: return "workbuddy"
+        case .ai: return "workbuddy_ai"
+        }
+    }
+
+    /// 允许交给系统浏览器打开的登录域名（按站点隔离）。
+    ///
+    /// 登录地址来自服务端响应：协议与域名任何一项不符都不许打开，
+    /// 否则一个 `javascript:` 或第三方域名的返回值就等于把任意链接塞给系统。
+    var trustedLoginDomains: [String] {
+        switch self {
+        case .cn: return ["codebuddy.cn", "workbuddy.cn"]
+        case .ai: return ["codebuddy.ai", "workbuddy.ai"]
+        }
+    }
+
+    /// 服务端给的登录地址 → 可安全打开 / 可编码成二维码的 URL。
+    ///
+    /// 必须与浏览器的解析口径一致：`\` 在 WHATWG special scheme 里等价于 `/`，
+    /// 所以 `https://evil.com\@www.workbuddy.ai/` 浏览器会打开 `evil.com`，
+    /// 而 Foundation 会把它当成 userinfo + 合法主机。反斜杠与 userinfo 一律拒绝。
+    func trustedLoginURL(_ raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.contains("\\") else { return nil }
+        guard !trimmed.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
+        else { return nil }
+        guard let components = URLComponents(string: trimmed),
+              components.scheme?.lowercased() == "https",
+              components.user == nil,
+              components.password == nil,
+              let host = components.host?.lowercased(),
+              !host.isEmpty
+        else { return nil }
+        let allowed = trustedLoginDomains.contains { host == $0 || host.hasSuffix("." + $0) }
+        return allowed ? components.url : nil
     }
 }
 

@@ -225,7 +225,7 @@ pub async fn sync_one(
     // 国际版的 Buddy 旅行接口没验证过：不发请求，也不写旅行状态。
     if !account.supports_workbuddy_cn_apis() {
         return Err(RpcError::invalid_params(
-            "WorkBuddy AI（国际版）的 Buddy 旅行接口尚未接入，未发送任何请求",
+            "WorkBuddy AI（国际版）没有 Buddy 旅行功能，未发送任何请求",
         ));
     }
     let prior = load_state(app, account_id)?;
@@ -290,13 +290,8 @@ pub async fn run_tick(app: &Arc<App>) -> Value {
                 continue;
             }
         };
-        // 国际版：协议未接入。自动轮次里直接跳过，**不发请求、不写旅行状态**。
+        // 国际版没有 Buddy 旅行：直接跳过，不发请求、不写状态、不产生结果行。
         if !account.supports_workbuddy_cn_apis() {
-            results.push(json!({
-                "accountId": account_id,
-                "status": "unsupported",
-                "reason": "unsupported_provider",
-            }));
             continue;
         }
         let prior = match load_state(app, account_id) {

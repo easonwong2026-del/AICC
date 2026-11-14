@@ -60,7 +60,7 @@ struct ConsoleCheckinView: View {
         HStack(spacing: 9) {
             Image(systemName: "info.circle")
                 .font(.system(size: 11))
-            Text("WorkBuddy 每日签到已接入：每个账号一个开关，默认关闭；每天 09:00（北京时间）后检查一次，服务端已签到就跳过。成长中心可自动接单与领奖，Buddy 旅行按开关执行。所有写操作都只在 AICC 运行时发生。")
+            Text("WorkBuddy 每日签到已接入：每个账号一个开关，默认关闭；每天 09:00（北京时间）后检查一次，服务端已签到就跳过。成长中心可自动接单与领奖，Buddy 旅行按开关执行。所有写操作都只在 AICC 运行时发生。WorkBuddy AI（国际版）没有这几项任务，不会出现在这里。")
                 .font(.system(size: 11))
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
@@ -156,7 +156,7 @@ struct ConsoleCheckinView: View {
             HStack {
                 ConsoleSectionTitle(title: "按账号查看", detail: "\(filteredAccounts.count) 个账号")
                 Picker("平台", selection: $platformFilter) {
-                    ForEach(ConsolePlatformFilter.allCases) { option in
+                    ForEach(ConsolePlatformFilter.checkinFilters) { option in
                         Text(option.title).tag(option)
                     }
                 }
@@ -188,7 +188,8 @@ struct ConsoleCheckinView: View {
     }
 
     private var filteredAccounts: [ConsoleAccount] {
-        store.accounts.filter { platformFilter.includes($0) }
+        // 国际版没有签到 / 成长 / 旅行这些任务，不进这一页。
+        store.accounts.filter { platformFilter.includes($0) && $0.supportsCNTasks }
     }
 
     private func accountRow(_ account: ConsoleAccount) -> some View {

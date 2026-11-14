@@ -29,10 +29,12 @@ struct ConsoleAccountsView: View {
         query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
-    private var visibleAccounts: [ConsoleAccount] {
-        guard filter.showsWorkbuddy else { return [] }
+    /// 国内版与**国际版**是两类账号：分组显示，不混在一个 "WorkBuddy" 里。
+    private func visibleWorkbuddy(_ international: Bool) -> [ConsoleAccount] {
+        guard international ? filter.showsWorkbuddyAI : filter.showsWorkbuddyCN else { return [] }
         return store.accounts.filter { account in
-            trimmedQuery.isEmpty || account.searchText.contains(trimmedQuery)
+            account.isWorkbuddy(international: international)
+                && (trimmedQuery.isEmpty || account.searchText.contains(trimmedQuery))
         }
     }
 
@@ -56,7 +58,8 @@ struct ConsoleAccountsView: View {
     }
 
     private var totalVisible: Int {
-        visibleAccounts.count
+        visibleWorkbuddy(false).count
+            + visibleWorkbuddy(true).count
             + QoderEdition.allCases.reduce(0) {
                 $0 + visibleProfiles($1).count + visibleServiceAccounts($1).count
             }
@@ -193,14 +196,14 @@ struct ConsoleAccountsView: View {
             )
 
             Picker("平台", selection: $filter) {
-                ForEach(ConsolePlatformFilter.allCases) { option in
+                ForEach(ConsolePlatformFilter.accountFilters) { option in
                     Text(option.title).tag(option)
                 }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .tint(ConsoleTheme.accent)
-            .frame(width: 300)
+            .frame(width: 420)
 
             Spacer(minLength: 8)
 
@@ -223,9 +226,10 @@ struct ConsoleAccountsView: View {
                 .buttonStyle(ConsoleSecondaryButtonStyle())
                 .help("复用 Magpie 已登录的 WorkBuddy 账号（只复制访问令牌）")
 
-            Button("扫码添加") { showAdd = true }
+            // 主入口现在是浏览器登录（扫码仍然可用），按钮文案别再只写"扫码"。
+            Button("添加账号") { showAdd = true }
                 .buttonStyle(ConsolePrimaryButtonStyle())
-                .help("用手机 WorkBuddy 扫码授权")
+                .help("在浏览器中登录或扫码，国内版 / 国际版都在面板里选")
         }
     }
 
@@ -312,13 +316,19 @@ struct ConsoleAccountsView: View {
             }
         } else {
             VStack(alignment: .leading, spacing: 22) {
-                if filter.showsWorkbuddy {
-                    workbuddySection
+                if filter.showsWorkbuddyCN, !visibleWorkbuddy(false).isEmpty {
+                    workbuddySection(international: false)
                 }
-                ForEach(QoderEdition.allCases) { edition in
-                    if filter.edition == nil || filter.edition == edition {
-                        qoderServiceSection(edition)
-                        qoderSection(edition)
+                if filter.showsWorkbuddyAI, !visibleWorkbuddy(true).isEmpty {
+                    workbuddySection(international: true)
+                }
+                if filter.showsQoder {
+                    ForEach(QoderEdition.allCases) { edition in
+                        if filter.edition == nil || filter.edition == edition {
+                            // 这一节现在带"浏览器授权"入口，账号为空时也要显示。
+                            qoderServiceSection(edition)
+                            qoderSection(edition)
+                        }
                     }
                 }
             }
@@ -326,18 +336,18 @@ struct ConsoleAccountsView: View {
     }
 
     @ViewBuilder
-    private var workbuddySection: some View {
-        let accounts = visibleAccounts
+    private func workbuddySection(international: Bool) -> some View {
+        let accounts = visibleWorkbuddy(international)
         VStack(alignment: .leading, spacing: 10) {
             ConsoleSectionTitle(
-                title: ConsoleAccountSection.workbuddy.title,
+                title: international ? "WorkBuddy AI（国际版）" : "WorkBuddy（国内版）",
                 detail: "\(accounts.count) 个账号"
             )
             if accounts.isEmpty {
                 ConsoleCard {
-                    Text(trimmedQuery.isEmpty
-                        ? "还没有 WorkBuddy 账号。扫码添加，或从 Magpie 导入已登录的账号。"
-                        : "没有匹配的 WorkBuddy 账号。")
+                    Text(international
+                        ? "还没有 WorkBuddy AI 账号。点「添加账号」→ 选 WorkBuddy AI → 在浏览器中登录。"
+                        : "还没有 WorkBuddy 账号。点「添加账号」，或从 Magpie 导入已登录的账号。")
                         .font(.system(size: 11))
                         .foregroundStyle(ConsoleTheme.secondaryText)
                 }
@@ -933,6 +943,17 @@ private struct ConsoleAccountCard: View {
                             Text(account.platformName)
                                 .font(.system(size: 10))
                                 .foregroundStyle(ConsoleTheme.secondaryText)
+                            if account.isWorkbuddyAI {
+                                Text("国际版")
+                                    .font(.system(size: 9, weight: .medium))
+                                    .foregroundStyle(ConsoleTheme.accent)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 1)
+                                    .background(
+                                        ConsoleTheme.accentSoft,
+                                        in: RoundedRectangle(cornerRadius: 3)
+                                    )
+                            }
                             if let source = account.sourceLabel {
                                 Text(source)
                                     .font(.system(size: 9, weight: .medium))
@@ -986,12 +1007,11 @@ private struct ConsoleAccountCard: View {
                 Divider().overlay(ConsoleTheme.border)
 
                 HStack(spacing: 14) {
-                    labelValue(
-                        "签到",
-                        account.supportsCNTasks
-                            ? (account.checkinEnabled ? "已开启" : "未开启")
-                            : "暂不支持"
-                    )
+                    // 国际版没有签到这项任务：不显示这一栏，而不是写"暂不支持"
+                    // —— 那读起来像"以后会有"。
+                    if account.supportsCNTasks {
+                        labelValue("签到", account.checkinEnabled ? "已开启" : "未开启")
+                    }
                     labelValue("最近更新", shortTimestamp(account.updatedAt))
                     Spacer(minLength: 0)
                 }
