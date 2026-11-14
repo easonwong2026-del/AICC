@@ -396,6 +396,23 @@ final class ConsoleStore: ObservableObject {
         }
     }
 
+    // MARK: - 统一任务汇总（PR #76）
+
+    /// 顶部汇总条的数字。只来自本地记录，不发网络请求。
+    @Published private(set) var tasksOverview: TasksOverview?
+    @Published private(set) var tasksOverviewError: String?
+
+    func refreshTasksOverview() async {
+        do {
+            let value = try await worker.tasksOverview()
+            tasksOverview = value
+            tasksOverviewError = nil
+        } catch {
+            // 汇总拿不到不该让整页报错：各分区还能各自工作。
+            tasksOverviewError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
     // MARK: - Qoder 每日 Credits（PR #75）
 
     /// 自动领取总览。每个账号独立开关，默认关闭。
@@ -452,8 +469,9 @@ final class ConsoleStore: ObservableObject {
             let report = try await worker.qoderCreditsClaim(accountId: accountId)
             qoderCreditsNotice = report.claimText
             await loadQoderCreditRuns(accountId: accountId)
-            // 领完之后顺手刷新额度缓存：Qoder 那一行的"今日已领"要跟着变。
+            // 领完之后顺手刷新额度缓存与顶部汇总：那两处的"今日已领"要跟着变。
             await refreshWorkerQuota(force: true)
+            await refreshTasksOverview()
             return report
         } catch {
             qoderCreditsNotice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription

@@ -309,6 +309,23 @@ final class AccountWorkerManager: ObservableObject {
         return result["removed"] as? Bool ?? false
     }
 
+    // MARK: - 统一任务汇总（PR #76）
+
+    /// 只读本地记录的任务汇总。助手侧不会因此发任何请求。
+    func tasksOverview() async throws -> TasksOverview {
+        if case .running = state {} else {
+            await refresh()
+        }
+        guard case .running = state, let client, client.isRunning else {
+            throw AccountWorkerFailure.notRunning
+        }
+        let result = try await client.call("tasks.overview", params: [:], timeout: 20)
+        guard let overview = TasksOverview(json: result) else {
+            throw AccountWorkerFailure.malformedLine
+        }
+        return overview
+    }
+
     // MARK: - Qoder 每日 Credits（PR #75）
 
     /// 只读查询今天的活动。**不发写请求**。

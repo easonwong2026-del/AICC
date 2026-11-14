@@ -44,6 +44,7 @@ struct ConsoleCheckinView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             notice
+            overviewBar
             taskSection
             ConsoleCheckinSection(store: store)
             ConsoleCreditsSection(store: store)
@@ -56,6 +57,96 @@ struct ConsoleCheckinView: View {
             if store.checkin.rows.isEmpty {
                 await store.loadCheckin(cached: true)
             }
+            if store.tasksOverview == nil {
+                await store.refreshTasksOverview()
+            }
+        }
+    }
+
+    /// 顶部汇总：五个数字全部来自 `tasks.overview`（本地记录），
+    /// 没有查过的项写"—"而不是 0。
+    private var overviewBar: some View {
+        ConsoleCard {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("今日概览")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(ConsoleTheme.text)
+                    if let overview = store.tasksOverview {
+                        Text(overview.today)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(ConsoleTheme.tertiaryText)
+                    }
+                    Spacer(minLength: 8)
+                    Button("刷新") {
+                        Task { await store.refreshTasksOverview() }
+                    }
+                    .buttonStyle(ConsoleSecondaryButtonStyle())
+                }
+
+                if let error = store.tasksOverviewError {
+                    Text(error)
+                        .font(.system(size: 10))
+                        .foregroundStyle(ConsoleTheme.warning)
+                } else if let overview = store.tasksOverview {
+                    HStack(spacing: 18) {
+                        stat("今日完成", "\(overview.doneToday)", ConsoleTheme.success)
+                        stat("待完成", "\(overview.pendingToday)", ConsoleTheme.secondaryText)
+                        stat("需重新授权", "\(overview.needsReauth)",
+                             overview.needsReauth > 0 ? ConsoleTheme.warning : ConsoleTheme.secondaryText)
+                        stat("自动任务开启", "\(overview.autoEnabled)", ConsoleTheme.secondaryText)
+                        stat("最近失败", "\(overview.failureCount)",
+                             overview.failureCount > 0 ? ConsoleTheme.danger : ConsoleTheme.secondaryText)
+                        Spacer(minLength: 0)
+                    }
+                    if !overview.recentFailures.isEmpty {
+                        VStack(alignment: .leading, spacing: 3) {
+                            ForEach(overview.recentFailures) { failure in
+                                HStack(spacing: 6) {
+                                    Text(failure.taskLabel)
+                                        .font(.system(size: 10, weight: .medium))
+                                        .foregroundStyle(ConsoleTheme.warning)
+                                    Text(failure.displayName)
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(ConsoleTheme.secondaryText)
+                                        .lineLimit(1)
+                                    if let detail = failure.detail {
+                                        Text(detail)
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(ConsoleTheme.tertiaryText)
+                                            .lineLimit(1)
+                                            .truncationMode(.tail)
+                                    }
+                                    Spacer(minLength: 0)
+                                    Text(ConsoleQuotaView.localTimestamp(failure.at))
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                                }
+                            }
+                        }
+                    }
+                    Text("只统计本地记录，本轮没有发起任何网络请求；Qoder 的「今天能领多少」需要单独查询。")
+                        .font(.system(size: 10))
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("读取中…")
+                        .font(.system(size: 10))
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                }
+            }
+        }
+    }
+
+    private func stat(_ title: String, _ value: String, _ tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value)
+                .font(.system(size: 16, weight: .semibold))
+                .monospacedDigit()
+                .foregroundStyle(tint)
+            Text(title)
+                .font(.system(size: 10))
+                .foregroundStyle(ConsoleTheme.tertiaryText)
         }
     }
 
