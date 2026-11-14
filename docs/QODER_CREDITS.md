@@ -116,12 +116,40 @@ AICC **不伪造这些值**：拿不到就是拿不到，不猜。如果真实�
 - 自动化在拿锁之后**再确认一次开关**：这期间用户可能刚关掉；
 - 去重按**单个活动**判断，不是整批：一批里有一项已领，不影响其它项提交。
 
-## 6. 存储（v17）
+### 5.4 每次 POST 前再问一遍
+
+查询活动与提交领取之间隔着一次网络往返。这段时间里用户可能关掉自动开关、
+删掉账号，或者换了一份新授权。任一发生，都不该再用旧快照里的活动去提交。
+
+`pre_post_stop()` 在每个 POST 之前重新确认三件事，任一不满足就**停下并写明原因**：
+
+| 情况 | 判定 | 结果 |
+| --- | --- | --- |
+| 账号已删除 | `qoder_auth_epoch` 读不到 | `reason = account_removed` |
+| 授权被替换 / 重新保存 | `auth_epoch` 与请求发起时不同 | `reason = authorization_changed` |
+| 自动开关被关（仅自动路径） | `credits_auto_enabled = 0` | `reason = auto_disabled` |
+
+手动路径不受开关影响（用户自己点的，本来就代表"现在就要"）。
+
+### 5.5 去重键包含活动周期（v18）
+
+`campaignId` 由服务端生成，**同一个 id 可能在不同周期被复用**。只按 id 去重时，
+次日会被当成"已经领过"而领不到。
+
+去重键改为 `(account_id, campaign_id, period_start)`：
+
+| 场景 | 是否算领过 |
+| --- | --- |
+| 同一 id、同一 `startAt`，已 `ok`/`already` | 算（不重复提交） |
+| 同一 id、`startAt` 不同（次日） | **不算**（允许领） |
+| 服务端没给 `startAt` | **不算**（宁可多一次幂等 POST，也不能挡住合法领取） |
+
+## 6. 存储（v17 / v18）
 
 | 对象 | 位置 |
 | --- | --- |
 | 自动开关 | `qoder_accounts.credits_auto_enabled`（默认 0） |
-| 领取账 | `qoder_credit_runs`（账号删掉则级联删除） |
+| 领取账 | `qoder_credit_runs`（含 `period_start` / `period_end`，账号删掉则级联删除） |
 | 额度缓存 | 复用 `quota_snapshots`（v14/v15），**不另造一套** |
 
 `qoder_credit_runs` 只记"发过什么、服务端怎么回"，**不缓存活动状态**：

@@ -217,7 +217,15 @@ pub fn persist(
     })?;
 
     let key = pat_key(&account.id);
-    let snapshot = Snapshot::capture(app, std::slice::from_ref(&key))?;
+    // 读旧凭据失败也在这条链上：`?` 提前返回同样会留下刚建的账号，
+    // 所以这里的失败也要走同一个清理路径。
+    let snapshot = match Snapshot::capture(app, std::slice::from_ref(&key)) {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            cleanup_created_account(app, &account.id, created);
+            return Err(err);
+        }
+    };
     if let Err(err) = app.secure.set(&key, pat.as_bytes()) {
         cleanup_created_account(app, &account.id, created);
         return Err(credential_error(err, "qoder/pat"));
@@ -529,7 +537,7 @@ mod tests {
         assert!(after > before, "重新授权必须推进版本号：{before} → {after}");
     }
 
-    fn faulty_app(fail_set: &[&str], fail_delete: &[&str]) -> (App, tempfile::TempDir) {
+    fn app_with(secure: SecureStore) -> (App, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let data = dir.path().to_path_buf();
         let paths = Paths {
@@ -540,10 +548,11 @@ mod tests {
             data_dir: data,
             wb_home_owned: true,
         };
-        (
-            App::with_secure(paths, SecureStore::faulty(fail_set, fail_delete)),
-            dir,
-        )
+        (App::with_secure(paths, secure), dir)
+    }
+
+    fn faulty_app(fail_set: &[&str], fail_delete: &[&str]) -> (App, tempfile::TempDir) {
+        app_with(SecureStore::faulty(fail_set, fail_delete))
     }
 
     /// 钥匙串写失败：**不能留下一个没有授权的空账号**。
@@ -562,6 +571,33 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "账号必须被回滚掉"
+        );
+    }
+
+    /// 回滚链上的**第一步**也可能失败：读不到旧凭据时 `Snapshot::capture` 直接返回，
+    /// 同样不能留下刚建的空账号。
+    #[test]
+    fn a_failed_snapshot_capture_also_rolls_the_new_account_back() {
+        let (app, _dir) = app_with(SecureStore::faulty_on_read_keys(&["qoder/"]));
+        app.secure.arm();
+        let err = persist(
+            &app,
+            QoderEdition::Cn,
+            "qp_abcdefghijklmnopqrstuvwxyz012345",
+            &identity("u-capture"),
+        )
+        .err()
+        .expect("读不到旧凭据必须中止保存");
+        assert!(
+            err.message.contains("凭据") || err.message.contains("读取"),
+            "{}",
+            err.message
+        );
+        assert!(
+            app.with_db(|db| db.list_qoder_accounts(None))
+                .unwrap()
+                .is_empty(),
+            "capture 失败也必须把新建账号回滚掉"
         );
     }
 

@@ -419,9 +419,14 @@ const MIGRATIONS: &[Migration] = &[
         version: 17,
         steps: &[MigrationStep::Rust(qoder_credits::migrate_v17)],
     },
+    // v18：领取账加活动周期两列，让去重键包含周期（服务端会复用 campaignId）。
+    Migration {
+        version: 18,
+        steps: &[MigrationStep::Rust(qoder_credits::migrate_v18)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 17;
+pub const LATEST_VERSION: i64 = 18;
 
 pub struct Db {
     conn: Connection,

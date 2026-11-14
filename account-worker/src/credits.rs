@@ -336,6 +336,35 @@ fn record(app: &App, input: RunInput<'_>) {
         .ok();
 }
 
+/// 每次 POST 之前必须重新确认的三件事：**账号还在、授权没换、开关还开着**。
+///
+/// 前两者是同一个网络等待窗口里的两个事故：用户可能在等结果时删了账号，
+/// 也可能换了一份新 PAT。任一发生，都不能再拿旧快照里的活动去提交——
+/// 提交的是旧凭据名下的活动，新授权会莫名其妙多出一笔领取记录。
+///
+/// 返回 `Some(reason)` 表示必须停手，理由直接进结果给人看。
+fn pre_post_stop(app: &App, account_id: &str, trigger: &str, epoch: i64) -> Option<&'static str> {
+    let current = app
+        .with_db(|db| db.qoder_auth_epoch(account_id))
+        .ok()
+        .flatten();
+    let Some(current) = current else {
+        return Some("account_removed");
+    };
+    if current != epoch {
+        return Some("authorization_changed");
+    }
+    if trigger == "auto" {
+        let still_on = app
+            .with_db(|db| db.qoder_credits_auto(account_id))
+            .unwrap_or(false);
+        if !still_on {
+            return Some("auto_disabled");
+        }
+    }
+    None
+}
+
 pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> RpcResult<Value> {
     if !crate::storage::qoder_credits::SOURCES.contains(&trigger) {
         return Err(RpcError::invalid_params("trigger 只支持 manual / auto"));
@@ -350,6 +379,8 @@ pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> R
                 account_id: &account.id,
                 campaign_id: None,
                 campaign_key: None,
+                period_start: None,
+                period_end: None,
                 outcome: "unsupported",
                 credits: None,
                 http_status: None,
@@ -419,6 +450,8 @@ pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> R
                         account_id: &account.id,
                         campaign_id: None,
                         campaign_key: None,
+                        period_start: None,
+                        period_end: None,
                         outcome: err.outcome(),
                         credits: None,
                         http_status: err.http_status(),
@@ -446,6 +479,8 @@ pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> R
                     account_id: &account.id,
                     campaign_id: None,
                     campaign_key: None,
+                    period_start: None,
+                    period_end: None,
                     outcome: err.outcome(),
                     credits: None,
                     http_status: err.http_status(),
@@ -475,6 +510,8 @@ pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> R
                     account_id: &account.id,
                     campaign_id: Some(&campaign.id),
                     campaign_key: Some(&campaign.key),
+                    period_start: campaign.start_at,
+                    period_end: campaign.end_at,
                     outcome: "already",
                     credits: campaign.credits,
                     http_status: None,
@@ -497,7 +534,7 @@ pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> R
         // **逐个活动去重**：这一项这周期已经成功过就不发 POST，
         // 但其它还没领的照样要领。按整批判断"全都领过没"会让部分已领的场景重复提交。
         let recorded = app
-            .with_db(|db| db.qoder_credit_claimed(&account.id, &campaign.id))
+            .with_db(|db| db.qoder_credit_claimed(&account.id, &campaign.id, campaign.start_at))
             .unwrap_or(false);
         if recorded {
             results.push(json!({
@@ -507,6 +544,17 @@ pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> R
                 "skipped": "recorded_this_period",
             }));
             continue;
+        }
+
+        // 这是最后一个能反悔的位置：POST 一旦发出去就是既成事实。
+        // 账号被删、授权被换、开关被关，任何一种都停下来，不再提交。
+        if let Some(reason) = pre_post_stop(app, &account.id, trigger, epoch) {
+            results.push(json!({
+                "campaignId": campaign.id,
+                "outcome": "skipped",
+                "reason": reason,
+            }));
+            break;
         }
 
         posted += 1;
@@ -519,6 +567,8 @@ pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> R
                         account_id: &account.id,
                         campaign_id: Some(&campaign.id),
                         campaign_key: Some(&campaign.key),
+                        period_start: campaign.start_at,
+                        period_end: campaign.end_at,
                         outcome,
                         credits: claimed.credits.or(campaign.credits),
                         http_status: Some(200),
@@ -550,6 +600,8 @@ pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> R
                                         account_id: &account.id,
                                         campaign_id: Some(&campaign.id),
                                         campaign_key: Some(&campaign.key),
+                                        period_start: campaign.start_at,
+                                        period_end: campaign.end_at,
                                         outcome: err.outcome(),
                                         credits: None,
                                         http_status: err.http_status(),
@@ -579,6 +631,8 @@ pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> R
                                     account_id: &account.id,
                                     campaign_id: Some(&item.id),
                                     campaign_key: Some(&item.key),
+                                    period_start: item.start_at,
+                                    period_end: item.end_at,
                                     outcome: "already",
                                     credits: item.credits.or(campaign.credits),
                                     http_status: None,
@@ -607,6 +661,8 @@ pub async fn claim(app: &Arc<App>, account_id: &str, trigger: &'static str) -> R
                         account_id: &account.id,
                         campaign_id: Some(&campaign.id),
                         campaign_key: Some(&campaign.key),
+                        period_start: campaign.start_at,
+                        period_end: campaign.end_at,
                         outcome: err.outcome(),
                         credits: None,
                         http_status: err.http_status(),
@@ -941,6 +997,59 @@ mod tests {
         drop(first);
         // 放掉之后可以重新拿。
         assert!(try_claim_lock("qa_lock").is_some());
+    }
+
+    /// POST 前的最后一道闸：账号还在、授权没换、开关还开着。
+    #[test]
+    fn the_pre_post_gate_stops_on_every_drift() {
+        let (app, _dir) = test_app();
+        let account = seed_account(&app, "qoder_cn");
+        let epoch = app
+            .with_db(|db| db.qoder_auth_epoch(&account.id))
+            .unwrap()
+            .unwrap();
+
+        // 手动不受开关影响：开关关着也能手动领。
+        assert!(pre_post_stop(&app, &account.id, "manual", epoch).is_none());
+
+        // 自动：开关关着必须停。
+        assert_eq!(
+            pre_post_stop(&app, &account.id, "auto", epoch),
+            Some("auto_disabled")
+        );
+        app.with_db(|db| db.set_qoder_credits_auto(&account.id, true))
+            .unwrap();
+        assert!(pre_post_stop(&app, &account.id, "auto", epoch).is_none());
+
+        // 授权被换：旧 epoch 的结果不许继续提交。
+        let token = "qp_abcdefghijklmnopqrstuvwxyz012345";
+        crate::providers::qoder_pat::persist(
+            &app,
+            QoderEdition::Cn,
+            token,
+            &crate::providers::qoder_auth::Identity {
+                uid: "u-1".into(),
+                name: None,
+                email: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            pre_post_stop(&app, &account.id, "manual", epoch),
+            Some("authorization_changed")
+        );
+
+        // 账号被删。
+        let fresh = app
+            .with_db(|db| db.qoder_auth_epoch(&account.id))
+            .unwrap()
+            .unwrap();
+        app.with_db(|db| db.delete_qoder_account(&account.id))
+            .unwrap();
+        assert_eq!(
+            pre_post_stop(&app, &account.id, "manual", fresh),
+            Some("account_removed")
+        );
     }
 
     #[test]
