@@ -1271,16 +1271,20 @@ mod tests {
     }
 
     /// 有一个 PAT 可用的账号（`claim_with` 需要一个能解析出的凭据）。
-    fn claimable_account(app: &Arc<App>) -> String {
+    ///
+    /// **每个用例必须传不同的 `uid`**：领取锁是进程级的、按账号 id 生效，而账号 id
+    /// 由 `(edition, uid)` 决定。几个用例共用同一个 uid 时，并行跑就会互相抢锁，
+    /// 后到的那个直接拿到 `state = "busy"`——测试时灵时不灵，且在 CI 上更容易翻车。
+    fn claimable_account(app: &Arc<App>, uid: &str) -> String {
         let account = app
-            .with_db(|db| db.upsert_qoder_account("qoder_cn", "u-net", Some("网络号"), None))
+            .with_db(|db| db.upsert_qoder_account("qoder_cn", uid, Some("网络号"), None))
             .unwrap();
         crate::providers::qoder_pat::persist(
             app,
             QoderEdition::Cn,
             "qp_abcdefghijklmnopqrstuvwxyz012345",
             &crate::providers::qoder_auth::Identity {
-                uid: "u-net".into(),
+                uid: uid.into(),
                 name: None,
                 email: None,
             },
@@ -1302,7 +1306,7 @@ mod tests {
     #[test]
     fn unauthorized_stops_the_batch_after_the_first_post() {
         let (app, _dir) = test_app();
-        let id = claimable_account(&app);
+        let id = claimable_account(&app, "u-unauth");
         let fake = FakeTransport::new(
             vec![
                 Ok(campaigns_body(&[("c1", "CLAIMABLE"), ("c2", "CLAIMABLE")])),
@@ -1324,7 +1328,7 @@ mod tests {
     #[test]
     fn forbidden_stops_the_batch_without_marking_the_credential_invalid() {
         let (app, _dir) = test_app();
-        let id = claimable_account(&app);
+        let id = claimable_account(&app, "u-forbid");
         let fake = FakeTransport::new(
             vec![
                 Ok(campaigns_body(&[("c1", "CLAIMABLE"), ("c2", "CLAIMABLE")])),
@@ -1344,7 +1348,7 @@ mod tests {
     #[test]
     fn a_timed_out_post_is_confirmed_by_a_recheck_not_resent() {
         let (app, _dir) = test_app();
-        let id = claimable_account(&app);
+        let id = claimable_account(&app, "u-timeout");
         let fake = FakeTransport::new(
             vec![
                 Ok(campaigns_body(&[("c1", "CLAIMABLE")])),
@@ -1367,7 +1371,7 @@ mod tests {
     #[test]
     fn only_unclaimed_campaigns_are_submitted() {
         let (app, _dir) = test_app();
-        let id = claimable_account(&app);
+        let id = claimable_account(&app, "u-dedupe");
         let generation = app
             .with_db(|db| db.get_qoder_account(&id))
             .unwrap()
@@ -1422,7 +1426,7 @@ mod tests {
     fn a_request_in_flight_across_a_delete_and_relogin_touches_nothing_new() {
         const PAT: &str = "qp_abcdefghijklmnopqrstuvwxyz012345";
         let (app, _dir) = test_app();
-        let old = claimable_account(&app);
+        let old = claimable_account(&app, "u-relogin");
         let old_life = app.with_db(|db| db.qoder_lifecycle(&old)).unwrap().unwrap();
 
         let hook_app = Arc::clone(&app);
@@ -1443,7 +1447,8 @@ mod tests {
                 QoderEdition::Cn,
                 PAT,
                 &crate::providers::qoder_auth::Identity {
-                    uid: "u-net".into(),
+                    // 同一个 uid → 同一个账号 id：这正是要覆盖的场景。
+                    uid: "u-relogin".into(),
                     name: Some("重新登录".into()),
                     email: None,
                 },
