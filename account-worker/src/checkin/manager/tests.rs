@@ -640,3 +640,45 @@ async fn a_read_only_probe_never_writes_anything() {
     let after = f.app.with_db(|db| db.counts()).unwrap();
     assert!(after["accounts"].as_i64().unwrap() >= before["accounts"].as_i64().unwrap());
 }
+
+/// WorkBuddy AI 不是"另一个平台的账号"，而是**另一个站点**：
+/// 拿它的授权请求国内接口等于把令牌发到错误域名。这里断言它连状态查询都不发。
+#[tokio::test]
+async fn workbuddy_ai_never_reaches_the_cn_checkin_api() {
+    let f = fixture();
+    let row = f
+        .app
+        .with_db(|db| {
+            db.upsert_account(&AccountInput {
+                platform: "workbuddy".to_string(),
+                uid: "ai-uid-1".to_string(),
+                provider: Some("workbuddy_ai".to_string()),
+                checkin_enabled: Some(true),
+                ..Default::default()
+            })
+        })
+        .expect("account");
+    let mock = Mock::new(vec![status_ok(Some(false))], vec![submit_ok(Some(100))]);
+
+    let outcome = run_account_with(&f.app, &row, &mock, Source::Auto, &gate_always()).await;
+
+    assert_eq!(outcome.state, "unsupported");
+    assert_eq!(
+        outcome.error_kind.as_deref(),
+        Some("unsupported_provider"),
+        "必须明确是版本不支持，不是平台不支持"
+    );
+    assert!(
+        mock.calls().is_empty(),
+        "国际版不许发任何请求：{:?}",
+        mock.calls()
+    );
+    assert_eq!(mock.submits(), 0);
+    assert!(
+        f.app
+            .with_db(|db| db.checkin_record(&row.id, &beijing_date()))
+            .unwrap()
+            .is_none(),
+        "不支持就不能留下签到记录"
+    );
+}

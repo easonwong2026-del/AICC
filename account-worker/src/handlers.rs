@@ -846,6 +846,19 @@ async fn workbuddy_account_status(app: &App, id: &str) -> RpcResult<Value> {
     if account.platform != "workbuddy" {
         return Err(RpcError::invalid_params("目前只支持查询 WorkBuddy 账号"));
     }
+    // 国际版：探测端点、请求头、账号域全都不一样，用国内版探针去问只会把
+    // 一份好授权误判成 invalid。**不取凭据、不发请求、不改任何状态。**
+    if !account.supports_workbuddy_cn_apis() {
+        return Ok(json!({
+            "state": "unsupported",
+            "provider": account.provider,
+            "error": {
+                "kind": "unsupported_provider",
+                "message": "WorkBuddy AI（国际版）的授权检查接口尚未接入；AICC 没有向任何接口发送请求",
+            },
+            "authorizationSummary": broker::summary(app, &account),
+        }));
+    }
 
     let mut resolved = match broker::resolve(app, &account)? {
         broker::Outcome::Resolved(resolved) => resolved,
@@ -1878,6 +1891,35 @@ mod tests {
             access_token: access.to_string(),
             expires_at_ms: Some(1_795_525_945_623),
         }
+    }
+
+    #[tokio::test]
+    async fn ai_account_status_is_unsupported_and_changes_nothing() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let record = app
+            .with_db(|db| {
+                db.upsert_account(&AccountInput {
+                    platform: "workbuddy".to_string(),
+                    uid: "ai-status-uid".to_string(),
+                    provider: Some("workbuddy_ai".to_string()),
+                    ..Default::default()
+                })
+            })
+            .expect("account");
+        let before = record.auth_status.clone();
+
+        let out = workbuddy_account_status(&app, &record.id)
+            .await
+            .expect("status");
+
+        assert_eq!(out["state"], json!("unsupported"));
+        assert_eq!(out["error"]["kind"], json!("unsupported_provider"));
+        assert_eq!(out["provider"], json!("workbuddy_ai"));
+        let after = app
+            .with_db(|db| db.get_account(&record.id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.auth_status, before, "没发请求就不许改授权状态");
     }
 
     fn magpie_login_with(key: &str, uid: &str, access: &str) -> magpie::MagpieLogin {

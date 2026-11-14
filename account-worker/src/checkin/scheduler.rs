@@ -207,9 +207,10 @@ fn attempts_today(app: &App, account_id: &str, day_start: &str) -> i64 {
 
 /// 这个账号现在开没开。`WriteGate` 每次发写请求前都问一次。
 fn still_enabled(app: &App, account_id: &str) -> bool {
+    // 开关**和**版本都要重新确认：写请求发出之前，任何一条不满足都停。
     matches!(
         app.with_db(|db| db.get_account(account_id)),
-        Ok(Some(account)) if account.checkin_enabled
+        Ok(Some(account)) if account.checkin_enabled && account.supports_workbuddy_cn_apis()
     )
 }
 
@@ -217,7 +218,8 @@ pub fn enabled_accounts(app: &App) -> Vec<AccountRecord> {
     app.with_db(|db| db.list_accounts(&Default::default()))
         .unwrap_or_default()
         .into_iter()
-        .filter(|account| account.platform == "workbuddy" && account.checkin_enabled)
+        // 自动轮次只跑国内版：国际版协议未接入，不能拿它的授权去请求国内接口。
+        .filter(|account| account.supports_workbuddy_cn_apis() && account.checkin_enabled)
         .collect()
 }
 
@@ -237,10 +239,12 @@ pub fn auto_status(app: &App) -> Value {
     let mut enabled = 0usize;
     let mut next_all: Option<DateTime<FixedOffset>> = None;
     for account in &accounts {
+        let supported = account.supports_workbuddy_cn_apis();
         let done = done_today(app, &account.id, &today);
         let next = read_next_at(app, &account.id);
         let at = next_run_at(now, &account.id, done, next);
-        if account.checkin_enabled {
+        // 只有国内版会真正执行；国际版照常列出（用户得看见它），但不参与调度。
+        if account.checkin_enabled && supported {
             enabled += 1;
             next_all = Some(match next_all {
                 Some(current) if current <= at => current,
@@ -254,9 +258,16 @@ pub fn auto_status(app: &App) -> Value {
             "checkedToday": done,
             "lastResult": account.last_result,
             "lastCheckinAt": account.last_checkin_at,
-            "nextRunAt": at.to_rfc3339(),
+            "nextRunAt": if supported { json!(at.to_rfc3339()) } else { Value::Null },
             "attemptsToday": attempts_today(app, &account.id, &day_start),
             "running": manager::is_running(&account.id),
+            "provider": account.provider,
+            "supported": supported,
+            "unsupportedReason": if supported {
+                Value::Null
+            } else {
+                json!("WorkBuddy AI（国际版）的签到接口尚未接入")
+            },
         }));
     }
 
@@ -847,5 +858,45 @@ mod tests {
         assert_eq!(State::Disabled.as_str(), "disabled");
         assert_eq!(State::Unsupported.as_str(), "unsupported");
         assert_eq!(State::Stopped.as_str(), "stopped");
+    }
+
+    #[test]
+    fn the_auto_round_skips_workbuddy_ai_but_still_lists_it() {
+        let (app, _dir) = test_app();
+        let cn = account(&app, "cn-uid", true);
+        let ai = app
+            .with_db(|db| {
+                let record = db.upsert_account(&AccountInput {
+                    platform: "workbuddy".to_string(),
+                    uid: "ai-uid".to_string(),
+                    provider: Some("workbuddy_ai".to_string()),
+                    checkin_enabled: Some(true),
+                    ..Default::default()
+                })?;
+                Ok(record.id)
+            })
+            .expect("ai account");
+
+        let picked: Vec<String> = enabled_accounts(&app)
+            .iter()
+            .map(|a| a.id.clone())
+            .collect();
+        assert_eq!(picked, vec![cn.clone()], "国际版不能进自动轮次");
+
+        let status = auto_status(&app);
+        let rows = status["accounts"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "界面上仍要看得见国际版账号");
+        let ai_row = rows
+            .iter()
+            .find(|row| row["accountId"] == serde_json::json!(ai))
+            .expect("ai row");
+        assert_eq!(ai_row["supported"], serde_json::json!(false));
+        assert_eq!(
+            ai_row["nextRunAt"],
+            serde_json::Value::Null,
+            "不调度就没有下一次"
+        );
+        assert_eq!(ai_row["provider"], serde_json::json!("workbuddy_ai"));
+        assert_eq!(status["enabledAccounts"], serde_json::json!(1));
     }
 }

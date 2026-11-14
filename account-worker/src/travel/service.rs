@@ -170,7 +170,10 @@ pub async fn sync_account<T: Transport, K: Tokens>(
     let mut events = Vec::new();
     prior.account_id = account.id.clone();
 
-    if account.platform != "workbuddy" || !supports_travel(account) {
+    if account.platform != "workbuddy"
+        || !account.supports_workbuddy_cn_apis()
+        || !supports_travel(account)
+    {
         prior.label = Label::Unsupported.as_str().to_string();
         prior.server_state.clear();
         prior.updated_at = iso(now);

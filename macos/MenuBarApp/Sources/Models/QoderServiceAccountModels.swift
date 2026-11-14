@@ -61,23 +61,32 @@ struct QoderServiceAccount: Identifiable, Equatable {
         authorizations.map(\.sourceLabel)
     }
 
-    /// 真正可用的来源：有凭据、或至少有 Magpie 关联的行。
+    /// 真正可用的来源：AICC 自己持有凭据且状态有效。
     var usableSources: [QoderAuthorization] {
         authorizations.filter { $0.isUsable }
     }
 
-    /// 界面上的授权状态：以"最好的那一份"为准，没有可用来源时退回最差状态。
+    /// 只有 Magpie 关联、还没用它向服务端验证过的来源。
+    var linkedSources: [QoderAuthorization] {
+        authorizations.filter { $0.isLinkedOnly }
+    }
+
+    /// 界面上的授权状态。
+    ///
+    /// 只有"自己拿着凭据"才算**有效**；仅仅在 Magpie 里有一条关联，
+    /// 不能声称认证有效——那份令牌归 Magpie，AICC 还没真正用过它。
     var statusLabel: String {
-        if let best = authorizations.first(where: { $0.isUsable }) {
-            return best.statusLabel
-        }
-        if authorizations.isEmpty { return "无授权" }
+        if !usableSources.isEmpty { return "有效" }
         if authorizations.contains(where: { $0.authStatus == "expired" }) { return "已过期" }
+        if !linkedSources.isEmpty { return "已关联（未校验）" }
+        if authorizations.isEmpty { return "无授权" }
         return "需重新登录"
     }
 
     var statusTone: QoderServiceStatusTone {
-        if authorizations.contains(where: { $0.isUsable }) { return .ok }
+        if !usableSources.isEmpty { return .ok }
+        if authorizations.contains(where: { $0.authStatus == "expired" }) { return .warn }
+        if !linkedSources.isEmpty { return .muted }
         if authorizations.isEmpty { return .muted }
         return .warn
     }
@@ -113,13 +122,17 @@ struct QoderAuthorization: Equatable {
         }
     }
 
-    /// Magpie 来源不持有 AICC 自己的凭据（令牌归 Magpie 刷新），
-    /// 所以"有 sourceKey"就算可用；自有授权必须有凭据。
+    /// 只有自有授权、且凭据真的存下来了，才算"可用"。
+    ///
+    /// Magpie 来源的令牌归 Magpie 刷新，AICC 手里没有任何凭据可验证，
+    /// 因此不能把它当成"认证有效"，只能说"已关联"。
     var isUsable: Bool {
-        switch authStatus {
-        case "valid": return source == "magpie" ? sourceKey != nil : hasSecret
-        default: return false
-        }
+        source == "own_browser" && hasSecret && authStatus == "valid"
+    }
+
+    /// Magpie 关联：知道这个账号在 Magpie 里登录过，但还没实时验证。
+    var isLinkedOnly: Bool {
+        source == "magpie" && sourceKey != nil
     }
 
     var statusLabel: String {

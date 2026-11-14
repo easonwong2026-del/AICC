@@ -962,7 +962,12 @@ private struct ConsoleAccountCard: View {
                 Divider().overlay(ConsoleTheme.border)
 
                 HStack(spacing: 14) {
-                    labelValue("签到", account.checkinEnabled ? "已开启" : "未开启")
+                    labelValue(
+                        "签到",
+                        account.supportsCNTasks
+                            ? (account.checkinEnabled ? "已开启" : "未开启")
+                            : "暂不支持"
+                    )
                     labelValue("最近更新", shortTimestamp(account.updatedAt))
                     Spacer(minLength: 0)
                 }

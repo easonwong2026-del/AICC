@@ -390,6 +390,24 @@ pub struct AccountRecord {
     pub provider: String,
 }
 
+impl AccountRecord {
+    /// 这个账号能不能走 **WorkBuddy 国内版**的接口。
+    ///
+    /// 签到、成长、旅行、授权检查全部只实现了国内版协议（端点写死在
+    /// `copilot.tencent.com` / `www.codebuddy.cn`）。WorkBuddy AI 是**另一个站点**，
+    /// 用国内版接口去请求它只会得到 401/404，更糟的是可能把国际版令牌发到国内域。
+    ///
+    /// 所以这些入口一律先问这个方法：**只看 `platform` 不够**，必须看 `provider`。
+    pub fn supports_workbuddy_cn_apis(&self) -> bool {
+        self.platform == "workbuddy" && self.provider == "workbuddy"
+    }
+
+    /// 界面上"是不是国际版"。
+    pub fn is_workbuddy_ai(&self) -> bool {
+        self.platform == "workbuddy" && self.provider == "workbuddy_ai"
+    }
+}
+
 /// 账号写入参数。**所有可选字段都是"补丁"语义**：
 /// 没出现的字段保持库里原值，不会被重置成默认值。
 ///
@@ -568,7 +586,20 @@ impl Db {
         if input.uid.trim().is_empty() {
             return Err(RpcError::invalid_params("uid 不能为空"));
         }
-        let provider = input.provider.as_deref().unwrap_or("workbuddy");
+        // 没传 provider 时**继承已有账号的 provider**：改备注这类补丁不该把
+        // 国际版账号重新判成国内版，更不该因此报 uid_conflict。
+        let existing_provider: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT provider FROM accounts WHERE platform = ?1 AND uid = ?2",
+                params![input.platform, input.uid],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let provider: &str = match input.provider.as_deref() {
+            Some(explicit) => explicit,
+            None => existing_provider.as_deref().unwrap_or("workbuddy"),
+        };
         if !PROVIDERS.contains(&provider) {
             return Err(RpcError::invalid_params(format!(
                 "provider 只支持 workbuddy / workbuddy_ai，收到 {provider}"
@@ -602,14 +633,7 @@ impl Db {
         // 账号，不能因为 UID 相同就共用一行（那会把国际版的令牌塞进国内版）。
         // 主表的 UNIQUE(platform, uid) 是 v1 的既有约束，这里不做重建，
         // 而是明确报冲突，让调用方决定怎么处理。
-        let existing_provider: Option<String> = tx
-            .query_row(
-                "SELECT provider FROM accounts WHERE platform = ?1 AND uid = ?2",
-                params![input.platform, input.uid],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(existing) = existing_provider {
+        if let Some(existing) = existing_provider.as_deref() {
             if existing != provider {
                 return Err(RpcError::invalid_params(format!(
                     "同一 UID 已属于 {existing}，不能再作为 {provider} 导入；\
@@ -1027,6 +1051,32 @@ mod tests {
     fn account_id_is_deterministic_and_platform_scoped() {
         assert_eq!(account_id("workbuddy", "u1"), account_id("workbuddy", "u1"));
         assert_ne!(account_id("workbuddy", "u1"), account_id("qoder_cn", "u1"));
+    }
+
+    #[test]
+    fn a_patch_without_provider_inherits_the_existing_one() {
+        let (mut db, _dir) = temp_db();
+        let ai = db
+            .upsert_account(&AccountInput {
+                platform: "workbuddy".into(),
+                uid: "u-ai".into(),
+                provider: Some("workbuddy_ai".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(ai.provider, "workbuddy_ai");
+
+        // 改备注时没传 provider：必须继承，不能降级成国内版，也不能报冲突。
+        let patched = db
+            .upsert_account(&AccountInput {
+                platform: "workbuddy".into(),
+                uid: "u-ai".into(),
+                nickname: Some("新备注".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(patched.nickname, "新备注");
+        assert_eq!(patched.provider, "workbuddy_ai");
     }
 
     #[test]

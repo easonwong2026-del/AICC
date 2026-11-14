@@ -209,6 +209,18 @@ pub async fn run_account(
     options: Options,
     gate: WriteGate<'_>,
 ) -> AccountRun {
+    // 第二道闸门：真正的写入口再确认一次版本。调度器已经筛过，但这里是
+    // "拿凭据 → 发请求"之间唯一的位置，不能只依赖上游筛选。
+    if let Ok(Some(account)) = app.with_db(|db| db.get_account(account_id)) {
+        if !account.supports_workbuddy_cn_apis() {
+            let mut run = AccountRun::new(account_id, nickname);
+            run.state = "unsupported";
+            run.errors
+                .push("WorkBuddy AI（国际版）的成长中心接口尚未接入，未发送任何请求".to_string());
+            run.finished_at = Some(now_rfc3339());
+            return run;
+        }
+    }
     let transport = LiveTransport::new(access, uid, domain);
     run_account_with(app, account_id, nickname, &transport, options, gate).await
 }

@@ -337,3 +337,26 @@ WorkBuddy 国内版与国际版共用 `platform='workbuddy'`，靠 `provider` �
 
 `qoder_authorizations` 上 `(account_id, source)` 唯一：重导只更新元数据，
 另一个来源的行完全不动。`magpie` 来源带 `secret_ref` 会被直接拒绝。
+
+### 9.4 版本隔离（WorkBuddy AI 不进入国内版流程）
+
+签到、成长、旅行、授权检查目前**只实现国内版协议**：端点写死在
+`copilot.tencent.com` / `www.codebuddy.cn`，请求头与签到日界线也是国内版的。
+WorkBuddy AI 是另一个站点，拿它的授权请求这些接口，轻则 401，重则把国际版
+令牌发到国内域名。因此这些入口一律以 `AccountRecord::supports_workbuddy_cn_apis()`
+（`platform == "workbuddy" && provider == "workbuddy"`）为准，**只看 platform 不算数**。
+
+| 入口 | 行为 |
+| --- | --- |
+| `checkin::manager::run_account(_with)` | 取凭据**之前**返回 `unsupported`，`error_kind = unsupported_provider` |
+| `checkin::scheduler::enabled_accounts` | 国际版不进自动轮次 |
+| `checkin::scheduler::auto_status` | 仍然列出国际版（用户要看得见），`supported=false`、`nextRunAt=null` |
+| `checkin::scheduler::still_enabled`（POST 前最后一道） | 开关 **和** 版本都要满足 |
+| `growth::scan_account` | 直接返回 `state=unsupported`，**连凭据都不取** |
+| `growth::scheduler` / `growth::manager::run_account` | 调度跳过 + 写入口再挡一次 |
+| `travel::scheduler` / `travel::service` | 标 `unsupported`，不写旅行状态 |
+| `workbuddy_account_status` | 返回 `state=unsupported`，不探测、不改授权状态 |
+| 账号卡 | `provider=workbuddy_ai` 显示为 **WorkBuddy AI**，签到一栏写「暂不支持」 |
+
+`accounts.upsert` 未传 `provider` 时**继承库里已有值**：改备注不会把国际版
+账号降级成国内版，也不会误报 `uid_conflict`。

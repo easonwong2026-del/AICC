@@ -41,12 +41,14 @@ final class QoderServiceAccountModelsTests: XCTestCase {
         XCTAssertNotEqual(cn.editionName, "Qoder International")
     }
 
-    /// Magpie 来源没有 AICC 自己的凭据，但只要有 sourceKey 就算可用。
-    func testMagpieSourceIsUsableWithoutASecret() throws {
+    /// Magpie 只是"关联"，不是"认证有效"：AICC 手里没有可验证的凭据。
+    func testMagpieLinkAloneIsNotClaimedAsValid() throws {
         let account = try XCTUnwrap(QoderServiceAccount(json: row()))
-        XCTAssertEqual(account.usableSources.count, 1)
+        XCTAssertTrue(account.usableSources.isEmpty, "magpie 关联不能被当成可用凭据")
+        XCTAssertEqual(account.linkedSources.count, 1)
+        XCTAssertEqual(account.statusLabel, "已关联（未校验）")
+        XCTAssertEqual(account.statusTone, .muted)
         XCTAssertEqual(account.sourceLabels, ["Magpie"])
-        XCTAssertEqual(account.statusTone, .ok)
     }
 
     /// 自有授权必须有凭据才算可用：界面不能把"登录过但没存下令牌"显示成有效。
@@ -72,7 +74,7 @@ final class QoderServiceAccountModelsTests: XCTestCase {
         XCTAssertEqual(withSecret.sourceLabels, ["浏览器登录"])
     }
 
-    /// 两个来源并存时，只要有一份可用就算可用（Magpie 过期、自有授权仍有效）。
+    /// 两个来源并存时，自有授权可用才算可用（Magpie 过期、自有授权仍有效）。
     func testOneUsableSourceIsEnough() throws {
         let account = try XCTUnwrap(QoderServiceAccount(json: row([
             "authorizations": [
@@ -83,6 +85,19 @@ final class QoderServiceAccountModelsTests: XCTestCase {
         XCTAssertEqual(account.usableSources.count, 1)
         XCTAssertEqual(account.statusLabel, "有效")
         XCTAssertEqual(account.sourceLabels, ["Magpie", "浏览器登录"])
+    }
+
+    /// 只有 Magpie 关联 + 自有授权过期：仍然不能说"有效"。
+    func testMagpieLinkDoesNotMaskAnExpiredOwnAuthorization() throws {
+        let account = try XCTUnwrap(QoderServiceAccount(json: row([
+            "authorizations": [
+                ["source": "magpie", "sourceKey": "qoder", "authStatus": "valid", "hasSecret": false],
+                ["source": "own_browser", "authStatus": "expired", "hasSecret": true],
+            ],
+        ])))
+        XCTAssertTrue(account.usableSources.isEmpty)
+        XCTAssertEqual(account.statusLabel, "已过期")
+        XCTAssertEqual(account.statusTone, .warn)
     }
 
     func testExpiredOnlyIsWarnNotOk() throws {
