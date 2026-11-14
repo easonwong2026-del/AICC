@@ -252,7 +252,7 @@ pub async fn run_account_guarded<T: Transport>(
             account_id,
             nickname,
             "unsupported_provider",
-            "WorkBuddy AI（国际版）的成长中心接口尚未接入，未发送任何请求",
+            "WorkBuddy AI（国际版）没有成长中心功能，未发送任何请求",
         );
     }
     run_account_with(app, account_id, nickname, transport, options, gate).await

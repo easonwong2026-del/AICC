@@ -340,7 +340,7 @@ WorkBuddy 国内版与国际版共用 `platform='workbuddy'`，靠 `provider` �
 
 ### 9.4 版本隔离（WorkBuddy AI 不进入国内版流程）
 
-签到、成长、旅行、授权检查目前**只实现国内版协议**：端点写死在
+签到、成长、旅行、授权检查是**国内版独有的任务**（国际版产品里没有这几项）：端点写死在
 `copilot.tencent.com` / `www.codebuddy.cn`，请求头与签到日界线也是国内版的。
 WorkBuddy AI 是另一个站点，拿它的授权请求这些接口，轻则 401，重则把国际版
 令牌发到国内域名。因此这些入口一律以 `AccountRecord::supports_workbuddy_cn_apis()`
@@ -350,13 +350,14 @@ WorkBuddy AI 是另一个站点，拿它的授权请求这些接口，轻则 401
 | --- | --- |
 | `checkin::manager::run_account(_with)` | 取凭据**之前**返回 `unsupported`，`error_kind = unsupported_provider` |
 | `checkin::scheduler::enabled_accounts` | 国际版不进自动轮次 |
-| `checkin::scheduler::auto_status` | 仍然列出国际版（用户要看得见），`supported=false`、`nextRunAt=null` |
+| `checkin::scheduler::auto_status` | **不列出国际版**（没有这个任务，列出来只是噪音） |
 | `checkin::scheduler::still_enabled`（POST 前最后一道） | 开关 **和** 版本都要满足 |
 | `growth::scan_account` | 直接返回 `state=unsupported`，**连凭据都不取** |
 | `growth::scheduler` / `growth::manager::run_account` | 调度跳过 + 写入口再挡一次 |
 | `travel::scheduler` / `travel::service` | 标 `unsupported`，不写旅行状态 |
 | `workbuddy_account_status` | 返回 `state=unsupported`，不探测、不改授权状态 |
-| 账号卡 | `provider=workbuddy_ai` 显示为 **WorkBuddy AI**，签到一栏写「暂不支持」 |
+| `growth::scan_fleet` / `travel::run_tick` | 直接跳过国际版，不产生结果行 |
+| 账号卡 | `provider=workbuddy_ai` 显示为 **WorkBuddy AI**，**不显示签到一栏** |
 
 `accounts.upsert` 未传 `provider` 时**继承库里已有值**：改备注不会把国际版
 账号降级成国内版，也不会误报 `uid_conflict`。
@@ -377,7 +378,7 @@ WorkBuddy AI 是另一个站点，拿它的授权请求这些接口，轻则 401
 | domain 校验 | `matches_domain` 拒绝跨档响应（国际版登录返回国内 domain 直接失败） |
 | UID 冲突 | 同一 UID 已在另一站点 → `uid_conflict`，凭据回滚，账号行不改写 |
 | 刷新 `auth.workbuddy.refresh` | **国际版仍返回 unsupported**：刷新端点没有真机证据，不拿好授权冒险 |
-| 签到 / 成长 / 旅行 / 授权检查 | 国际版仍 `unsupported_provider`，等真实协议证据后再逐项放开 |
+| 签到 / 成长 / 旅行 / 授权检查 | 国际版**没有这些任务**，永久 `unsupported_provider`；列表里也不出现 |
 
 界面：添加账号面板顶部有 `WorkBuddy` / `WorkBuddy AI` 分段选择，切换即重开会话；
 账号卡按 provider 显示独立名称与图标，国际版的签到一栏写「暂不支持」。

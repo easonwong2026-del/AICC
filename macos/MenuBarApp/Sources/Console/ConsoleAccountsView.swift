@@ -962,12 +962,11 @@ private struct ConsoleAccountCard: View {
                 Divider().overlay(ConsoleTheme.border)
 
                 HStack(spacing: 14) {
-                    labelValue(
-                        "签到",
-                        account.supportsCNTasks
-                            ? (account.checkinEnabled ? "已开启" : "未开启")
-                            : "暂不支持"
-                    )
+                    // 国际版没有签到这项任务：不显示这一栏，而不是写"暂不支持"
+                    // —— 那读起来像"以后会有"。
+                    if account.supportsCNTasks {
+                        labelValue("签到", account.checkinEnabled ? "已开启" : "未开启")
+                    }
                     labelValue("最近更新", shortTimestamp(account.updatedAt))
                     Spacer(minLength: 0)
                 }

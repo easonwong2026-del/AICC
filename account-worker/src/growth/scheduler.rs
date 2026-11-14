@@ -174,18 +174,8 @@ pub async fn run_tick(app: &std::sync::Arc<App>, force: bool) -> Value {
     let gate = || enabled(app);
 
     for account in accounts {
-        if account.platform != "workbuddy" {
-            continue;
-        }
-        // 国际版：协议未接入，连扫描都不做，更不会接单/领奖。
+        // 国际版没有成长任务：直接跳过，连一行结果都不产生。
         if !account.supports_workbuddy_cn_apis() {
-            runs.push(json!({
-                "accountId": account.id,
-                "nickname": account.nickname,
-                "state": "unsupported",
-                "reason": "unsupported_provider",
-                "detail": "WorkBuddy AI（国际版）的成长中心接口尚未接入，未发送任何请求",
-            }));
             continue;
         }
         // 切到下一个账号之前重新确认：用户可能刚在界面上关掉。

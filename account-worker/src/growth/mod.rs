@@ -54,11 +54,14 @@ pub async fn scan_account(app: &Arc<App>, account: &AccountRecord) -> AccountSca
 }
 
 /// 版本不支持：**没有发任何请求**，也没有碰授权状态。
+///
+/// 国际版没有成长中心这项功能，所以正常列表里根本不会出现这个账号；
+/// 这个分支只挡住"显式指定了 AI 账号 id"的调用。
 fn unsupported(account: &AccountRecord) -> AccountScan {
     let mut scan = unavailable(
         account,
         "unsupported_provider",
-        "WorkBuddy AI（国际版）的成长中心接口尚未接入；AICC 没有向任何接口发送请求",
+        "WorkBuddy AI（国际版）没有成长中心功能；AICC 没有向任何接口发送请求",
     );
     scan.state = "unsupported";
     scan
@@ -95,7 +98,8 @@ pub async fn scan_fleet(app: &Arc<App>, ids: &[String]) -> Vec<AccountScan> {
     };
     let mut out = Vec::new();
     for account in accounts {
-        if account.platform != "workbuddy" {
+        // 国际版没有成长任务：不扫描，也不在结果里出现。
+        if !account.supports_workbuddy_cn_apis() {
             continue;
         }
         if !ids.is_empty() && !ids.contains(&account.id) {
