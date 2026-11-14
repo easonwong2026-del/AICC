@@ -240,6 +240,14 @@ enum QoderEdition: String, CaseIterable, Identifiable {
         case .global: return "Qoder International 账号"
         }
     }
+
+    /// 界面用的 SF Symbol。两个版本图标不同，避免列表里看起来是同一个平台。
+    var symbolName: String {
+        switch self {
+        case .cn: return "chevron.left.forwardslash.chevron.right"
+        case .global: return "globe"
+        }
+    }
 }
 
 /// 「AI 账号」页的三段分组。WorkBuddy 走 `accounts`，两个 Qoder 走 Profile。

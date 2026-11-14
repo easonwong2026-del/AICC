@@ -24,6 +24,8 @@ final class ConsoleStore: ObservableObject {
     @Published private(set) var workerQuotaRows: [WorkerQuotaRow] = []
     @Published private(set) var workerQuotaError: String?
     @Published private(set) var loadingWorkerQuota = false
+    /// 用量窗口（7 / 30 天）。只影响用量统计，不改余额口径。
+    @Published private(set) var workerQuotaWindowDays = 7
 
     /// Buddy 旅行的本地快照 + 运行信息。
     @Published private(set) var travelRows: [TravelAccountRow] = []
@@ -74,8 +76,17 @@ final class ConsoleStore: ObservableObject {
     @Published private(set) var qoderError: String?
     @Published private(set) var qoderNotice: String?
     @Published private(set) var qoderLoading = false
+    /// 最近一次 Qoder 数据同步成功的时间（总览页"最近同步"用）。
+    @Published private(set) var qoderSyncedAt: Date?
     /// 正在执行动作的 profileId，用来禁用该卡片按钮。
     @Published private(set) var qoderActing: String?
+
+    /// 正在删除的 Qoder 服务账号 id：删除期间禁用同一账号的重复删除（PRD §4.5）。
+    @Published private(set) var qoderDeleting: String?
+    /// 删除失败的原因：账号仍在，界面提供重试入口。
+    @Published private(set) var qoderDeleteError: String?
+    /// 删除成功的一次性提示。
+    @Published private(set) var qoderDeleteNotice: String?
 
     let worker: AccountWorkerManager
     private let settings: AppSettings
@@ -87,21 +98,43 @@ final class ConsoleStore: ObservableObject {
 
     var stats: ConsoleOverviewStats { ConsoleOverviewStats(accounts: accounts) }
     var quotaSummary: ConsoleQuotaSummary { ConsoleQuotaSummary(snapshot: snapshot) }
+    /// 总览页的平台统计：服务账号总数不含本机 Profile。
+    var fleet: ConsoleFleetSummary {
+        ConsoleFleetSummary(
+            accounts: accounts,
+            qoderAccounts: qoderServiceAccounts,
+            qoderProfiles: qoderProfiles
+        )
+    }
+
+    func clearQoderDeleteFeedback() {
+        qoderDeleteError = nil
+        qoderDeleteNotice = nil
+    }
+
+    /// 账号详情里的一次性结论（PAT 检测、移除结果等）。只写提示，不改数据。
+    func showQoderNotice(_ text: String) {
+        qoderNotice = text
+    }
 
     /// 首次进入窗口时拉一遍。重复调用是安全的。
+    ///
+    /// 顺序很重要（PRD §11.4）：先把助手拉起来一次，再**并行**取四份数据。
+    /// 早先串行时，Magpie 的 HTTP 超时会把账号列表一起拖到十几秒之后。
     func loadIfNeeded() async {
-        if snapshot == nil && !loadingQuota {
-            await refreshQuota(force: false)
+        if case .running = worker.state {} else {
+            await worker.refresh()
         }
-        if workerQuotaRows.isEmpty && !loadingWorkerQuota {
-            await refreshWorkerQuota(force: false)
-        }
-        if lastAccountsRefresh == nil && !loadingAccounts {
-            await refreshAccounts()
-        }
-        if qoderEditions.isEmpty && !qoderLoading {
-            await refreshQoder(silent: true)
-        }
+        let needQuota = snapshot == nil && !loadingQuota
+        let needAccounts = lastAccountsRefresh == nil && !loadingAccounts
+        let needQoder = qoderEditions.isEmpty && !qoderLoading
+        let needWorkerQuota = workerQuotaRows.isEmpty && !loadingWorkerQuota
+
+        async let quota: Void = needQuota ? refreshQuota(force: false) : ()
+        async let accounts: Void = needAccounts ? refreshAccounts() : ()
+        async let qoder: Void = needQoder ? refreshQoder(silent: true) : ()
+        async let workerQuota: Void = needWorkerQuota ? refreshWorkerQuota(force: false) : ()
+        _ = await (quota, accounts, qoder, workerQuota)
     }
 
     func refreshAll() async {
@@ -133,14 +166,69 @@ final class ConsoleStore: ObservableObject {
             qoderPendingSwitches = (pending["items"] as? [[String: Any]] ?? [])
                 .compactMap(QoderPendingSwitch.init(json:))
             qoderError = nil
+            qoderSyncedAt = Date()
         } catch {
             qoderError = message(for: error)
             if !silent { qoderNotice = nil }
         }
     }
 
+    /// 删除一个 Qoder **服务账号**（PRD §4.5，走 PR #77 的 `qoder.accounts.delete`）。
+    ///
+    /// 只删 AICC 自己保存的凭据、授权元数据、领取记录与额度快照：
+    /// 不碰 Magpie 配置，不删客户端本机 Profile，也不代表服务端 PAT 已撤销。
+    /// 失败时账号仍在，返回 false 并留下可重试的错误文案。
+    @discardableResult
+    func deleteQoderServiceAccount(_ account: QoderServiceAccount) async -> Bool {
+        guard qoderDeleting == nil else { return false }
+        qoderDeleting = account.id
+        qoderDeleteError = nil
+        qoderDeleteNotice = nil
+        defer { qoderDeleting = nil }
+        do {
+            let result = try await worker.deleteQoderAccount(accountId: account.id)
+            if result.removed {
+                qoderDeleteNotice = "已从 AICC 移除 \(account.displayName)"
+                    + "（清掉 \(result.secretsDeleted) 份凭据）"
+                await refreshQoder(silent: true)
+                return true
+            }
+            qoderDeleteError = "账号仍保留：这次没有完成删除，可以直接重试"
+            return false
+        } catch {
+            qoderDeleteError = message(for: error)
+            return false
+        }
+    }
+
+    /// 用真实接口核一次 WorkBuddy 账号的登录态（只读）。
+    ///
+    /// 结论只代表"身份还能用"，不代表签到等写能力已被验证。
+    @discardableResult
+    func verifyWorkbuddyAccount(_ account: ConsoleAccount) async -> String {
+        do {
+            let json = try await worker.workbuddyStatus(accountId: account.id)
+            let state = (json["state"] as? String) ?? (json["authStatus"] as? String) ?? "unknown"
+            await refreshAccounts()
+            switch state {
+            case "valid", "ok", "authorized":
+                return "授权有效：服务端确认身份仍可用"
+            case "expired":
+                return "授权已过期，请重新登录"
+            case "denied":
+                return "钥匙串被拒，请在系统弹窗里允许 AICC 访问"
+            default:
+                return "服务端返回状态：\(state)"
+            }
+        } catch {
+            return message(for: error)
+        }
+    }
+
     /// 扫描本机已有的 Qoder 配置并登记。只登记引用，不动任何目录。
-    func scanQoderProfiles() async {
+    ///
+    /// `announce: false` 用于页面自动扫描：同一次打开不需要给用户一条"什么也没发生"的提示。
+    func scanQoderProfiles(announce: Bool = true) async {
         guard qoderActing == nil else { return }
         qoderActing = "scan"
         defer { qoderActing = nil }
@@ -148,9 +236,11 @@ final class ConsoleStore: ObservableObject {
             let json = try await worker.qoderProfilesScan()
             let created = (json["created"] as? [[String: Any]] ?? []).count
             let skipped = (json["skipped"] as? [[String: Any]] ?? []).count
-            qoderNotice = created == 0
-                ? "没有发现新的 Qoder 配置（已有 \(skipped) 个已登记）"
-                : "已登记 \(created) 个 Qoder 配置，原有登录状态未改动"
+            if announce {
+                qoderNotice = created == 0
+                    ? "没有发现新的 Qoder 配置（已有 \(skipped) 个已登记）"
+                    : "已登记 \(created) 个 Qoder 配置，原有登录状态未改动"
+            }
             await refreshQoder(silent: true)
         } catch {
             qoderNotice = message(for: error)
@@ -383,12 +473,16 @@ final class ConsoleStore: ObservableObject {
     }
 
     /// 助手侧四平台额度。`refresh=false` 时助手优先用快照缓存（不打网络）。
-    func refreshWorkerQuota(force: Bool = true) async {
+    ///
+    /// `days` 只影响**用量窗口**（7 / 30 天），不改余额口径。
+    func refreshWorkerQuota(force: Bool = true, days: Int? = nil) async {
         guard !loadingWorkerQuota else { return }
+        let window = days ?? workerQuotaWindowDays
         loadingWorkerQuota = true
         defer { loadingWorkerQuota = false }
         do {
-            workerQuotaRows = try await worker.workerQuota(days: 7, refresh: force)
+            workerQuotaRows = try await worker.workerQuota(days: window, refresh: force)
+            workerQuotaWindowDays = window
             workerQuotaError = workerQuotaRows.isEmpty ? "还没有可显示的账号" : nil
         } catch {
             workerQuotaRows = []
@@ -423,6 +517,9 @@ final class ConsoleStore: ObservableObject {
     @Published private(set) var qoderCreditsBusy: String?
     /// 每个账号最近一条领取结果，按需加载。
     @Published private(set) var qoderCreditsRuns: [String: [QoderCreditRun]] = [:]
+    /// 本次会话里每个账号最近一次只读检查的结论。
+    /// 用途只有一个：让「立即领取」只在服务端确实说可领时才可点（PRD §6.3）。
+    @Published private(set) var qoderCreditsReports: [String: QoderCreditsReport] = [:]
     /// 最近一次动作的一句话结论（成功/失败都给一句）。
     @Published private(set) var qoderCreditsNotice: String?
 
@@ -450,6 +547,7 @@ final class ConsoleStore: ObservableObject {
         defer { qoderCreditsBusy = nil }
         do {
             let report = try await worker.qoderCreditsStatus(accountId: accountId)
+            qoderCreditsReports[accountId] = report
             qoderCreditsNotice = report.statusText
             await loadQoderCreditRuns(accountId: accountId)
             return report
@@ -467,6 +565,7 @@ final class ConsoleStore: ObservableObject {
         defer { qoderCreditsBusy = nil }
         do {
             let report = try await worker.qoderCreditsClaim(accountId: accountId)
+            qoderCreditsReports[accountId] = report
             qoderCreditsNotice = report.claimText
             await loadQoderCreditRuns(accountId: accountId)
             // 领完之后顺手刷新额度缓存与顶部汇总：那两处的"今日已领"要跟着变。
@@ -761,3 +860,52 @@ final class ConsoleStore: ObservableObject {
         }
     }
 }
+
+#if AICC_VISUAL_TEST && AICC_CONSOLE_VISUAL
+// MARK: - 视觉回归样本（只在控制台离屏渲染时编译）
+
+/// 离屏渲染用：把一组固定样本灌进 store。
+///
+/// 生产构建里这段代码不存在：两个 flag 只在 `scripts/smoke-test-console-visual.sh`
+/// 里同时定义，所以界面不会凭空多出假数据。只判断 `AICC_VISUAL_TEST` 会把这段
+/// 编进设置页 / 看板的离屏渲染（它们引用不到 `ConsoleVisualFixture`）。
+extension ConsoleStore {
+    func applyVisualFixture(_ fixture: ConsoleVisualFixture) {
+        accounts = fixture.accounts
+        accountsError = fixture.accountsError
+        lastAccountsRefresh = fixture.lastAccountsRefresh
+
+        snapshot = fixture.snapshot
+        quotaError = fixture.quotaError
+        lastQuotaRefresh = fixture.lastAccountsRefresh
+
+        workerQuotaRows = fixture.workerQuotaRows
+        workerQuotaError = fixture.workerQuotaError
+        workerQuotaWindowDays = fixture.workerQuotaWindowDays
+
+        tasksOverview = fixture.tasksOverview
+        tasksOverviewError = fixture.tasksOverviewError
+
+        checkin = fixture.checkin
+        checkinAuto = fixture.checkinAuto
+        checkinError = fixture.checkinError
+
+        growthResult = fixture.growthResult
+        growthError = fixture.growthError
+        lastGrowthScan = fixture.lastGrowthScan
+
+        travelRows = fixture.travelRows
+        travelAuto = fixture.travelAuto
+        travelError = fixture.travelError
+
+        qoderProfiles = fixture.qoderProfiles
+        qoderServiceAccounts = fixture.qoderServiceAccounts
+        qoderEditions = fixture.qoderEditions
+        qoderPendingSwitches = fixture.qoderPendingSwitches
+        qoderError = fixture.qoderError
+        qoderSyncedAt = fixture.lastAccountsRefresh
+        qoderCreditsAuto = fixture.qoderCreditsAuto
+        qoderCreditsError = fixture.qoderCreditsError
+    }
+}
+#endif

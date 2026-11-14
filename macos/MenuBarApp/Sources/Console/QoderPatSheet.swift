@@ -78,6 +78,7 @@ struct QoderPatSheet: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .tint(ConsoleTheme.accent)
             .disabled(saving || saved != nil)
 
             VStack(alignment: .leading, spacing: 6) {

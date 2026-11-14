@@ -570,3 +570,141 @@ struct MagpieImportResult: Equatable {
         )
     }
 }
+
+/// 账号页选中的对象。
+///
+/// 三种账号是三种东西，不能合并成一个 id：
+/// - `workbuddy` 来自 `accounts` 表（含国内版 / 国际版）；
+/// - `qoderService` 是 Qoder 平台服务账号（PR #77 支持删除）；
+/// - `qoderProfile` 是本机客户端快照，只读管理，不计入服务账号总数。
+enum ConsoleAccountSelection: Hashable {
+    case workbuddy(String)
+    case qoderService(String)
+    case qoderProfile(String)
+
+    var id: String {
+        switch self {
+        case .workbuddy(let id), .qoderService(let id), .qoderProfile(let id): return id
+        }
+    }
+
+    /// 切换平台筛选后，原选中项是否还在可见范围内。
+    func matches(filter: ConsolePlatformFilter) -> Bool {
+        switch self {
+        case .workbuddy, .qoderService:
+            return filter.showsWorkbuddy || filter.showsQoder
+        case .qoderProfile:
+            return filter.showsQoder
+        }
+    }
+
+    /// QA 钩子用的 `kind:id` 写法，例如 `qoderService:qsa-cn-1`。
+    init?(qaValue: String) {
+        let parts = qaValue.split(separator: ":", maxSplits: 1).map(String.init)
+        guard parts.count == 2, !parts[1].isEmpty else { return nil }
+        switch parts[0] {
+        case "workbuddy": self = .workbuddy(parts[1])
+        case "qoderService": self = .qoderService(parts[1])
+        case "qoderProfile": self = .qoderProfile(parts[1])
+        default: return nil
+        }
+    }
+}
+
+// MARK: - 总览页的平台统计（PRD §3.3）
+
+/// 四个服务平台。**只列真实存在的服务账号**：Qoder 本机 Profile 不算服务账号。
+enum ConsolePlatformKind: String, CaseIterable, Identifiable {
+    case workbuddyCN
+    case workbuddyAI
+    case qoderCN
+    case qoderGlobal
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .workbuddyCN: return "WorkBuddy CN"
+        case .workbuddyAI: return "WorkBuddy AI"
+        case .qoderCN: return "Qoder CN"
+        case .qoderGlobal: return "Qoder International"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .workbuddyCN: return "国内版 · workbuddy.cn"
+        case .workbuddyAI: return "国际版 · workbuddy.ai"
+        case .qoderCN: return "qoder.com（CN）"
+        case .qoderGlobal: return "qoder.com（International）"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .workbuddyCN: return "bubble.left.and.bubble.right.fill"
+        case .workbuddyAI: return "globe.asia.australia.fill"
+        case .qoderCN: return "chevron.left.forwardslash.chevron.right"
+        case .qoderGlobal: return "globe"
+        }
+    }
+
+    /// 点卡片跳到账号页时要用的筛选档位。
+    var filter: ConsolePlatformFilter {
+        switch self {
+        case .workbuddyCN: return .workbuddy
+        case .workbuddyAI: return .workbuddyAI
+        case .qoderCN: return .qoder
+        case .qoderGlobal: return .qoderGlobal
+        }
+    }
+}
+
+/// 一张平台卡片：账号数、授权正常数、异常数。
+struct ConsolePlatformCard: Identifiable, Equatable {
+    let kind: ConsolePlatformKind
+    let accounts: Int
+    let healthy: Int
+
+    var id: String { kind.rawValue }
+    /// 异常 = 总数 - 正常；没有账号时是 0，不显示成"异常"。
+    var issues: Int { max(0, accounts - healthy) }
+}
+
+/// 总览页顶部与平台区的数据。全部从真实账号数组推导。
+struct ConsoleFleetSummary: Equatable {
+    let cards: [ConsolePlatformCard]
+    /// 本机 Qoder 配置数量：**不计入**服务账号总数。
+    let localProfiles: Int
+
+    init(
+        accounts: [ConsoleAccount],
+        qoderAccounts: [QoderServiceAccount],
+        qoderProfiles: [QoderProfile]
+    ) {
+        func workbuddyCard(_ kind: ConsolePlatformKind, international: Bool) -> ConsolePlatformCard {
+            let rows = accounts.filter { $0.isWorkbuddy(international: international) }
+            let healthy = rows.filter { $0.authStatus == "valid" && !$0.isTokenExpired() }.count
+            return ConsolePlatformCard(kind: kind, accounts: rows.count, healthy: healthy)
+        }
+
+        func qoderCard(_ kind: ConsolePlatformKind, edition: String) -> ConsolePlatformCard {
+            let rows = qoderAccounts.filter { $0.edition == edition }
+            let healthy = rows.filter { !$0.usableSources.isEmpty }.count
+            return ConsolePlatformCard(kind: kind, accounts: rows.count, healthy: healthy)
+        }
+
+        cards = [
+            workbuddyCard(.workbuddyCN, international: false),
+            workbuddyCard(.workbuddyAI, international: true),
+            qoderCard(.qoderCN, edition: "qoder_cn"),
+            qoderCard(.qoderGlobal, edition: "qoder_global"),
+        ]
+        localProfiles = qoderProfiles.count
+    }
+
+    /// 服务账号总数：WorkBuddy 两个站点 + Qoder 两个版本，不含本机 Profile。
+    var serviceAccounts: Int { cards.reduce(0) { $0 + $1.accounts } }
+    var healthy: Int { cards.reduce(0) { $0 + $1.healthy } }
+    var issues: Int { cards.reduce(0) { $0 + $1.issues } }
+}
