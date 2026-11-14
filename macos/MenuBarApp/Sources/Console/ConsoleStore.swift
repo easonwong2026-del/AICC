@@ -125,6 +125,12 @@ final class ConsoleStore: ObservableObject {
         if case .running = worker.state {} else {
             await worker.refresh()
         }
+        // 助手是单线程处理请求的：先要那份最便宜的本地汇总，
+        // 否则 Qoder 的目录扫描会把"今日完成"一起拖到十几秒之后。
+        if tasksOverview == nil && !tasksOverviewLoading {
+            await refreshTasksOverview()
+        }
+
         let needQuota = snapshot == nil && !loadingQuota
         let needAccounts = lastAccountsRefresh == nil && !loadingAccounts
         let needQoder = qoderEditions.isEmpty && !qoderLoading
@@ -491,8 +497,12 @@ final class ConsoleStore: ObservableObject {
     /// 顶部汇总条的数字。只来自本地记录，不发网络请求。
     @Published private(set) var tasksOverview: TasksOverview?
     @Published private(set) var tasksOverviewError: String?
+    @Published private(set) var tasksOverviewLoading = false
 
     func refreshTasksOverview() async {
+        guard !tasksOverviewLoading else { return }
+        tasksOverviewLoading = true
+        defer { tasksOverviewLoading = false }
         guard await ensureWorkerReady() else {
             tasksOverviewError = workerFailureText
             return

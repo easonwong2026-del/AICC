@@ -221,6 +221,16 @@ bash scripts/smoke-test-console-visual.sh   # 输出 /private/tmp/aicc-console-q
 
 `docs/console-v3/` 里提交的 33 张是 24 张基础图 + 9 张关键状态图，均由该脚本产出。
 
+`docs/console-v3/real-run/` 是真机运行截图（`screencapture -l <window>`，1120×760）：
+
+| 文件 | 说明 |
+| --- | --- |
+| `before-accounts-1120x760-light.png` | 改造前（`main@ca253b7`）：420pt 分段筛选把工具栏挤爆，「扫…」「…」被截断，两条说明横幅占掉首屏 |
+| `before-overview-1120x760-light.png` | 改造前总览：占位符「待接入」、重复的「查看账号」按钮 |
+| `after-{overview,accounts,quota,checkin}-1120x760-light.png` | 改造后四页的真实运行结果（同一台机器、同一份账号库） |
+
+> 「改造前」两张是用 `main@ca253b7` 的代码 + 固定样本离屏渲染的，避免把桌面上的其它窗口带进仓库。
+
 ---
 
 ## 8. 已知限制
@@ -230,5 +240,7 @@ bash scripts/smoke-test-console-visual.sh   # 输出 /private/tmp/aicc-console-q
 - **Qoder 账号切换永久关闭**：`main.sqlite` 未按账号隔离，只保留识别 / 扫描 / 导入 / 快照能力。
 - **WorkBuddy 账号删除没有后端接口**：详情页不提供该按钮，避免假入口。
 - **WorkBuddy 单份授权移除没有接口**：只能重新授权覆盖，或用 Magpie 侧操作。
-- **首屏账号数约 6–9 秒**（账号助手进程启动 + 健康检查），此后各页数据并行加载。
+- **首屏耗时**：账号数约 5–8 秒（助手进程启动 + 健康检查）；`tasks.overview`（今日完成/待完成）
+  在本机实测要 15–20 秒，期间显示「读取本地记录中」而不是 0；Qoder 列表同理，期间显示「尚未同步」。
+  这是助手侧的单线程 RPC 耗时，UI 侧已把最便宜的汇总排在 Qoder 目录扫描之前。
 - 桌面小组件在 ad-hoc 签名换构建后会丢实例，需要重新添加（与 UI 无关，见 RELEASING.md）。
