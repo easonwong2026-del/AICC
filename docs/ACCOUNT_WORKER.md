@@ -425,7 +425,7 @@ WorkBuddy AI 是另一个站点，拿它的授权请求这些接口，轻则 401
 | `usage` | `windowDays` / `requests` / `credits` / `truncated` / 按模型的明细 |
 | `syncAt` / `capturedAt` / `error` | 抓取时间、快照时间、失败原因（已过 `sanitize`） |
 
-六条硬规则：
+七条硬规则：
 
 1. **未知不当 0**：`Packages` 为空、**某个包缺 `CycleTotalCapacity` / `CycleUsedCapacity`**、
    平台未接入，都返回 `null`。聚合是**按字段完整性**做的——三个字段各自累计，
@@ -433,13 +433,24 @@ WorkBuddy AI 是另一个站点，拿它的授权请求这些接口，轻则 401
    "不知道"写成"确实是 0"，界面就会画成"额度用完了"。
 2. **部分成功**：额度与用量是两次独立请求。额度成功、用量 429/超时/解析失败时，
    余额照常返回，失败只写进 `usageError`。
-3. **缓存 5 分钟**：`refresh=false` 且快照在 300 秒内 → 直接用，不打网络。
-   超过就重取。`refresh=true` 一定重取。
+3. **缓存 5 分钟 + 窗口必须一致**：`refresh=false`、快照在 300 秒内、**且快照里
+   `usage.windowDays` 等于本次请求的 `days`** 才算命中。窗口不一致时**余额复用、
+   用量按新窗口重取**——7 天的消耗绝不能被 30 天的查询拿去复用（实测：
+   `days=7` 是 97 次 / 624.11 credit，`days=30` 重取后是 396 次 / 2346.34 credit）。
+   上次用量取数失败（`usage=null`）也不算命中，下一轮会重试用量。
 4. **刷新失败不丢数据**：有旧快照时返回旧数据并标 `status="stale"` + `stale=true`
    + `error`（本次失败原因）；没有旧快照才是真正的失败行。失败行**不落库**——
    一次临时 429 不该变成历史记录。
 5. **批量有界**：3 路并发（`MAX_CONCURRENT`）、整轮 20 秒硬预算（`BOARD_BUDGET`），
    超预算的账号直接返回"缓存 + 过期"或 `timeout`，不拖累已经拿到的账号。
    Swift 侧 RPC 超时 45 秒，**必须大于**助手的预算。
-6. **只读**：`quota.board` / `quota.history` 不写 `last_used_at`、不改 `auth_status`、
+   **钥匙串读取也在预算内**：`broker::resolve` 是同步阻塞调用，跑在 `spawn_blocking`
+   里并套 `timeout_at`。首次授权弹窗时调用方最多等 20 秒就降级返回，
+   不会把整轮看板挂住；但那个被阻塞的线程会一直到用户回答弹窗为止——
+   这是 macOS 钥匙串的行为，无法取消。
+6. **快照写入原子核验身份**：写入是同一条 `INSERT … SELECT … WHERE EXISTS`，
+   只有账号仍存在、`provider` 未变、`auth_epoch` 未变才落库。取数有两三次网络往返，
+   期间账号可能被删除或重新授权；账号 id 是 uid 的哈希，重新导入会复用同一个 id，
+   一条晚到的快照会被当成"这个新账号刚取过"。账号删除时另有一条显式清理。
+7. **只读**：`quota.board` / `quota.history` 不写 `last_used_at`、不改 `auth_status`、
    不刷新令牌。取数失败只影响这一行。
