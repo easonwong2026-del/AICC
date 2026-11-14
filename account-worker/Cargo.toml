@@ -20,6 +20,8 @@ serde_json = "1"
 # 登录地址校验：主机必须走标准解析器，手工 split 与浏览器解析不一致（反斜杠即路径分隔符）。
 url = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# 额度看板要拿到 HTTP 状态码区分 401/429/5xx（vendored crate 已有同版本依赖，不新增下载）。
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # 登录流程要跑异步 HTTP：一个 current-thread runtime 足够（RPC 本来就是串行的）。
 tokio = { version = "1", features = ["rt", "time", "net", "io-util", "macros"] }
 uuid = { version = "1", features = ["v4"] }

@@ -13,6 +13,7 @@ mod handlers;
 mod paths;
 mod providers;
 mod qoder_profiles;
+mod quota;
 mod rpc;
 mod securestore;
 mod storage;

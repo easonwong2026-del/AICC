@@ -58,6 +58,7 @@ dependencies = [
  "cbc",
  "chrono",
  "pbkdf2",
+ "reqwest",
  "rusqlite",
  "security-framework",
  "serde",
