@@ -296,6 +296,21 @@ CREATE TABLE IF NOT EXISTS quota_snapshots (\
 );\
 CREATE INDEX IF NOT EXISTS idx_quota_snapshots_account ON quota_snapshots (account_id, captured_at);";
 
+/// v16：PAT 授权来源 + Qoder 账号的凭据版本号（PR #73）。
+///
+/// 两件事，都必须做，且**不能只做一半**：
+///
+/// 1. `qoder_authorizations.source` 的 CHECK 原本只有 `magpie` / `own_browser`。
+///    PAT 是**第三种独立来源**：它和浏览器授权可以同时存在，各自一行、各自一份
+///    钥匙串凭据，谁也不能覆盖谁。SQLite 改不了 CHECK，只能重建表搬数据；
+/// 2. `qoder_accounts.auth_epoch`：PR #74 给 `accounts` 加过同名字段，用来让
+///    "取数期间账号被重新授权"的在途额度快照作废。Qoder 服务账号在另一张表里，
+///    没有这个字段，（#75）的晚到快照就会写回旧令牌的数据。
+///
+/// 具体步骤是 Rust（`qoder_accounts::rebuild_v16`）而不是纯 SQL：两步都要先
+/// 检测现状，重复执行必须是空操作——人工把 `user_version` 回拨、或者迁移事务
+/// 已提交但版本号没写下去时，再来一次不能炸在 `duplicate column name` 上。
+///
 /// 一次迁移里的一步：纯 SQL，或者需要 Rust 参与的数据迁移。
 enum MigrationStep {
     Sql(&'static str),
@@ -384,9 +399,14 @@ const MIGRATIONS: &[Migration] = &[
         version: 15,
         steps: &[MigrationStep::Rust(quota::rebuild_v15)],
     },
+    // v16：Qoder PAT 来源 + 账号凭据版本号。重建一张子表、追加一列。
+    Migration {
+        version: 16,
+        steps: &[MigrationStep::Rust(qoder_accounts::rebuild_v16)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 15;
+pub const LATEST_VERSION: i64 = 16;
 
 pub struct Db {
     conn: Connection,
@@ -1288,5 +1308,68 @@ mod tests {
             .unwrap();
         assert!(db.delete_account(&acc.id).unwrap());
         assert!(!db.delete_account(&acc.id).unwrap());
+    }
+
+    /// v15 → v16：**旧 Qoder 授权一行不丢**，重建后的表接受 `own_pat`，
+    /// 仍然拒绝表外的来源，账号多了 `auth_epoch` 且默认 0。
+    ///
+    /// 这是本轮唯一一次"重建已有表"的迁移，必须在真实旧库形态上验证，
+    /// 而不是新建一个库再看它长得对不对。
+    #[test]
+    fn v15_upgrade_keeps_qoder_authorizations_and_accepts_pat() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = legacy_db(dir.path(), 15);
+        {
+            let conn = Connection::open(&path).expect("open legacy");
+            conn.execute_batch(
+                "INSERT INTO qoder_accounts (id, edition, uid, nickname, email, created_at, updated_at)
+                 VALUES ('qa_old', 'qoder_cn', 'u-old', '旧账号', 'old@e.com',
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                 INSERT INTO qoder_authorizations
+                     (id, account_id, source, source_key, secret_ref, auth_status,
+                      token_expires_at, fingerprint, created_at, updated_at)
+                 VALUES ('qz_old', 'qa_old', 'own_browser', NULL, 'keychain:qoder/qa_old/own/access',
+                         'valid', '2027-01-01T00:00:00Z', 'fp-old',
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');",
+            )
+            .expect("seed qoder");
+        }
+
+        let mut db = Db::open(&path).expect("open");
+        assert_eq!(db.schema_version().unwrap(), LATEST_VERSION);
+
+        let account = db.get_qoder_account("qa_old").unwrap().expect("账号还在");
+        assert_eq!(account.nickname, "旧账号");
+        assert_eq!(account.email.as_deref(), Some("old@e.com"));
+        assert_eq!(account.auth_epoch, 0, "旧账号从 0 起算");
+
+        let rows = db.list_qoder_authorizations("qa_old").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, "own_browser");
+        assert_eq!(rows[0].auth_status, "valid");
+        assert_eq!(rows[0].fingerprint.as_deref(), Some("fp-old"));
+
+        // 新来源可写，且与旧来源并存。
+        db.upsert_qoder_authorization(
+            "qa_old",
+            "own_pat",
+            None,
+            Some("keychain:qoder/qa_old/pat/token"),
+            "valid",
+            None,
+            Some("fp-pat"),
+        )
+        .expect("own_pat 必须被 v16 接受");
+        assert_eq!(db.list_qoder_authorizations("qa_old").unwrap().len(), 2);
+        assert!(db.qoder_auth_epoch("qa_old").unwrap().unwrap() > 0);
+
+        // CHECK 仍然生效：表外来源一律拒绝。
+        assert!(db
+            .upsert_qoder_authorization("qa_old", "curl", None, None, "valid", None, None)
+            .is_err());
+
+        // 级联：删账号把两份授权一起带走。
+        assert!(db.delete_qoder_account("qa_old").unwrap());
+        assert!(db.list_qoder_authorizations("qa_old").unwrap().is_empty());
     }
 }

@@ -7,7 +7,8 @@ use serde_json::{json, Value};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::app::App;
-use crate::providers::{magpie, qoder, workbuddy, workbuddy_auth};
+use crate::providers::qoder_edition::QoderEdition;
+use crate::providers::{magpie, qoder, qoder_auth, qoder_pat, workbuddy, workbuddy_auth};
 use crate::qoder_profiles::manager as qoder_manager;
 use crate::rpc::{RpcError, RpcResult};
 use crate::securestore::SecretErrorKind;
@@ -61,6 +62,14 @@ pub const METHODS: &[&str] = &[
     "qoder.profiles.recover",
     // ---- Qoder 平台账号（PR #71，v13）----
     "qoder.accounts.list",
+    // ---- Qoder 设备授权（PR #73）----
+    "qoder.auth.start",
+    "qoder.auth.poll",
+    "qoder.auth.cancel",
+    // ---- Qoder PAT 备用授权（PR #73 第二轮）----
+    "qoder.auth.pat.save",
+    "qoder.auth.pat.check",
+    "qoder.auth.pat.remove",
     "auth.workbuddy.start",
     "auth.workbuddy.poll",
     "auth.workbuddy.cancel",
@@ -383,6 +392,134 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
         "qoder.profiles.recover" => qoder_manager::recover(app, params),
 
         "qoder.accounts.list" => qoder_accounts_list(app, params),
+
+        // ---- Qoder 设备授权（PR #73）----
+        //
+        // 与 WorkBuddy 的扫码登录是**两套独立流程**：域名、client id、钥匙串键
+        // 都按 edition 分开；这里也不碰 `accounts` 表（Qoder 账号在 v13 的表里）。
+        "qoder.auth.start" => {
+            let raw = require_str(params, "edition")?;
+            let edition = QoderEdition::parse(&raw).ok_or_else(|| {
+                RpcError::invalid_params("edition 只支持 qoder_cn / qoder_global")
+            })?;
+            // 发起阶段不联网：只生成 PKCE 并返回登录页。
+            let info = qoder_auth::start(edition);
+            Ok(json!({
+                "edition": edition.as_str(),
+                "displayName": edition.display_name(),
+                "loginId": info.login_id,
+                "verificationUri": info.verification_uri,
+                "expiresIn": info.expires_in,
+                "qrPayload": info.verification_uri,
+            }))
+        }
+
+        "qoder.auth.poll" => {
+            let login_id = require_str(params, "loginId")?;
+            match qoder_auth::poll(&login_id).await {
+                qoder_auth::Polled::Pending => Ok(json!({ "state": "pending" })),
+                qoder_auth::Polled::Failed(err) => Ok(json!({
+                    "state": poll_state(err.kind),
+                    "error": { "kind": err.kind, "message": err.message },
+                })),
+                qoder_auth::Polled::Token(token) => {
+                    // 版本只能从会话里原子取：取不到就说明会话已取消 / 过期 / 结束，
+                    // 一律不落库（与 #72 同一套门禁，不允许任何默认值兜底）。
+                    let edition = match qoder_auth::begin_commit(&login_id) {
+                        Ok(edition) => edition,
+                        Err(err) => {
+                            return Ok(json!({
+                                "state": poll_state(err.kind),
+                                "error": { "kind": err.kind, "message": err.message },
+                            }))
+                        }
+                    };
+                    match qoder_auth::persist(app, edition, &token) {
+                        Ok(saved) => {
+                            qoder_auth::complete(&login_id);
+                            let mut value = saved.to_json();
+                            value["state"] = json!("success");
+                            Ok(value)
+                        }
+                        Err(err) => {
+                            qoder_auth::fail(
+                                &login_id,
+                                qoder_auth::KIND_NETWORK,
+                                err.message.clone(),
+                            );
+                            Ok(json!({
+                                "state": "failed",
+                                "error": { "kind": "storage", "message": err.message },
+                            }))
+                        }
+                    }
+                }
+            }
+        }
+
+        "qoder.auth.cancel" => {
+            let login_id = require_str(params, "loginId")?;
+            Ok(json!({ "cancelled": qoder_auth::cancel(&login_id) }))
+        }
+
+        // ---- Qoder PAT 备用授权 ----
+        //
+        // 三条规则决定了这里的形状：
+        // 1. **令牌只从请求进、只往钥匙串去**：不回显、不进错误信息、不进数据库。
+        // 2. **落库前必须真打一次 userinfo**：拿不到 uid 就不写。
+        // 3. **"身份已验证" ≠ "能领 Credits"**：返回体里分开报，后者恒为 unknown。
+        "qoder.auth.pat.save" => {
+            let edition = require_edition(params)?;
+            let raw = require_str(params, "token")?;
+            let token =
+                qoder_pat::normalize(&raw).map_err(|err| RpcError::invalid_params(err.message))?;
+            match qoder_pat::verify(edition, &token).await {
+                Ok(identity) => {
+                    let saved = qoder_pat::persist(app, edition, &token, &identity)?;
+                    let mut value = saved.to_json();
+                    value["saved"] = json!(true);
+                    value["state"] = json!("verified_identity");
+                    Ok(value)
+                }
+                Err(err) => Ok(json!({
+                    "saved": false,
+                    "state": "failed",
+                    "error": err.to_json(),
+                })),
+            }
+        }
+
+        "qoder.auth.pat.check" => {
+            let account_id = require_str(params, "accountId")?;
+            let account = app
+                .with_db(|db| db.get_qoder_account(&account_id))?
+                .ok_or_else(|| RpcError::not_found(format!("Qoder 账号不存在：{account_id}")))?;
+            let edition = QoderEdition::parse(&account.edition)
+                .ok_or_else(|| RpcError::invalid_params("账号的 edition 非法"))?;
+            match qoder_pat::recheck(app, edition, &account_id).await {
+                Ok(identity) => Ok(json!({
+                    "state": "valid",
+                    "identity": {
+                        "uid": identity.uid,
+                        "name": identity.name,
+                        "email": identity.email,
+                    },
+                })),
+                Err(err) => Ok(json!({
+                    "state": "failed",
+                    "error": err.to_json(),
+                })),
+            }
+        }
+
+        "qoder.auth.pat.remove" => {
+            let account_id = require_str(params, "accountId")?;
+            let removed = qoder_pat::remove(app, &account_id)?;
+            Ok(json!({
+                "removed": removed.removed,
+                "secretDeleted": removed.secret_deleted,
+            }))
+        }
 
         // ---- WorkBuddy 扫码登录（PR1b-1）----
         "auth.workbuddy.start" => {
@@ -1906,6 +2043,16 @@ fn require_str(params: &Value, key: &str) -> RpcResult<String> {
         .map(str::to_string)
         .filter(|v| !v.trim().is_empty())
         .ok_or_else(|| RpcError::invalid_params(format!("缺少参数 {key}")))
+}
+
+/// 必须显式给出、且只能是两个合法版本之一。
+///
+/// **绝不回落**到任何一个默认版本：那会用错站点去验凭据，
+/// 把一次国内版操作记成国际版（或反过来）。
+fn require_edition(params: &Value) -> RpcResult<QoderEdition> {
+    let raw = require_str(params, "edition")?;
+    QoderEdition::parse(&raw)
+        .ok_or_else(|| RpcError::invalid_params("edition 只支持 qoder_cn / qoder_global"))
 }
 
 /// 可选的字符串数组参数。缺省 / `null` / 类型不对都当空数组（= 全部）。

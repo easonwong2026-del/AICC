@@ -70,6 +70,9 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `qoder.profiles.status` | 运行状态汇总（`running` / `stopped` / `unknown` 三态，每次都重新核实 PID）；**只读**，未完成切换放在 `pendingSwitches` 里 | 否 |
 | `qoder.profiles.recover` | **显式**恢复未完成切换：必须能证明对应客户端已退出（`pgrep` 退出码 1），`Running` / `Unknown` / 找不到客户端都拒绝；任一条恢复失败返回错误 + `blocked` 明细 | 否 |
 | `auth.workbuddy.start` / `poll` / `cancel` | 官方 OAuth：发起、轮询、取消（PR1b-1）。`start` 接受 `variant`（`cn` / `ai`，**严格解析**，非法值直接报参数错）；返回值带 `provider`，轮询成功后账号按**会话档位**落 `accounts.provider`。同一 URL 既能在浏览器打开也能渲染成二维码 | 是 |
+| `qoder.auth.start` | 发起 Qoder **设备授权**（PR #73）：`edition` 只接受 `qoder_cn` / `qoder_global`，本地生成 PKCE + nonce + machine_id，返回该站点的 `/device/selectAccounts` 登录页。**不联网** | 否 |
+| `qoder.auth.poll` | 轮询设备码：只有 `200` 且带非空 `token` 才算完成，其余（含 4xx、网络抖动）都继续等，15 分钟 TTL 兜底；成功后令牌进钥匙串、账号与 `own_browser` 授权入库，**版本取自会话**（提交门禁，无默认值兜底） | 是 |
+| `qoder.auth.cancel` | 取消一次设备授权；只对仍在等待的会话生效，已进入落库的会话取消落空 | 否 |
 | `auth.workbuddy.refresh` | 刷新令牌；`auth_source=magpie` 的账号改为重新同步 | 是 |
 | `auth.workbuddy.status` | 用当前选用的授权探测一次登录态（只读）：先 `Valid/Unauthorized/Transient` 分类，再过 401 才切源 | 是 |
 | `providers.magpie.accounts` | 列出 Magpie 里已登录的**四个 provider**（`workbuddy` / `workbuddy-ai` / `qoder` / `qoder-cn`）账号，逐条带 `platform` / `provider` / `edition` / `importTarget`，并标出哪些已导入；**不含令牌** | 否 |

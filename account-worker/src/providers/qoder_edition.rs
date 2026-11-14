@@ -91,6 +91,51 @@ impl QoderEdition {
         matches!(self, Self::Global)
     }
 
+    // -----------------------------------------------------------------------
+    // 设备授权（PR #73）：两套**独立**的站点与 client id
+    // -----------------------------------------------------------------------
+    //
+    // 参数来自客户端自己的 CLI（`@qoder-ai/qodercli` / `@qodercn-ai/qoderclicn`），
+    // 见 docs/QODER_DEVICE_AUTH.md。**不能混用**：越站签发的 device token 会被
+    // 网关拒绝，而且会把国际版令牌发到国内域名。
+
+    /// 浏览器登录页所在站点（`/device/selectAccounts` 挂在这个 origin 上）。
+    pub fn web_base(self) -> &'static str {
+        match self {
+            Self::Cn => "https://qoder.cn",
+            Self::Global => "https://qoder.com",
+        }
+    }
+
+    /// 设备码轮询与用户信息所在站点。
+    pub fn openapi_base(self) -> &'static str {
+        match self {
+            Self::Cn => "https://openapi.qoder.com.cn",
+            Self::Global => "https://openapi.qoder.sh",
+        }
+    }
+
+    /// 模型 / 网关站点（#74 领取 Credits 时用）。
+    pub fn api_base(self) -> &'static str {
+        match self {
+            Self::Cn => "https://gateway.qoder.com.cn",
+            Self::Global => "https://api3.qoder.sh",
+        }
+    }
+
+    /// 设备授权用的 client id（各自 CLI 的生产值，互不通用）。
+    pub fn client_id(self) -> &'static str {
+        match self {
+            Self::Cn => "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb",
+            Self::Global => "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa",
+        }
+    }
+
+    /// 签发 `redirect_uri` 的情况：两站都是空串（CLI 不发）。
+    pub fn redirect_uri(self) -> &'static str {
+        ""
+    }
+
     /// 是否能"同时跑多个账号"。
     ///
     /// - International：实测**不能**——客户端忽略 `--user-data-dir`，
