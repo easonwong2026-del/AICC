@@ -17,6 +17,8 @@ wb-switch-core = { path = "vendor/crates/wb-switch-core" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 登录地址校验：主机必须走标准解析器，手工 split 与浏览器解析不一致（反斜杠即路径分隔符）。
+url = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # 登录流程要跑异步 HTTP：一个 current-thread runtime 足够（RPC 本来就是串行的）。
 tokio = { version = "1", features = ["rt", "time", "net", "io-util", "macros"] }

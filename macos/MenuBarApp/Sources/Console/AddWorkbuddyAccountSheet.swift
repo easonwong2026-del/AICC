@@ -3,10 +3,13 @@ import CoreImage
 import CoreImage.CIFilterBuiltins
 import SwiftUI
 
-/// 添加 WorkBuddy 账号：显示官方登录二维码，轮询到成功为止。
+/// 添加 WorkBuddy 账号：**浏览器登录为主**，扫码为次，两者共用同一个会话。
 ///
 /// 流程完全走官方 `auth/state` → `auth/token`，不读也不改 WorkBuddy 客户端
-/// 自己的登录态；令牌由助手直接写进钥匙串，这个界面拿不到token。
+/// 自己的登录态；令牌由助手直接写进钥匙串，这个界面拿不到 token。
+///
+/// 国内版与国际版是**两套 OAuth 与两套域名**：页面上必须选清楚，
+/// 登录会话也不会在完成后被"看起来像"的 domain 改档。
 struct AddWorkbuddyAccountSheet: View {
     @ObservedObject var store: ConsoleStore
     let onFinished: () -> Void
@@ -20,6 +23,7 @@ struct AddWorkbuddyAccountSheet: View {
     @State private var deadline: Date?
     @State private var now = Date()
     @State private var pollTask: Task<Void, Never>?
+    @State private var variant: WorkbuddyVariant = .cn
 
     private var isSuccess: Bool {
         if case .success = phase { return true }
@@ -53,9 +57,9 @@ struct AddWorkbuddyAccountSheet: View {
                 .frame(width: 28, height: 28)
                 .background(ConsoleTheme.accentSoft, in: RoundedRectangle(cornerRadius: 8))
             VStack(alignment: .leading, spacing: 2) {
-                Text("添加 WorkBuddy 账号").font(.system(size: 13, weight: .semibold))
+                Text("添加 \(variant.title) 账号").font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(ConsoleTheme.text)
-                Text("用手机 WorkBuddy 扫码授权")
+                Text(variant.subtitle)
                     .font(.system(size: 11))
                     .foregroundStyle(ConsoleTheme.secondaryText)
             }
@@ -67,11 +71,59 @@ struct AddWorkbuddyAccountSheet: View {
     @ViewBuilder
     private var content: some View {
         VStack(spacing: 14) {
+            variantPicker
+            browserBlock
             qrBlock
             statusLine
         }
         .padding(.vertical, 18)
         .padding(.horizontal, 20)
+    }
+
+    /// 选站点。切换即重开一个会话：state 与后续 token 都是按站点签发的。
+    private var variantPicker: some View {
+        Picker("", selection: $variant) {
+            ForEach(WorkbuddyVariant.allCases) { option in
+                Text(option.title).tag(option)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .disabled(starting || isSuccess)
+        .onChange(of: variant) { _, _ in
+            guard !starting, !isSuccess else { return }
+            Task { await begin() }
+        }
+    }
+
+    /// 主入口：在系统默认浏览器里完成授权。不要求回调到 AICC，也不装扩展。
+    private var browserBlock: some View {
+        VStack(spacing: 8) {
+            Button {
+                openInBrowser()
+            } label: {
+                Label("在浏览器中登录", systemImage: "safari")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(ConsolePrimaryButtonStyle())
+            .disabled(start == nil || starting || isTerminal)
+
+            Text("浏览器里登录完成后这里会自动刷新；也可以用下面的二维码在手机上扫。")
+                .font(.system(size: 10))
+                .foregroundStyle(ConsoleTheme.tertiaryText)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func openInBrowser() {
+        // 地址来自服务端：只接受本站点的 https 登录页，其余 scheme / 域名一律不打开。
+        guard let start, let url = variant.trustedLoginURL(start.verificationUri) else {
+            failure = "登录地址不可信，已拒绝打开"
+            phase = .failed(kind: "untrusted_url", message: failure ?? "登录地址不可信")
+            return
+        }
+        NSWorkspace.shared.open(url)
     }
 
     private var qrBlock: some View {
@@ -81,7 +133,10 @@ struct AddWorkbuddyAccountSheet: View {
                 .overlay(
                     RoundedRectangle(cornerRadius: 12).strokeBorder(ConsoleTheme.border, lineWidth: 1)
                 )
-            if let start, let image = Self.qrImage(from: start.verificationUri) {
+            // 二维码内容同样按可信域名过滤：扫出去的就是这个字符串，不能是任意链接。
+            if let start,
+               let url = variant.trustedLoginURL(start.verificationUri),
+               let image = Self.qrImage(from: url.absoluteString) {
                 Image(nsImage: image)
                     .interpolation(.none)
                     .resizable()
@@ -147,7 +202,7 @@ struct AddWorkbuddyAccountSheet: View {
             switch phase {
             case .pending:
                 VStack(spacing: 4) {
-                    Text("等待扫码确认…")
+                    Text("等待\(variant.title)授权确认…")
                         .font(.system(size: 12))
                         .foregroundStyle(ConsoleTheme.text)
                     if let deadline {
@@ -232,14 +287,14 @@ struct AddWorkbuddyAccountSheet: View {
         }
 
         do {
-            let session = try await store.worker.startWorkbuddyLogin()
+            let session = try await store.worker.startWorkbuddyLogin(variant: variant)
             start = session
             deadline = Date().addingTimeInterval(TimeInterval(session.expiresIn))
             startPolling(session.loginId)
         } catch {
             start = nil
             failure = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            phase = .failed(kind: "start", message: failure ?? "无法获取二维码")
+            phase = .failed(kind: "start", message: failure ?? "无法开始登录")
         }
     }
 

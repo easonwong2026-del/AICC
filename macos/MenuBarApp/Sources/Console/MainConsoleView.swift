@@ -20,7 +20,7 @@ enum ConsolePage: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .overview: return "账号、额度与运行状态一屏看完"
-        case .accounts: return "管理 WorkBuddy 与 Qoder CN 账号"
+        case .accounts: return "管理 WorkBuddy（国内版 / 国际版）与 Qoder 账号"
         case .quota: return "Magpie 各服务商额度与重置时间"
         case .checkin: return "每日签到与成长任务"
         }

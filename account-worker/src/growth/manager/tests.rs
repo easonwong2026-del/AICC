@@ -954,16 +954,16 @@ async fn closing_the_switch_after_accept_skips_the_claim_phase() {
 #[tokio::test]
 async fn run_account_refuses_when_the_account_is_missing() {
     let (app, _dir) = test_app();
-    let mock = Mock::with_tasks(vec![]);
+    let mock = Mock::with_tasks(vec![task("a", "TODO", false)]);
     let open = || true;
 
-    let run = run_account(
+    // 走生产入口同一条路径（`run_account_guarded`），只是把传输层换成 Mock，
+    // 这样 `calls().is_empty()` 才是"一个请求都没发"的真凭证。
+    let run = run_account_guarded(
         &app,
         "no-such-account",
         "测试号",
-        "access",
-        "uid",
-        "domain",
+        &mock,
         Options::FULL,
         &open,
     )
@@ -975,7 +975,7 @@ async fn run_account_refuses_when_the_account_is_missing() {
         "{:?}",
         run.errors
     );
-    assert!(mock.calls().is_empty());
+    assert!(mock.calls().is_empty(), "{:?}", mock.calls());
 }
 
 /// 国际版：连任务列表都不拉，直接拒绝。
@@ -983,6 +983,7 @@ async fn run_account_refuses_when_the_account_is_missing() {
 async fn run_account_refuses_workbuddy_ai_before_any_request() {
     use crate::storage::AccountInput;
     let (app, _dir) = test_app();
+    let mock = Mock::with_tasks(vec![task("a", "TODO", false)]);
     let id = app
         .with_db(|db| {
             db.upsert_account(&AccountInput {

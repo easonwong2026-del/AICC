@@ -28,7 +28,7 @@ use crate::rpc::{RpcError, RpcResult};
 use crate::storage::checkin::CheckinRecord;
 use crate::storage::AccountRecord;
 
-use api::{CheckinError, ErrorKind, Transport};
+use api::{CheckinError, ErrorKind};
 use manager::Source;
 use state::State;
 
@@ -73,7 +73,7 @@ pub async fn probe_account(app: &Arc<App>, account: &AccountRecord) -> AccountSt
         status.error = Some(CheckinError::new(
             ErrorKind::Business,
             if account.platform == "workbuddy" {
-                "WorkBuddy AI（国际版）的签到接口尚未接入；AICC 没有发送任何请求".to_string()
+                "WorkBuddy AI（国际版）没有签到功能；AICC 没有发送任何请求".to_string()
             } else {
                 "签到只支持 WorkBuddy".to_string()
             },
@@ -242,7 +242,8 @@ pub async fn fleet_status(app: &Arc<App>, ids: &[String], cached: bool) -> Value
         .with_db(|db| db.list_accounts(&Default::default()))
         .unwrap_or_default()
         .into_iter()
-        .filter(|account| account.platform == "workbuddy")
+        // 国际版没有签到这项功能，不是"暂不支持"：列表里根本不该出现。
+        .filter(|account| account.supports_workbuddy_cn_apis())
         .filter(|account| ids.is_empty() || ids.contains(&account.id))
         .collect::<Vec<_>>();
 
@@ -321,7 +322,8 @@ pub async fn run_pending(app: &Arc<App>, ids: &[String]) -> Value {
         .with_db(|db| db.list_accounts(&Default::default()))
         .unwrap_or_default()
         .into_iter()
-        .filter(|account| account.platform == "workbuddy")
+        // 国际版没有签到这项功能，不是"暂不支持"：列表里根本不该出现。
+        .filter(|account| account.supports_workbuddy_cn_apis())
         .filter(|account| ids.is_empty() || ids.contains(&account.id))
         .collect::<Vec<_>>();
 

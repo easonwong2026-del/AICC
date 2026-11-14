@@ -239,7 +239,11 @@ pub fn auto_status(app: &App) -> Value {
     let mut enabled = 0usize;
     let mut next_all: Option<DateTime<FixedOffset>> = None;
     for account in &accounts {
-        let supported = account.supports_workbuddy_cn_apis();
+        // 国际版没有签到：不进调度，也不在列表里出现。
+        if !account.supports_workbuddy_cn_apis() {
+            continue;
+        }
+        let supported = true;
         let done = done_today(app, &account.id, &today);
         let next = read_next_at(app, &account.id);
         let at = next_run_at(now, &account.id, done, next);
@@ -263,11 +267,6 @@ pub fn auto_status(app: &App) -> Value {
             "running": manager::is_running(&account.id),
             "provider": account.provider,
             "supported": supported,
-            "unsupportedReason": if supported {
-                Value::Null
-            } else {
-                json!("WorkBuddy AI（国际版）的签到接口尚未接入")
-            },
         }));
     }
 
@@ -860,22 +859,23 @@ mod tests {
         assert_eq!(State::Stopped.as_str(), "stopped");
     }
 
+    /// 国际版**没有签到这项功能**：它不该出现在签到列表里，
+    /// 也不该被自动轮次选中 —— 不是"暂不支持"，是根本没有。
     #[test]
-    fn the_auto_round_skips_workbuddy_ai_but_still_lists_it() {
+    fn workbuddy_ai_is_absent_from_the_checkin_surface() {
         let (app, _dir) = test_app();
         let cn = account(&app, "cn-uid", true);
-        let ai = app
-            .with_db(|db| {
-                let record = db.upsert_account(&AccountInput {
-                    platform: "workbuddy".to_string(),
-                    uid: "ai-uid".to_string(),
-                    provider: Some("workbuddy_ai".to_string()),
-                    checkin_enabled: Some(true),
-                    ..Default::default()
-                })?;
-                Ok(record.id)
-            })
-            .expect("ai account");
+        app.with_db(|db| {
+            db.upsert_account(&AccountInput {
+                platform: "workbuddy".to_string(),
+                uid: "ai-uid".to_string(),
+                provider: Some("workbuddy_ai".to_string()),
+                checkin_enabled: Some(true),
+                ..Default::default()
+            })?;
+            Ok(())
+        })
+        .expect("ai account");
 
         let picked: Vec<String> = enabled_accounts(&app)
             .iter()
@@ -885,18 +885,9 @@ mod tests {
 
         let status = auto_status(&app);
         let rows = status["accounts"].as_array().unwrap();
-        assert_eq!(rows.len(), 2, "界面上仍要看得见国际版账号");
-        let ai_row = rows
-            .iter()
-            .find(|row| row["accountId"] == serde_json::json!(ai))
-            .expect("ai row");
-        assert_eq!(ai_row["supported"], serde_json::json!(false));
-        assert_eq!(
-            ai_row["nextRunAt"],
-            serde_json::Value::Null,
-            "不调度就没有下一次"
-        );
-        assert_eq!(ai_row["provider"], serde_json::json!("workbuddy_ai"));
+        assert_eq!(rows.len(), 1, "签到列表里不该出现国际版：{rows:?}");
+        assert_eq!(rows[0]["accountId"], serde_json::json!(cn));
         assert_eq!(status["enabledAccounts"], serde_json::json!(1));
+        assert_eq!(status["totalAccounts"], serde_json::json!(1));
     }
 }

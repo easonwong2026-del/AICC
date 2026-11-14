@@ -182,12 +182,144 @@ final class ConsoleModelsTests: XCTestCase {
         XCTAssertEqual(start.loginId, "wb1b_abc")
         XCTAssertEqual(start.expiresIn, 600)
         XCTAssertTrue(start.verificationUri.contains("codebuddy.cn"))
+        // 老助手不带 variant：按国内版处理，不能猜成国际版。
+        XCTAssertEqual(start.variant, .cn)
+    }
+
+    func testLoginStartCarriesTheSelectedVariant() throws {
+        let start = try XCTUnwrap(WorkbuddyLoginStart.parse([
+            "loginId": "wb1b_ai",
+            "verificationUri": "https://www.workbuddy.ai/login?state=1",
+            "expiresIn": 600,
+            "variant": "ai",
+            "provider": "workbuddy_ai",
+        ]))
+        XCTAssertEqual(start.variant, .ai)
+        XCTAssertEqual(start.variant.provider, "workbuddy_ai")
+        XCTAssertEqual(start.variant.title, "WorkBuddy AI")
+    }
+
+    func testVariantNamesAndProvidersStayDistinct() {
+        XCTAssertEqual(WorkbuddyVariant.cn.provider, "workbuddy")
+        XCTAssertEqual(WorkbuddyVariant.ai.provider, "workbuddy_ai")
+        XCTAssertNotEqual(WorkbuddyVariant.cn.title, WorkbuddyVariant.ai.title)
+        XCTAssertTrue(WorkbuddyVariant.ai.subtitle.contains("workbuddy.ai"))
+    }
+
+    /// 筛选条必须把两个站点分开：选 WorkBuddy 不该把国际版也带出来。
+    func testPlatformFilterSeparatesTheTwoWorkbuddySites() {
+        let cn = ConsoleAccount(
+            id: "a1", platform: "workbuddy", provider: "workbuddy", uid: "u1", nickname: "国内"
+        )
+        let ai = ConsoleAccount(
+            id: "a2", platform: "workbuddy", provider: "workbuddy_ai", uid: "u2", nickname: "海外"
+        )
+        XCTAssertTrue(ConsolePlatformFilter.all.includes(cn))
+        XCTAssertTrue(ConsolePlatformFilter.all.includes(ai))
+        XCTAssertTrue(ConsolePlatformFilter.workbuddy.includes(cn))
+        XCTAssertFalse(ConsolePlatformFilter.workbuddy.includes(ai), "国际版不能混进 WorkBuddy 段")
+        XCTAssertTrue(ConsolePlatformFilter.workbuddyAI.includes(ai))
+        XCTAssertFalse(ConsolePlatformFilter.workbuddyAI.includes(cn))
+
+        XCTAssertTrue(ConsolePlatformFilter.all.showsWorkbuddyCN)
+        XCTAssertTrue(ConsolePlatformFilter.all.showsWorkbuddyAI)
+        XCTAssertFalse(ConsolePlatformFilter.workbuddy.showsWorkbuddyAI)
+        XCTAssertFalse(ConsolePlatformFilter.workbuddyAI.showsWorkbuddyCN)
+        XCTAssertFalse(ConsolePlatformFilter.workbuddy.showsQoder)
+        XCTAssertFalse(ConsolePlatformFilter.workbuddyAI.showsQoder)
+    }
+
+    /// 平台判断不能只看 provider：`accounts` 里可能有 qoder_cn 之类，别归进 WorkBuddy 段。
+    func testWorkbuddySectionIgnoresOtherPlatforms() {
+        let qoder = ConsoleAccount(
+            id: "q1", platform: "qoder_cn", provider: "workbuddy", uid: "u1", nickname: "Qoder"
+        )
+        XCTAssertFalse(qoder.isWorkbuddy(international: false))
+        XCTAssertFalse(qoder.isWorkbuddy(international: true))
+        XCTAssertFalse(ConsolePlatformFilter.workbuddy.includes(qoder))
+    }
+
+    /// 签到页没有"国际版"这一档：那边根本没有签到任务。
+    func testCheckinFiltersDoNotOfferTheInternationalSite() {
+        XCTAssertFalse(ConsolePlatformFilter.checkinFilters.contains(.workbuddyAI))
+        XCTAssertEqual(
+            ConsolePlatformFilter.checkinFilters.map(\.rawValue),
+            ["all", "workbuddy", "qoder", "qoderGlobal"]
+        )
+        XCTAssertEqual(ConsolePlatformFilter.accountFilters.count, 5)
+    }
+
+    /// 账号卡必须能看出是哪个站点，且国际版不能显示成国内版。
+    func testAccountCarriesTheProvider() {
+        let cn = ConsoleAccount(
+            id: "a1", platform: "workbuddy", provider: "workbuddy", uid: "u1", nickname: "国内号"
+        )
+        let ai = ConsoleAccount(
+            id: "a2", platform: "workbuddy", provider: "workbuddy_ai", uid: "u2", nickname: "海外号"
+        )
+        XCTAssertEqual(cn.platformName, "WorkBuddy")
+        XCTAssertEqual(ai.platformName, "WorkBuddy AI")
+        XCTAssertEqual(ai.workbuddyVariant, .ai)
+        XCTAssertEqual(cn.workbuddyVariant, .cn)
+        XCTAssertTrue(cn.supportsCNTasks)
+        XCTAssertFalse(ai.supportsCNTasks, "国际版的签到 / 成长接口还没接")
+        XCTAssertTrue(ai.isWorkbuddyAI)
     }
 
     func testLoginStartRejectsIncompletePayload() {
         XCTAssertNil(WorkbuddyLoginStart.parse(["loginId": "x"]))
         XCTAssertNil(WorkbuddyLoginStart.parse(["verificationUri": "https://x"]))
         XCTAssertNil(WorkbuddyLoginStart.parse(["loginId": "", "verificationUri": "https://x"]))
+    }
+
+    /// 登录地址来自服务端：只有本站点的 https 页面能交给系统浏览器、能编码成二维码。
+    func testTrustedLoginURLRejectsOtherSchemesAndHosts() {
+        let cn = WorkbuddyVariant.cn
+        let ai = WorkbuddyVariant.ai
+        XCTAssertNotNil(cn.trustedLoginURL("https://www.codebuddy.cn/login?state=1"))
+        XCTAssertNotNil(cn.trustedLoginURL("https://sso.codebuddy.cn:8443/login"))
+        XCTAssertNotNil(ai.trustedLoginURL("https://www.workbuddy.ai/login?state=1"))
+
+        // 非 https：明文 http / javascript / file 都不许交给系统。
+        XCTAssertNil(cn.trustedLoginURL("http://www.codebuddy.cn/login"))
+        XCTAssertNil(cn.trustedLoginURL("javascript:alert(1)"))
+        XCTAssertNil(cn.trustedLoginURL("file:///etc/passwd"))
+        XCTAssertNil(cn.trustedLoginURL("www.codebuddy.cn/login"))
+
+        // 域名仿冒 / userinfo 伪装。
+        XCTAssertNil(cn.trustedLoginURL("https://www.codebuddy.cn.evil.com/login"))
+        XCTAssertNil(cn.trustedLoginURL("https://evil.com/?codebuddy.cn"))
+        XCTAssertNil(cn.trustedLoginURL("https://www.codebuddy.cn@evil.com/login"))
+
+        // 跨站点：国内版会话不许打开国际版登录页，反之亦然。
+        XCTAssertNil(cn.trustedLoginURL("https://www.workbuddy.ai/login?state=1"))
+        XCTAssertNil(ai.trustedLoginURL("https://www.codebuddy.cn/login?state=1"))
+    }
+
+    /// 反斜杠在浏览器里等价于 `/`：`evil.com\@官方域` 会被浏览器打开到 evil.com，
+    /// 而 Foundation 会把它解析成 userinfo。这类输入必须落在"拒绝"。
+    func testTrustedLoginURLRejectsBackslashAndUserinfo() {
+        let cn = WorkbuddyVariant.cn
+        let ai = WorkbuddyVariant.ai
+        for raw in [
+            "https://evil.com\\@www.workbuddy.ai/",
+            "https://www.workbuddy.ai\\@evil.com/",
+            "https://evil.com\\www.workbuddy.ai/",
+            "https://evil.com\\@www.codebuddy.cn/login",
+            "https:\\\\www.workbuddy.ai/login",
+        ] {
+            XCTAssertNil(ai.trustedLoginURL(raw), "反斜杠必须拒绝: \(raw)")
+            XCTAssertNil(cn.trustedLoginURL(raw), "反斜杠必须拒绝: \(raw)")
+        }
+
+        XCTAssertNil(ai.trustedLoginURL("https://user:pw@www.workbuddy.ai/login"))
+        XCTAssertNil(ai.trustedLoginURL("https://user@www.workbuddy.ai/login"))
+        XCTAssertNil(ai.trustedLoginURL("https://@www.workbuddy.ai/login"))
+        XCTAssertNil(cn.trustedLoginURL("https://user:pw@www.codebuddy.cn/login"))
+
+        // 正常形态仍然通过：大小写主机、显式端口、query 与 fragment。
+        XCTAssertNotNil(ai.trustedLoginURL("HTTPS://WWW.WORKBUDDY.AI:443/login?state=1#x"))
+        XCTAssertNotNil(cn.trustedLoginURL("https://sso.codebuddy.cn:8443/login"))
     }
 
     func testLoginPhaseMapping() {
