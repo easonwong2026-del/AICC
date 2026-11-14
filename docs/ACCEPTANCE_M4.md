@@ -27,6 +27,14 @@
 | 看板授权来源取列表第一条 | 用本次真正发请求成功的 `authSource` | 显示"Magpie"实际走的是 PAT |
 | 汇总按执行次数计数 | Qoder 完成数按 `(账号, campaignId)` 去重；不支持平台的遗留开关不计入自动数；失败按时间降序取前 5 | "今日完成"虚高、失败列表顺序随机 |
 
+## 1.2 第二轮评审的三个边界（本轮修完）
+
+| 位置 | 边界 | 处理 |
+| --- | --- | --- |
+| #73 | `Snapshot::capture()` 读旧凭据失败时用 `?` 提前返回，绕过清理，留下刚建的空账号 | 保存链上三个失败点（capture / set / 授权写入）走同一条回滚；新增「读取失败」故障注入用例 |
+| #75 | 查询活动与 POST 之间，用户可能关掉自动开关、删号或换授权，旧快照仍会被提交 | 每个 POST 前 `pre_post_stop()` 重新核对 `auth_epoch` / 账号存在 / 自动开关，任一漂移就停下并写明原因 |
+| #75 | 去重只看 `campaignId`，服务端复用 id 时会挡住次日领取 | v18 给领取账加 `period_start` / `period_end`，去重键变成 `(账号, campaign, period_start)`；未知周期不算领过 |
+
 ## 2. 四平台能力矩阵
 
 图例：**已实现** = 代码 + 单测完成；**已验证** = 有真实凭据的成功响应；
@@ -77,6 +85,7 @@
 | --- | --- | --- | --- |
 | v16 | `qoder_accounts.auth_epoch`；重建 `qoder_authorizations` 以接受 `own_pat` | 是（Rust 步骤，先检测） | `v15_upgrade_keeps_qoder_authorizations_and_accepts_pat` |
 | v17 | `qoder_accounts.credits_auto_enabled` + `qoder_credit_runs` | 是（先检测列） | 同上（同一条用例覆盖到最新版本） |
+| v18 | `qoder_credit_runs.period_start` / `period_end`（去重键含周期） | 是（逐列检测） | 同上 |
 
 回滚策略：
 
@@ -92,7 +101,7 @@
 
 | 范围 | 数量 | 说明 |
 | --- | --- | --- |
-| Rust 单测 | 514 | 新增 46：PAT（14，含故障注入与版本竞态）、Credits 协议（18）、存储与迁移（9）、任务汇总（6）、领取互斥（1） |
+| Rust 单测 | 517 | 新增 49：PAT（15，含三类故障注入）、Credits 协议（18）、存储与迁移（10，含跨周期去重）、任务汇总（6）、领取互斥（1）、POST 前闸门（1） |
 | `rpc_stdio` 端到端 | 25 | 未变（新增方法不影响既有断言） |
 | `vendor_paths` | 2 | 未变 |
 | Swift 单测 | 新增 2 个文件 | `QoderPatModelsTests`、`QoderCreditsModelsTests`、`TaskOverviewModelsTests` |
