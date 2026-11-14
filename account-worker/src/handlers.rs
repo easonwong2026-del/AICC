@@ -92,6 +92,9 @@ pub const METHODS: &[&str] = &[
     "checkin.auto.status",
     "checkin.auto.tick",
     "checkin.records",
+    // ---- 四平台额度看板（M4）----
+    "quota.board",
+    "quota.history",
 ];
 
 pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult<Value> {
@@ -681,6 +684,22 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                 .unwrap_or(30)
                 .min(200) as u32;
             crate::checkin::records(app, id, limit)
+        }
+
+        // ---- 四平台额度看板（M4）----
+        //
+        // 只读：不改账号、不改授权状态、不写 last_used_at。唯一写入是快照缓存。
+        // Qoder 两版在这里是 `unverified` 且**零请求**，不是"暂时取不到"。
+        "quota.board" => {
+            let parsed: crate::quota::BoardParams = serde_json::from_value(params.clone())
+                .map_err(|e| RpcError::invalid_params(format!("额度参数非法：{e}")))?;
+            crate::quota::board(app, parsed).await
+        }
+
+        "quota.history" => {
+            let parsed: crate::quota::HistoryParams = serde_json::from_value(params.clone())
+                .map_err(|e| RpcError::invalid_params(format!("额度参数非法：{e}")))?;
+            crate::quota::history(app, parsed)
         }
 
         "auth.magpie.import" => {

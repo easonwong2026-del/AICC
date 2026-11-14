@@ -90,6 +90,8 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `checkin.auto.status` | 计划时间、下次执行、尝试次数与每账号状态 | 否 |
 | `checkin.auto.tick` | 跑一轮自动签到；`force` 只跳过时间判断，不绕过开关与每日次数上限 | 是（开关打开时） |
 | `checkin.records` | 签到历史与每次尝试（`checkin_records` + `task_executions`） | 否 |
+| `quota.board` | 四平台额度看板（`days` / `provider` / `accountId` / `refresh`）。WorkBuddy CN/AI 走官方只读接口，**Qoder 两版零请求返回 `unverified`**；`refresh=false` 时优先用 `quota_snapshots` 缓存 | 是（只读语义） |
+| `quota.history` | 某账号的额度快照历史（`days` 默认 30，上限 90），按时间升序 | 否 |
 
 `health` **故意不做**钥匙串探针：否则每次启动 App 都会弹一次系统授权框。
 需要验证凭据存储时显式调 `secure.status`（设置页有按钮）。探针的读写删三步全成功才报 `ok`，
@@ -385,3 +387,71 @@ WorkBuddy AI 是另一个站点，拿它的授权请求这些接口，轻则 401
 
 界面：添加账号面板顶部有 `WorkBuddy` / `WorkBuddy AI` 分段选择，切换即重开会话；
 账号卡按 provider 显示独立名称与图标，国际版**不显示签到一栏**（产品里没有签到，不是"暂不支持"）。
+
+## 11. 四平台额度看板（v14）
+
+一段话：额度是**观测数据**，不是业务状态。所以它不进 `accounts`，只在
+`quota_snapshots`（v14 建表，v15 去掉外键）里留快照，读取路径完全不碰账号与授权。
+
+**为什么 v15 要改 v14 的表**：v14 最初把 `account_id` 建成指向 `accounts(id)` 的外键，
+但四平台里 WorkBuddy 账号在 `accounts`、Qoder 服务账号在 `qoder_accounts` ——
+一张"通用"缓存表没法同时对两张表建外键。SQLite 改不了外键，所以 v15 是一步
+**按需重建**的 Rust 迁移：检测到还有外键就建新表搬数据，新建库上是空操作。
+代价是没有级联：`delete_account` / `delete_qoder_account` 各加一条显式清快照
+（账号 id 是 uid 的确定性哈希，重加同一账号会复用同一 id，残留快照会被当成"刚取过"），
+外加 90 天裁剪兜底。
+
+| 平台 | 数据来源 | 状态 |
+| --- | --- | --- |
+| `workbuddy`（国内版） | `www.codebuddy.cn` 官方只读接口 | `ok`（真实账号实测） |
+| `workbuddy_ai`（国际版） | `www.workbuddy.ai` 官方只读接口 | `ok`（真实账号实测） |
+| `qoder_cn` / `qoder_global` | **无** | `unverified`，零请求 |
+
+接口细节与实测证据见 `docs/WORKBUDDY_QUOTA_API.md`；Qoder 的阻塞依据见
+`docs/QODER_QUOTA_BLOCKER.md`。真机界面截图见
+`docs/verification/quota-board-m4-2026-11-14.png`（5 个真实账号，钥匙串直读，非注入令牌）。
+
+统一模型（`quota.board` 每行）：
+
+| 字段 | 语义 |
+| --- | --- |
+| `accountId` / `provider` / `nickname` | 账号身份 |
+| `source` | 这次用的是哪份授权（`own` / `magpie` / Qoder 的 `magpie` `own_browser`） |
+| `status` | `ok` / `unauthorized` / `rate_limited` / `error` / `unverified` |
+| `unit` / `total` / `used` / `remaining` | **单位原样带出，不同单位不相加**；未知一律 `null`，不是 0 |
+| `usage` / `usageError` | 用量与它的失败原因。**用量失败不影响余额**，两件事分开显示 |
+| `cached` / `stale` / `capturedAt` | 来自缓存 / 来自旧快照 / 快照时间 |
+| `plan` / `isPaid` | 订阅名与是否付费（服务端字段直出） |
+| `usage` | `windowDays` / `requests` / `credits` / `truncated` / 按模型的明细 |
+| `syncAt` / `capturedAt` / `error` | 抓取时间、快照时间、失败原因（已过 `sanitize`） |
+
+七条硬规则：
+
+1. **未知不当 0**：`Packages` 为空、**某个包缺 `CycleTotalCapacity` / `CycleUsedCapacity`**、
+   平台未接入，都返回 `null`。聚合是**按字段完整性**做的——三个字段各自累计，
+   有一个参与计数的包缺该字段，这一项整体为 `null`。用 `unwrap_or(0)` 会把
+   "不知道"写成"确实是 0"，界面就会画成"额度用完了"。
+2. **部分成功**：额度与用量是两次独立请求。额度成功、用量 429/超时/解析失败时，
+   余额照常返回，失败只写进 `usageError`。
+3. **缓存 5 分钟 + 窗口必须一致**：`refresh=false`、快照在 300 秒内、**且快照里
+   `usage.windowDays` 等于本次请求的 `days`** 才算命中。窗口不一致时**余额复用、
+   用量按新窗口重取**——7 天的消耗绝不能被 30 天的查询拿去复用（实测：
+   `days=7` 是 97 次 / 624.11 credit，`days=30` 重取后是 396 次 / 2346.34 credit）。
+   上次用量取数失败（`usage=null`）也不算命中，下一轮会重试用量。
+4. **刷新失败不丢数据，但降级也守窗口**：有旧快照时返回旧数据并标 `status="stale"`
+   + `stale=true` + `error`（本次失败原因）；没有旧快照才是真正的失败行。失败行**不落库**——
+   一次临时 429 不该变成历史记录。降级行里的 `usage` 若与本次 `days` 不一致，
+   **置空并写明原因**（余额保留）：30 天的请求不能把 7 天的消耗一起端上来。
+5. **批量有界**：3 路并发（`MAX_CONCURRENT`）、整轮 20 秒硬预算（`BOARD_BUDGET`），
+   超预算的账号直接返回"缓存 + 过期"或 `timeout`，不拖累已经拿到的账号。
+   Swift 侧 RPC 超时 45 秒，**必须大于**助手的预算。
+   **钥匙串读取也在预算内**：`broker::resolve` 是同步阻塞调用，跑在 `spawn_blocking`
+   里并套 `timeout_at`。首次授权弹窗时调用方最多等 20 秒就降级返回，
+   不会把整轮看板挂住；但那个被阻塞的线程会一直到用户回答弹窗为止——
+   这是 macOS 钥匙串的行为，无法取消。
+6. **快照写入原子核验身份**：写入是同一条 `INSERT … SELECT … WHERE EXISTS`，
+   只有账号仍存在、`provider` 未变、`auth_epoch` 未变才落库。取数有两三次网络往返，
+   期间账号可能被删除或重新授权；账号 id 是 uid 的哈希，重新导入会复用同一个 id，
+   一条晚到的快照会被当成"这个新账号刚取过"。账号删除时另有一条显式清理。
+7. **只读**：`quota.board` / `quota.history` 不写 `last_used_at`、不改 `auth_status`、
+   不刷新令牌。取数失败只影响这一行。

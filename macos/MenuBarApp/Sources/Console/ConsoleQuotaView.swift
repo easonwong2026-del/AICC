@@ -8,6 +8,7 @@ struct ConsoleQuotaView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             summaryRow
+            workerSection
             if let snapshot = store.snapshot, !snapshot.accounts.isEmpty {
                 providerSections(snapshot)
             } else {
@@ -19,6 +20,165 @@ struct ConsoleQuotaView: View {
                         actionTitle: "重新读取",
                         action: { Task { await store.refreshQuota(force: true) } }
                     )
+                }
+            }
+        }
+    }
+
+    // MARK: - 助手侧四平台额度（M4）
+
+    /// 上面那段是 Magpie 的额度窗口，这段是助手直接问官方接口的账号级余额与用量。
+    /// 两段数据来源不同，不合并、不相加。
+    @ViewBuilder
+    private var workerSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                ConsoleSectionTitle(
+                    title: "账号额度（官方接口）",
+                    detail: store.workerQuotaRows.isEmpty ? nil : "\(store.workerQuotaRows.count) 个账号"
+                )
+                Spacer(minLength: 8)
+                if store.loadingWorkerQuota {
+                    ProgressView().controlSize(.small)
+                }
+                Button("刷新") {
+                    Task { await store.refreshWorkerQuota(force: true) }
+                }
+                .buttonStyle(ConsoleSecondaryButtonStyle())
+                .disabled(store.loadingWorkerQuota)
+            }
+
+            if store.workerQuotaRows.isEmpty {
+                ConsoleCard {
+                    ConsoleEmptyState(
+                        symbol: "gauge.with.dots.needle.33percent",
+                        title: "没有读到账号额度",
+                        message: store.workerQuotaError ?? "助手还没返回任何账号。",
+                        actionTitle: "重新读取",
+                        action: { Task { await store.refreshWorkerQuota(force: true) } }
+                    )
+                }
+            } else {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 320), spacing: ConsoleTheme.cardSpacing)],
+                    spacing: ConsoleTheme.cardSpacing
+                ) {
+                    ForEach(store.workerQuotaRows) { row in
+                        workerQuotaCard(row)
+                    }
+                }
+            }
+        }
+    }
+
+    /// RFC3339（UTC）→ 本机时区的 `MM-dd HH:mm`。解析不了就原样显示前 16 位。
+    static func localTimestamp(_ raw: String) -> String {
+        let parser = ISO8601DateFormatter()
+        parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var date = parser.date(from: raw)
+        if date == nil {
+            parser.formatOptions = [.withInternetDateTime]
+            date = parser.date(from: raw)
+        }
+        guard let date else {
+            return raw.prefix(16).replacingOccurrences(of: "T", with: " ")
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM-dd HH:mm"
+        return formatter.string(from: date)
+    }
+
+    private func workerQuotaCard(_ row: WorkerQuotaRow) -> some View {
+        ConsoleCard {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(row.nickname.isEmpty ? row.accountId : row.nickname)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(ConsoleTheme.text)
+                        .lineLimit(1)
+                    ConsoleBadge(text: row.providerName, tint: ConsoleTheme.secondaryText)
+                    Spacer(minLength: 0)
+                    if row.stale {
+                        // 旧数据 + 这次为什么没取到，两件事都要可见。
+                        ConsoleBadge(text: "过期", tint: ConsoleTheme.danger)
+                    } else if row.cached {
+                        ConsoleBadge(text: "缓存", tint: ConsoleTheme.warning)
+                    }
+                }
+
+                switch row.status {
+                case "ok", "stale":
+                    if let text = row.remainingText {
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(text)
+                                .font(.system(size: 18, weight: .semibold))
+                                .monospacedDigit()
+                                .foregroundStyle(ConsoleTheme.text)
+                            if let unit = row.unit {
+                                Text(unit)
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                            }
+                            Spacer(minLength: 0)
+                            if let plan = row.plan, !plan.isEmpty {
+                                ConsoleBadge(text: plan, tint: ConsoleTheme.secondaryText)
+                            }
+                        }
+                        if let share = row.remainingShare {
+                            ConsoleShareBar(share: share, tone: share <= 30 ? ConsoleTheme.warning : ConsoleTheme.accent)
+                        }
+                        if let total = row.totalText {
+                            Text(total)
+                                .font(.system(size: 10))
+                                .foregroundStyle(ConsoleTheme.tertiaryText)
+                        }
+                    } else {
+                        // 拿到 200 但没拿到额度：显示未知，不显示 0。
+                        Text("额度未知")
+                            .font(.system(size: 12))
+                            .foregroundStyle(ConsoleTheme.secondaryText)
+                    }
+                    if let usage = row.usage, usage.requests > 0 {
+                        Text("近 \(usage.windowDays) 天 \(usage.requests) 次请求 · 消耗 \(WorkerQuotaRow.format(usage.credits))\(usage.truncated ? "（已截断）" : "")")
+                            .font(.system(size: 10))
+                            .foregroundStyle(ConsoleTheme.tertiaryText)
+                    } else if let usageError = row.usageError, !usageError.isEmpty {
+                        // 余额拿到了、用量没拿到：单独一行说明，不影响上面的额度。
+                        Text("用量读取失败：\(usageError)")
+                            .font(.system(size: 10))
+                            .foregroundStyle(ConsoleTheme.warning)
+                    }
+                case "unverified":
+                    Text("未接入（已验证为零请求）")
+                        .font(.system(size: 12))
+                        .foregroundStyle(ConsoleTheme.secondaryText)
+                case "unauthorized":
+                    Text("授权不可用")
+                        .font(.system(size: 12))
+                        .foregroundStyle(ConsoleTheme.danger)
+                default:
+                    Text("读取失败")
+                        .font(.system(size: 12))
+                        .foregroundStyle(ConsoleTheme.danger)
+                }
+
+                HStack(spacing: 6) {
+                    Text(row.sourceName)
+                    if let capturedAt = row.capturedAt, !capturedAt.isEmpty {
+                        // 快照时间是 RFC3339 UTC，界面要显示本机时间，否则用户会以为
+                        // 数据是九小时前的（+8 时区）。
+                        Text("· 数据于 \(Self.localTimestamp(capturedAt))")
+                    }
+                    Spacer(minLength: 0)
+                }
+                .font(.system(size: 10))
+                .foregroundStyle(ConsoleTheme.tertiaryText)
+
+                if let error = row.error, !error.isEmpty {
+                    Text(error)
+                        .font(.system(size: 10))
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }

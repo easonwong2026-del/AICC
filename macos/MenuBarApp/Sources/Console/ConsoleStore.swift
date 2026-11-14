@@ -19,6 +19,12 @@ final class ConsoleStore: ObservableObject {
     @Published private(set) var lastAccountsRefresh: Date?
     @Published private(set) var lastQuotaRefresh: Date?
 
+    /// 助手侧的统一额度看板（四平台）。与上面的 `snapshot`（Magpie 额度卡）是两条
+    /// 互不替代的数据链路：Magpie 给窗口，助手给账号级余额与用量。
+    @Published private(set) var workerQuotaRows: [WorkerQuotaRow] = []
+    @Published private(set) var workerQuotaError: String?
+    @Published private(set) var loadingWorkerQuota = false
+
     /// Buddy 旅行的本地快照 + 运行信息。
     @Published private(set) var travelRows: [TravelAccountRow] = []
     @Published private(set) var travelAuto: TravelAutoStatus?
@@ -86,6 +92,9 @@ final class ConsoleStore: ObservableObject {
     func loadIfNeeded() async {
         if snapshot == nil && !loadingQuota {
             await refreshQuota(force: false)
+        }
+        if workerQuotaRows.isEmpty && !loadingWorkerQuota {
+            await refreshWorkerQuota(force: false)
         }
         if lastAccountsRefresh == nil && !loadingAccounts {
             await refreshAccounts()
@@ -371,6 +380,20 @@ final class ConsoleStore: ObservableObject {
             accountsError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
         lastAccountsRefresh = Date()
+    }
+
+    /// 助手侧四平台额度。`refresh=false` 时助手优先用快照缓存（不打网络）。
+    func refreshWorkerQuota(force: Bool = true) async {
+        guard !loadingWorkerQuota else { return }
+        loadingWorkerQuota = true
+        defer { loadingWorkerQuota = false }
+        do {
+            workerQuotaRows = try await worker.workerQuota(days: 7, refresh: force)
+            workerQuotaError = workerQuotaRows.isEmpty ? "还没有可显示的账号" : nil
+        } catch {
+            workerQuotaRows = []
+            workerQuotaError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
     }
 
     func refreshQuota(force: Bool = true) async {
