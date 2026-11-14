@@ -39,21 +39,12 @@ struct ConsoleGrowthSection: View {
                     tint: ConsoleTheme.danger
                 )
             }
-            Button {
-                Task { await store.loadGrowth() }
-            } label: {
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .buttonStyle(ConsoleIconButtonStyle())
-            .disabled(store.growthLoading)
-            .help("扫描一次成长中心（只读，不会执行任何任务）")
-
-            Button("扫描") {
+            Button(store.growthLoading ? "扫描中…" : "扫描") {
                 Task { await store.loadGrowth() }
             }
             .buttonStyle(ConsoleSecondaryButtonStyle())
             .disabled(store.growthLoading)
+            .help("扫描一次成长中心（只读，不会接受任务或领奖）")
         }
     }
 
@@ -81,10 +72,10 @@ struct ConsoleGrowthSection: View {
 
                 if store.growthAuto.enabled {
                     Text(store.growthAuto.intervalText)
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundStyle(ConsoleTheme.tertiaryText)
                     Text(store.growthAuto.nextTickText)
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundStyle(ConsoleTheme.tertiaryText)
                 }
 
@@ -98,18 +89,19 @@ struct ConsoleGrowthSection: View {
 
             if let summary = store.growthAuto.lastResult, store.growthAuto.enabled {
                 Text("最近：\(summary)")
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(ConsoleTheme.secondaryText)
             }
             if let notice = store.growthNotice {
                 Text(notice)
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(ConsoleTheme.secondaryText)
             }
             if !store.growthAuto.enabled {
-                Text("开启后 AICC 会替你接单、并在任务完成后自动领奖；不代替你完成任何任务。")
-                    .font(.system(size: 10))
+                Text("开启后只做接单与领奖，不代替你完成任何任务。")
+                    .font(ConsoleType.caption)
                     .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .lineLimit(1)
             }
         }
         .padding(.horizontal, 16)
@@ -179,7 +171,7 @@ struct ConsoleGrowthSection: View {
             } label: {
                 HStack(spacing: 10) {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(ConsoleTheme.tertiaryText)
                         .frame(width: 10)
 
@@ -194,7 +186,7 @@ struct ConsoleGrowthSection: View {
                             }
                         }
                         Text(scan.profile.summaryText)
-                            .font(.system(size: 10))
+                            .font(.system(size: 11))
                             .foregroundStyle(ConsoleTheme.tertiaryText)
                             .lineLimit(1)
                     }
@@ -212,13 +204,13 @@ struct ConsoleGrowthSection: View {
 
                     if let runs = store.growthRuns[scan.accountId], runs.grantedCredit > 0 {
                         Text("已领 +\(runs.grantedCredit)")
-                            .font(.system(size: 10))
+                            .font(.system(size: 11))
                             .foregroundStyle(ConsoleTheme.success)
                     }
 
                     if let travel = scan.travel {
                         Text(travel.stateText)
-                            .font(.system(size: 10))
+                            .font(.system(size: 11))
                             .foregroundStyle(ConsoleTheme.tertiaryText)
                     }
                 }
@@ -254,7 +246,7 @@ struct ConsoleGrowthSection: View {
                 Text(scan.needsAuth
                      ? "这个账号没有可用授权，先到「AI 账号」页重新登录或从 Magpie 导入。"
                      : "服务端没有下发任务。")
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(ConsoleTheme.tertiaryText)
                     .padding(.horizontal, 44)
                     .padding(.bottom, 10)
@@ -266,7 +258,7 @@ struct ConsoleGrowthSection: View {
 
             ForEach(scan.errors) { error in
                 Text("\(error.field)：\(error.message)")
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(error.needsUserAction ? ConsoleTheme.danger : ConsoleTheme.tertiaryText)
                     .padding(.horizontal, 44)
                     .padding(.bottom, 3)
@@ -279,7 +271,7 @@ struct ConsoleGrowthSection: View {
     private func taskRow(_ task: GrowthTaskRow, accountId: String) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: symbol(for: task.taskClass))
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(ConsoleTheme.accent)
                 .frame(width: 16)
                 .padding(.top, 1)
@@ -290,13 +282,13 @@ struct ConsoleGrowthSection: View {
                     .foregroundStyle(ConsoleTheme.text)
                     .lineLimit(1)
                 Text(task.condition)
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(ConsoleTheme.tertiaryText)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
                 if let record = store.growthRuns[accountId]?.latestByTask[task.code] {
                     Text("\(record.summary) · \(record.timeText)")
-                        .font(.system(size: 9))
+                        .font(.system(size: 11))
                         .foregroundStyle(record.outcome.isProblem ? ConsoleTheme.danger : ConsoleTheme.tertiaryText)
                         .lineLimit(1)
                 }
@@ -305,12 +297,12 @@ struct ConsoleGrowthSection: View {
             Spacer(minLength: 8)
 
             Text(task.progressText)
-                .font(.system(size: 10, design: .monospaced))
+                .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(ConsoleTheme.secondaryText)
                 .frame(width: 54, alignment: .trailing)
 
             Text(task.rewardText)
-                .font(.system(size: 10))
+                .font(.system(size: 11))
                 .foregroundStyle(ConsoleTheme.secondaryText)
                 .frame(width: 108, alignment: .trailing)
 
@@ -356,25 +348,28 @@ struct ConsoleGrowthSection: View {
 
     private var footerNote: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(footerLine)
-                .font(.system(size: 10))
-                .foregroundStyle(ConsoleTheme.secondaryText)
-                .fixedSize(horizontal: false, vertical: true)
-            if let prefix = result.scans.compactMap({ $0.pathPrefix }).first {
-                // 线上排查用：两种路径形态到底哪个生效，直接写在界面上。
-                Text("接口前缀 \(prefix) · 每个账号 9 个只读请求")
-                    .font(.system(size: 10))
-                    .foregroundStyle(ConsoleTheme.tertiaryText)
+            HStack(spacing: 6) {
+                Text(footerLine)
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.secondaryText)
+                    .lineLimit(1)
+                if let prefix = result.scans.compactMap({ $0.pathPrefix }).first {
+                    // 线上排查用：两种路径形态到底哪个生效，收进帮助里。
+                    Image(systemName: "info.circle")
+                        .font(ConsoleType.caption)
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                        .help("接口前缀 \(prefix) · 每个账号 9 个只读请求")
+                }
+                Spacer(minLength: 0)
             }
         }
     }
 
     /// 必须让用户一眼看清"现在到底会不会动服务端"。
     private var footerLine: String {
-        if store.growthAuto.enabled {
-            return "自动管理已开启：只做接单与领奖，不代替你完成任何任务。补签、兑换、抽奖、开盲盒都不会自动执行。"
-        }
-        return "当前只读：不会接受任务、不会领取奖励。开启自动管理后，AICC 只做接单与领奖，不代替你完成任何任务。"
+        store.growthAuto.enabled
+            ? "自动管理已开启：只接单与领奖，不代替你完成任务；补签 / 兑换 / 抽奖不会自动执行。"
+            : "当前只读：不会接受任务，也不会领取奖励。"
     }
 
     private static let timeFormatter: DateFormatter = {

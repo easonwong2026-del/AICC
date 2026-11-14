@@ -27,7 +27,7 @@ struct ConsoleCheckinSection: View {
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            ConsoleSectionTitle(title: "WorkBuddy 每日签到", detail: headerDetail)
+            ConsoleSectionTitle(title: "WorkBuddy 每日签到", detail: headerDetail ?? "\(failedCount) 个需处理")
             Spacer(minLength: 8)
             if status.counts.unchecked > 0 {
                 ConsoleBadge(text: "\(status.counts.unchecked) 个未签到", tint: ConsoleTheme.warning)
@@ -47,10 +47,11 @@ struct ConsoleCheckinSection: View {
         }
     }
 
-    private var headerDetail: String {
+    /// 头部只说"在做什么"，数字留给下面的概览行，避免同一句话出现两次。
+    private var headerDetail: String? {
         if store.checkinLoading { return "查询中…" }
         if store.checkinBatching { return "执行中…" }
-        return status.headline
+        return nil
     }
 
     private var failedCount: Int {
@@ -65,14 +66,14 @@ struct ConsoleCheckinSection: View {
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(ConsoleTheme.text)
             Text(status.enabledNote)
-                .font(.system(size: 10))
+                .font(.system(size: 11))
                 .foregroundStyle(ConsoleTheme.tertiaryText)
             if let credit = status.creditNote {
                 ConsoleBadge(text: credit, tint: ConsoleTheme.success)
             }
             if status.cached {
                 Text("本地记录")
-                    .font(.system(size: 9))
+                    .font(.system(size: 11))
                     .foregroundStyle(ConsoleTheme.tertiaryText)
                     .help("这一份来自本地签到记录，点右上角刷新才会向服务端核对")
             }
@@ -120,7 +121,7 @@ struct ConsoleCheckinSection: View {
             Text("操作")
                 .frame(width: 70, alignment: .trailing)
         }
-        .font(.system(size: 10))
+        .font(.system(size: 11))
         .foregroundStyle(ConsoleTheme.tertiaryText)
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
@@ -136,7 +137,7 @@ struct ConsoleCheckinSection: View {
                     .foregroundStyle(ConsoleTheme.text)
                     .lineLimit(1)
                 Text(row.detailText)
-                    .font(.system(size: 9))
+                    .font(.system(size: 11))
                     .foregroundStyle(ConsoleTheme.tertiaryText)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
@@ -225,29 +226,30 @@ struct ConsoleCheckinSection: View {
                 Spacer(minLength: 0)
 
                 Text("最近检查：\(auto.lastTickText ?? "—")")
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(ConsoleTheme.tertiaryText)
                 Text("下次自动检查：\(auto.nextRunText())")
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(ConsoleTheme.tertiaryText)
             }
 
             if let notice = store.checkinNotice {
                 Text(notice)
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(ConsoleTheme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let error = store.checkinError {
                 Text(error)
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(ConsoleTheme.danger)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Text("\(auto.ownershipNote) 计划时间 \(auto.planTime)（\(auto.timezone)），账号之间错峰执行；手动签到不受该时间限制。")
-                .font(.system(size: 9))
+            Text("计划 \(auto.planTime)（\(auto.timezone)）· 自动执行只在 AICC 运行时发生")
+                .font(ConsoleType.caption)
                 .foregroundStyle(ConsoleTheme.tertiaryText)
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(1)
+                .help(auto.ownershipNote)
         }
     }
 }
