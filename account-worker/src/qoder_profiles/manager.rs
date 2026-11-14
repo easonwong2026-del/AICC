@@ -113,6 +113,148 @@ fn is_inside_managed_root(app: &App, dir: &Path) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 可写目录闸门（P0：外部导入目录恒只读）
+// ---------------------------------------------------------------------------
+//
+// 背景：`qoder.profiles.import` 允许把**任意外部目录**登记成 `snapshot_dir`，
+// 而 `capture` 会往 `snapshot_dir` 里写文件。如果用户导入的是客户端正在使用的
+// live 目录，一次「保存当前登录」就会把 live 的认证文件整体替换掉——
+// 这是本模块唯一还能碰到真实账号数据的写路径，必须在文件层之前关死。
+//
+// 现在的规则：
+// 1. `managed = false`（外部导入）**只读**，`capture` 直接拒绝；
+// 2. 可写目录的真实路径必须**正好**等于 `qoder/profiles/<profile_id>`，
+//    任何符号链接重定向都会在这里被挡住；
+// 3. 可写目录不能与 live 目录相等、互为祖先或互为后代；
+// 4. 目录本身、组文件、日志文件都不允许是符号链接；
+// 5. 外部快照要变成可管理状态，只能走 `adopt`（复制进 AICC 管理目录）。
+
+/// 词法检查：绝对路径、不含 `..` 片段。
+fn sanitize_path(raw: &str) -> RpcResult<PathBuf> {
+    let path = PathBuf::from(raw);
+    if !path.is_absolute() {
+        return Err(RpcError::invalid_params(format!("必须是绝对路径：{raw}")));
+    }
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(RpcError::invalid_params(format!(
+            "路径不允许包含 .. 片段：{raw}"
+        )));
+    }
+    Ok(path)
+}
+
+/// 解析真实路径：存在的部分走 `canonicalize`（消掉符号链接），
+/// 不存在的尾部按字面拼回去。这样既能比较还不存在的目录，又不会被链接骗到。
+fn resolve_real(path: &Path) -> RpcResult<PathBuf> {
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = path.to_path_buf();
+    loop {
+        if let Ok(real) = cursor.canonicalize() {
+            let mut out = real;
+            for name in suffix.iter().rev() {
+                out.push(name);
+            }
+            return Ok(out);
+        }
+        let Some(name) = cursor.file_name().map(|n| n.to_os_string()) else {
+            return Err(RpcError::invalid_params(format!(
+                "路径无法解析：{}",
+                path.display()
+            )));
+        };
+        suffix.push(name);
+        if !cursor.pop() {
+            return Err(RpcError::invalid_params(format!(
+                "路径无法解析：{}",
+                path.display()
+            )));
+        }
+    }
+}
+
+fn unsafe_path(code: &str, message: String) -> RpcError {
+    RpcError::invalid_params(message).with_data(json!({ "code": code }))
+}
+
+fn reject_symlink(path: &Path) -> RpcResult<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(unsafe_path(
+            "symlink_target",
+            format!("快照目录里 {} 是符号链接，拒绝写入", path.display()),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// 证明「这个快照目录可以写」。
+///
+/// 返回值是**字面路径**，不是 `canonicalize` 之后的目标：如果把符号链接解析成
+/// 目标再写，就等于绕过了下面所有检查（曾经真的这么写过，被测试抓到）。
+fn writable_snapshot_dir(app: &App, profile: &ProfileRecord) -> RpcResult<PathBuf> {
+    if !profile.managed {
+        return Err(RpcError::invalid_params(format!(
+            "Profile {} 是外部导入的只读快照，不会向它写入任何文件；\
+             需要保存登录态请先「复制到 AICC 管理目录」",
+            profile.profile_id
+        ))
+        .with_data(json!({
+            "code": "profile_read_only",
+            "profileId": profile.profile_id,
+            "managed": false,
+            "snapshotDir": profile.snapshot_dir,
+            "hint": "qoder.profiles.adopt 会把外部快照复制进 AICC 管理目录，原目录不会被改动",
+        })));
+    }
+    let raw = sanitize_path(&profile.snapshot_dir)?;
+    let root = profiles_root(app);
+    std::fs::create_dir_all(&root)
+        .map_err(|e| RpcError::internal(format!("创建 AICC 快照根目录失败：{e}")))?;
+    reject_symlink(&root)?;
+    let expected = snapshot_dir(app, &profile.profile_id);
+    if raw != expected && resolve_real(&raw)? != resolve_real(&expected)? {
+        return Err(unsafe_path(
+            "snapshot_dir_not_owned",
+            format!(
+                "快照目录必须是 AICC 为该 Profile 分配的目录 {}，收到 {}",
+                expected.display(),
+                raw.display()
+            ),
+        ));
+    }
+    // 目标目录本身不能是指向别处的符号链接（祖先目录是用户自己的事，不在这里管）。
+    reject_symlink(&expected)?;
+    let real = resolve_real(&expected)?;
+    let live = resolve_real(Path::new(&profile.live_dir))?;
+    if real == live || real.starts_with(&live) || live.starts_with(&real) {
+        return Err(unsafe_path(
+            "snapshot_dir_overlaps_live",
+            format!(
+                "快照目录 {} 与客户端 live 目录 {} 重叠，拒绝写入",
+                expected.display(),
+                live.display()
+            ),
+        ));
+    }
+    Ok(expected)
+}
+
+/// 写之前确认目录本身和每个目标文件都不是符号链接。
+fn reject_symlinked_targets(dir: &Path, extra: &[PathBuf]) -> RpcResult<()> {
+    reject_symlink(dir)?;
+    for name in switch::GROUP_FILES {
+        reject_symlink(&dir.join(name))?;
+    }
+    reject_symlink(&capture_journal_path(dir))?;
+    for path in extra {
+        reject_symlink(path)?;
+    }
+    Ok(())
+}
+
 fn edition_of(profile: &ProfileRecord) -> RpcResult<QoderEdition> {
     QoderEdition::parse(&profile.edition)
         .ok_or_else(|| RpcError::internal(format!("profile edition 非法：{}", profile.edition)))
@@ -308,6 +450,9 @@ fn profile_json(app: &App, profile: &ProfileRecord) -> RpcResult<Value> {
     value["snapshotReady"] = json!(snapshot_hash.is_some() && !incomplete);
     value["snapshotIncomplete"] = json!(incomplete);
     value["snapshotHash"] = json!(snapshot_hash);
+    // 外部导入的快照只读：界面据此禁用「保存当前登录」，只留「复制到 AICC 管理目录」。
+    value["readOnly"] = json!(!profile.managed);
+    value["adoptable"] = json!(!profile.managed && auth_path_in(snapshot).is_file());
     value["switchEnabled"] = json!(switching);
     value["switchBlockedReason"] = json!(if switching {
         Value::Null
@@ -424,7 +569,8 @@ fn heal_capture(snapshot: &Path) -> RpcResult<Option<String>> {
 /// overlay 还是旧的"这种半套快照。
 fn capture_into(app: &App, profile: &ProfileRecord) -> RpcResult<Value> {
     let live = PathBuf::from(&profile.live_dir);
-    let snapshot = PathBuf::from(&profile.snapshot_dir);
+    // P0：只能写 AICC 管理的快照目录。外部导入（managed=false）恒只读。
+    let snapshot = writable_snapshot_dir(app, profile)?;
     let edition = edition_of(profile)?;
     let live_auth = auth_path_in(&live);
     if !live_auth.is_file() {
@@ -433,6 +579,7 @@ fn capture_into(app: &App, profile: &ProfileRecord) -> RpcResult<Value> {
 
     std::fs::create_dir_all(&snapshot)
         .map_err(|e| RpcError::internal(format!("创建快照目录失败：{e}")))?;
+    reject_symlinked_targets(&snapshot, &[])?;
     // 上一次保存被中断 → 先恢复到上一份完整快照，再谈这次。
     let healed = heal_capture(&snapshot)?;
 
@@ -458,6 +605,7 @@ fn capture_into(app: &App, profile: &ProfileRecord) -> RpcResult<Value> {
         &hex(&Sha256::digest(uuid::Uuid::new_v4().as_bytes()))[..16]
     );
     let staging = capture_scratch(&snapshot, "new", &id);
+    reject_symlink(&staging)?;
     std::fs::create_dir_all(&staging)
         .map_err(|e| RpcError::internal(format!("创建快照暂存目录失败：{e}")))?;
 
@@ -520,6 +668,7 @@ fn capture_into(app: &App, profile: &ProfileRecord) -> RpcResult<Value> {
 
     // 3. 提交：旧的一代挪进 old/，新的一代挪进正式位置，最后整组校验。
     let previous_dir = capture_scratch(&snapshot, "old", &id);
+    reject_symlink(&previous_dir)?;
     let commit = (|| -> RpcResult<()> {
         std::fs::create_dir_all(&previous_dir)
             .map_err(|e| RpcError::internal(format!("创建快照备份目录失败：{e}")))?;
@@ -792,22 +941,20 @@ pub fn create(app: &App, params: &Value) -> RpcResult<Value> {
     }))
 }
 
+/// 导入外部目录为**只读** Profile。
+///
+/// 这里登记的目录不是 AICC 的写入目标：`managed = false`，`capture` 会拒绝。
+/// 想让它变成可保存登录态的 Profile，必须先 `adopt`（复制进 AICC 管理目录）。
 pub fn import(app: &App, params: &Value) -> RpcResult<Value> {
     let edition = parse_edition(params)?;
     let raw = param_str(params, "snapshotDir")
         .or_else(|| param_str(params, "userDataDir"))
         .ok_or_else(|| RpcError::invalid_params("必须提供 snapshotDir（含 auth.v1.dat 的目录）"))?;
-    let source = PathBuf::from(raw);
-    if !source.is_absolute() {
-        return Err(RpcError::invalid_params(format!(
-            "snapshotDir 必须是绝对路径：{raw}"
-        )));
+    let declared = sanitize_path(raw)?;
+    if !declared.is_dir() {
+        return Err(RpcError::invalid_params(format!("目录不存在：{raw}")));
     }
-    if raw.split('/').any(|part| part == "..") {
-        return Err(RpcError::invalid_params(
-            "snapshotDir 不允许包含 .. 路径片段",
-        ));
-    }
+    let source = resolve_real(&declared)?;
     if !source.is_dir() {
         return Err(RpcError::invalid_params(format!("目录不存在：{raw}")));
     }
@@ -816,8 +963,15 @@ pub fn import(app: &App, params: &Value) -> RpcResult<Value> {
             "该目录里没有 auth.v1.dat，不能当作账号快照导入",
         ));
     }
+    if let Ok(root) = resolve_real(&profiles_root(app)) {
+        if source.starts_with(&root) {
+            return Err(RpcError::invalid_params(
+                "该目录已经在 AICC 管理目录里，不需要导入（它已经是可管理的 Profile）",
+            ));
+        }
+    }
     if app
-        .with_db(|db| db.find_profile_by_snapshot_dir(raw))?
+        .with_db(|db| db.find_profile_by_snapshot_dir(&source.to_string_lossy()))?
         .is_some()
     {
         return Err(RpcError::invalid_params("该目录已登记为 Profile"));
@@ -828,6 +982,19 @@ pub fn import(app: &App, params: &Value) -> RpcResult<Value> {
             edition.display_name()
         )));
     };
+    // 用户最容易选错的就是 live 目录本身：登记它只会制造「看起来像快照、
+    // 其实是同一个目录」的假隔离，直接拒绝。
+    let live_real = resolve_real(&live)?;
+    if source == live_real || live_real.starts_with(&source) {
+        return Err(unsafe_path(
+            "source_is_live_dir",
+            format!(
+                "{} 是 {} 正在使用的客户端数据目录，不能当作外部快照导入",
+                source.display(),
+                edition.display_name()
+            ),
+        ));
+    }
     let detection = qoder_edition::detect(edition);
     let display_name = param_str(params, "displayName")
         .map(str::to_string)
@@ -848,7 +1015,122 @@ pub fn import(app: &App, params: &Value) -> RpcResult<Value> {
         managed: false,
     };
     let record = app.with_db(|db| db.insert_profile(&insert))?;
-    Ok(json!({ "profile": profile_json(app, &record)? }))
+    Ok(json!({
+        "profile": profile_json(app, &record)?,
+        "managed": false,
+        "readOnly": true,
+        "hint": "外部导入的快照只读，AICC 不会向它写文件；要保存登录态请先「复制到 AICC 管理目录」",
+    }))
+}
+
+/// 把外部导入的只读快照**复制**进 AICC 管理目录，之后才可写。
+///
+/// 原目录一个字节都不改：只读源、只写目标，复制后逐文件校验哈希。
+/// 任何一步失败都把刚建的目标目录删掉，不留半个 Profile。
+pub fn adopt(app: &App, params: &Value) -> RpcResult<Value> {
+    let id = param_str(params, "profileId")
+        .ok_or_else(|| RpcError::invalid_params("必须提供 profileId"))?;
+    let profile = require_profile(app, id)?;
+    if profile.managed {
+        return Ok(json!({
+            "profile": profile_json(app, &profile)?,
+            "adopted": false,
+            "reason": "这个 Profile 已经由 AICC 管理，无需复制",
+        }));
+    }
+    let edition = edition_of(&profile)?;
+    let source = sanitize_path(&profile.snapshot_dir)?;
+    let source = resolve_real(&source)?;
+    if !auth_path_in(&source).is_file() {
+        return Err(RpcError::invalid_params(format!(
+            "外部快照里没有 auth.v1.dat：{}",
+            source.display()
+        )));
+    }
+
+    let target = snapshot_dir(app, &profile.profile_id);
+    let target_real = resolve_real(&target)?;
+    let live = resolve_real(Path::new(&profile.live_dir))?;
+    if target_real == live || target_real.starts_with(&live) || live.starts_with(&target_real) {
+        return Err(unsafe_path(
+            "snapshot_dir_overlaps_live",
+            format!(
+                "AICC 目标目录 {} 与 live 目录 {} 重叠，拒绝复制",
+                target_real.display(),
+                live.display()
+            ),
+        ));
+    }
+    if target.exists() {
+        let empty = std::fs::read_dir(&target)
+            .map(|mut it| it.next().is_none())
+            .unwrap_or(false);
+        if !empty {
+            return Err(RpcError::invalid_params(format!(
+                "AICC 目标目录已经存在且非空：{}",
+                target.display()
+            )));
+        }
+    }
+    if app
+        .with_db(|db| db.find_profile_by_snapshot_dir(&target.to_string_lossy()))?
+        .is_some()
+    {
+        return Err(RpcError::invalid_params(
+            "AICC 目标目录已被其他 Profile 占用",
+        ));
+    }
+
+    std::fs::create_dir_all(&target)
+        .map_err(|e| RpcError::internal(format!("创建 AICC 快照目录失败：{e}")))?;
+    reject_symlinked_targets(&target, &[])?;
+
+    let copy = (|| -> RpcResult<()> {
+        for name in switch::GROUP_FILES {
+            let src = source.join(name);
+            if !src.is_file() {
+                continue;
+            }
+            let dst = target.join(name);
+            std::fs::copy(&src, &dst)
+                .map_err(|e| RpcError::internal(format!("复制 {name} 失败：{e}")))?;
+            if switch::file_sha256(&src) != switch::file_sha256(&dst) {
+                return Err(RpcError::internal(format!("复制 {name} 后校验失败")));
+            }
+        }
+        if !auth_path_in(&target).is_file() {
+            return Err(RpcError::internal("复制后目标目录里没有 auth.v1.dat"));
+        }
+        Ok(())
+    })();
+
+    if let Err(err) = copy {
+        let _ = std::fs::remove_dir_all(&target);
+        return Err(err);
+    }
+
+    let patch = ProfilePatch {
+        snapshot_dir: Some(target.to_string_lossy().to_string()),
+        auth_file: Some(auth_path_in(&target).to_string_lossy().to_string()),
+        snapshot_hash: switch::file_sha256(&auth_path_in(&target)),
+        managed: Some(true),
+        ..Default::default()
+    };
+    let updated = match app.with_db(|db| db.update_profile(&profile.profile_id, &patch)) {
+        Ok(record) => record,
+        Err(err) => {
+            let _ = std::fs::remove_dir_all(&target);
+            return Err(err);
+        }
+    };
+    let source_hash = switch::file_sha256(&auth_path_in(&source));
+    Ok(json!({
+        "profile": profile_json(app, &updated)?,
+        "adopted": true,
+        "sourceDir": source.to_string_lossy(),
+        "sourceUnchanged": source_hash == switch::file_sha256(&auth_path_in(&source)),
+        "edition": edition.as_str(),
+    }))
 }
 
 pub fn inspect(app: &App, params: &Value) -> RpcResult<Value> {
@@ -1858,6 +2140,199 @@ esac
         assert_eq!(state["unknown"], 1);
         assert_eq!(state["profiles"][0]["runtime"]["state"], "unknown");
         sb.app.with_db(|db| db.clear_runtime(&id)).unwrap();
+    }
+
+    // ---- 5. 外部导入目录恒只读，capture 写不进任何管理目录之外的路径 ----
+
+    fn copy_files(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), dst.join(entry.file_name())).unwrap();
+            }
+        }
+    }
+
+    fn err_code(err: &RpcError) -> String {
+        err.data
+            .as_ref()
+            .and_then(|d| d.get("code"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[test]
+    fn imported_profile_is_read_only_and_capture_never_touches_it() {
+        let _guard = lock_env();
+        let sb = sandbox();
+        install_both(&sb, sb._dir.path());
+        let live = seed_live(&sb, "com.qoder.app.stable", "LIVE-A", "OVERLAY-A");
+        let external = sb._dir.path().join("external-snapshot");
+        copy_files(&live, &external);
+        let auth = external.join(qoder::AUTH_FILE);
+        let overlay = external.join("auth-profile-overlays.v1.dat");
+        let before = std::fs::read(&auth).unwrap();
+        let before_overlay = std::fs::read(&overlay).unwrap();
+
+        let imported = super::import(
+            &sb.app,
+            &json!({ "edition": "qoder_global", "snapshotDir": external.to_string_lossy() }),
+        )
+        .unwrap();
+        assert_eq!(imported["profile"]["managed"], false);
+        assert_eq!(imported["profile"]["readOnly"], true);
+        assert_eq!(imported["profile"]["adoptable"], true);
+        let id = imported["profile"]["profileId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let err = super::capture(&sb.app, &json!({ "profileId": id })).unwrap_err();
+        assert_eq!(err_code(&err), "profile_read_only", "msg={}", err.message);
+        assert_eq!(
+            std::fs::read(&auth).unwrap(),
+            before,
+            "外部目录必须一个字节都不变"
+        );
+        assert_eq!(std::fs::read(&overlay).unwrap(), before_overlay);
+        assert!(!external.join(super::CAPTURE_JOURNAL).exists());
+    }
+
+    #[test]
+    fn import_refuses_the_live_dir_itself() {
+        let _guard = lock_env();
+        let sb = sandbox();
+        install_both(&sb, sb._dir.path());
+        let live = seed_live(&sb, "com.qoder.app.stable", "LIVE-A", "OVERLAY-A");
+
+        let err = super::import(
+            &sb.app,
+            &json!({ "edition": "qoder_global", "snapshotDir": live.to_string_lossy() }),
+        )
+        .unwrap_err();
+        assert_eq!(err_code(&err), "source_is_live_dir", "msg={}", err.message);
+    }
+
+    #[test]
+    fn capture_refuses_a_snapshot_dir_outside_the_managed_root() {
+        let _guard = lock_env();
+        let sb = sandbox();
+        install_both(&sb, sb._dir.path());
+        let live = seed_live(&sb, "com.qoder.app.stable", "LIVE-A", "OVERLAY-A");
+        seed_live(&sb, "com.qoder.app.dev", "LIVE-B", "OVERLAY-B");
+        set_status_json(&sb, "a@example.com");
+        let created = super::create(&sb.app, &json!({ "edition": "qoder_global" })).unwrap();
+        let id = created["profile"]["profileId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // 模拟"库里的 snapshot_dir 被改成 live 目录"这种篡改/历史脏数据。
+        sb.app
+            .with_db(|db| {
+                db.update_profile(
+                    &id,
+                    &ProfilePatch {
+                        snapshot_dir: Some(live.to_string_lossy().to_string()),
+                        ..Default::default()
+                    },
+                )
+            })
+            .unwrap();
+        let before = std::fs::read(live.join(qoder::AUTH_FILE)).unwrap();
+
+        let err = super::capture(&sb.app, &json!({ "profileId": id })).unwrap_err();
+        assert_eq!(
+            err_code(&err),
+            "snapshot_dir_not_owned",
+            "msg={}",
+            err.message
+        );
+        assert_eq!(std::fs::read(live.join(qoder::AUTH_FILE)).unwrap(), before);
+    }
+
+    #[test]
+    fn capture_refuses_a_symlinked_snapshot_dir() {
+        let _guard = lock_env();
+        let sb = sandbox();
+        install_both(&sb, sb._dir.path());
+        seed_live(&sb, "com.qoder.app.stable", "LIVE-A", "OVERLAY-A");
+        seed_live(&sb, "com.qoder.app.dev", "LIVE-B", "OVERLAY-B");
+        set_status_json(&sb, "a@example.com");
+        let created = super::create(&sb.app, &json!({ "edition": "qoder_global" })).unwrap();
+        let id = created["profile"]["profileId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let snapshot = PathBuf::from(created["profile"]["snapshotDir"].as_str().unwrap());
+        std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+        // AICC 分配的快照目录被换成指向别处的符号链接。
+        std::fs::remove_dir_all(&snapshot).ok();
+        let elsewhere = sb._dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &snapshot).unwrap();
+
+        let err = super::capture(&sb.app, &json!({ "profileId": id })).unwrap_err();
+        assert_eq!(err_code(&err), "symlink_target", "msg={}", err.message);
+        assert!(std::fs::read_dir(&elsewhere).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn adopt_copies_into_the_managed_root_and_only_then_allows_capture() {
+        let _guard = lock_env();
+        let sb = sandbox();
+        install_both(&sb, sb._dir.path());
+        let live = seed_live(&sb, "com.qoder.app.stable", "LIVE-A", "OVERLAY-A");
+        let external = sb._dir.path().join("external-snapshot");
+        copy_files(&live, &external);
+        let source_auth = external.join(qoder::AUTH_FILE);
+        let before = std::fs::read(&source_auth).unwrap();
+
+        let imported = super::import(
+            &sb.app,
+            &json!({ "edition": "qoder_global", "snapshotDir": external.to_string_lossy() }),
+        )
+        .unwrap();
+        let id = imported["profile"]["profileId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let adopted = super::adopt(&sb.app, &json!({ "profileId": id })).unwrap();
+        assert_eq!(adopted["adopted"], true);
+        assert_eq!(adopted["sourceUnchanged"], true);
+        assert_eq!(adopted["profile"]["managed"], true);
+        let managed_dir = PathBuf::from(adopted["profile"]["snapshotDir"].as_str().unwrap());
+        assert!(managed_dir.starts_with(sb.app.paths.data_dir.join("qoder").join("profiles")));
+        assert_ne!(managed_dir, external);
+        assert_eq!(std::fs::read(&source_auth).unwrap(), before);
+
+        // 复制之后才允许保存登录态。
+        let captured = super::capture(&sb.app, &json!({ "profileId": id })).unwrap();
+        assert_eq!(captured["captured"], true);
+        assert_eq!(
+            sha(&live.join(qoder::AUTH_FILE)),
+            sha(&managed_dir.join(qoder::AUTH_FILE))
+        );
+        assert_eq!(
+            std::fs::read(&source_auth).unwrap(),
+            before,
+            "原目录必须还是原样"
+        );
+    }
+
+    #[test]
+    fn adopt_is_idempotent_for_managed_profiles() {
+        let _guard = lock_env();
+        let sb = sandbox();
+        install_both(&sb, sb._dir.path());
+        seed_live(&sb, "com.qoder.app.stable", "LIVE-A", "OVERLAY-A");
+        set_status_json(&sb, "a@example.com");
+        let (id, _) = register_current(&sb);
+        let again = super::adopt(&sb.app, &json!({ "profileId": id })).unwrap();
+        assert_eq!(again["adopted"], false);
     }
 
     fn contains_key(value: &Value, needle: &str) -> bool {

@@ -49,6 +49,7 @@ pub const METHODS: &[&str] = &[
     "qoder.profiles.scan",
     "qoder.profiles.create",
     "qoder.profiles.import",
+    "qoder.profiles.adopt",
     "qoder.profiles.inspect",
     "qoder.profiles.capture",
     "qoder.profiles.rename",
@@ -355,6 +356,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
         "qoder.profiles.create" => qoder_manager::create(app, params),
 
         "qoder.profiles.import" => qoder_manager::import(app, params),
+
+        "qoder.profiles.adopt" => qoder_manager::adopt(app, params),
 
         "qoder.profiles.inspect" => qoder_manager::inspect(app, params),
 

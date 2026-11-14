@@ -43,7 +43,8 @@
 | --- | --- | --- |
 | 版本检测 `editions.detect` | 可用 | International 实测；CN 标注未复验，`parallelInstances=unknown` |
 | 扫描 `profiles.scan` | 可用 | 只读 live + 复制快照，live 零改动 |
-| 导入 `profiles.import` | 可用 | 只登记已有快照目录 |
+| 导入 `profiles.import` | 可用（只读） | 只登记已有快照目录；`managed=false`，`capture` 不会向它写文件；live 目录本身拒绝导入 |
+| 转管理 `profiles.adopt` | 可用 | 把外部只读快照**复制**进 AICC 管理目录后才可写；原目录零改动 |
 | 认证检查 `profiles.inspect` | 可用 | 只读快照，不碰 live |
 | 保存快照 `profiles.capture` | 可用 | 只写快照目录；身份证明不了就拒绝 |
 | 切换 `profiles.open` / `activate` | **永久拒绝** | 没有任何环境变量开关；写入路径已从交付二进制里移除（`#[cfg(test)]`） |
@@ -67,7 +68,28 @@
 真实库里 `qoder_switch_journal` 为 0 条；只做了 schema 迁移 v11 → v12（新增切换日志表与
 `qoder_profiles.snapshot_hash` 列）。
 
-### 3.0.1 International 钥匙串授权（本轮完成）
+### 3.0.1 外部导入目录的写入风险（PR #70 最后一条 P0，已封闭）
+
+复核发现：`qoder.profiles.import` 可以把**任意外部目录**登记成 `snapshot_dir`，
+而 `capture` 会往 `snapshot_dir` 写文件。如果导入的是客户端正在使用的 live 目录，
+一次「保存当前登录」就会覆盖 live 的认证文件。
+
+修复（提交 `fix(qoder): keep imported snapshots read-only`）：
+
+| 规则 | 实现 | 测试 |
+| --- | --- | --- |
+| 外部导入 Profile 只读 | `managed=false` → `capture` 返回 `profile_read_only` 并带 `adopt` 提示 | `imported_profile_is_read_only_and_capture_never_touches_it` |
+| 只能写 AICC 管理的目录 | 目标必须**字面等于** `qoder/profiles/<profile_id>/`（写的是字面路径，不是 `canonicalize` 后的目标，避免链接把写入重定向到别处） | `capture_refuses_a_snapshot_dir_outside_the_managed_root` |
+| 符号链接 / 目录穿越 | 导入先做绝对路径 + `..` 词法检查，再 `canonicalize`；快照目录本身、组文件、journal、暂存目录都不许是链接 | `capture_refuses_a_symlinked_snapshot_dir` |
+| 禁止把 live 当快照 | 导入时若源目录就是 live（或 live 的祖先）直接拒绝 `source_is_live_dir` | `import_refuses_the_live_dir_itself` |
+| 与 live 重叠一律拒写 | 快照目录与 live 相等/互为祖先后代 → `snapshot_dir_overlaps_live` | 同上 |
+| 外部快照转可管理 | 新增 `qoder.profiles.adopt`：先复制进 AICC 管理目录、逐文件校验哈希，才把 `managed` 置 true；失败删除半成品 | `adopt_copies_into_the_managed_root_and_only_then_allows_capture`、`adopt_is_idempotent_for_managed_profiles` |
+
+原始目录零改动由断言保证：导入前后 `auth.v1.dat` 与 `auth-profile-overlays.v1.dat`
+逐字节比较相等，且外部目录不会出现 `.aicc-capture.json`。
+`qoder.profiles.open` / `activate` 仍然恒拒绝，`switch_capability()` 没有环境变量开关。
+
+### 3.0.2 International 钥匙串授权（本轮完成）
 
 之前 `inspect` 一直停在"待检查"，原因是钥匙串条目的 ACL **只信任 Qoder 自己**：
 

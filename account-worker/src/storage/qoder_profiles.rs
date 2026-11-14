@@ -84,6 +84,8 @@ pub struct ProfilePatch {
     pub app_bundle_id: Option<String>,
     pub app_path: Option<String>,
     pub client_version: Option<String>,
+    /// 只有 `adopt`（把外部导入目录改成 AICC 管理目录）会改这一列。
+    pub snapshot_dir: Option<String>,
     pub auth_file: Option<String>,
     pub auth_fingerprint: Option<String>,
     pub snapshot_hash: Option<String>,
@@ -245,6 +247,7 @@ impl crate::storage::Db {
         set_text!(patch.app_bundle_id, "app_bundle_id");
         set_text!(patch.app_path, "app_path");
         set_text!(patch.client_version, "client_version");
+        set_text!(patch.snapshot_dir, "snapshot_dir");
         set_text!(patch.auth_file, "auth_file");
         set_text!(patch.auth_fingerprint, "auth_fingerprint");
         set_text!(patch.snapshot_hash, "snapshot_hash");

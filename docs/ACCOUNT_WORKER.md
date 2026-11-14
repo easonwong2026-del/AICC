@@ -58,9 +58,10 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `qoder.profiles.list` | 列出 Profile（可带 `edition` 过滤）；附带快照是否就绪、live 当前是否就是这个账号、运行状态；**只读**：未完成切换只放在 `pendingSwitches` 里报告，不恢复 | 否 |
 | `qoder.profiles.scan` | 把客户端当前登录的账号登记成 Profile：复制一份快照，**不移动、不覆盖、不要求重新登录** | 否 |
 | `qoder.profiles.create` | 新建 Profile（AICC 托管的空快照目录） | 否 |
-| `qoder.profiles.import` | 登记一份已有账号快照目录（必须有 `auth.v1.dat`；`..` 与重复目录会被拒） | 否 |
+| `qoder.profiles.import` | 登记一份**外部**账号快照目录（必须有 `auth.v1.dat`；`..`、已登记目录、AICC 管理目录内、以及**客户端 live 目录本身**都会被拒）。登记后 `managed=false`，即**只读**：`capture` 不会向它写任何文件 | 否 |
+| `qoder.profiles.adopt` | 把外部只读快照**复制**进 AICC 管理目录（`qoder/profiles/<id>/`），逐文件校验哈希后才改成 `managed=true`；原目录一个字节都不改，失败即删除半成品 | 否 |
 | `qoder.profiles.inspect` | 用对应版本的适配器解密**快照**，写回指纹/到期/身份；**不回传令牌** | 否 |
-| `qoder.profiles.capture` | 把客户端此刻的登录态按**文件组事务**存进快照（暂存 → 校验 → 上一代备份 → 提交 → 全组校验；失败整体回退）；无法证明 live 属于该 Profile 时拒绝覆盖 | 否 |
+| `qoder.profiles.capture` | 把客户端此刻的登录态按**文件组事务**存进快照（暂存 → 校验 → 上一代备份 → 提交 → 全组校验；失败整体回退）；无法证明 live 属于该 Profile 时拒绝覆盖；**只写 AICC 管理的 `qoder/profiles/<id>/`**：外部导入（`managed=false`）返回 `profile_read_only`，目录不是 AICC 分配的、与 live 重叠、或目标本身是符号链接，都直接拒绝 | 否 |
 | `qoder.profiles.rename` | 只改 AICC 里的显示名 | 否 |
 | `qoder.profiles.open` | **本阶段永久拒绝**：返回 `switchEnabled:false, permanent:true`，不探测进程、不建备份、不读写 live（没有任何环境变量开关） | 否 |
 | `qoder.profiles.close` | 只关 AICC 自己拉起的进程；`force` 才升级 SIGKILL | 否 |
