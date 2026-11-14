@@ -12,9 +12,12 @@ mod growth;
 mod handlers;
 mod paths;
 mod providers;
+mod qoder_profiles;
 mod rpc;
 mod securestore;
 mod storage;
+#[cfg(test)]
+mod test_env;
 mod travel;
 mod version;
 

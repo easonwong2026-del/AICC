@@ -510,7 +510,8 @@ mod tests {
         }
 
         let db = Db::open(&path).expect("upgrade");
-        assert_eq!(db.schema_version().unwrap(), 10);
+        // v10 引入签到诊断列，v11 又加了 Qoder Profile 两张表；这里只关心"升到最新"。
+        assert_eq!(db.schema_version().unwrap(), super::super::LATEST_VERSION);
         assert!(db.integrity_ok());
 
         let account = db.get_account("acc-1").unwrap().expect("账号还在");

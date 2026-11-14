@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::app::App;
 use crate::providers::{magpie, qoder, workbuddy, workbuddy_auth};
+use crate::qoder_profiles::manager as qoder_manager;
 use crate::rpc::{RpcError, RpcResult};
 use crate::securestore::SecretErrorKind;
 use crate::storage::{AccountFilter, AccountInput};
@@ -39,6 +40,25 @@ pub const METHODS: &[&str] = &[
     "providers.workbuddy.oauth",
     "providers.qoder.presence",
     "providers.qoder.inspect",
+    // 国际版的同名只读检查：与 CN 分开，绝不共用密钥/路径。
+    "providers.qoder_global.presence",
+    "providers.qoder_global.inspect",
+    // ---- Qoder 双版本多账号（PR #70）----
+    "qoder.editions.detect",
+    "qoder.profiles.list",
+    "qoder.profiles.scan",
+    "qoder.profiles.create",
+    "qoder.profiles.import",
+    "qoder.profiles.adopt",
+    "qoder.profiles.inspect",
+    "qoder.profiles.capture",
+    "qoder.profiles.rename",
+    "qoder.profiles.open",
+    "qoder.profiles.close",
+    "qoder.profiles.activate",
+    "qoder.profiles.remove",
+    "qoder.profiles.status",
+    "qoder.profiles.recover",
     "auth.workbuddy.start",
     "auth.workbuddy.poll",
     "auth.workbuddy.cancel",
@@ -313,6 +333,49 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
             let dir = params.get("authDir").and_then(Value::as_str);
             Ok(qoder::inspect(dir))
         }
+
+        "providers.qoder_global.presence" => {
+            let dir = params.get("authDir").and_then(Value::as_str);
+            Ok(crate::providers::qoder_global::presence(dir))
+        }
+
+        "providers.qoder_global.inspect" => {
+            let dir = params.get("authDir").and_then(Value::as_str);
+            Ok(crate::providers::qoder_global::inspect(dir))
+        }
+
+        // ---- Qoder 双版本多账号（PR #70）----
+        // 每个方法都带显式 edition 或 profileId，**没有**任何"用全局环境变量
+        // 切换当前账号"的隐式状态：多账号场景下那就是串号源头。
+        "qoder.editions.detect" => Ok(qoder_manager::editions_detect()),
+
+        "qoder.profiles.list" => qoder_manager::list(app, params),
+
+        "qoder.profiles.scan" => qoder_manager::scan(app, params),
+
+        "qoder.profiles.create" => qoder_manager::create(app, params),
+
+        "qoder.profiles.import" => qoder_manager::import(app, params),
+
+        "qoder.profiles.adopt" => qoder_manager::adopt(app, params),
+
+        "qoder.profiles.inspect" => qoder_manager::inspect(app, params),
+
+        "qoder.profiles.capture" => qoder_manager::capture(app, params),
+
+        "qoder.profiles.rename" => qoder_manager::rename(app, params),
+
+        "qoder.profiles.open" => qoder_manager::open(app, params),
+
+        "qoder.profiles.close" => qoder_manager::close(app, params),
+
+        "qoder.profiles.activate" => qoder_manager::activate(app, params),
+
+        "qoder.profiles.remove" => qoder_manager::remove(app, params),
+
+        "qoder.profiles.status" => qoder_manager::status(app, params),
+
+        "qoder.profiles.recover" => qoder_manager::recover(app, params),
 
         // ---- WorkBuddy 扫码登录（PR1b-1）----
         "auth.workbuddy.start" => {

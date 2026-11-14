@@ -410,6 +410,141 @@ final class AccountWorkerManager: ObservableObject {
         return try await client.call("checkin.records", params: params, timeout: 15)
     }
 
+    // MARK: - Qoder 双版本多账号（PR #70）
+
+    /// 两个版本的安装情况。不碰钥匙串，可以随时调。
+    func qoderEditionsDetect() async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call("qoder.editions.detect", timeout: 10)
+    }
+
+    func qoderProfilesList(edition: String? = nil) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        var params: [String: Any] = [:]
+        if let edition { params["edition"] = edition }
+        return try await client.call("qoder.profiles.list", params: params, timeout: 15)
+    }
+
+    /// 扫描本机已有的配置目录，登记成 Profile（不移动、不覆盖）。
+    func qoderProfilesScan() async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call("qoder.profiles.scan", timeout: 30)
+    }
+
+    func qoderProfileCreate(edition: String, displayName: String) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call(
+            "qoder.profiles.create",
+            params: ["edition": edition, "displayName": displayName],
+            timeout: 20
+        )
+    }
+
+    /// 导入一份已有的账号快照目录（目录里必须有 `auth.v1.dat`）。
+    func qoderProfileImport(
+        edition: String,
+        snapshotDir: String,
+        displayName: String? = nil
+    ) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        var params: [String: Any] = ["edition": edition, "snapshotDir": snapshotDir]
+        if let displayName, !displayName.isEmpty { params["displayName"] = displayName }
+        return try await client.call("qoder.profiles.import", params: params, timeout: 20)
+    }
+
+    /// 把客户端当前登录态存进该 Profile 的快照。
+    func qoderProfileCapture(profileId: String) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call(
+            "qoder.profiles.capture",
+            params: ["profileId": profileId],
+            timeout: 20
+        )
+    }
+
+    /// 显式恢复未完成的切换。后端会先确认对应客户端已完全退出。
+    func qoderProfileRecover() async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call("qoder.profiles.recover", params: [:], timeout: 30)
+    }
+
+    /// 只读检查认证。第一次会弹钥匙串授权，之后不再弹。
+    func qoderProfileInspect(profileId: String) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call(
+            "qoder.profiles.inspect",
+            params: ["profileId": profileId],
+            timeout: 30
+        )
+    }
+
+    func qoderProfileRename(profileId: String, displayName: String) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call(
+            "qoder.profiles.rename",
+            params: ["profileId": profileId, "displayName": displayName],
+            timeout: 15
+        )
+    }
+
+    func qoderProfileOpen(profileId: String) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call(
+            "qoder.profiles.open",
+            params: ["profileId": profileId],
+            timeout: 30
+        )
+    }
+
+    func qoderProfileClose(profileId: String, force: Bool = false) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call(
+            "qoder.profiles.close",
+            params: ["profileId": profileId, "force": force],
+            timeout: 30
+        )
+    }
+
+    func qoderProfileActivate(profileId: String) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call(
+            "qoder.profiles.activate",
+            params: ["profileId": profileId],
+            timeout: 40
+        )
+    }
+
+    /// `purge = true` 才会删磁盘目录，且只对 AICC 托管的目录生效。
+    func qoderProfileRemove(profileId: String, purge: Bool) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call(
+            "qoder.profiles.remove",
+            params: ["profileId": profileId, "purge": purge],
+            timeout: 30
+        )
+    }
+
+    func qoderProfilesStatus(edition: String? = nil) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        var params: [String: Any] = [:]
+        if let edition { params["edition"] = edition }
+        return try await client.call("qoder.profiles.status", params: params, timeout: 15)
+    }
+
     private func ensureRunning() async throws {
         if case .running = state { return }
         await refresh()

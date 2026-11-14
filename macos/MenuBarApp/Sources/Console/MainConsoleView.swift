@@ -209,7 +209,7 @@ struct MainConsoleView: View {
     }
 
     private var isRefreshing: Bool {
-        store.loadingAccounts || store.loadingQuota
+        store.loadingAccounts || store.loadingQuota || store.qoderLoading
     }
 
     private func refreshCurrentPage() async {
@@ -221,7 +221,9 @@ struct MainConsoleView: View {
             async let travel: Void = store.loadTravel()
             _ = await (accounts, travel)
         case .accounts:
-            await store.refreshAccounts()
+            async let accounts: Void = store.refreshAccounts()
+            async let qoder: Void = store.refreshQoder()
+            _ = await (accounts, qoder)
         }
     }
 }

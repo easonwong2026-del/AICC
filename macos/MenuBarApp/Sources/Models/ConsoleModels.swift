@@ -235,6 +235,7 @@ enum ConsolePlatformFilter: String, CaseIterable, Identifiable {
     case all
     case workbuddy
     case qoder
+    case qoderGlobal
 
     var id: String { rawValue }
 
@@ -243,14 +244,36 @@ enum ConsolePlatformFilter: String, CaseIterable, Identifiable {
         case .all: return "全部"
         case .workbuddy: return "WorkBuddy"
         case .qoder: return "Qoder CN"
+        case .qoderGlobal: return "International"
         }
     }
 
+    /// 这一档是否要画 WorkBuddy 那一段。
+    var showsWorkbuddy: Bool {
+        self == .all || self == .workbuddy
+    }
+
+    /// 这一档是否要画 Qoder 的两段。
+    var showsQoder: Bool {
+        self != .workbuddy
+    }
+
+    /// 只筛某一个 Qoder 版本时返回它；`.all` / `.workbuddy` 返回 nil。
+    var edition: QoderEdition? {
+        switch self {
+        case .qoder: return .cn
+        case .qoderGlobal: return .global
+        case .all, .workbuddy: return nil
+        }
+    }
+
+    /// 老口径：只看 `accounts` 表里的账号（WorkBuddy）。
     func includes(_ account: ConsoleAccount) -> Bool {
         switch self {
         case .all: return true
         case .workbuddy: return account.platform == "workbuddy"
         case .qoder: return account.platform == "qoder_cn"
+        case .qoderGlobal: return account.platform == "qoder_global"
         }
     }
 }
