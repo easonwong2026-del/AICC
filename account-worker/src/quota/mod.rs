@@ -209,10 +209,11 @@ fn wanted(
 
 /// 一个 WorkBuddy 账号的一行。
 ///
-/// 三条降级规则：
-/// 1. 缓存在 5 分钟内 → 直接用，不打网络；
-/// 2. 过期或要求刷新 → 重新取，**额度与用量各自独立成败**；
-/// 3. 取数失败但有旧快照 → 返回旧数据并标 `stale`，不把有用的数丢掉。
+/// 四条降级规则：
+/// 1. 缓存在 5 分钟内**且统计窗口一致** → 直接用，不打网络；
+/// 2. 缓存新但窗口不一致 → 余额复用，**用量按请求的窗口重取**（7 天的消耗不能冒充 30 天）；
+/// 3. 过期或要求刷新 → 重新取，**额度与用量各自独立成败**；
+/// 4. 取数失败但有旧快照 → 返回旧数据并标 `stale`，不把有用的数丢掉。
 async fn workbuddy_row(
     app: &Arc<App>,
     account: AccountRecord,
@@ -226,11 +227,17 @@ async fn workbuddy_row(
         .flatten();
 
     if !refresh {
-        if let Some(snapshot) = cached.as_ref() {
-            if snapshot_age_secs(&snapshot.captured_at) <= CACHE_TTL_SECS {
+        if let Some(snapshot) = cached
+            .as_ref()
+            .filter(|s| snapshot_age_secs(&s.captured_at) <= CACHE_TTL_SECS)
+        {
+            if cached_usage_window(snapshot) == Some(days) {
                 if let Some(row) = cached_row(snapshot, false) {
                     return row;
                 }
+            } else {
+                // 余额还是 5 分钟内的，可以复用；用量必须按这一轮的窗口重取。
+                return usage_only_row(app, &account, snapshot, days, deadline).await;
             }
         }
     }
@@ -246,24 +253,22 @@ async fn workbuddy_row(
         );
     }
 
-    let (source, access) = match broker::resolve(app, &account) {
-        Ok(Outcome::Resolved(resolved)) => (resolved.kind.clone(), resolved.access),
-        Ok(Outcome::Unavailable { reason, detail }) => {
+    let (source, access) = match resolve_access(app, &account, deadline).await {
+        Ok(resolved) => resolved,
+        Err(detail) => {
+            // 凭据读不到（含钥匙串等授权超时）一律按授权不可用降级，
+            // 有旧快照就继续显示旧数据。
+            let status = if detail.contains("时间预算") {
+                "timeout"
+            } else {
+                "unauthorized"
+            };
             return degraded_or_error(
                 &account,
                 &account.auth_source,
                 cached.as_ref(),
-                "unauthorized",
-                &format!("{reason}: {detail}"),
-            );
-        }
-        Err(err) => {
-            return degraded_or_error(
-                &account,
-                &account.auth_source,
-                cached.as_ref(),
-                "error",
-                &err.message,
+                status,
+                &detail,
             );
         }
     };
@@ -303,9 +308,100 @@ async fn workbuddy_row(
         };
 
     let row = ok_row(&account, &source, &quota, usage.as_ref(), usage_error);
-    app.with_db(|db| db.save_quota_snapshot(&account.id, &account.provider, "ok", &row))
-        .ok();
+    // 请求期间账号可能已被删除或重新授权：写入时**原子核验身份**，否则会留下
+    // 孤儿快照；账号 id 是 uid 的哈希，重新导入会复用同一个 id。
+    app.with_db(|db| {
+        db.save_quota_snapshot(
+            &account.id,
+            &account.provider,
+            "ok",
+            &row,
+            Some(account.auth_epoch),
+        )
+        .map(|_| ())
+    })
+    .ok();
     row
+}
+
+/// 只重取用量：余额取自 5 分钟内的快照，窗口按本次请求。
+///
+/// 这条路径存在的唯一原因：`days` 是请求参数，缓存里存的是上次的窗口。
+/// 把 7 天的消耗显示成 30 天，比不显示更糟。
+async fn usage_only_row(
+    app: &Arc<App>,
+    account: &AccountRecord,
+    snapshot: &crate::storage::quota::QuotaSnapshot,
+    days: i64,
+    deadline: tokio::time::Instant,
+) -> Value {
+    let mut row = match cached_row(snapshot, false) {
+        Some(row) => row,
+        // 快照内容坏掉（不是对象）就退回完整刷新路径。
+        None => Box::pin(workbuddy_row(app, account.clone(), days, true, deadline)).await,
+    };
+
+    let access = match resolve_access(app, account, deadline).await {
+        Ok((source, access)) => {
+            row["source"] = json!(source);
+            access
+        }
+        Err(failure) => {
+            // 拿不到凭据：余额照旧，用量明确置空。
+            row["usage"] = Value::Null;
+            row["usageError"] = json!(crate::rpc::sanitize(&failure));
+            return row;
+        }
+    };
+
+    match tokio::time::timeout_at(deadline, workbuddy::fetch_usage(account, &access, days)).await {
+        Ok(Ok(usage)) => {
+            row["usage"] = usage_json(&usage);
+            row["usageError"] = Value::Null;
+            // 用新窗口的用量覆盖快照，下一次同窗口查询才能真正命中缓存。
+            let epoch = Some(account.auth_epoch);
+            app.with_db(|db| {
+                db.save_quota_snapshot(&account.id, &account.provider, "ok", &row, epoch)
+                    .map(|_| ())
+            })
+            .ok();
+            row
+        }
+        Ok(Err(failure)) => {
+            row["usage"] = Value::Null;
+            row["usageError"] = json!(failure.detail());
+            row
+        }
+        Err(_) => {
+            row["usage"] = Value::Null;
+            row["usageError"] = json!("用量查询超出本轮时间预算");
+            row
+        }
+    }
+}
+
+/// 读一次凭据。**钥匙串调用是同步阻塞的**（首次可能弹系统授权框），所以放在
+/// `spawn_blocking` 里并同样受 deadline 约束：超时就返回错误，让这一行降级，
+/// 而不是把整轮看板卡在这里。
+///
+/// 注意：超时只是让**调用方**不再等待；被阻塞的那个线程会一直挂着直到用户
+/// 回答系统弹窗。这是 macOS 钥匙串的行为，任何实现都绕不开。
+async fn resolve_access(
+    app: &Arc<App>,
+    account: &AccountRecord,
+    deadline: tokio::time::Instant,
+) -> Result<(String, String), String> {
+    let app = Arc::clone(app);
+    let owned = account.clone();
+    let handle = tokio::task::spawn_blocking(move || broker::resolve(&app, &owned));
+    match tokio::time::timeout_at(deadline, handle).await {
+        Ok(Ok(Ok(Outcome::Resolved(resolved)))) => Ok((resolved.kind, resolved.access)),
+        Ok(Ok(Ok(Outcome::Unavailable { reason, detail }))) => Err(format!("{reason}: {detail}")),
+        Ok(Ok(Err(err))) => Err(err.message),
+        // 阻塞任务 panic 或超时。
+        Ok(Err(err)) => Err(format!("凭据读取异常：{err}")),
+        Err(_) => Err("凭据读取超出本轮时间预算（可能在等待钥匙串授权）".to_string()),
+    }
 }
 
 /// 成功行。额度一定有，用量可能没有（`usageError` 单独说明）。
@@ -423,6 +519,12 @@ fn error_row(
         "cached": false,
         "stale": false,
     })
+}
+
+/// 快照里那次用量统计覆盖了多少天。没有用量（上次用量取数失败）时返回 `None`，
+/// 这样下一轮会重取用量而不是把"空"当成命中。
+fn cached_usage_window(snapshot: &crate::storage::quota::QuotaSnapshot) -> Option<i64> {
+    parse_payload(&snapshot.payload)["usage"]["windowDays"].as_i64()
 }
 
 /// 快照距今多少秒。时间戳解析不了就当作"很旧"，宁可多打一次网络。
@@ -599,6 +701,73 @@ mod tests {
         assert_eq!(row["status"], "timeout");
         assert!(row["remaining"].is_null());
         assert_eq!(row["stale"], false);
+    }
+
+    #[test]
+    fn cached_usage_window_comes_from_the_payload() {
+        let with_usage = snapshot(json!({"usage": {"windowDays": 7, "requests": 3}}));
+        assert_eq!(cached_usage_window(&with_usage), Some(7));
+        // 上次用量没取到 → 没有窗口 → 这一轮必须重取，不能当成命中。
+        let no_usage = snapshot(json!({"usage": null}));
+        assert_eq!(cached_usage_window(&no_usage), None);
+        assert_eq!(cached_usage_window(&snapshot(json!({}))), None);
+    }
+
+    /// 5 分钟内但窗口不同：**余额可复用，用量必须置空重取**，
+    /// 绝不能把 7 天的消耗显示成 30 天的。
+    #[tokio::test]
+    async fn a_different_window_never_reuses_the_cached_usage() {
+        let (app, _dir) = test_app();
+        let record = app
+            .with_db(|db| {
+                db.upsert_account(&crate::storage::AccountInput {
+                    platform: "workbuddy".into(),
+                    uid: "u-window".into(),
+                    nickname: None,
+                    email: None,
+                    group_id: None,
+                    auth_ref: None,
+                    profile_ref: None,
+                    auth_status: None,
+                    checkin_enabled: None,
+                    token_expires_at: None,
+                    auth_domain: None,
+                    auth_source: None,
+                    travel_enabled: None,
+                    provider: Some("workbuddy".into()),
+                })
+            })
+            .unwrap();
+
+        // 先放一条「7 天窗口」的新鲜快照。
+        let payload = json!({
+            "accountId": record.id, "provider": "workbuddy", "status": "ok",
+            "unit": "credits", "remaining": 90.0,
+            "usage": {"windowDays": 7, "requests": 42, "credits": 1.5},
+            "cached": false, "stale": false,
+        });
+        app.with_db(|db| {
+            db.save_quota_snapshot(&record.id, "workbuddy", "ok", &payload, None)
+                .map(|_| ())
+        })
+        .unwrap();
+
+        // 同窗口 → 命中缓存，用量原样返回。
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let hit = workbuddy_row(&app, record.clone(), 7, false, deadline).await;
+        assert_eq!(hit["cached"], true);
+        assert_eq!(hit["usage"]["windowDays"], 7);
+        assert_eq!(hit["usage"]["requests"], 42);
+
+        // 换窗口 → 不许复用 7 天的用量。这里没有凭据，所以用量必须是空 + 有原因，
+        // 余额仍然从缓存里来。
+        let miss = workbuddy_row(&app, record.clone(), 30, false, deadline).await;
+        assert_eq!(miss["remaining"], 90.0, "余额可以复用");
+        assert!(miss["usage"].is_null(), "七天用量不能冒充三十天");
+        assert!(
+            !miss["usageError"].as_str().unwrap_or_default().is_empty(),
+            "用量被弃用时要说明原因"
+        );
     }
 
     #[test]
