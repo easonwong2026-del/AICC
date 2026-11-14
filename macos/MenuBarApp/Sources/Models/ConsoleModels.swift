@@ -172,6 +172,11 @@ struct ConsoleAccount: Identifiable, Equatable {
 
     var isWorkbuddyAI: Bool { platform == "workbuddy" && provider == "workbuddy_ai" }
 
+    /// 是不是 WorkBuddy 的某个站点。`accounts` 里也可能有别的平台，别只按 provider 判。
+    func isWorkbuddy(international: Bool) -> Bool {
+        platform == "workbuddy" && isWorkbuddyAI == international
+    }
+
     var workbuddyVariant: WorkbuddyVariant? {
         guard platform == "workbuddy" else { return nil }
         return provider == "workbuddy_ai" ? .ai : .cn

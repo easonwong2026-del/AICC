@@ -229,6 +229,16 @@ final class ConsoleModelsTests: XCTestCase {
         XCTAssertFalse(ConsolePlatformFilter.workbuddyAI.showsQoder)
     }
 
+    /// 平台判断不能只看 provider：`accounts` 里可能有 qoder_cn 之类，别归进 WorkBuddy 段。
+    func testWorkbuddySectionIgnoresOtherPlatforms() {
+        let qoder = ConsoleAccount(
+            id: "q1", platform: "qoder_cn", provider: "workbuddy", uid: "u1", nickname: "Qoder"
+        )
+        XCTAssertFalse(qoder.isWorkbuddy(international: false))
+        XCTAssertFalse(qoder.isWorkbuddy(international: true))
+        XCTAssertFalse(ConsolePlatformFilter.workbuddy.includes(qoder))
+    }
+
     /// 签到页没有"国际版"这一档：那边根本没有签到任务。
     func testCheckinFiltersDoNotOfferTheInternationalSite() {
         XCTAssertFalse(ConsolePlatformFilter.checkinFilters.contains(.workbuddyAI))

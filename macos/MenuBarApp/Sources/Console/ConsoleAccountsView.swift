@@ -31,7 +31,7 @@ struct ConsoleAccountsView: View {
     private func visibleWorkbuddy(_ international: Bool) -> [ConsoleAccount] {
         guard international ? filter.showsWorkbuddyAI : filter.showsWorkbuddyCN else { return [] }
         return store.accounts.filter { account in
-            account.isWorkbuddyAI == international
+            account.isWorkbuddy(international: international)
                 && (trimmedQuery.isEmpty || account.searchText.contains(trimmedQuery))
         }
     }
@@ -310,12 +310,14 @@ struct ConsoleAccountsView: View {
                 if filter.showsWorkbuddyAI, !visibleWorkbuddy(true).isEmpty {
                     workbuddySection(international: true)
                 }
-                ForEach(QoderEdition.allCases) { edition in
-                    if filter.edition == nil || filter.edition == edition {
-                        if !visibleServiceAccounts(edition).isEmpty {
-                            qoderServiceSection(edition)
+                if filter.showsQoder {
+                    ForEach(QoderEdition.allCases) { edition in
+                        if filter.edition == nil || filter.edition == edition {
+                            if !visibleServiceAccounts(edition).isEmpty {
+                                qoderServiceSection(edition)
+                            }
+                            qoderSection(edition)
                         }
-                        qoderSection(edition)
                     }
                 }
             }
