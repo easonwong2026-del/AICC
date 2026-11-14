@@ -262,6 +262,7 @@ struct ConsoleAccount: Identifiable, Equatable {
 enum ConsolePlatformFilter: String, CaseIterable, Identifiable {
     case all
     case workbuddy
+    case workbuddyAI
     case qoder
     case qoderGlobal
 
@@ -271,35 +272,53 @@ enum ConsolePlatformFilter: String, CaseIterable, Identifiable {
         switch self {
         case .all: return "全部"
         case .workbuddy: return "WorkBuddy"
+        case .workbuddyAI: return "WorkBuddy AI"
         case .qoder: return "Qoder CN"
-        case .qoderGlobal: return "International"
+        case .qoderGlobal: return "Qoder Intl"
         }
     }
 
-    /// 这一档是否要画 WorkBuddy 那一段。
-    var showsWorkbuddy: Bool {
+    /// AI 账号页能筛的五档（两个 WorkBuddy 站点分开）。
+    static let accountFilters: [ConsolePlatformFilter] = allCases
+
+    /// 签到页只筛真正有签到任务的对象：国际版没有这些任务，不放进筛选条。
+    static let checkinFilters: [ConsolePlatformFilter] = [.all, .workbuddy, .qoder, .qoderGlobal]
+
+    /// 国内版那一段。
+    var showsWorkbuddyCN: Bool {
         self == .all || self == .workbuddy
+    }
+
+    /// 国际版那一段。
+    var showsWorkbuddyAI: Bool {
+        self == .all || self == .workbuddyAI
+    }
+
+    /// 这一档是否要画任意 WorkBuddy 段。
+    var showsWorkbuddy: Bool {
+        showsWorkbuddyCN || showsWorkbuddyAI
     }
 
     /// 这一档是否要画 Qoder 的两段。
     var showsQoder: Bool {
-        self != .workbuddy
+        self != .workbuddy && self != .workbuddyAI
     }
 
-    /// 只筛某一个 Qoder 版本时返回它；`.all` / `.workbuddy` 返回 nil。
+    /// 只筛某一个 Qoder 版本时返回它。
     var edition: QoderEdition? {
         switch self {
         case .qoder: return .cn
         case .qoderGlobal: return .global
-        case .all, .workbuddy: return nil
+        case .all, .workbuddy, .workbuddyAI: return nil
         }
     }
 
-    /// 老口径：只看 `accounts` 表里的账号（WorkBuddy）。
+    /// 只看 `accounts` 表里的账号（WorkBuddy 两个站点靠 provider 区分）。
     func includes(_ account: ConsoleAccount) -> Bool {
         switch self {
         case .all: return true
-        case .workbuddy: return account.platform == "workbuddy"
+        case .workbuddy: return account.platform == "workbuddy" && !account.isWorkbuddyAI
+        case .workbuddyAI: return account.platform == "workbuddy" && account.isWorkbuddyAI
         case .qoder: return account.platform == "qoder_cn"
         case .qoderGlobal: return account.platform == "qoder_global"
         }

@@ -206,6 +206,39 @@ final class ConsoleModelsTests: XCTestCase {
         XCTAssertTrue(WorkbuddyVariant.ai.subtitle.contains("workbuddy.ai"))
     }
 
+    /// 筛选条必须把两个站点分开：选 WorkBuddy 不该把国际版也带出来。
+    func testPlatformFilterSeparatesTheTwoWorkbuddySites() {
+        let cn = ConsoleAccount(
+            id: "a1", platform: "workbuddy", provider: "workbuddy", uid: "u1", nickname: "国内"
+        )
+        let ai = ConsoleAccount(
+            id: "a2", platform: "workbuddy", provider: "workbuddy_ai", uid: "u2", nickname: "海外"
+        )
+        XCTAssertTrue(ConsolePlatformFilter.all.includes(cn))
+        XCTAssertTrue(ConsolePlatformFilter.all.includes(ai))
+        XCTAssertTrue(ConsolePlatformFilter.workbuddy.includes(cn))
+        XCTAssertFalse(ConsolePlatformFilter.workbuddy.includes(ai), "国际版不能混进 WorkBuddy 段")
+        XCTAssertTrue(ConsolePlatformFilter.workbuddyAI.includes(ai))
+        XCTAssertFalse(ConsolePlatformFilter.workbuddyAI.includes(cn))
+
+        XCTAssertTrue(ConsolePlatformFilter.all.showsWorkbuddyCN)
+        XCTAssertTrue(ConsolePlatformFilter.all.showsWorkbuddyAI)
+        XCTAssertFalse(ConsolePlatformFilter.workbuddy.showsWorkbuddyAI)
+        XCTAssertFalse(ConsolePlatformFilter.workbuddyAI.showsWorkbuddyCN)
+        XCTAssertFalse(ConsolePlatformFilter.workbuddy.showsQoder)
+        XCTAssertFalse(ConsolePlatformFilter.workbuddyAI.showsQoder)
+    }
+
+    /// 签到页没有"国际版"这一档：那边根本没有签到任务。
+    func testCheckinFiltersDoNotOfferTheInternationalSite() {
+        XCTAssertFalse(ConsolePlatformFilter.checkinFilters.contains(.workbuddyAI))
+        XCTAssertEqual(
+            ConsolePlatformFilter.checkinFilters.map(\.rawValue),
+            ["all", "workbuddy", "qoder", "qoderGlobal"]
+        )
+        XCTAssertEqual(ConsolePlatformFilter.accountFilters.count, 5)
+    }
+
     /// 账号卡必须能看出是哪个站点，且国际版不能显示成国内版。
     func testAccountCarriesTheProvider() {
         let cn = ConsoleAccount(

@@ -27,10 +27,12 @@ struct ConsoleAccountsView: View {
         query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
-    private var visibleAccounts: [ConsoleAccount] {
-        guard filter.showsWorkbuddy else { return [] }
+    /// 国内版与**国际版**是两类账号：分组显示，不混在一个 "WorkBuddy" 里。
+    private func visibleWorkbuddy(_ international: Bool) -> [ConsoleAccount] {
+        guard international ? filter.showsWorkbuddyAI : filter.showsWorkbuddyCN else { return [] }
         return store.accounts.filter { account in
-            trimmedQuery.isEmpty || account.searchText.contains(trimmedQuery)
+            account.isWorkbuddyAI == international
+                && (trimmedQuery.isEmpty || account.searchText.contains(trimmedQuery))
         }
     }
 
@@ -54,7 +56,8 @@ struct ConsoleAccountsView: View {
     }
 
     private var totalVisible: Int {
-        visibleAccounts.count
+        visibleWorkbuddy(false).count
+            + visibleWorkbuddy(true).count
             + QoderEdition.allCases.reduce(0) {
                 $0 + visibleProfiles($1).count + visibleServiceAccounts($1).count
             }
@@ -185,14 +188,14 @@ struct ConsoleAccountsView: View {
             )
 
             Picker("平台", selection: $filter) {
-                ForEach(ConsolePlatformFilter.allCases) { option in
+                ForEach(ConsolePlatformFilter.accountFilters) { option in
                     Text(option.title).tag(option)
                 }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .tint(ConsoleTheme.accent)
-            .frame(width: 300)
+            .frame(width: 420)
 
             Spacer(minLength: 8)
 
@@ -301,8 +304,11 @@ struct ConsoleAccountsView: View {
             }
         } else {
             VStack(alignment: .leading, spacing: 22) {
-                if filter.showsWorkbuddy {
-                    workbuddySection
+                if filter.showsWorkbuddyCN, !visibleWorkbuddy(false).isEmpty {
+                    workbuddySection(international: false)
+                }
+                if filter.showsWorkbuddyAI, !visibleWorkbuddy(true).isEmpty {
+                    workbuddySection(international: true)
                 }
                 ForEach(QoderEdition.allCases) { edition in
                     if filter.edition == nil || filter.edition == edition {
@@ -317,18 +323,18 @@ struct ConsoleAccountsView: View {
     }
 
     @ViewBuilder
-    private var workbuddySection: some View {
-        let accounts = visibleAccounts
+    private func workbuddySection(international: Bool) -> some View {
+        let accounts = visibleWorkbuddy(international)
         VStack(alignment: .leading, spacing: 10) {
             ConsoleSectionTitle(
-                title: ConsoleAccountSection.workbuddy.title,
+                title: international ? "WorkBuddy AI（国际版）" : "WorkBuddy（国内版）",
                 detail: "\(accounts.count) 个账号"
             )
             if accounts.isEmpty {
                 ConsoleCard {
-                    Text(trimmedQuery.isEmpty
-                        ? "还没有 WorkBuddy 账号。扫码添加，或从 Magpie 导入已登录的账号。"
-                        : "没有匹配的 WorkBuddy 账号。")
+                    Text(international
+                        ? "还没有 WorkBuddy AI 账号。点「添加账号」→ 选 WorkBuddy AI → 在浏览器中登录。"
+                        : "还没有 WorkBuddy 账号。点「添加账号」，或从 Magpie 导入已登录的账号。")
                         .font(.system(size: 11))
                         .foregroundStyle(ConsoleTheme.secondaryText)
                 }
@@ -910,6 +916,17 @@ private struct ConsoleAccountCard: View {
                             Text(account.platformName)
                                 .font(.system(size: 10))
                                 .foregroundStyle(ConsoleTheme.secondaryText)
+                            if account.isWorkbuddyAI {
+                                Text("国际版")
+                                    .font(.system(size: 9, weight: .medium))
+                                    .foregroundStyle(ConsoleTheme.accent)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 1)
+                                    .background(
+                                        ConsoleTheme.accentSoft,
+                                        in: RoundedRectangle(cornerRadius: 3)
+                                    )
+                            }
                             if let source = account.sourceLabel {
                                 Text(source)
                                     .font(.system(size: 9, weight: .medium))

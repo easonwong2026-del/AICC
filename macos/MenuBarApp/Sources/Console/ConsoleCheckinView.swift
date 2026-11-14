@@ -156,7 +156,7 @@ struct ConsoleCheckinView: View {
             HStack {
                 ConsoleSectionTitle(title: "按账号查看", detail: "\(filteredAccounts.count) 个账号")
                 Picker("平台", selection: $platformFilter) {
-                    ForEach(ConsolePlatformFilter.allCases) { option in
+                    ForEach(ConsolePlatformFilter.checkinFilters) { option in
                         Text(option.title).tag(option)
                     }
                 }
