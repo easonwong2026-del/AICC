@@ -280,10 +280,15 @@ CREATE INDEX IF NOT EXISTS idx_qoder_auth_account ON qoder_authorizations (accou
 /// `payload` 存整行 JSON 而不是拆列：四平台的计量单位不同（credits / tokens /
 /// unknown），拆成 `total/used/remaining` 三列会诱导"跨单位相加"这种错误。
 /// 时间范围查询走 `captured_at` 索引。
+///
+/// **`account_id` 刻意没有外键**：四平台里 WorkBuddy 账号在 `accounts`，
+/// Qoder 服务账号在 `qoder_accounts`，一张缓存表没法同时对两张表建外键。
+/// 代价是删除账号时要显式清快照（`delete_account` / `delete_qoder_account`
+/// 已各加一条 DELETE），另外 90 天裁剪兜底。
 const MIGRATION_V14_SQL: &str = "\
 CREATE TABLE IF NOT EXISTS quota_snapshots (\
     id          TEXT PRIMARY KEY,\
-    account_id  TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,\
+    account_id  TEXT NOT NULL,\
     provider    TEXT NOT NULL,\
     captured_at TEXT NOT NULL,\
     status      TEXT NOT NULL,\
@@ -372,9 +377,16 @@ const MIGRATIONS: &[Migration] = &[
         version: 14,
         steps: &[MigrationStep::Sql(MIGRATION_V14_SQL)],
     },
+    // v15：把 v14 原来那条只指向 `accounts` 的外键去掉——一张缓存表要同时装
+    // WorkBuddy 与 Qoder 服务账号，外键在这里是错的。v14 也曾带过这条外键，
+    // 所以这一步同时负责**修复已经跑过旧 v14 的库**（新建库上是空操作）。
+    Migration {
+        version: 15,
+        steps: &[MigrationStep::Rust(quota::rebuild_v15)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 14;
+pub const LATEST_VERSION: i64 = 15;
 
 pub struct Db {
     conn: Connection,
@@ -809,6 +821,9 @@ impl Db {
     }
 
     pub fn delete_account(&mut self, id: &str) -> RpcResult<bool> {
+        // 快照表没有外键（要同时装 Qoder 服务账号），所以这里必须显式清。
+        // 账号 id 是 uid 的确定性哈希，重加同一账号会复用同一 id。
+        self.purge_account_quota_snapshots(id)?;
         let n = self
             .conn
             .execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
