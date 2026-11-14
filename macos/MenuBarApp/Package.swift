@@ -40,6 +40,7 @@ let package = Package(
                 "Models/GrowthModels.swift",
                 "Models/CheckinModels.swift",
                 "Models/QuotaModel.swift",
+                "Models/WorkerQuotaModels.swift",
                 "Models/UsageModel.swift",
                 "Models/WidgetPreferences.swift",
                 "Models/DashboardTypography.swift",

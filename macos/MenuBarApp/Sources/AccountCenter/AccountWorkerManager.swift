@@ -282,6 +282,22 @@ final class AccountWorkerManager: ObservableObject {
         return TravelAutoStatus(json: result)
     }
 
+    // MARK: - 四平台额度（M4）
+
+    /// 统一额度看板。`refresh` 时会真的打网络；否则优先用库里的快照。
+    /// 四平台里 Qoder 两版返回 `unverified` 且零请求，超时给 30 秒（两个站点各一次）。
+    func workerQuota(days: Int = 7, refresh: Bool) async throws -> [WorkerQuotaRow] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        let result = try await client.call(
+            "quota.board",
+            params: ["days": days, "refresh": refresh],
+            timeout: 30
+        )
+        let rows = (result["rows"] as? [[String: Any]]) ?? []
+        return rows.compactMap { WorkerQuotaRow(json: $0) }
+    }
+
     // MARK: - 成长中心（PR #67：只读）
 
     /// 扫一遍成长中心。**只有 GET**：任务列表、档案、能量、连签、兑换状态、

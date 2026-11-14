@@ -8,6 +8,7 @@ struct ConsoleQuotaView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             summaryRow
+            workerSection
             if let snapshot = store.snapshot, !snapshot.accounts.isEmpty {
                 providerSections(snapshot)
             } else {
@@ -19,6 +20,132 @@ struct ConsoleQuotaView: View {
                         actionTitle: "重新读取",
                         action: { Task { await store.refreshQuota(force: true) } }
                     )
+                }
+            }
+        }
+    }
+
+    // MARK: - 助手侧四平台额度（M4）
+
+    /// 上面那段是 Magpie 的额度窗口，这段是助手直接问官方接口的账号级余额与用量。
+    /// 两段数据来源不同，不合并、不相加。
+    @ViewBuilder
+    private var workerSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                ConsoleSectionTitle(
+                    title: "账号额度（官方接口）",
+                    detail: store.workerQuotaRows.isEmpty ? nil : "\(store.workerQuotaRows.count) 个账号"
+                )
+                Spacer(minLength: 8)
+                if store.loadingWorkerQuota {
+                    ProgressView().controlSize(.small)
+                }
+                Button("刷新") {
+                    Task { await store.refreshWorkerQuota(force: true) }
+                }
+                .buttonStyle(ConsoleSecondaryButtonStyle())
+                .disabled(store.loadingWorkerQuota)
+            }
+
+            if store.workerQuotaRows.isEmpty {
+                ConsoleCard {
+                    ConsoleEmptyState(
+                        symbol: "gauge.with.dots.needle.33percent",
+                        title: "没有读到账号额度",
+                        message: store.workerQuotaError ?? "助手还没返回任何账号。",
+                        actionTitle: "重新读取",
+                        action: { Task { await store.refreshWorkerQuota(force: true) } }
+                    )
+                }
+            } else {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 320), spacing: ConsoleTheme.cardSpacing)],
+                    spacing: ConsoleTheme.cardSpacing
+                ) {
+                    ForEach(store.workerQuotaRows) { row in
+                        workerQuotaCard(row)
+                    }
+                }
+            }
+        }
+    }
+
+    private func workerQuotaCard(_ row: WorkerQuotaRow) -> some View {
+        ConsoleCard {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(row.nickname.isEmpty ? row.accountId : row.nickname)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(ConsoleTheme.text)
+                        .lineLimit(1)
+                    ConsoleBadge(text: row.providerName, tint: ConsoleTheme.secondaryText)
+                    Spacer(minLength: 0)
+                    if row.cached {
+                        ConsoleBadge(text: "缓存", tint: ConsoleTheme.warning)
+                    }
+                }
+
+                switch row.status {
+                case "ok":
+                    if let text = row.remainingText {
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(text)
+                                .font(.system(size: 18, weight: .semibold))
+                                .monospacedDigit()
+                                .foregroundStyle(ConsoleTheme.text)
+                            if let unit = row.unit {
+                                Text(unit)
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                            }
+                            Spacer(minLength: 0)
+                            if let plan = row.plan, !plan.isEmpty {
+                                ConsoleBadge(text: plan, tint: ConsoleTheme.secondaryText)
+                            }
+                        }
+                        if let share = row.remainingShare {
+                            ConsoleShareBar(share: share, tone: share <= 30 ? ConsoleTheme.warning : ConsoleTheme.accent)
+                        }
+                        if let total = row.totalText {
+                            Text(total)
+                                .font(.system(size: 10))
+                                .foregroundStyle(ConsoleTheme.tertiaryText)
+                        }
+                    } else {
+                        // 拿到 200 但没拿到额度：显示未知，不显示 0。
+                        Text("额度未知")
+                            .font(.system(size: 12))
+                            .foregroundStyle(ConsoleTheme.secondaryText)
+                    }
+                    if let usage = row.usage, usage.requests > 0 {
+                        Text("近 \(usage.windowDays) 天 \(usage.requests) 次请求 · 消耗 \(WorkerQuotaRow.format(usage.credits))\(usage.truncated ? "（已截断）" : "")")
+                            .font(.system(size: 10))
+                            .foregroundStyle(ConsoleTheme.tertiaryText)
+                    }
+                case "unverified":
+                    Text("未接入（已验证为零请求）")
+                        .font(.system(size: 12))
+                        .foregroundStyle(ConsoleTheme.secondaryText)
+                case "unauthorized":
+                    Text("授权不可用")
+                        .font(.system(size: 12))
+                        .foregroundStyle(ConsoleTheme.danger)
+                default:
+                    Text("读取失败")
+                        .font(.system(size: 12))
+                        .foregroundStyle(ConsoleTheme.danger)
+                }
+
+                Text(row.sourceName)
+                    .font(.system(size: 10))
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+
+                if let error = row.error, !error.isEmpty {
+                    Text(error)
+                        .font(.system(size: 10))
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
