@@ -23,7 +23,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # 额度看板要拿到 HTTP 状态码区分 401/429/5xx（vendored crate 已有同版本依赖，不新增下载）。
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # 登录流程要跑异步 HTTP：一个 current-thread runtime 足够（RPC 本来就是串行的）。
-tokio = { version = "1", features = ["rt", "time", "net", "io-util", "macros"] }
+tokio = { version = "1", features = ["rt", "time", "net", "io-util", "macros", "sync"] }
 uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
