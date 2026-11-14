@@ -861,13 +861,14 @@ final class ConsoleStore: ObservableObject {
     }
 }
 
-#if AICC_VISUAL_TEST
-// MARK: - 视觉回归样本（只在 `-D AICC_VISUAL_TEST` 时编译）
+#if AICC_VISUAL_TEST && AICC_CONSOLE_VISUAL
+// MARK: - 视觉回归样本（只在控制台离屏渲染时编译）
 
 /// 离屏渲染用：把一组固定样本灌进 store。
 ///
-/// 生产构建里这段代码不存在（`AICC_VISUAL_TEST` 只在
-/// `scripts/smoke-test-console-visual.sh` 里定义），所以界面不会凭空多出假数据。
+/// 生产构建里这段代码不存在：两个 flag 只在 `scripts/smoke-test-console-visual.sh`
+/// 里同时定义，所以界面不会凭空多出假数据。只判断 `AICC_VISUAL_TEST` 会把这段
+/// 编进设置页 / 看板的离屏渲染（它们引用不到 `ConsoleVisualFixture`）。
 extension ConsoleStore {
     func applyVisualFixture(_ fixture: ConsoleVisualFixture) {
         accounts = fixture.accounts

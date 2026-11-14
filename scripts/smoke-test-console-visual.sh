@@ -18,7 +18,7 @@ SWIFT_FILES=()
 while IFS= read -r -d '' file; do SWIFT_FILES+=("$file"); done \
   < <(find "$ROOT/macos/MenuBarApp/Sources" -name '*.swift' -print0)
 
-xcrun swiftc -parse-as-library -D AICC_VISUAL_TEST -O \
+xcrun swiftc -parse-as-library -D AICC_VISUAL_TEST -D AICC_CONSOLE_VISUAL -O \
   -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
   -target arm64-apple-macosx14.0 \
   -module-cache-path "${SWIFT_MODULE_CACHE:-/tmp/swift-module-cache}" \
