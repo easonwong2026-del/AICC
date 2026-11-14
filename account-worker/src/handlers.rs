@@ -77,6 +77,8 @@ pub const METHODS: &[&str] = &[
     "qoder.credits.auto.status",
     "qoder.credits.auto.setEnabled",
     "qoder.credits.auto.tick",
+    // ---- 统一任务汇总（PR #76）----
+    "tasks.overview",
     "auth.workbuddy.start",
     "auth.workbuddy.poll",
     "auth.workbuddy.cancel",
@@ -562,6 +564,11 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                 .ok_or_else(|| RpcError::invalid_params("缺少参数 enabled（布尔）"))?;
             crate::credits::set_auto(app, &account_id, enabled)
         }
+
+        // ---- 统一任务汇总（PR #76）----
+        //
+        // 只读本地记录：不进网络、不改状态。界面顶部的数字全部来自这里。
+        "tasks.overview" => crate::tasks::overview(app),
 
         "qoder.credits.auto.tick" => {
             // `force` 只跳过 20 分钟的最小间隔，不绕过账号开关。

@@ -18,6 +18,7 @@ mod quota;
 mod rpc;
 mod securestore;
 mod storage;
+mod tasks;
 #[cfg(test)]
 mod test_env;
 mod travel;
