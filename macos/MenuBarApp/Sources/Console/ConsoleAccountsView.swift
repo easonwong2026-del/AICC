@@ -211,9 +211,10 @@ struct ConsoleAccountsView: View {
                 .buttonStyle(ConsoleSecondaryButtonStyle())
                 .help("复用 Magpie 已登录的 WorkBuddy 账号（只复制访问令牌）")
 
-            Button("扫码添加") { showAdd = true }
+            // 主入口现在是浏览器登录（扫码仍然可用），按钮文案别再只写"扫码"。
+            Button("添加账号") { showAdd = true }
                 .buttonStyle(ConsolePrimaryButtonStyle())
-                .help("用手机 WorkBuddy 扫码授权")
+                .help("在浏览器中登录或扫码，国内版 / 国际版都在面板里选")
         }
     }
 
