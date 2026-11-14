@@ -43,13 +43,27 @@ struct ConsoleAccountsView: View {
         }
     }
 
+    /// Qoder 平台服务账号（Magpie 导入 / 网页授权）：与本机快照分开显示。
+    private func visibleServiceAccounts(_ edition: QoderEdition) -> [QoderServiceAccount] {
+        guard filter.showsQoder else { return [] }
+        guard filter.edition == nil || filter.edition == edition else { return [] }
+        return store.qoderServiceAccounts.filter { account in
+            account.edition == edition.rawValue
+                && (trimmedQuery.isEmpty || account.searchText.contains(trimmedQuery))
+        }
+    }
+
     private var totalVisible: Int {
         visibleAccounts.count
-            + QoderEdition.allCases.reduce(0) { $0 + visibleProfiles($1).count }
+            + QoderEdition.allCases.reduce(0) {
+                $0 + visibleProfiles($1).count + visibleServiceAccounts($1).count
+            }
     }
 
     private var hasAnything: Bool {
-        !store.accounts.isEmpty || !store.qoderProfiles.isEmpty
+        !store.accounts.isEmpty
+            || !store.qoderProfiles.isEmpty
+            || !store.qoderServiceAccounts.isEmpty
     }
 
     var body: some View {
@@ -291,6 +305,9 @@ struct ConsoleAccountsView: View {
                 }
                 ForEach(QoderEdition.allCases) { edition in
                     if filter.edition == nil || filter.edition == edition {
+                        if !visibleServiceAccounts(edition).isEmpty {
+                            qoderServiceSection(edition)
+                        }
                         qoderSection(edition)
                     }
                 }
@@ -324,6 +341,85 @@ struct ConsoleAccountsView: View {
                     }
                 }
             }
+        }
+    }
+
+    /// 平台服务账号：来自 Magpie 导入或浏览器授权，**不需要本机装 Qoder 客户端**。
+    ///
+    /// 和下面「本机 Profile」是两条独立的线：这里显示的是服务端账号身份，
+    /// 那里显示的是本机客户端保存的认证快照。
+    @ViewBuilder
+    private func qoderServiceSection(_ edition: QoderEdition) -> some View {
+        let accounts = visibleServiceAccounts(edition)
+        VStack(alignment: .leading, spacing: 10) {
+            ConsoleSectionTitle(
+                title: "\(edition.displayName) 账号",
+                detail: "\(accounts.count) 个服务账号"
+            )
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 300), spacing: ConsoleTheme.cardSpacing)],
+                spacing: ConsoleTheme.cardSpacing
+            ) {
+                ForEach(accounts) { account in
+                    qoderServiceCard(account)
+                }
+            }
+        }
+    }
+
+    private func qoderServiceCard(_ account: QoderServiceAccount) -> some View {
+        ConsoleCard {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text(account.displayName)
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                    Text(account.statusLabel)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(qoderStatusColor(account.statusTone))
+                }
+                HStack(spacing: 6) {
+                    Text(account.editionName)
+                        .font(.system(size: 10))
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                    Text("·")
+                        .font(.system(size: 10))
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                    Text("UID \(account.maskedUid)")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                HStack(spacing: 6) {
+                    ForEach(account.sourceLabels, id: \.self) { label in
+                        Text(label)
+                            .font(.system(size: 10, weight: .medium))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(
+                                ConsoleTheme.tertiaryText.opacity(0.12),
+                                in: Capsule()
+                            )
+                            .foregroundStyle(ConsoleTheme.secondaryText)
+                    }
+                    if account.authorizations.isEmpty {
+                        Text("还没有授权来源")
+                            .font(.system(size: 10))
+                            .foregroundStyle(ConsoleTheme.tertiaryText)
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+    }
+
+    private func qoderStatusColor(_ tone: QoderServiceStatusTone) -> Color {
+        switch tone {
+        case .ok: return ConsoleTheme.secondaryText
+        case .warn: return ConsoleTheme.warning
+        case .muted: return ConsoleTheme.tertiaryText
         }
     }
 
