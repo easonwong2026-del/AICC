@@ -47,6 +47,18 @@
 5. **Qoder International 的 Credits 能力**：`blocked`，零请求，界面不显示领取按钮。
 6. **Qoder CN 客户端 Profile 的真实识别**：本机未安装 CN 客户端，仍沿用 #70 的结论。
 
+### 3.1 两份参考实现在细节上不一致（未验证谁对）
+
+| 项 | `88lin/workbuddy-auto-signin` | `magpie-community/plugins` | AICC 现在 |
+| --- | --- | --- | --- |
+| `User-Agent` | `Qoder/claim` | `Qoder` | `Qoder/claim` |
+| 领取请求体 | 空字节串 | `{}` | 空字节串 |
+| 风控头 | 需要 `runtime-info` 的 `machineToken` | 国际版必需、CN 可不带 | 一律不带 |
+
+两处差异都不大可能决定成败（服务端多半只看 `Authorization` + `Cosy-ClientType`），
+但在拿到真实响应之前**不能断言**。若真机返回 4xx，按上表逐项试一遍即可定位，
+不要先怀疑"接口不存在"。
+
 ## 4. 数据库迁移记录
 
 | 版本 | 内容 | 幂等 | 旧库验证 |
