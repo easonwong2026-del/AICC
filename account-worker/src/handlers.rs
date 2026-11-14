@@ -1969,6 +1969,48 @@ mod tests {
         assert_eq!(workbuddy_auth::provider_of(V::Ai), "workbuddy_ai");
     }
 
+    /// 国际版也要能"Magpie 借用的授权 + 自有登录授权"并存：
+    /// 登录只写 own，导入的 magpie/access 一个字节都不动。
+    #[test]
+    fn ai_account_keeps_magpie_and_own_authorizations_side_by_side() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "ai-dual-uid";
+        import_logins(
+            &app,
+            vec![magpie_login_with("workbuddy-ai", uid, "borrowed-ai")],
+            &[],
+        )
+        .expect("import");
+        let record = account(&app, uid);
+        assert_eq!(record.provider, "workbuddy_ai");
+
+        persist_login(
+            &app,
+            &payload(uid, "own-access-ai", Some("own-refresh-ai")),
+            WbVariant::Ai,
+        )
+        .expect("browser login");
+
+        assert_eq!(
+            magpie_access(&app, &record.id).as_deref(),
+            Some("borrowed-ai"),
+            "自有登录不能覆盖借用授权"
+        );
+        assert_eq!(
+            own_access(&app, &record.id).as_deref(),
+            Some("own-access-ai")
+        );
+        let kinds: Vec<String> = app
+            .with_db(|db| db.list_authorizations(&record.id))
+            .unwrap()
+            .into_iter()
+            .map(|row| row.kind)
+            .collect();
+        assert!(kinds.contains(&"own".to_string()), "{kinds:?}");
+        assert!(kinds.contains(&"magpie".to_string()), "{kinds:?}");
+        assert_eq!(account(&app, uid).provider, "workbuddy_ai");
+    }
+
     /// `auth.workbuddy.start` 的 variant 参数在**发请求之前**就要校验：
     /// 这里用非法值调用真实派发入口，必须直接报参数错，不会有任何网络行为。
     #[tokio::test]
