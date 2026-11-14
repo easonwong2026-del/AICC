@@ -142,17 +142,59 @@ impl Campaign {
     }
 }
 
-/// 从 `campaigns` 响应里取出活动数组。**任何结构不认识都返回空数组**，
-/// 由调用方把 `unparsable` 的结论单独报出去，而不是当成"没有活动"。
-pub fn parse_campaigns(body: &Value) -> Vec<Campaign> {
+/// 从 `campaigns` 响应里取出活动数组。
+///
+/// **"没有活动"和"响应看不懂"必须分开**。早先的版本对任何异常结构都返回空数组，
+/// 于是 HTTP 200 + 业务失败 + 结构变更统统显示成"今天没有活动"——用户会以为
+/// 今天确实没奖励，而真相是接口变了。这里只有一种情况返回空数组：
+/// **响应里确实有 `campaigns`，且它是空的**。
+pub fn parse_campaigns(body: &Value) -> Result<Vec<Campaign>, CreditsError> {
+    // 业务码：`code` 非 0 或 `success == false` 都说明这次调用没成功。
+    if let Some(code) = body.get("code").and_then(Value::as_i64) {
+        if code != 0 {
+            return Err(CreditsError::Unparsable(format!("业务码 code={code}")));
+        }
+    }
+    if body.get("success").and_then(Value::as_bool) == Some(false) {
+        let message = body
+            .get("message")
+            .or_else(|| body.get("msg"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        return Err(CreditsError::Unparsable(if message.is_empty() {
+            "响应 success=false".to_string()
+        } else {
+            format!("响应 success=false：{message}")
+        }));
+    }
+
     let source = body
         .get("data")
         .filter(|data| data.get("campaigns").is_some())
         .unwrap_or(body);
-    let Some(items) = source.get("campaigns").and_then(Value::as_array) else {
-        return Vec::new();
+    let items = match source.get("campaigns") {
+        Some(Value::Array(items)) => items,
+        Some(_) => return Err(CreditsError::Unparsable("campaigns 不是数组".to_string())),
+        None => {
+            return Err(CreditsError::Unparsable(
+                "响应里没有 campaigns 字段".to_string(),
+            ))
+        }
     };
-    items.iter().filter_map(parse_campaign).collect()
+
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        match parse_campaign(item) {
+            Some(campaign) => out.push(campaign),
+            // 一条活动没有 id 就整份作废：继续下去会得出"可领 0 个"的错误结论。
+            None => {
+                return Err(CreditsError::Unparsable(
+                    "活动条目缺少 campaignId".to_string(),
+                ))
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn parse_campaign(value: &Value) -> Option<Campaign> {
@@ -509,7 +551,7 @@ mod tests {
              "benefit": {"amount": 100, "validity": {"mode": "RELATIVE_DAYS", "days": 7}}},
             {"campaignId": "c2", "actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMABLE"}
         ]});
-        let parsed = parse_campaigns(&body);
+        let parsed = parse_campaigns(&body).unwrap();
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].credits, Some(100));
         assert_eq!(parsed[0].validity_days, Some(7));
@@ -518,6 +560,43 @@ mod tests {
         assert!(parsed[1].credits.is_none());
         // 没有 endAt → 不拦。
         assert!(parsed[1].is_active(NOW));
+    }
+
+    /// HTTP 200 但结构不对：**必须报错**，不能变成"今天没有活动"。
+    #[test]
+    fn a_200_with_an_unexpected_shape_is_an_error_not_an_empty_day() {
+        let cases = [
+            json!({}),
+            json!({"campaigns": "nope"}),
+            json!({"campaigns": [{"campaignKey": "no-id"}]}),
+            json!({"code": 40301, "message": "denied"}),
+            json!({"success": false, "message": "token expired"}),
+            json!({"data": {"campaigns": {}}}),
+        ];
+        for body in cases {
+            let err = parse_campaigns(&body).unwrap_err();
+            assert_eq!(err.outcome(), "failed", "{body}");
+            assert!(
+                err.detail().contains("响应") || err.detail().contains("业务码"),
+                "{body}"
+            );
+        }
+
+        // 唯一允许返回空数组的情况：`campaigns` 确实存在且为空。
+        assert!(parse_campaigns(&json!({"campaigns": []}))
+            .unwrap()
+            .is_empty());
+        assert!(parse_campaigns(&json!({"code": 0, "campaigns": []}))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_business_code_of_zero_still_parses_the_list() {
+        let body = json!({"code": 0, "campaigns": [
+            {"campaignId": "c1", "actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMABLE"}
+        ]});
+        assert_eq!(parse_campaigns(&body).unwrap().len(), 1);
     }
 
     #[test]

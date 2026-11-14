@@ -202,6 +202,11 @@ pub fn persist(
     pat: &str,
     identity: &Identity,
 ) -> RpcResult<Persisted> {
+    // 先看这是不是一行新账号：决定失败时要不要连行一起清掉。
+    let created = app
+        .with_db(|db| db.find_qoder_account(edition.as_str(), &identity.uid))?
+        .is_none();
+
     let account = app.with_db(|db| {
         db.upsert_qoder_account(
             edition.as_str(),
@@ -214,6 +219,7 @@ pub fn persist(
     let key = pat_key(&account.id);
     let snapshot = Snapshot::capture(app, std::slice::from_ref(&key))?;
     if let Err(err) = app.secure.set(&key, pat.as_bytes()) {
+        cleanup_created_account(app, &account.id, created);
         return Err(credential_error(err, "qoder/pat"));
     }
 
@@ -233,6 +239,7 @@ pub fn persist(
     if let Err(err) = written {
         // 库没写成功：钥匙串里不该留一份没人认领的令牌。
         snapshot.restore(app);
+        cleanup_created_account(app, &account.id, created);
         return Err(err);
     }
 
@@ -244,6 +251,27 @@ pub fn persist(
         email: account.email,
         fingerprint: digest,
     })
+}
+
+/// 回滚"刚新建的账号"。只在本次调用是**新建**时才动手，且必须确认它确实
+/// 一条授权都没有——否则可能把并发写入的 Magpie 关联一起删掉。
+fn cleanup_created_account(app: &App, account_id: &str, created: bool) {
+    if !created {
+        return;
+    }
+    let removed = app
+        .with_db(|db| {
+            let rows = db.list_qoder_authorizations(account_id)?;
+            if !rows.is_empty() {
+                return Ok(false);
+            }
+            db.delete_qoder_account(account_id)
+        })
+        .unwrap_or(false);
+    if !removed {
+        // 清不掉要留痕：用户在账号页会看到一个没有来源的账号，得知道原因。
+        crate::handlers::log_note("PAT 保存失败后未能清掉新建的 Qoder 账号，请手动移除");
+    }
 }
 
 /// 读回已存的 PAT。**只在 worker 内部使用**，不经过 RPC。
@@ -266,25 +294,37 @@ pub async fn recheck(
     edition: QoderEdition,
     account_id: &str,
 ) -> Result<Identity, PatError> {
+    // 请求前的授权版本：网络回来时要确认"还是这份授权"，否则不写状态。
+    let epoch = app
+        .with_db(|db| db.qoder_auth_epoch(account_id))
+        .map_err(|err| PatError::new(KIND_NO_SECRET, err.message))?
+        .ok_or_else(|| PatError::new(KIND_UNKNOWN_ACCOUNT, "Qoder 账号不存在"))?;
+
     let pat = read_secret(app, account_id)?;
     match verify(edition, &pat).await {
         Ok(identity) => {
-            app.with_db(|db| db.set_qoder_auth_status(account_id, SOURCE_OWN_PAT, "valid"))
-                .ok();
+            write_status_if_current(app, account_id, "valid", epoch);
             Ok(identity)
         }
         Err(err) => {
-            let status = match err.kind {
-                KIND_REJECTED | KIND_FORBIDDEN => Some("invalid"),
-                _ => None,
-            };
-            if let Some(status) = status {
-                app.with_db(|db| db.set_qoder_auth_status(account_id, SOURCE_OWN_PAT, status))
-                    .ok();
+            // **只有 401 才说明"这份凭据不被接受了"**。403 是权限问题：
+            // 把它写成 invalid，用户会以为令牌坏了去重新生成，其实只是没勾权限。
+            if err.kind == KIND_REJECTED {
+                write_status_if_current(app, account_id, "invalid", epoch);
             }
             Err(err)
         }
     }
+}
+
+/// 带版本核验地写授权状态。
+///
+/// 用户在请求返回期间换了 PAT（`auth_epoch` 前进），这次结果说的就是**旧令牌**，
+/// 写进去只会把新授权标脏。所以对不上就什么都不写。
+fn write_status_if_current(app: &App, account_id: &str, status: &str, epoch: i64) {
+    let _ = app.with_db(|db| {
+        db.set_qoder_auth_status_if_current(account_id, SOURCE_OWN_PAT, status, epoch)
+    });
 }
 
 pub struct Removed {
@@ -292,10 +332,14 @@ pub struct Removed {
     pub secret_deleted: bool,
 }
 
-/// 删掉 PAT 这一份来源：先删库（用户在界面上看到的立刻消失），再删钥匙串。
+/// 删掉 PAT 这一份来源。
 ///
-/// 顺序与写入相反，理由也相反：写入失败要回滚成"什么都没有"，
-/// 删除失败要保证"库里没有、钥匙串里也别留"。
+/// **顺序：先删钥匙串，再删授权行。** 反过来的话，钥匙串删除失败会留下
+/// 一份没有主人的凭据——库里看不出它存在，用户也无从重试。
+///
+/// 钥匙串删除失败时**保留授权行并报错**，让用户能再点一次；下一次进来
+/// 若凭据已经不在了（`NotFound`），视为删干净，继续把行删掉，所以这个
+/// 半途状态是可自愈的。
 pub fn remove(app: &App, account_id: &str) -> RpcResult<Removed> {
     if app
         .with_db(|db| db.get_qoder_account(account_id))?
@@ -305,18 +349,28 @@ pub fn remove(app: &App, account_id: &str) -> RpcResult<Removed> {
             "Qoder 账号不存在：{account_id}"
         )));
     }
-    let removed = app.with_db(|db| db.delete_qoder_authorization(account_id, SOURCE_OWN_PAT))?;
+
     let key = pat_key(account_id);
-    let secret_deleted = match app.secure.delete(&key) {
-        Ok(_) => true,
+    match app.secure.delete(&key) {
+        Ok(_) => {}
+        // 本来就没有这份凭据，算删干净。
+        Err(err) if err.kind == crate::securestore::SecretErrorKind::NotFound => {}
         Err(err) => {
-            // 没有这份凭据本来就算删干净了。
-            err.kind == crate::securestore::SecretErrorKind::NotFound
+            return Err(RpcError::new(
+                crate::rpc::E_SECURESTORE,
+                format!(
+                    "删除钥匙串里的 PAT 失败：{}。授权记录已保留，可重试",
+                    err.message
+                ),
+            )
+            .with_data(json!({ "kind": "secret_delete_failed", "key": key })))
         }
-    };
+    }
+
+    let removed = app.with_db(|db| db.delete_qoder_authorization(account_id, SOURCE_OWN_PAT))?;
     Ok(Removed {
         removed,
-        secret_deleted,
+        secret_deleted: true,
     })
 }
 
@@ -473,6 +527,147 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(after > before, "重新授权必须推进版本号：{before} → {after}");
+    }
+
+    fn faulty_app(fail_set: &[&str], fail_delete: &[&str]) -> (App, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data = dir.path().to_path_buf();
+        let paths = Paths {
+            db_path: data.join("accounts.sqlite"),
+            backups_dir: data.join("backups"),
+            logs_dir: data.join("logs"),
+            wb_switch_home: data.join("wb-switch-home"),
+            data_dir: data,
+            wb_home_owned: true,
+        };
+        (
+            App::with_secure(paths, SecureStore::faulty(fail_set, fail_delete)),
+            dir,
+        )
+    }
+
+    /// 钥匙串写失败：**不能留下一个没有授权的空账号**。
+    /// 那种账号在界面上就是一个删不掉、也认不出的空卡片。
+    #[test]
+    fn a_failed_keychain_write_leaves_no_orphan_account() {
+        let (app, _dir) = faulty_app(&["qoder/"], &[]);
+        app.secure.arm();
+        let pat = "qp_abcdefghijklmnopqrstuvwxyz012345";
+        let err = persist(&app, QoderEdition::Cn, pat, &identity("u-orphan"))
+            .err()
+            .expect("钥匙串写失败必须报错");
+        assert!(err.message.contains("凭据"), "{}", err.message);
+        assert!(
+            app.with_db(|db| db.list_qoder_accounts(None))
+                .unwrap()
+                .is_empty(),
+            "账号必须被回滚掉"
+        );
+    }
+
+    /// 账号本来就有（例如先 Magpie 导入过）：失败时**不许**把它删掉。
+    #[test]
+    fn a_failed_keychain_write_keeps_a_preexisting_account() {
+        let (app, _dir) = faulty_app(&["qoder/"], &[]);
+        let existing = app
+            .with_db(|db| db.upsert_qoder_account("qoder_cn", "u-old", Some("老账号"), None))
+            .unwrap();
+        // 先把账号种进去，再武装故障注入：顺序反了就连账号都建不出来。
+        app.secure.arm();
+        let err = persist(
+            &app,
+            QoderEdition::Cn,
+            "qp_abcdefghijklmnopqrstuvwxyz012345",
+            &identity("u-old"),
+        )
+        .err()
+        .expect("钥匙串写失败必须报错");
+        assert!(err.message.contains("凭据"));
+        let rows = app.with_db(|db| db.list_qoder_accounts(None)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, existing.id);
+    }
+
+    /// 钥匙串删不掉：**保留授权行并报错**，不能静默留下孤儿凭据。
+    #[test]
+    fn a_failed_secret_delete_keeps_the_authorization_for_retry() {
+        let (app, _dir) = faulty_app(&[], &["qoder/"]);
+        let pat = "qp_abcdefghijklmnopqrstuvwxyz012345";
+        let saved = persist(&app, QoderEdition::Cn, pat, &identity("u-del")).unwrap();
+        // 写入成功之后再武装：要测的是"删失败"，不是"写失败"。
+        app.secure.arm();
+
+        let err = remove(&app, &saved.account_id)
+            .err()
+            .expect("删除失败必须有错误");
+        assert!(err.message.contains("可重试"), "{}", err.message);
+
+        // 授权行还在，凭据也还在：这是一个可以重试的中间态。
+        app.secure.disarm();
+        let rows = app
+            .with_db(|db| db.list_qoder_authorizations(&saved.account_id))
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, SOURCE_OWN_PAT);
+        assert!(app.secure.get(&pat_key(&saved.account_id)).is_ok());
+    }
+
+    /// 网络返回期间用户换了 PAT：旧结果不许把新授权标脏。
+    #[test]
+    fn a_status_write_from_a_replaced_authorization_is_rejected() {
+        let (app, _dir) = test_app();
+        let pat = "qp_abcdefghijklmnopqrstuvwxyz012345";
+        let saved = persist(&app, QoderEdition::Cn, pat, &identity("u-race")).unwrap();
+        let old_epoch = app
+            .with_db(|db| db.qoder_auth_epoch(&saved.account_id))
+            .unwrap()
+            .unwrap();
+
+        // 用户重新保存了一次 PAT → auth_epoch 前进。
+        persist(&app, QoderEdition::Cn, pat, &identity("u-race")).unwrap();
+
+        let written = app
+            .with_db(|db| {
+                db.set_qoder_auth_status_if_current(
+                    &saved.account_id,
+                    SOURCE_OWN_PAT,
+                    "invalid",
+                    old_epoch,
+                )
+            })
+            .unwrap();
+        assert!(!written, "旧版本的状态写入必须被拒");
+
+        let rows = app
+            .with_db(|db| db.list_qoder_authorizations(&saved.account_id))
+            .unwrap();
+        assert_eq!(rows[0].auth_status, "valid", "新授权不能被旧结果标脏");
+    }
+
+    #[test]
+    fn a_status_write_with_the_current_epoch_goes_through() {
+        let (app, _dir) = test_app();
+        let pat = "qp_abcdefghijklmnopqrstuvwxyz012345";
+        let saved = persist(&app, QoderEdition::Cn, pat, &identity("u-ok")).unwrap();
+        let epoch = app
+            .with_db(|db| db.qoder_auth_epoch(&saved.account_id))
+            .unwrap()
+            .unwrap();
+        let written = app
+            .with_db(|db| {
+                db.set_qoder_auth_status_if_current(
+                    &saved.account_id,
+                    SOURCE_OWN_PAT,
+                    "invalid",
+                    epoch,
+                )
+            })
+            .unwrap();
+        assert!(written);
+        let rows = app
+            .with_db(|db| db.list_qoder_authorizations(&saved.account_id))
+            .unwrap();
+        assert_eq!(rows[0].auth_status, "invalid");
     }
 
     #[test]
