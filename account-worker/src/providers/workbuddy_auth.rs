@@ -274,24 +274,43 @@ pub fn parse_variant(raw: &str) -> Option<WbVariant> {
 /// 这个字符串是服务端给的，界面会直接丢给系统浏览器，因此不能只做格式检查：
 /// `javascript:` / 第三方域名 / 主域名后缀仿冒（`www.codebuddy.cn.evil.com`）
 /// 都必须拦在这里。落库前会话里的档位是唯一判据，这里也按档位限制域名。
+///
+/// 主机**必须交给标准 URL 解析器**：手工 `split` 出来的 authority 与浏览器的
+/// WHATWG 解析不一致，`https://evil.com\@www.workbuddy.ai/` 就是这样——浏览器把 `\`
+/// 当成 `/`（special scheme），实际打开 `evil.com`，而手工取 `@` 之后一段会得到
+/// `www.workbuddy.ai` 并通过白名单。所以这里先拒绝反斜杠与 userinfo，再交给 `url`。
 pub fn is_trusted_login_url(variant: WbVariant, raw: &str) -> bool {
     let url = raw.trim();
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return false;
-    };
-    if !scheme.eq_ignore_ascii_case("https") {
+    // 反斜杠在浏览器里等价于路径分隔符，永远不该出现在官方登录地址里。
+    if url.contains('\\') || url.chars().any(char::is_control) {
         return false;
     }
-    // authority 截止到 path / query / fragment 前的第一个分隔符。
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    // userinfo 形式（`https://a@b/`）里真正的目标是 `@` 之后那一段，取最后一段。
-    let host_port = authority.rsplit('@').next().unwrap_or("");
-    let host = host_port
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if host.is_empty() || host.contains('\\') || host.chars().any(char::is_whitespace) {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "https" {
+        return false;
+    }
+    // 登录页从不带凭据：出现 userinfo 一律视为伪装（`https://工作域@evil.com/`）。
+    // 解析器会把空的 `https://@host/` 归一掉，所以再对原始 authority 段查一次 `@`——
+    // 这里只用来**多加一条拒绝**，主机判定仍然只认解析器结果。
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return false;
+    }
+    if url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+        .is_some_and(|authority| authority.contains('@'))
+    {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    // 解析器已做过百分号解码 / IDNA 归一，这里按标签边界比对即可。
+    let host = host.to_ascii_lowercase();
+    if host.is_empty() || host.contains('\\') {
         return false;
     }
     let domains: &[&str] = match variant {
@@ -971,5 +990,61 @@ mod tests {
             "https://www.codebuddy.cn/login"
         ));
         assert!(!is_trusted_login_url(WbVariant::Ai, ""));
+    }
+
+    /// 反斜杠在浏览器里等价于 `/`（WHATWG special scheme）：手工解析会把它当成
+    /// userinfo 分隔符，于是 `evil.com\@www.workbuddy.ai` 被判成本站点而浏览器打开
+    /// `evil.com`。两条口径都必须落到"拒绝"。
+    #[test]
+    fn login_url_rejects_backslash_and_userinfo() {
+        for raw in [
+            "https://evil.com\\@www.workbuddy.ai/",
+            "https://www.workbuddy.ai\\@evil.com/",
+            "https://evil.com\\www.workbuddy.ai/",
+            "https://evil.com\\@www.codebuddy.cn/login",
+            "https:\\\\www.workbuddy.ai/login",
+        ] {
+            assert!(
+                !is_trusted_login_url(WbVariant::Ai, raw),
+                "反斜杠必须拒绝: {raw}"
+            );
+        }
+
+        for raw in [
+            "https://user:pw@www.workbuddy.ai/login",
+            "https://user@www.workbuddy.ai/login",
+            "https://@www.workbuddy.ai/login",
+            "https://user:pw@www.codebuddy.cn/login",
+        ] {
+            let variant = if raw.contains("workbuddy.ai") {
+                WbVariant::Ai
+            } else {
+                WbVariant::Cn
+            };
+            assert!(
+                !is_trusted_login_url(variant, raw),
+                "userinfo 必须拒绝: {raw}"
+            );
+        }
+
+        // 解析器口径下的正常形态仍然通过。
+        assert!(is_trusted_login_url(
+            WbVariant::Ai,
+            "https://www.workbuddy.ai/login?state=st-1#x"
+        ));
+        // 主机大小写、显式 443 端口不影响判定。
+        assert!(is_trusted_login_url(
+            WbVariant::Ai,
+            "HTTPS://WWW.WORKBUDDY.AI:443/login"
+        ));
+        // 非 ASCII / 百分号编码的主机归一后不在白名单内。
+        assert!(!is_trusted_login_url(
+            WbVariant::Ai,
+            "https://www.workbuddy.ai.evil.com/login"
+        ));
+        assert!(!is_trusted_login_url(
+            WbVariant::Cn,
+            "https://%65vil.com/login"
+        ));
     }
 }

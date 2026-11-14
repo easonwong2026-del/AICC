@@ -414,15 +414,24 @@ enum WorkbuddyVariant: String, CaseIterable, Identifiable {
     }
 
     /// 服务端给的登录地址 → 可安全打开 / 可编码成二维码的 URL。
+    ///
+    /// 必须与浏览器的解析口径一致：`\` 在 WHATWG special scheme 里等价于 `/`，
+    /// 所以 `https://evil.com\@www.workbuddy.ai/` 浏览器会打开 `evil.com`，
+    /// 而 Foundation 会把它当成 userinfo + 合法主机。反斜杠与 userinfo 一律拒绝。
     func trustedLoginURL(_ raw: String) -> URL? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: trimmed),
-              url.scheme?.lowercased() == "https",
-              let host = url.host?.lowercased(),
+        guard !trimmed.contains("\\") else { return nil }
+        guard !trimmed.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
+        else { return nil }
+        guard let components = URLComponents(string: trimmed),
+              components.scheme?.lowercased() == "https",
+              components.user == nil,
+              components.password == nil,
+              let host = components.host?.lowercased(),
               !host.isEmpty
         else { return nil }
         let allowed = trustedLoginDomains.contains { host == $0 || host.hasSuffix("." + $0) }
-        return allowed ? url : nil
+        return allowed ? components.url : nil
     }
 }
 

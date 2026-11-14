@@ -253,6 +253,32 @@ final class ConsoleModelsTests: XCTestCase {
         XCTAssertNil(ai.trustedLoginURL("https://www.codebuddy.cn/login?state=1"))
     }
 
+    /// 反斜杠在浏览器里等价于 `/`：`evil.com\@官方域` 会被浏览器打开到 evil.com，
+    /// 而 Foundation 会把它解析成 userinfo。这类输入必须落在"拒绝"。
+    func testTrustedLoginURLRejectsBackslashAndUserinfo() {
+        let cn = WorkbuddyVariant.cn
+        let ai = WorkbuddyVariant.ai
+        for raw in [
+            "https://evil.com\\@www.workbuddy.ai/",
+            "https://www.workbuddy.ai\\@evil.com/",
+            "https://evil.com\\www.workbuddy.ai/",
+            "https://evil.com\\@www.codebuddy.cn/login",
+            "https:\\\\www.workbuddy.ai/login",
+        ] {
+            XCTAssertNil(ai.trustedLoginURL(raw), "反斜杠必须拒绝: \(raw)")
+            XCTAssertNil(cn.trustedLoginURL(raw), "反斜杠必须拒绝: \(raw)")
+        }
+
+        XCTAssertNil(ai.trustedLoginURL("https://user:pw@www.workbuddy.ai/login"))
+        XCTAssertNil(ai.trustedLoginURL("https://user@www.workbuddy.ai/login"))
+        XCTAssertNil(ai.trustedLoginURL("https://@www.workbuddy.ai/login"))
+        XCTAssertNil(cn.trustedLoginURL("https://user:pw@www.codebuddy.cn/login"))
+
+        // 正常形态仍然通过：大小写主机、显式端口、query 与 fragment。
+        XCTAssertNotNil(ai.trustedLoginURL("HTTPS://WWW.WORKBUDDY.AI:443/login?state=1#x"))
+        XCTAssertNotNil(cn.trustedLoginURL("https://sso.codebuddy.cn:8443/login"))
+    }
+
     func testLoginPhaseMapping() {
         XCTAssertEqual(WorkbuddyLoginPhase.parse(["state": "pending"]), .pending)
         XCTAssertEqual(WorkbuddyLoginPhase.parse(["state": "success", "reused": true]), .success(reused: true))
