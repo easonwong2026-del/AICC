@@ -60,6 +60,8 @@ public struct QoderCreditsInfo: Equatable {
             return "该版本暂未支持（没有已证实的接口）"
         case "unauthorized":
             return "凭据被拒绝，需要重新授权"
+        case "busy":
+            return "这个账号正在领取，稍后再试"
         default:
             return "查询失败"
         }
@@ -119,6 +121,7 @@ public struct QoderCreditsReport: Equatable {
             }
             return "已领取（服务端已确认）"
         }
+        if state == "busy" { return "这个账号正在领取，请稍后再试" }
         if let errorMessage { return errorMessage }
         if let after { return after.summary }
         return "领取没有完成：\(state)"
