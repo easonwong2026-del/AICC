@@ -945,3 +945,78 @@ async fn closing_the_switch_after_accept_skips_the_claim_phase() {
     assert_eq!(run.claimed, 0);
     assert!(run.stopped_by_user);
 }
+
+// ---------------------------------------------------------------------------
+// 版本隔离 / 拒绝执行
+// ---------------------------------------------------------------------------
+
+/// 写入口的第二道闸门：账号读不出来时**拒绝执行**，不能当成"没问题"继续跑。
+#[tokio::test]
+async fn run_account_refuses_when_the_account_is_missing() {
+    let (app, _dir) = test_app();
+    let mock = Mock::with_tasks(vec![]);
+    let open = || true;
+
+    let run = run_account(
+        &app,
+        "no-such-account",
+        "测试号",
+        "access",
+        "uid",
+        "domain",
+        Options::FULL,
+        &open,
+    )
+    .await;
+
+    assert_eq!(run.state, "failed");
+    assert!(
+        run.errors.iter().any(|e| e.contains("account_missing")),
+        "{:?}",
+        run.errors
+    );
+    assert!(mock.calls().is_empty());
+}
+
+/// 国际版：连任务列表都不拉，直接拒绝。
+#[tokio::test]
+async fn run_account_refuses_workbuddy_ai_before_any_request() {
+    use crate::storage::AccountInput;
+    let (app, _dir) = test_app();
+    let id = app
+        .with_db(|db| {
+            db.upsert_account(&AccountInput {
+                platform: "workbuddy".to_string(),
+                uid: "ai-growth-run".to_string(),
+                nickname: Some("国际版".to_string()),
+                provider: Some("workbuddy_ai".to_string()),
+                ..Default::default()
+            })
+        })
+        .expect("account")
+        .id;
+    let open = || true;
+
+    let run = run_account(
+        &app,
+        &id,
+        "国际版",
+        "access",
+        "uid",
+        "domain",
+        Options::FULL,
+        &open,
+    )
+    .await;
+
+    assert_eq!(run.state, "unsupported");
+    assert_eq!(run.accepted, 0);
+    assert_eq!(run.claimed, 0);
+    assert!(
+        run.errors
+            .iter()
+            .any(|e| e.contains("unsupported_provider")),
+        "{:?}",
+        run.errors
+    );
+}

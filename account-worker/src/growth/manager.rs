@@ -211,18 +211,51 @@ pub async fn run_account(
 ) -> AccountRun {
     // 第二道闸门：真正的写入口再确认一次版本。调度器已经筛过，但这里是
     // "拿凭据 → 发请求"之间唯一的位置，不能只依赖上游筛选。
-    if let Ok(Some(account)) = app.with_db(|db| db.get_account(account_id)) {
-        if !account.supports_workbuddy_cn_apis() {
-            let mut run = AccountRun::new(account_id, nickname);
-            run.state = "unsupported";
-            run.errors
-                .push("WorkBuddy AI（国际版）的成长中心接口尚未接入，未发送任何请求".to_string());
-            run.finished_at = Some(now_rfc3339());
-            return run;
+    //
+    // 读库失败或账号不存在时**必须拒绝执行**：以前用 `if let Ok(Some(..))`，
+    // 检查失败就当成"没问题"继续跑，等于闸门可以被一次数据库抖动绕开。
+    let account = match app.with_db(|db| db.get_account(account_id)) {
+        Ok(Some(account)) => account,
+        Ok(None) => {
+            return refused(
+                account_id,
+                nickname,
+                "account_missing",
+                "账号不存在，拒绝执行成长任务",
+            )
         }
+        Err(err) => {
+            return refused(
+                account_id,
+                nickname,
+                "storage_error",
+                &format!("读取账号失败，拒绝执行成长任务：{}", err.message),
+            )
+        }
+    };
+    if !account.supports_workbuddy_cn_apis() {
+        return refused(
+            account_id,
+            nickname,
+            "unsupported_provider",
+            "WorkBuddy AI（国际版）的成长中心接口尚未接入，未发送任何请求",
+        );
     }
     let transport = LiveTransport::new(access, uid, domain);
     run_account_with(app, account_id, nickname, &transport, options, gate).await
+}
+
+/// 拒绝执行：**一个请求都不发**，但要说清为什么。
+fn refused(account_id: &str, nickname: &str, kind: &str, message: &str) -> AccountRun {
+    let mut run = AccountRun::new(account_id, nickname);
+    run.state = if kind == "unsupported_provider" {
+        "unsupported"
+    } else {
+        "failed"
+    };
+    run.errors.push(format!("{kind}：{message}"));
+    run.finished_at = Some(now_rfc3339());
+    run
 }
 
 /// 可注入的执行主体。测试用 Mock 实现 `Transport`，生产用 `LiveTransport`。

@@ -1612,6 +1612,19 @@ pub(crate) async fn refresh_account(app: &App, id: &str) -> RpcResult<Value> {
     if account.platform != "workbuddy" {
         return Err(RpcError::invalid_params("目前只支持刷新 WorkBuddy 账号"));
     }
+    // 刷新也是国内版协议（`WbVariant::Cn` 的 token 端点 + 国内 domain）。
+    // 国际版走这里只会浪费一次请求，失败时还会把一份好授权标成 invalid。
+    // **不查授权、不读钥匙串、不改状态。**
+    if !account.supports_workbuddy_cn_apis() {
+        return Ok(json!({
+            "state": "unsupported",
+            "provider": account.provider,
+            "error": {
+                "kind": "unsupported_provider",
+                "message": "WorkBuddy AI（国际版）的令牌刷新接口尚未接入；AICC 没有发送请求，也没有改动授权状态",
+            },
+        }));
+    }
     let own = app.with_db(|db| db.find_authorization(&account.id, crate::auth::ids::KIND_OWN))?;
     let Some(own) = own else {
         return resync_magpie_access(app, &account);
@@ -1891,6 +1904,53 @@ mod tests {
             access_token: access.to_string(),
             expires_at_ms: Some(1_795_525_945_623),
         }
+    }
+
+    /// `auth.workbuddy.refresh` 也是国内版协议：国际版必须**在查授权之前**被挡住，
+    /// 而且不能因为一次"刷新"把一份好授权标成 invalid。
+    #[tokio::test]
+    async fn ai_account_refresh_is_unsupported_and_keeps_the_authorization() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "ai-refresh-uid";
+        app.with_db(|db| {
+            db.upsert_account(&AccountInput {
+                platform: "workbuddy".to_string(),
+                uid: uid.to_string(),
+                provider: Some("workbuddy_ai".to_string()),
+                ..Default::default()
+            })
+        })
+        .expect("account");
+        // persist_login 不传 provider，走的是"继承已有值"，账号仍是国际版。
+        persist_login(&app, &payload(uid, "own-access", Some("own-refresh")))
+            .expect("persist login");
+
+        let record = account(&app, uid);
+        assert_eq!(record.provider, "workbuddy_ai");
+        let before = app
+            .with_db(|db| db.find_authorization(&record.id, ids::KIND_OWN))
+            .unwrap()
+            .expect("own authorization");
+
+        let out = refresh_account(&app, &record.id).await.expect("refresh");
+
+        assert_eq!(out["state"], json!("unsupported"));
+        assert_eq!(out["error"]["kind"], json!("unsupported_provider"));
+        let after = app
+            .with_db(|db| db.find_authorization(&record.id, ids::KIND_OWN))
+            .unwrap()
+            .expect("own authorization");
+        assert_eq!(after.status, before.status, "没发请求就不许把授权标成失效");
+        assert_eq!(after.version, before.version, "授权没有被写过");
+        assert_eq!(
+            own_access(&app, &record.id).as_deref(),
+            Some("own-access"),
+            "钥匙串里的令牌一个字节都没动"
+        );
+        assert_eq!(
+            own_refresh(&app, &record.id).as_deref(),
+            Some("own-refresh")
+        );
     }
 
     #[tokio::test]

@@ -66,8 +66,18 @@ pub async fn probe_account(app: &Arc<App>, account: &AccountRecord) -> AccountSt
         error: None,
     };
 
-    if account.platform != "workbuddy" {
+    // **取凭据之前**就要拦：WorkBuddy AI 是另一个站点，`LiveTransport` 的域名
+    // 写死在国内版上，走到下一行就等于把国际版令牌发到国内域名。
+    if !account.supports_workbuddy_cn_apis() {
         status.state = State::Unsupported;
+        status.error = Some(CheckinError::new(
+            ErrorKind::Business,
+            if account.platform == "workbuddy" {
+                "WorkBuddy AI（国际版）的签到接口尚未接入；AICC 没有发送任何请求".to_string()
+            } else {
+                "签到只支持 WorkBuddy".to_string()
+            },
+        ));
         return status;
     }
     let resolved = match broker::resolve(app, account) {
@@ -88,6 +98,14 @@ pub async fn probe_account(app: &Arc<App>, account: &AccountRecord) -> AccountSt
     };
     let domain = account.auth_domain.clone().unwrap_or_default();
     let transport = api::LiveTransport::new(&resolved.access, &account.uid, &domain);
+    probe_with(status, &transport).await
+}
+
+/// 可注入的探测主体：生产用 `LiveTransport`，测试用 Mock 断言"一次请求都没发"。
+pub(crate) async fn probe_with<T: api::Transport>(
+    mut status: AccountStatus,
+    transport: &T,
+) -> AccountStatus {
     match transport.status().await {
         Ok(reply) => {
             status.server_checked_in = reply.checked_in;
@@ -139,6 +157,15 @@ fn status_row(status: &AccountStatus) -> Value {
     // 没有凭据时不要报成"未授权"——那会让人以为令牌过期了。
     let error_kind = match status.state {
         State::NoCredential => Some("no_credential".to_string()),
+        // 版本/平台不支持要有明确的码，界面与日志才不用去猜括号里的中文。
+        State::Unsupported => Some(
+            if status.account.platform == "workbuddy" {
+                "unsupported_provider"
+            } else {
+                "unsupported_platform"
+            }
+            .to_string(),
+        ),
         _ => status
             .error
             .as_ref()
@@ -346,4 +373,74 @@ pub fn records(app: &App, account_id: Option<&str>, limit: u32) -> RpcResult<Val
         };
         Ok(json!({ "records": rows, "attempts": attempts }))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paths::Paths;
+    use crate::securestore::SecureStore;
+    use crate::storage::AccountInput;
+
+    fn test_app() -> (Arc<App>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data = dir.path().to_path_buf();
+        let paths = Paths {
+            db_path: data.join("accounts.sqlite"),
+            backups_dir: data.join("backups"),
+            logs_dir: data.join("logs"),
+            wb_switch_home: data.join("wb-switch-home"),
+            data_dir: data,
+            wb_home_owned: true,
+        };
+        let app = Arc::new(App::with_secure(paths, SecureStore::memory()));
+        app.with_db(|db| Ok(db.migrate()?)).expect("migrate");
+        (app, dir)
+    }
+
+    fn account(app: &App, uid: &str, provider: Option<&str>) -> AccountRecord {
+        app.with_db(|db| {
+            db.upsert_account(&AccountInput {
+                platform: "workbuddy".to_string(),
+                uid: uid.to_string(),
+                nickname: Some(uid.to_string()),
+                provider: provider.map(str::to_string),
+                ..Default::default()
+            })
+        })
+        .expect("account")
+    }
+
+    /// `checkin.status`（`cached=false`）会走在线探测，它必须自己挡版本：
+    /// 国际版在**读凭据之前**就返回 unsupported，因此根本不可能发请求。
+    ///
+    /// 这里用一个连凭据都没有的账号：如果闸门被绕过，broker 会返回
+    /// `no_credential`；实际拿到 `unsupported` 才证明顺序是对的。
+    #[tokio::test]
+    async fn status_probe_refuses_workbuddy_ai_before_touching_credentials() {
+        let (app, _dir) = test_app();
+        let ai = account(&app, "ai-probe-uid", Some("workbuddy_ai"));
+
+        let status = probe_account(&app, &ai).await;
+        assert_eq!(status.state, State::Unsupported);
+        assert!(status.server_checked_in.is_none(), "没有查过服务端");
+        assert!(status.path.is_none());
+
+        let row = status_row(&status);
+        assert_eq!(row["state"], json!("unsupported"));
+        assert_eq!(row["errorKind"], json!("unsupported_provider"));
+        assert_eq!(row["httpStatus"], Value::Null, "零网络请求");
+    }
+
+    /// 对照组：国内版账号没有凭据时仍然是 `no_credential`，
+    /// 说明上面的 `unsupported` 不是"无差别拒绝"。
+    #[tokio::test]
+    async fn status_probe_still_reports_missing_credential_for_cn_accounts() {
+        let (app, _dir) = test_app();
+        let cn = account(&app, "cn-probe-uid", None);
+
+        let status = probe_account(&app, &cn).await;
+        assert_eq!(status.state, State::NoCredential);
+        assert_eq!(status_row(&status)["errorKind"], json!("no_credential"));
+    }
 }
