@@ -205,6 +205,12 @@ fn map_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<CreditRun> {
 /// 写一条记录要的全部内容。参数多到必须用具名结构，避免又一次"第 7 个参数是啥"。
 pub struct RunInput<'a> {
     pub account_id: &'a str,
+    /// 发起这次请求时账号的生命周期标识（`generation`）。
+    ///
+    /// 写入时与账号行核对：对不上说明这中间账号被删掉又用同一个 UID 重建过，
+    /// 这条记录属于**上一个账号**，不能记到新的头上（那会让去重认为新账号
+    /// 今天已经领过，直接导致次日之前都领不到）。
+    pub generation: &'a str,
     pub campaign_id: Option<&'a str>,
     pub campaign_key: Option<&'a str>,
     pub period_start: Option<i64>,
@@ -241,13 +247,17 @@ impl crate::storage::Db {
             &executed_at,
         );
         // 记录不是业务状态：账号已经被删掉时**不写孤儿行**，但也不报错打断领取。
+        //
+        // `generation` 是这里的关键条件：只判 `id` 存在时，删号又用同一个 UID
+        // 登录会让旧请求的结果落到新账号上——新账号莫名其妙多一条"今天已领"，
+        // 去重于是挡住它真正的那次领取。
         let inserted = self.conn.execute(
             "INSERT OR IGNORE INTO qoder_credit_runs (
                  uid, account_id, campaign_id, campaign_key, period_start, period_end,
                  outcome, credits, http_status, auth_source, error_kind, error_detail,
                  trigger, executed_at)
              SELECT ?1, ?2, ?3, ?4, ?13, ?14, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
-             WHERE EXISTS (SELECT 1 FROM qoder_accounts WHERE id = ?2)",
+             WHERE EXISTS (SELECT 1 FROM qoder_accounts WHERE id = ?2 AND generation = ?15)",
             params![
                 uid,
                 input.account_id,
@@ -262,12 +272,13 @@ impl crate::storage::Db {
                 input.trigger,
                 executed_at,
                 input.period_start,
-                input.period_end
+                input.period_end,
+                input.generation
             ],
         )?;
         if inserted == 0 {
             return Err(crate::rpc::RpcError::not_found(format!(
-                "Qoder 账号不存在，未记录领取结果：{}",
+                "Qoder 账号不存在或已被重新创建，未记录领取结果：{}",
                 input.account_id
             )));
         }
@@ -311,6 +322,20 @@ impl crate::storage::Db {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// `since` 之后（北京时间当天零点起）有没有成功记录。
+    ///
+    /// 与 `qoder_credit_claimed` 的分工：这个回答"今天领到过没有"，
+    /// 不看活动 id、不看条数；那个回答"这一期这个活动领过没有"。
+    pub fn qoder_credit_succeeded_since(&self, account_id: &str, since: &str) -> RpcResult<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM qoder_credit_runs
+             WHERE account_id = ?1 AND executed_at >= ?2 AND outcome IN ('ok', 'already')",
+            params![account_id, since],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     /// 这个账号在**这一期**活动上是否已经成功领过（`ok` / `already`）。
@@ -393,15 +418,21 @@ mod tests {
         (db, dir)
     }
 
-    fn account(db: &mut Db) -> String {
+    fn account(db: &mut Db) -> super::super::qoder_accounts::QoderAccountRecord {
         db.upsert_qoder_account("qoder_cn", "u-credits", Some("积分号"), None)
             .unwrap()
-            .id
     }
 
-    fn run<'a>(account_id: &'a str, outcome: &'a str, credits: Option<i64>) -> RunInput<'a> {
+    /// 记一条流水。带账号记录而不是裸 id：`generation` 是写入时的核验条件，
+    /// 忘了给它就等于把这条记录记到"别的某一次生命周期"上。
+    fn run<'a>(
+        account: &'a super::super::qoder_accounts::QoderAccountRecord,
+        outcome: &'a str,
+        credits: Option<i64>,
+    ) -> RunInput<'a> {
         RunInput {
-            account_id,
+            account_id: &account.id,
+            generation: &account.generation,
             campaign_id: Some("c-1"),
             campaign_key: Some("daily"),
             period_start: Some(1_700_000_000),
@@ -419,10 +450,10 @@ mod tests {
     #[test]
     fn records_survive_and_are_scoped_per_account() {
         let (mut db, _dir) = db();
-        let id = account(&mut db);
-        db.record_qoder_credit_run(run(&id, "ok", Some(100)))
+        let acc = account(&mut db);
+        db.record_qoder_credit_run(run(&acc, "ok", Some(100)))
             .unwrap();
-        let rows = db.list_qoder_credit_runs(Some(&id), 10).unwrap();
+        let rows = db.list_qoder_credit_runs(Some(&acc.id), 10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].outcome, "ok");
         assert_eq!(rows[0].credits, Some(100));
@@ -433,12 +464,12 @@ mod tests {
     #[test]
     fn credits_stay_null_when_unknown_never_zero() {
         let (mut db, _dir) = db();
-        let id = account(&mut db);
+        let acc = account(&mut db);
         let record = db
             .record_qoder_credit_run(RunInput {
                 credits: None,
                 outcome: "already",
-                ..run(&id, "already", None)
+                ..run(&acc, "already", None)
             })
             .unwrap();
         assert!(record.credits.is_none(), "未知奖励不能记成 0");
@@ -447,11 +478,11 @@ mod tests {
     #[test]
     fn invalid_outcome_is_rejected() {
         let (mut db, _dir) = db();
-        let id = account(&mut db);
+        let acc = account(&mut db);
         assert!(db
             .record_qoder_credit_run(RunInput {
                 outcome: "yolo",
-                ..run(&id, "yolo", None)
+                ..run(&acc, "yolo", None)
             })
             .is_err());
     }
@@ -459,58 +490,84 @@ mod tests {
     #[test]
     fn run_for_a_deleted_account_is_not_written() {
         let (mut db, _dir) = db();
-        let id = account(&mut db);
-        db.delete_qoder_account(&id).unwrap();
-        assert!(db.record_qoder_credit_run(run(&id, "ok", Some(1))).is_err());
+        let acc = account(&mut db);
+        db.delete_qoder_account(&acc.id).unwrap();
+        assert!(db
+            .record_qoder_credit_run(run(&acc, "ok", Some(1)))
+            .is_err());
         assert!(db.list_qoder_credit_runs(None, 10).unwrap().is_empty());
     }
 
     #[test]
     fn claim_dedupe_only_counts_successful_runs() {
         let (mut db, _dir) = db();
-        let id = account(&mut db);
+        let acc = account(&mut db);
         let period = Some(1_700_000_000);
         // 失败不算"领过"：否则一次 429 会让当天再也领不到。
-        db.record_qoder_credit_run(run(&id, "rate_limited", None))
+        db.record_qoder_credit_run(run(&acc, "rate_limited", None))
             .unwrap();
-        assert!(!db.qoder_credit_claimed(&id, "c-1", period).unwrap());
-        db.record_qoder_credit_run(run(&id, "ok", Some(100)))
+        assert!(!db.qoder_credit_claimed(&acc.id, "c-1", period).unwrap());
+        db.record_qoder_credit_run(run(&acc, "ok", Some(100)))
             .unwrap();
-        assert!(db.qoder_credit_claimed(&id, "c-1", period).unwrap());
+        assert!(db.qoder_credit_claimed(&acc.id, "c-1", period).unwrap());
         // 另一个活动不受影响。
-        assert!(!db.qoder_credit_claimed(&id, "c-2", period).unwrap());
+        assert!(!db.qoder_credit_claimed(&acc.id, "c-2", period).unwrap());
+    }
+
+    #[test]
+    fn succeeded_since_answers_by_range_not_by_recent_count() {
+        let (mut db, _dir) = db();
+        let acc = account(&mut db);
+        let today = crate::clock::beijing_now().format("%Y-%m-%d").to_string();
+        let since = format!("{today}T00:00:00Z"); // 简化：只验证"范围"语义
+        assert!(!db.qoder_credit_succeeded_since(&acc.id, &since).unwrap());
+
+        db.record_qoder_credit_run(run(&acc, "ok", Some(100)))
+            .unwrap();
+        // 再灌 6 条失败记录：旧实现只取最近 5 条，成功那条会被挤出去。
+        for _ in 0..6 {
+            db.record_qoder_credit_run(RunInput {
+                outcome: "network",
+                ..run(&acc, "network", None)
+            })
+            .unwrap();
+        }
+        assert!(
+            db.qoder_credit_succeeded_since(&acc.id, &since).unwrap(),
+            "成功记录不该被后续失败挤出窗口"
+        );
     }
 
     /// 服务端复用同一个 `campaignId` 时，**下一期必须还能领**。
     #[test]
     fn the_same_campaign_id_in_a_new_period_is_not_considered_claimed() {
         let (mut db, _dir) = db();
-        let id = account(&mut db);
-        db.record_qoder_credit_run(run(&id, "ok", Some(100)))
+        let acc = account(&mut db);
+        db.record_qoder_credit_run(run(&acc, "ok", Some(100)))
             .unwrap();
 
         // 同一期：领过了。
         assert!(db
-            .qoder_credit_claimed(&id, "c-1", Some(1_700_000_000))
+            .qoder_credit_claimed(&acc.id, "c-1", Some(1_700_000_000))
             .unwrap());
         // 次日同一个 id、窗口不同：不该被挡住。
         assert!(!db
-            .qoder_credit_claimed(&id, "c-1", Some(1_700_086_400))
+            .qoder_credit_claimed(&acc.id, "c-1", Some(1_700_086_400))
             .unwrap());
         // 服务端没给窗口：不参与去重（宁可多一次幂等 POST）。
-        assert!(!db.qoder_credit_claimed(&id, "c-1", None).unwrap());
+        assert!(!db.qoder_credit_claimed(&acc.id, "c-1", None).unwrap());
     }
 
     #[test]
     fn auto_flag_is_per_account_and_off_by_default() {
         let (mut db, _dir) = db();
-        let id = account(&mut db);
-        assert!(!db.qoder_credits_auto(&id).unwrap());
+        let acc = account(&mut db);
+        assert!(!db.qoder_credits_auto(&acc.id).unwrap());
         assert!(db.qoder_credits_auto_accounts().unwrap().is_empty());
-        assert!(db.set_qoder_credits_auto(&id, true).unwrap());
-        assert!(db.qoder_credits_auto(&id).unwrap());
+        assert!(db.set_qoder_credits_auto(&acc.id, true).unwrap());
+        assert!(db.qoder_credits_auto(&acc.id).unwrap());
         assert_eq!(db.qoder_credits_auto_accounts().unwrap().len(), 1);
-        assert!(db.set_qoder_credits_auto(&id, false).unwrap());
+        assert!(db.set_qoder_credits_auto(&acc.id, false).unwrap());
         assert!(db.qoder_credits_auto_accounts().unwrap().is_empty());
         // 不存在的账号返回 false，而不是静默成功。
         assert!(!db.set_qoder_credits_auto("qa_missing", true).unwrap());
@@ -519,10 +576,10 @@ mod tests {
     #[test]
     fn deleting_the_account_takes_its_runs_away() {
         let (mut db, _dir) = db();
-        let id = account(&mut db);
-        db.record_qoder_credit_run(run(&id, "ok", Some(100)))
+        let acc = account(&mut db);
+        db.record_qoder_credit_run(run(&acc, "ok", Some(100)))
             .unwrap();
-        db.delete_qoder_account(&id).unwrap();
+        db.delete_qoder_account(&acc.id).unwrap();
         assert!(db.list_qoder_credit_runs(None, 10).unwrap().is_empty());
     }
 }

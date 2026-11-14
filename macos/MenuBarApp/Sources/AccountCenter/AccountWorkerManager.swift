@@ -326,6 +326,34 @@ final class AccountWorkerManager: ObservableObject {
         return overview
     }
 
+    // MARK: - Qoder 账号删除（PR #77）
+
+    /// 删掉一个 Qoder **服务账号**：连同 AICC 钥匙串里的 browser access / refresh
+    /// 与 PAT 一起清掉。**不碰** Magpie 的配置，也不删 Qoder 客户端的本机 Profile。
+    ///
+    /// 失败是业务结论，不是通信故障：助手会在钥匙串删不掉时保留账号与授权，
+    /// 返回一条能直接给用户看的中文提示（含"可重试"），所以这里只抛
+    /// `AccountWorkerFailure` 表示真的没能跟助手说上话。
+    ///
+    /// UI 入口由 V3 的账号详情页负责，本阶段只留调用面。
+    func deleteQoderAccount(accountId: String) async throws -> QoderAccountDeletion {
+        if case .running = state {} else {
+            await refresh()
+        }
+        guard case .running = state, let client, client.isRunning else {
+            throw AccountWorkerFailure.notRunning
+        }
+        let result = try await client.call(
+            "qoder.accounts.delete",
+            params: ["accountId": accountId],
+            timeout: 30
+        )
+        guard let deletion = QoderAccountDeletion.parse(result) else {
+            throw AccountWorkerFailure.malformedLine
+        }
+        return deletion
+    }
+
     // MARK: - Qoder 每日 Credits（PR #75）
 
     /// 只读查询今天的活动。**不发写请求**。

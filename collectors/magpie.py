@@ -16,6 +16,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 import tempfile
 from datetime import datetime
@@ -467,6 +468,7 @@ def _request(path, method="GET"):
         valid = False
     if not valid:
         raise ValueError("Magpie URL must be a local HTTP address with a port")
+    stage = "refresh" if method == "POST" else "read"
     try:
         opener = build_opener(ProxyHandler({}), NoRedirect())
         target = base.rstrip("/") + path
@@ -478,8 +480,24 @@ def _request(path, method="GET"):
             if len(raw) > 1024 * 1024:
                 raise ValueError("Magpie quota report too large")
             return json.loads(raw)
-    except Exception:
-        raise ValueError("Magpie temporarily unavailable") from None
+    except Exception as error:
+        # Keep the cause: "temporarily unavailable" alone cannot be told apart
+        # from a changed field name, and that difference decides whether the
+        # user restarts Magpie or we fix the parser.
+        log_failure(stage, path, error)
+        raise ValueError(f"Magpie unavailable ({stage}: {type(error).__name__})") from error
+
+
+def log_failure(stage, path, error):
+    """One stderr line per failed read: stage, error type, redacted reason.
+
+    Never writes the response body, credentials or a full URL: the message is
+    collapsed to one line, URLs are masked, and it is truncated.
+    """
+    reason = re.sub(r"https?://\S+", "<url>", str(error).replace("\n", " "))
+    route = path.split("?", 1)[0]
+    print(f"[magpie] {stage} failed: {type(error).__name__}: {reason[:160]} ({route})",
+          file=sys.stderr)
 
 
 def refresh(provider=None):

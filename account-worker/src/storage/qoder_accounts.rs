@@ -100,6 +100,62 @@ pub(super) fn rebuild_v16(tx: &rusqlite::Transaction<'_>) -> RpcResult<()> {
     Ok(())
 }
 
+/// v19 迁移步骤：给账号加 `generation`。
+///
+/// **为什么 `auth_epoch` 一个人不够**：账号 id 是 `(edition, uid)` 的确定性哈希，
+/// 删掉再用同一个 UID 登录会复用同一个 id；新行的 `auth_epoch` 从 0 重新开始，
+/// 于是旧生命周期里发起的请求（epoch 也是 0）会"恰好"通过版本核验，把结果写进
+/// 新账号。`generation` 在**建行时**取一个随机值，删行即随之消失，重建必得新值，
+/// 所以它是"这一次生命周期"的标识，而不是"这一次授权"的版本。
+///
+/// `auth_epoch` 继续保留：它描述的是同一生命周期内授权被换过几次，两者一起用。
+///
+/// 与 v16 / v17 / v18 一样先检测再动手；回填用 `randomblob` 逐行求值，
+/// 不会把所有旧行写成同一个值。
+pub(super) fn migrate_v19(tx: &rusqlite::Transaction<'_>) -> RpcResult<()> {
+    let has_generation: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('qoder_accounts') WHERE name = 'generation'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_generation == 0 {
+        tx.execute_batch(
+            "ALTER TABLE qoder_accounts ADD COLUMN generation TEXT NOT NULL DEFAULT '';",
+        )?;
+    }
+    tx.execute_batch(
+        "UPDATE qoder_accounts SET generation = lower(hex(randomblob(16))) WHERE generation = '';",
+    )?;
+    Ok(())
+}
+
+/// 一次**账号生命周期**的标识：`generation` + `auth_epoch`。
+///
+/// 两者必须一起核验，缺一不可：
+///
+/// | 场景 | `generation` | `auth_epoch` |
+/// | --- | --- | --- |
+/// | 换了一份 PAT / 浏览器授权 | 不变 | +1 |
+/// | 删号后用同一个 UID 重新登录 | **变** | **回到 0** |
+///
+/// 只看 `auth_epoch` 时第二种情况会误判成"没变过"——新行从 0 起，而旧请求
+/// 记的也是 0。这个结构的存在就是为了让那种比较不可能被写错。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QoderLifecycle {
+    pub generation: String,
+    pub auth_epoch: i64,
+}
+
+impl QoderLifecycle {
+    /// 从一条账号记录取出当时的生命周期。**取数前调一次，写入时带上它。**
+    pub fn of(account: &QoderAccountRecord) -> Self {
+        Self {
+            generation: account.generation.clone(),
+            auth_epoch: account.auth_epoch,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QoderAccountRecord {
@@ -116,6 +172,11 @@ pub struct QoderAccountRecord {
     /// 期间用户可能重新授权甚至删号；账号 id 是 `(edition, uid)` 的确定性哈希，
     /// 删了再导入会**复用同一个 id**，晚到的快照会被当成"刚取过"。
     pub auth_epoch: i64,
+    /// 账号生命周期标识（v19）：建行时随机生成，**删号重建必得新值**。
+    ///
+    /// 单独看 `auth_epoch` 挡不住"删了又用同一个 UID 登录"：新行从 0 开始，
+    /// 与旧请求记下的 0 相等。所有"晚到的写入"必须同时核对它。
+    pub generation: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -188,7 +249,7 @@ pub fn qoder_auth_id(account_id: &str, source: &str) -> String {
 }
 
 pub(crate) const ACCOUNT_COLUMNS: &str =
-    "id, edition, uid, nickname, email, created_at, updated_at, auth_epoch";
+    "id, edition, uid, nickname, email, created_at, updated_at, auth_epoch, generation";
 
 const AUTH_COLUMNS: &str = "id, account_id, source, source_key, secret_ref, auth_status, \
      token_expires_at, fingerprint, created_at, updated_at";
@@ -203,6 +264,7 @@ pub(crate) fn map_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<QoderAcco
         created_at: row.get(5)?,
         updated_at: row.get(6)?,
         auth_epoch: row.get(7)?,
+        generation: row.get(8)?,
     })
 }
 
@@ -243,12 +305,15 @@ impl crate::storage::Db {
         }
         let id = qoder_account_id(edition, uid);
         let now = now_rfc3339();
+        // 生命周期标识只在**建行**时写一次：`DO NOTHING` 与后面的 `UPDATE`
+        // 都不碰它，所以重复导入、加一份新授权都不会让人以为账号"换了一个"。
+        let generation = uuid::Uuid::new_v4().simple().to_string();
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO qoder_accounts (id, edition, uid, nickname, email, created_at, updated_at)
-             VALUES (?1, ?2, ?3, '', NULL, ?4, ?4)
+            "INSERT INTO qoder_accounts (id, edition, uid, nickname, email, created_at, updated_at, generation)
+             VALUES (?1, ?2, ?3, '', NULL, ?4, ?4, ?5)
              ON CONFLICT (edition, uid) DO NOTHING",
-            params![id, edition, uid, now],
+            params![id, edition, uid, now, generation],
         )?;
         let mut sets: Vec<&str> = Vec::new();
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -408,19 +473,22 @@ impl crate::storage::Db {
         Ok(changed > 0)
     }
 
-    /// 带版本核验的状态更新：**只有账号的授权版本仍是 `expected_epoch` 时才写**。
+    /// 带版本核验的状态更新：**只有账号仍处于 `expected` 那次生命周期、且授权
+    /// 没换过时才写**。
     ///
-    /// 为什么必须有它：一次网络请求要几秒，期间用户可能已经换了一份新 PAT。
-    /// 旧请求回来把新授权标成 `invalid`，用户看到的是"刚存就失效"，而真正
-    /// 失效的是那张已经被替换掉的旧令牌。核验与写入是同一条语句，没有插队窗口。
+    /// 为什么必须有它：一次网络请求要几秒，期间用户可能已经换了一份新 PAT，
+    /// 也可能把账号删了又用同一个 UID 重新登录。前一种情况下旧请求回来把新授权
+    /// 标成 `invalid`，用户看到的是"刚存就失效"；后一种更糟——账号 id 相同、
+    /// `auth_epoch` 又都从 0 起，只比 epoch 会写进**另一个账号**。
+    /// 核验与写入是同一条语句，没有插队窗口。
     ///
-    /// 返回 `false` 表示"账号的授权已经变了"，此时**什么都不写**。
+    /// 返回 `false` 表示"账号已经不是那一个了"或授权变了，此时**什么都不写**。
     pub fn set_qoder_auth_status_if_current(
         &mut self,
         account_id: &str,
         source: &str,
         auth_status: &str,
-        expected_epoch: i64,
+        expected: &QoderLifecycle,
     ) -> RpcResult<bool> {
         if !AUTH_STATUSES.contains(&auth_status) {
             return Err(RpcError::invalid_params(format!(
@@ -430,13 +498,15 @@ impl crate::storage::Db {
         let changed = self.conn.execute(
             "UPDATE qoder_authorizations SET auth_status = ?1, updated_at = ?2
              WHERE account_id = ?3 AND source = ?4
-               AND EXISTS (SELECT 1 FROM qoder_accounts WHERE id = ?3 AND auth_epoch = ?5)",
+               AND EXISTS (SELECT 1 FROM qoder_accounts
+                           WHERE id = ?3 AND generation = ?5 AND auth_epoch = ?6)",
             params![
                 auth_status,
                 now_rfc3339(),
                 account_id,
                 source,
-                expected_epoch
+                expected.generation,
+                expected.auth_epoch
             ],
         )?;
         Ok(changed > 0)
@@ -492,14 +562,35 @@ impl crate::storage::Db {
         Ok(changed > 0)
     }
 
-    /// 当前授权版本号。取数前读一次，写快照时带上做原子核验。
-    pub fn qoder_auth_epoch(&self, account_id: &str) -> RpcResult<Option<i64>> {
+    /// 当前生命周期。取数（或发 POST）前读一次，写回时带上做原子核验。
+    pub fn qoder_lifecycle(&self, account_id: &str) -> RpcResult<Option<QoderLifecycle>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT auth_epoch FROM qoder_accounts WHERE id = ?1")?;
+            .prepare("SELECT generation, auth_epoch FROM qoder_accounts WHERE id = ?1")?;
         Ok(stmt
-            .query_row(params![account_id], |row| row.get::<_, i64>(0))
+            .query_row(params![account_id], |row| {
+                Ok(QoderLifecycle {
+                    generation: row.get(0)?,
+                    auth_epoch: row.get(1)?,
+                })
+            })
             .optional()?)
+    }
+
+    /// 推进同一生命周期内的授权版本号，返回推进后的生命周期。
+    ///
+    /// 删号前调用：让**在途**的额度快照与领取请求立刻作废。`generation` 不动——
+    /// 它代表"账号还是这一个"，删号本身会让整行连同它一起消失。
+    /// 不回滚：它只让旧请求失效，留着比退回去安全。
+    pub fn bump_qoder_auth_epoch(&mut self, account_id: &str) -> RpcResult<Option<QoderLifecycle>> {
+        let changed = self.conn.execute(
+            "UPDATE qoder_accounts SET auth_epoch = auth_epoch + 1, updated_at = ?1 WHERE id = ?2",
+            params![now_rfc3339(), account_id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.qoder_lifecycle(account_id)
     }
 
     pub fn delete_qoder_account(&mut self, id: &str) -> RpcResult<bool> {

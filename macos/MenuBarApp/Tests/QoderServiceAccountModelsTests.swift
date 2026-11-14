@@ -156,4 +156,25 @@ final class QoderServiceAccountModelsTests: XCTestCase {
         let dump = String(describing: account)
         XCTAssertFalse(dump.contains("secret-value"))
     }
+
+    /// PR #77：删号回执的解析。`secretsMissing` 是"重试时本来就没有"，
+    /// 不是错误，别让界面把它当异常。
+    func testDeletionPayloadParsesCounts() throws {
+        let deletion = try XCTUnwrap(QoderAccountDeletion.parse([
+            "accountId": "qa_1",
+            "edition": "qoder_global",
+            "removed": true,
+            "secretsDeleted": 2,
+            "secretsMissing": 1,
+        ]))
+        XCTAssertEqual(deletion.edition, .global)
+        XCTAssertTrue(deletion.removed)
+        XCTAssertEqual(deletion.secretsDeleted + deletion.secretsMissing, 3)
+
+        // 缺 edition 就不认：不能猜站点。
+        XCTAssertNil(QoderAccountDeletion.parse([
+            "accountId": "qa_1",
+            "removed": true,
+        ]))
+    }
 }

@@ -26,6 +26,9 @@
 use serde_json::{json, Value};
 
 /// Qoder 账号的标识方式：`qoder_cn` / `qoder_global`。
+///
+/// 只有本模块的测试在用：生产侧的统一清单是 `quota::PROVIDERS`。
+#[cfg(test)]
 pub const PROVIDERS: &[&str] = &["qoder_cn", "qoder_global"];
 
 /// 未验证的能力行。`status = unverified`、`quota = null`，并附上阻塞原因。

@@ -781,6 +781,31 @@ fn checkin_records_start_empty() {
 // PR #73：Qoder 设备授权（CN / International 独立）
 // ---------------------------------------------------------------------------
 
+/// PR #77：删号走真实子进程。未知账号必须是明确的 `not_found`，
+/// 而不是"删了 0 行也算成功"。
+#[test]
+fn qoder_account_delete_reports_unknown_accounts() {
+    let mut session = Session::start();
+    let reply = session.call(
+        1,
+        "qoder.accounts.delete",
+        json!({"accountId": "qa_missing"}),
+    );
+    assert!(reply.get("error").is_some(), "{reply}");
+    assert_eq!(reply["error"]["code"], json!(1003), "{reply}");
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Qoder 账号不存在"),
+        "{reply}"
+    );
+
+    // 空参数也要被当成参数错误，不能默认删掉什么。
+    let bad = session.call(2, "qoder.accounts.delete", json!({}));
+    assert_eq!(bad["error"]["code"], json!(-32602), "{bad}");
+}
+
 /// 发起阶段**不联网**：只生成 PKCE 并返回对应站点的登录页。
 /// 含糊的 edition 不能被默认成任何一个站；取消后轮询立刻是终态。
 #[test]

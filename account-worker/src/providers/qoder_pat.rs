@@ -32,7 +32,7 @@ use crate::providers::qoder_auth::{parse_identity, userinfo_url, Identity};
 use crate::providers::qoder_edition::QoderEdition;
 use crate::rpc::{RpcError, RpcResult};
 use crate::securestore::fingerprint;
-use crate::storage::qoder_accounts::SOURCE_OWN_PAT;
+use crate::storage::qoder_accounts::{QoderLifecycle, SOURCE_OWN_PAT};
 
 /// `userinfo` 单次请求上限。换身份只是一次只读请求，12 秒足够。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
@@ -302,36 +302,39 @@ pub async fn recheck(
     edition: QoderEdition,
     account_id: &str,
 ) -> Result<Identity, PatError> {
-    // 请求前的授权版本：网络回来时要确认"还是这份授权"，否则不写状态。
-    let epoch = app
-        .with_db(|db| db.qoder_auth_epoch(account_id))
+    // 请求前的生命周期：网络回来时要确认"还是这个账号、这份授权"，否则不写状态。
+    // 账号 id 由 `(edition, uid)` 决定，删号重建后 id 相同、`auth_epoch` 也归零，
+    // 所以必须带上 `generation`。
+    let lifecycle = app
+        .with_db(|db| db.qoder_lifecycle(account_id))
         .map_err(|err| PatError::new(KIND_NO_SECRET, err.message))?
         .ok_or_else(|| PatError::new(KIND_UNKNOWN_ACCOUNT, "Qoder 账号不存在"))?;
 
     let pat = read_secret(app, account_id)?;
     match verify(edition, &pat).await {
         Ok(identity) => {
-            write_status_if_current(app, account_id, "valid", epoch);
+            write_status_if_current(app, account_id, "valid", &lifecycle);
             Ok(identity)
         }
         Err(err) => {
             // **只有 401 才说明"这份凭据不被接受了"**。403 是权限问题：
             // 把它写成 invalid，用户会以为令牌坏了去重新生成，其实只是没勾权限。
             if err.kind == KIND_REJECTED {
-                write_status_if_current(app, account_id, "invalid", epoch);
+                write_status_if_current(app, account_id, "invalid", &lifecycle);
             }
             Err(err)
         }
     }
 }
 
-/// 带版本核验地写授权状态。
+/// 带生命周期核验地写授权状态。
 ///
 /// 用户在请求返回期间换了 PAT（`auth_epoch` 前进），这次结果说的就是**旧令牌**，
-/// 写进去只会把新授权标脏。所以对不上就什么都不写。
-fn write_status_if_current(app: &App, account_id: &str, status: &str, epoch: i64) {
+/// 写进去只会把新授权标脏；若期间账号被删掉又用同一个 UID 登录，写进去就是把
+/// 另一个账号的凭据标脏。所以两者都对不上就什么都不写。
+fn write_status_if_current(app: &App, account_id: &str, status: &str, lifecycle: &QoderLifecycle) {
     let _ = app.with_db(|db| {
-        db.set_qoder_auth_status_if_current(account_id, SOURCE_OWN_PAT, status, epoch)
+        db.set_qoder_auth_status_if_current(account_id, SOURCE_OWN_PAT, status, lifecycle)
     });
 }
 
@@ -526,15 +529,21 @@ mod tests {
         let pat = "qp_abcdefghijklmnopqrstuvwxyz012345";
         let saved = persist(&app, QoderEdition::Cn, pat, &identity("u-epoch")).unwrap();
         let before = app
-            .with_db(|db| db.qoder_auth_epoch(&saved.account_id))
+            .with_db(|db| db.qoder_lifecycle(&saved.account_id))
             .unwrap()
             .unwrap();
         persist(&app, QoderEdition::Cn, pat, &identity("u-epoch")).unwrap();
         let after = app
-            .with_db(|db| db.qoder_auth_epoch(&saved.account_id))
+            .with_db(|db| db.qoder_lifecycle(&saved.account_id))
             .unwrap()
             .unwrap();
-        assert!(after > before, "重新授权必须推进版本号：{before} → {after}");
+        assert!(
+            after.auth_epoch > before.auth_epoch,
+            "重新授权必须推进版本号：{} → {}",
+            before.auth_epoch,
+            after.auth_epoch
+        );
+        assert_eq!(after.generation, before.generation, "换授权不换生命周期");
     }
 
     fn app_with(secure: SecureStore) -> (App, tempfile::TempDir) {
@@ -655,7 +664,7 @@ mod tests {
         let pat = "qp_abcdefghijklmnopqrstuvwxyz012345";
         let saved = persist(&app, QoderEdition::Cn, pat, &identity("u-race")).unwrap();
         let old_epoch = app
-            .with_db(|db| db.qoder_auth_epoch(&saved.account_id))
+            .with_db(|db| db.qoder_lifecycle(&saved.account_id))
             .unwrap()
             .unwrap();
 
@@ -668,7 +677,7 @@ mod tests {
                     &saved.account_id,
                     SOURCE_OWN_PAT,
                     "invalid",
-                    old_epoch,
+                    &old_epoch,
                 )
             })
             .unwrap();
@@ -686,7 +695,7 @@ mod tests {
         let pat = "qp_abcdefghijklmnopqrstuvwxyz012345";
         let saved = persist(&app, QoderEdition::Cn, pat, &identity("u-ok")).unwrap();
         let epoch = app
-            .with_db(|db| db.qoder_auth_epoch(&saved.account_id))
+            .with_db(|db| db.qoder_lifecycle(&saved.account_id))
             .unwrap()
             .unwrap();
         let written = app
@@ -695,7 +704,7 @@ mod tests {
                     &saved.account_id,
                     SOURCE_OWN_PAT,
                     "invalid",
-                    epoch,
+                    &epoch,
                 )
             })
             .unwrap();
@@ -712,13 +721,13 @@ mod tests {
         let pat = "qp_abcdefghijklmnopqrstuvwxyz012345";
         let saved = persist(&app, QoderEdition::Cn, pat, &identity("u-status")).unwrap();
         let before = app
-            .with_db(|db| db.qoder_auth_epoch(&saved.account_id))
+            .with_db(|db| db.qoder_lifecycle(&saved.account_id))
             .unwrap()
             .unwrap();
         app.with_db(|db| db.set_qoder_auth_status(&saved.account_id, SOURCE_OWN_PAT, "invalid"))
             .unwrap();
         let after = app
-            .with_db(|db| db.qoder_auth_epoch(&saved.account_id))
+            .with_db(|db| db.qoder_lifecycle(&saved.account_id))
             .unwrap()
             .unwrap();
         assert_eq!(before, after, "状态是观测结论，不是凭据变更");

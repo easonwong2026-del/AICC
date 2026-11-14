@@ -297,31 +297,11 @@ CREATE TABLE IF NOT EXISTS quota_snapshots (\
 );\
 CREATE INDEX IF NOT EXISTS idx_quota_snapshots_account ON quota_snapshots (account_id, captured_at);";
 
-/// v16：PAT 授权来源 + Qoder 账号的凭据版本号（PR #73）。
-///
-/// 两件事，都必须做，且**不能只做一半**：
-///
-/// 1. `qoder_authorizations.source` 的 CHECK 原本只有 `magpie` / `own_browser`。
-///    PAT 是**第三种独立来源**：它和浏览器授权可以同时存在，各自一行、各自一份
-///    钥匙串凭据，谁也不能覆盖谁。SQLite 改不了 CHECK，只能重建表搬数据；
-/// 2. `qoder_accounts.auth_epoch`：PR #74 给 `accounts` 加过同名字段，用来让
-///    "取数期间账号被重新授权"的在途额度快照作废。Qoder 服务账号在另一张表里，
-///    没有这个字段，（#75）的晚到快照就会写回旧令牌的数据。
-///
-/// 具体步骤是 Rust（`qoder_accounts::rebuild_v16`）而不是纯 SQL：两步都要先
-/// 检测现状，重复执行必须是空操作——人工把 `user_version` 回拨、或者迁移事务
-/// 已提交但版本号没写下去时，再来一次不能炸在 `duplicate column name` 上。
-///
-/// v17：Qoder 每日 Credits 领取（PR #75）。
-///
-/// 一个开关 + 一张账。**不复用 `task_executions`**：那张表是 WorkBuddy 签到 /
-/// 旅行 / 成长共用的"一次任务运行"，没有 `campaign_id` 与 `credits` 两列，
-/// 塞进去要么丢信息要么靠拼字符串查；也不复用 `credit_snapshots`（上游 wb-switch
-/// 的账，另一套单位语义）。
-///
-/// 步骤是 Rust（`qoder_credits::migrate_v17`）：先检测有没有那一列，
-/// 重复执行必须是空操作。表结构见那个函数。
 /// 一次迁移里的一步：纯 SQL，或者需要 Rust 参与的数据迁移。
+///
+/// v16 起的 Qoder 迁移都是 Rust 步骤：它们要先检测现状再动手，重复执行必须是
+/// 空操作——人工把 `user_version` 回拨、或者迁移事务已提交但版本号没写下去时，
+/// 再来一次不能炸在 `duplicate column name` 上。具体步骤见各版本自己的 `migrate_*`。
 enum MigrationStep {
     Sql(&'static str),
     Rust(fn(&rusqlite::Transaction<'_>) -> RpcResult<()>),
@@ -424,9 +404,15 @@ const MIGRATIONS: &[Migration] = &[
         version: 18,
         steps: &[MigrationStep::Rust(qoder_credits::migrate_v18)],
     },
+    // v19：账号加生命周期标识 `generation`。删号后用同一个 UID 重新登录会复用
+    // 账号 id，`auth_epoch` 也回到 0；只有 generation 能区分"这两次不是同一个账号"。
+    Migration {
+        version: 19,
+        steps: &[MigrationStep::Rust(qoder_accounts::migrate_v19)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 18;
+pub const LATEST_VERSION: i64 = 19;
 
 pub struct Db {
     conn: Connection,
@@ -478,11 +464,6 @@ impl AccountRecord {
     /// 所以这些入口一律先问这个方法：**只看 `platform` 不够**，必须看 `provider`。
     pub fn supports_workbuddy_cn_apis(&self) -> bool {
         self.platform == "workbuddy" && self.provider == "workbuddy"
-    }
-
-    /// 界面上"是不是国际版"。
-    pub fn is_workbuddy_ai(&self) -> bool {
-        self.platform == "workbuddy" && self.provider == "workbuddy_ai"
     }
 }
 
@@ -1317,6 +1298,37 @@ mod tests {
         assert_eq!(db.list_accounts(&hit).unwrap().len(), 1);
     }
 
+    /// v19：给已有账号补 `generation`。**每行各自不同**，重复执行不改写。
+    ///
+    /// 旧库的真实形状是"没有这一列"，所以这里先把列删掉再回拨版本号，
+    /// 而不是只把值清空——那会把"加列"这一步测不到。
+    #[test]
+    fn v19_backfills_a_generation_for_existing_accounts() {
+        let (mut db, _dir) = temp_db();
+        let a = db
+            .upsert_qoder_account("qoder_cn", "u-a", Some("甲"), None)
+            .unwrap();
+        let b = db
+            .upsert_qoder_account("qoder_global", "u-b", Some("乙"), None)
+            .unwrap();
+        assert_eq!(a.generation.len(), 32, "新建账号就该带着生命周期");
+
+        db.exec_raw("ALTER TABLE qoder_accounts DROP COLUMN generation;")
+            .expect("退回 v18 的形状");
+        db.conn.pragma_update(None, "user_version", 18).unwrap();
+
+        assert_eq!(db.migrate().unwrap(), LATEST_VERSION);
+        let ga = db.get_qoder_account(&a.id).unwrap().unwrap().generation;
+        let gb = db.get_qoder_account(&b.id).unwrap().unwrap().generation;
+        assert_eq!(ga.len(), 32);
+        assert_ne!(ga, gb, "每行必须各自不同，不能都写成同一个值");
+
+        // 回拨再跑一次：空操作，不能把已经有的值改掉。
+        db.conn.pragma_update(None, "user_version", 18).unwrap();
+        db.migrate().unwrap();
+        assert_eq!(db.get_qoder_account(&a.id).unwrap().unwrap().generation, ga);
+    }
+
     #[test]
     fn delete_removes_row() {
         let (mut db, _dir) = temp_db();
@@ -1382,7 +1394,7 @@ mod tests {
         )
         .expect("own_pat 必须被 v16 接受");
         assert_eq!(db.list_qoder_authorizations("qa_old").unwrap().len(), 2);
-        assert!(db.qoder_auth_epoch("qa_old").unwrap().unwrap() > 0);
+        assert!(db.qoder_lifecycle("qa_old").unwrap().unwrap().auth_epoch > 0);
 
         // CHECK 仍然生效：表外来源一律拒绝。
         assert!(db

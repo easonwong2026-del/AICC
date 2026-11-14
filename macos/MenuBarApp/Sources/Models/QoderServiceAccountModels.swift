@@ -165,3 +165,31 @@ enum QoderServiceStatusTone {
     case warn
     case muted
 }
+
+/// `qoder.accounts.delete` 的返回值。
+///
+/// `secretsDeleted + secretsMissing` 是该账号可能存在的三条键：
+/// 浏览器 access、refresh、PAT。重试时缺失的键按"已删"计，
+/// 所以界面不该把 `secretsMissing > 0` 当成异常。
+struct QoderAccountDeletion: Equatable {
+    let accountId: String
+    let edition: QoderEdition
+    let removed: Bool
+    let secretsDeleted: Int
+    let secretsMissing: Int
+
+    static func parse(_ json: [String: Any]) -> QoderAccountDeletion? {
+        guard let accountId = json["accountId"] as? String,
+              let raw = json["edition"] as? String,
+              let edition = QoderEdition(rawValue: raw),
+              let removed = json["removed"] as? Bool
+        else { return nil }
+        return QoderAccountDeletion(
+            accountId: accountId,
+            edition: edition,
+            removed: removed,
+            secretsDeleted: (json["secretsDeleted"] as? Int) ?? 0,
+            secretsMissing: (json["secretsMissing"] as? Int) ?? 0
+        )
+    }
+}

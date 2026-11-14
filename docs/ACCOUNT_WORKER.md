@@ -86,6 +86,7 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `auth.workbuddy.status` | 用当前选用的授权探测一次登录态（只读）：先 `Valid/Unauthorized/Transient` 分类，再过 401 才切源 | 是 |
 | `providers.magpie.accounts` | 列出 Magpie 里已登录的**四个 provider**（`workbuddy` / `workbuddy-ai` / `qoder` / `qoder-cn`）账号，逐条带 `platform` / `provider` / `edition` / `importTarget`，并标出哪些已导入；**不含令牌** | 否 |
 | `auth.magpie.import` | 按平台分流：WorkBuddy（CN/AI）把 access 搬进钥匙串 + `accounts`；Qoder（CN/Global）只登记 `qoder_accounts` + `qoder_authorizations`（`magpie` 来源**不复制令牌**） | 否 |
+| `qoder.accounts.delete` | 删掉一个 Qoder 服务账号（PR #77）：关自动领取 → 推进 `auth_epoch`（让在途请求作废；删行后 `generation` 随之消失，重建必换新值）→ 删钥匙串 `own/access`、`own/refresh`、`pat/token` → 删行（授权与领取记录级联、额度快照显式清理）。钥匙串删不掉时**保留账号**并返回可重试错误；不碰 Magpie 配置与 Qoder 客户端 Profile | 否 |
 | `qoder.accounts.list` | Qoder CN / Global 的**平台服务账号** + 各自授权来源（`magpie` / `own_browser`）；与 `qoder.profiles.list` 是两件事 | 否 |
 | `travel.summary` | 旅行快照汇总（账号 + 开关 + 运行信息），**只读本地库** | 否 |
 | `travel.events` | 某账号的旅行事件日志（派出 / 领取 / 失败） | 否 |

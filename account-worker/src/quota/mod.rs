@@ -188,13 +188,21 @@ pub async fn board(app: &Arc<App>, params: BoardParams) -> RpcResult<Value> {
 
     // 明确告诉界面：这些平台一个网络请求都没发，不是"暂时取不到"。
     // 现在按实际结果算：任何一行拿到 `ok`，就不再算"未验证"。
+    // 只有"确实有账号、且这些账号全是 unverified"才算未验证。
+    // 没有任何账号时 `all()` 空集为真——那会被读成"这个平台没接入"，
+    // 而真相是"你还没添加账号"。
     let unverified: Vec<&str> = PROVIDERS
         .iter()
         .copied()
         .filter(|provider| {
-            rows.iter()
+            let scoped: Vec<&Value> = rows
+                .iter()
                 .filter(|row| row["provider"].as_str() == Some(provider))
-                .all(|row| row["status"].as_str() == Some("unverified"))
+                .collect();
+            !scoped.is_empty()
+                && scoped
+                    .iter()
+                    .all(|row| row["status"].as_str() == Some("unverified"))
         })
         .collect();
 
@@ -278,14 +286,19 @@ async fn qoder_row(
 
     // 只有真的拿到过服务端结论（含"今天没有活动"）才落缓存：
     // 401 / 网络错误的行不该变成历史记录。
+    //
+    // 落缓存时核对**发起请求时**的生命周期：`account` 是查询前读出来的那一条，
+    // 它带着当时的 `generation`。期间账号被删掉又用同一个 UID 登录时，新账号的
+    // `auth_epoch` 也是 0，只比 epoch 会把这份旧数据写进新账号。
     if matches!(row["status"].as_str(), Some("ok")) {
+        let lifecycle = crate::storage::qoder_accounts::QoderLifecycle::of(account);
         app.with_db(|db| {
             db.save_qoder_quota_snapshot(
                 &account.id,
                 &account.edition,
                 "ok",
                 &row,
-                Some(account.auth_epoch),
+                Some(&lifecycle),
             )
             .map(|_| ())
         })
