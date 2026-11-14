@@ -19,6 +19,7 @@ pub mod growth;
 pub mod qoder_accounts;
 pub mod qoder_profiles;
 pub mod qoder_switch;
+pub mod quota;
 pub mod travel;
 
 pub use authz::AuthorizationRecord;
@@ -270,6 +271,26 @@ CREATE TABLE IF NOT EXISTS qoder_authorizations (\
 );\
 CREATE INDEX IF NOT EXISTS idx_qoder_auth_account ON qoder_authorizations (account_id);";
 
+/// v14：额度快照缓存（M4 额度看板）。
+///
+/// 只建一张新表，不动任何已有表：额度是**观测数据**，不是业务状态，
+/// 因此不写进 `accounts`，也不改 `credit_snapshots`（那张是上游 wb-switch 的账，
+/// 由 vendored 模块自己维护文件版快照）。
+///
+/// `payload` 存整行 JSON 而不是拆列：四平台的计量单位不同（credits / tokens /
+/// unknown），拆成 `total/used/remaining` 三列会诱导"跨单位相加"这种错误。
+/// 时间范围查询走 `captured_at` 索引。
+const MIGRATION_V14_SQL: &str = "\
+CREATE TABLE IF NOT EXISTS quota_snapshots (\
+    id          TEXT PRIMARY KEY,\
+    account_id  TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,\
+    provider    TEXT NOT NULL,\
+    captured_at TEXT NOT NULL,\
+    status      TEXT NOT NULL,\
+    payload     TEXT NOT NULL\
+);\
+CREATE INDEX IF NOT EXISTS idx_quota_snapshots_account ON quota_snapshots (account_id, captured_at);";
+
 /// 一次迁移里的一步：纯 SQL，或者需要 Rust 参与的数据迁移。
 enum MigrationStep {
     Sql(&'static str),
@@ -346,9 +367,14 @@ const MIGRATIONS: &[Migration] = &[
         version: 13,
         steps: &[MigrationStep::Sql(MIGRATION_V13_SQL)],
     },
+    // v14：额度快照缓存（M4）。只建新表。
+    Migration {
+        version: 14,
+        steps: &[MigrationStep::Sql(MIGRATION_V14_SQL)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 13;
+pub const LATEST_VERSION: i64 = 14;
 
 pub struct Db {
     conn: Connection,
@@ -553,6 +579,7 @@ impl Db {
             "account_authorizations",
             "qoder_accounts",
             "qoder_authorizations",
+            "quota_snapshots",
         ] {
             let sql = format!("SELECT COUNT(*) FROM {table}");
             let n: i64 = self.conn.query_row(&sql, [], |row| row.get(0))?;
