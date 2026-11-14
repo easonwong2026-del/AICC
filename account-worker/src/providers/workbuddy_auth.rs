@@ -286,7 +286,11 @@ pub fn is_trusted_login_url(variant: WbVariant, raw: &str) -> bool {
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     // userinfo 形式（`https://a@b/`）里真正的目标是 `@` 之后那一段，取最后一段。
     let host_port = authority.rsplit('@').next().unwrap_or("");
-    let host = host_port.split(':').next().unwrap_or("").to_ascii_lowercase();
+    let host = host_port
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     if host.is_empty() || host.contains('\\') || host.chars().any(char::is_whitespace) {
         return false;
     }
@@ -388,10 +392,7 @@ pub fn cancel(login_id: &str) -> bool {
 pub fn begin_commit(login_id: &str) -> Result<WbVariant, AuthError> {
     let mut map = sessions().lock().expect("sessions");
     let Some(session) = map.get_mut(login_id) else {
-        return Err(AuthError::new(
-            KIND_UNKNOWN_LOGIN,
-            "登录请求不存在或已结束",
-        ));
+        return Err(AuthError::new(KIND_UNKNOWN_LOGIN, "登录请求不存在或已结束"));
     };
     if session.created.elapsed().as_secs() as i64 > SESSION_TTL_SECONDS {
         session.phase = Phase::Expired;
@@ -443,10 +444,7 @@ fn failure_of(session: &Session) -> AuthError {
 fn ensure_pending(login_id: &str) -> Result<(), AuthError> {
     let map = sessions().lock().expect("sessions");
     let Some(session) = map.get(login_id) else {
-        return Err(AuthError::new(
-            KIND_UNKNOWN_LOGIN,
-            "登录请求不存在或已结束",
-        ));
+        return Err(AuthError::new(KIND_UNKNOWN_LOGIN, "登录请求不存在或已结束"));
     };
     match session.phase {
         Phase::Pending => Ok(()),
@@ -838,7 +836,12 @@ mod tests {
     #[test]
     fn cancelled_or_expired_sessions_can_never_commit() {
         // 取消发生在 `poll` 等网络期间：令牌回来了也不许落库。
-        seed("commit-cancelled", WbVariant::Ai, Phase::Cancelled, Duration::ZERO);
+        seed(
+            "commit-cancelled",
+            WbVariant::Ai,
+            Phase::Cancelled,
+            Duration::ZERO,
+        );
         assert_eq!(
             begin_commit("commit-cancelled").unwrap_err().kind,
             KIND_CANCELLED
@@ -870,9 +873,22 @@ mod tests {
 
     #[test]
     fn pending_recheck_rejects_a_session_cancelled_during_the_await() {
-        seed("poll-cancelled", WbVariant::Ai, Phase::Cancelled, Duration::ZERO);
-        assert_eq!(ensure_pending("poll-cancelled").unwrap_err().kind, KIND_CANCELLED);
-        seed("poll-pending", WbVariant::Ai, Phase::Pending, Duration::ZERO);
+        seed(
+            "poll-cancelled",
+            WbVariant::Ai,
+            Phase::Cancelled,
+            Duration::ZERO,
+        );
+        assert_eq!(
+            ensure_pending("poll-cancelled").unwrap_err().kind,
+            KIND_CANCELLED
+        );
+        seed(
+            "poll-pending",
+            WbVariant::Ai,
+            Phase::Pending,
+            Duration::ZERO,
+        );
         assert!(ensure_pending("poll-pending").is_ok());
         for id in ["poll-cancelled", "poll-pending"] {
             sessions().lock().unwrap().remove(id);
@@ -882,14 +898,24 @@ mod tests {
     #[test]
     fn complete_and_fail_never_revive_a_terminal_session() {
         // 已取消的会话收到落库成功回执：仍必须留在 Cancelled。
-        seed("done-cancelled", WbVariant::Cn, Phase::Cancelled, Duration::ZERO);
+        seed(
+            "done-cancelled",
+            WbVariant::Cn,
+            Phase::Cancelled,
+            Duration::ZERO,
+        );
         complete("done-cancelled", json!({"ok": true}));
         assert_eq!(snapshot("done-cancelled").unwrap().0, Phase::Cancelled);
         fail("done-cancelled", KIND_NETWORK, "boom");
         assert_eq!(snapshot("done-cancelled").unwrap().0, Phase::Cancelled);
 
         // 门禁之后落库失败：Committing → Failed，可以正常报错。
-        seed("done-committing", WbVariant::Cn, Phase::Pending, Duration::ZERO);
+        seed(
+            "done-committing",
+            WbVariant::Cn,
+            Phase::Pending,
+            Duration::ZERO,
+        );
         assert!(begin_commit("done-committing").is_ok());
         fail("done-committing", KIND_NETWORK, "boom");
         assert_eq!(snapshot("done-committing").unwrap().0, Phase::Failed);
