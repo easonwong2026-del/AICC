@@ -85,6 +85,7 @@ struct QoderDeviceAuthSheet: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .tint(ConsoleTheme.accent)
             .disabled(starting || isSuccess)
             .onChange(of: edition) { _, _ in
                 guard !starting, !isSuccess else { return }

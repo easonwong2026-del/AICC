@@ -67,6 +67,7 @@ let package = Package(
                 "AccountWorkerClientTests.swift",
                 "AccountWorkerProtocolTests.swift",
                 "ConsoleModelsTests.swift",
+                "ConsoleFleetSummaryTests.swift",
                 "QoderProfileModelsTests.swift",
                 "QoderServiceAccountModelsTests.swift",
                 "QoderLoginModelsTests.swift",

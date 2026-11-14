@@ -1,141 +1,95 @@
 import AppKit
 import SwiftUI
 
-/// 「AI 账号」= 三个平台：WorkBuddy、Qoder CN、Qoder International。
+/// 「AI 账号」页（PRD §4）：左侧账号列表 + 右侧账号详情。
 ///
-/// WorkBuddy 的账号来自 `accounts` 表；两个 Qoder 版本来自 `qoder_profiles`。
-///
-/// ⚠️ 本阶段 Qoder 是**只读管理**：识别 / 扫描 / 导入 / 认证检查 / 保存快照。
-/// 账号切换在完整隔离（`main.sqlite` 的账号数据、Cookies、Local Storage）落地前
-/// 不开放，界面上不提供任何写入 live 的入口。
+/// 三条必须守住的界线：
+/// 1. 列表行只显示"是谁、哪个平台、一个授权状态"，操作都在右侧详情里；
+/// 2. 服务账号（WorkBuddy 账号 / Qoder 服务账号）与**本机 Qoder 配置**分组显示，
+///    本机配置不计入服务账号统计；
+/// 3. 只渲染真实存在的能力：没有凭据可删、没有接口可调的地方不放假按钮。
 struct ConsoleAccountsView: View {
     @ObservedObject var store: ConsoleStore
+    @EnvironmentObject private var nav: ConsoleNavigation
 
-    @State private var filter: ConsolePlatformFilter = .all
     @State private var query = ""
-    @State private var showAdd = false
-    @State private var showMagpie = false
-    @State private var showQoderSheet = false
-    @State private var qoderSheetEdition: QoderEdition = .global
-    /// 设备授权面板的版本选择：nil 表示面板没开。
-    @State private var qoderLoginEdition: QoderEdition?
-    /// PAT 备用授权面板的版本选择：nil 表示面板没开。
-    @State private var qoderPatEdition: QoderEdition?
-    /// 正在被操作的服务账号（检测 / 移除 PAT）。
-    @State private var qoderBusyAccount: String?
-    @State private var qoderPatNotice: String?
-    @State private var renaming: QoderProfile?
+    @State private var activeSheet: ActiveConsoleSheet?
+    @State private var verifyNotice: [String: String] = [:]
+    @State private var busyAccount: String?
+
+    // 本机 Profile 的操作确认（只读管理 + 显式移除）。
+    @State private var renamingProfile: QoderProfile?
     @State private var renameText = ""
-    @State private var removing: QoderProfile?
-    @State private var confirmPurge = false
+    @State private var removingProfile: QoderProfile?
     @State private var showRecoverConfirm = false
 
     private var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
-    /// 国内版与**国际版**是两类账号：分组显示，不混在一个 "WorkBuddy" 里。
-    private func visibleWorkbuddy(_ international: Bool) -> [ConsoleAccount] {
-        guard international ? filter.showsWorkbuddyAI : filter.showsWorkbuddyCN else { return [] }
-        return store.accounts.filter { account in
-            account.isWorkbuddy(international: international)
-                && (trimmedQuery.isEmpty || account.searchText.contains(trimmedQuery))
-        }
-    }
-
-    private func visibleProfiles(_ edition: QoderEdition) -> [QoderProfile] {
-        guard filter.showsQoder else { return [] }
-        guard filter.edition == nil || filter.edition == edition else { return [] }
-        return store.qoderProfiles.filter { profile in
-            profile.edition == edition.rawValue
-                && (trimmedQuery.isEmpty || profile.searchText.contains(trimmedQuery))
-        }
-    }
-
-    /// Qoder 平台服务账号（Magpie 导入 / 网页授权）：与本机快照分开显示。
-    private func visibleServiceAccounts(_ edition: QoderEdition) -> [QoderServiceAccount] {
-        guard filter.showsQoder else { return [] }
-        guard filter.edition == nil || filter.edition == edition else { return [] }
-        return store.qoderServiceAccounts.filter { account in
-            account.edition == edition.rawValue
-                && (trimmedQuery.isEmpty || account.searchText.contains(trimmedQuery))
-        }
-    }
-
-    private var totalVisible: Int {
-        visibleWorkbuddy(false).count
-            + visibleWorkbuddy(true).count
-            + QoderEdition.allCases.reduce(0) {
-                $0 + visibleProfiles($1).count + visibleServiceAccounts($1).count
-            }
-    }
-
-    private var hasAnything: Bool {
-        !store.accounts.isEmpty
-            || !store.qoderProfiles.isEmpty
-            || !store.qoderServiceAccounts.isEmpty
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        ConsolePageScaffold(scrolls: false) {
             toolbar
-            readOnlyStageNote
-            if !store.qoderPendingSwitches.isEmpty { pendingSwitchBanner }
-            if let error = store.accountsError { banner(error, tone: .error) }
-            if let error = store.qoderError { banner(error, tone: .error) }
-            if let notice = store.qoderNotice { banner(notice, tone: .info) }
-            content
+        } content: {
+            HStack(spacing: 0) {
+                listColumn
+                    .frame(width: ConsoleTheme.accountListWidth)
+                Divider().overlay(ConsoleTheme.border)
+                detailColumn
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+            .background(ConsoleTheme.card.opacity(0.35))
+            .clipShape(RoundedRectangle(cornerRadius: ConsoleTheme.cardRadius))
+            .overlay(
+                RoundedRectangle(cornerRadius: ConsoleTheme.cardRadius)
+                    .strokeBorder(ConsoleTheme.border, lineWidth: 1)
+            )
+            .padding(.horizontal, ConsoleTheme.pagePadding)
+            .padding(.bottom, 16)
         }
         .task {
-            // QA 钩子：`open --args -AICCOpenAddAccount 1` 直接拉起扫码面板。
+            // QA 钩子：`-AICCOpenAddAccount 1` 直接拉起统一添加面板。
             if UserDefaults.standard.bool(forKey: "AICCOpenAddAccount")
                 || ProcessInfo.processInfo.environment["AICC_OPEN_ADD_ACCOUNT"] == "1" {
-                showAdd = true
+                activeSheet = .addAccount(ConsoleAddRequest())
             }
-            // 同理：`open --args -AICCOpenMagpieImport 1` 直接拉起 Magpie 导入面板。
             if UserDefaults.standard.bool(forKey: "AICCOpenMagpieImport")
                 || ProcessInfo.processInfo.environment["AICC_OPEN_MAGPIE_IMPORT"] == "1" {
-                showMagpie = true
+                activeSheet = .addAccount(ConsoleAddRequest(platform: .workbuddyCN, method: .magpie))
             }
-            if store.qoderProfiles.isEmpty {
-                await store.scanQoderProfiles()
+            if store.qoderProfiles.isEmpty && store.qoderEditions.isEmpty {
+                await store.scanQoderProfiles(announce: false)
             }
+            ensureSelection()
         }
-        .sheet(isPresented: $showAdd) {
-            AddWorkbuddyAccountSheet(store: store) {
-                Task { await store.refreshAccounts() }
-            }
-        }
-        .sheet(isPresented: $showMagpie) {
-            MagpieImportSheet(store: store)
-        }
-        .sheet(isPresented: $showQoderSheet) {
-            QoderProfileSheet(store: store, initialEdition: qoderSheetEdition)
-        }
-        // 设备授权面板：独立组件，按版本打开（CN / International 各自一套站点）。
-        .sheet(item: $qoderLoginEdition) { edition in
-            QoderDeviceAuthSheet(store: store, initialEdition: edition) {
-                Task { await store.refreshQoder(silent: true) }
-            }
-        }
-        // PAT 是**备用**入口，与设备授权并存：两条来源各自一行，互不覆盖。
-        .sheet(item: $qoderPatEdition) { edition in
-            QoderPatSheet(store: store, initialEdition: edition) {
-                Task { await store.refreshQoder(silent: true) }
+        // 全页只有一个 sheet 路由状态：所有流程从这里进，不并行声明多个 sheet。
+        .sheet(item: $activeSheet) { sheet in
+            switch sheet {
+            case .addAccount(let request):
+                ConsoleAddAccountSheet(store: store, request: request) {
+                    Task { await store.refreshAccounts() }
+                }
+            case .qoderProfiles(let edition):
+                QoderProfileSheet(store: store, initialEdition: edition)
+            case .deleteQoderAccount(let accountId):
+                ConsoleDeleteAccountSheet(store: store, accountId: accountId) {
+                    nav.accountSelection = nil
+                    ensureSelection()
+                }
             }
         }
-        .alert("重命名 Profile", isPresented: Binding(
-            get: { renaming != nil },
-            set: { if !$0 { renaming = nil } }
+        .alert("重命名本机配置", isPresented: Binding(
+            get: { renamingProfile != nil },
+            set: { if !$0 { renamingProfile = nil } }
         )) {
             TextField("显示名称", text: $renameText)
-            Button("取消", role: .cancel) { renaming = nil }
+            Button("取消", role: .cancel) { renamingProfile = nil }
             Button("保存") {
-                if let profile = renaming {
+                if let profile = renamingProfile {
                     let name = renameText
                     Task { await store.qoderRename(profile, to: name) }
                 }
-                renaming = nil
+                renamingProfile = nil
             }
         } message: {
             Text("只改 AICC 里显示的名称，不会改动 Qoder 客户端里的任何数据。")
@@ -148,681 +102,900 @@ struct ConsoleAccountsView: View {
                 + "无法确认（进程状态未知）时会拒绝恢复，并保持 live 认证原样。")
         }
         .confirmationDialog(
-            removing.map { "移除 \($0.displayName)？" } ?? "移除 Profile",
+            removingProfile.map { "移除本机配置 \($0.displayName)？" } ?? "移除本机配置",
             isPresented: Binding(
-                get: { removing != nil },
-                set: { if !$0 { removing = nil; confirmPurge = false } }
+                get: { removingProfile != nil },
+                set: { if !$0 { removingProfile = nil } }
             ),
             titleVisibility: .visible
         ) {
-            if let profile = removing {
+            if let profile = removingProfile {
                 Button("从 AICC 移除（保留磁盘数据）") {
                     Task { await store.qoderRemove(profile, purge: false) }
-                    removing = nil
+                    removingProfile = nil
                 }
-                Button("永久删除 Profile 与用户数据目录", role: .destructive) {
-                    confirmPurge = true
+                Button("永久删除快照与用户数据目录", role: .destructive) {
                     Task { await store.qoderRemove(profile, purge: true) }
-                    removing = nil
+                    removingProfile = nil
                 }
-                Button("取消", role: .cancel) { removing = nil }
+                Button("取消", role: .cancel) { removingProfile = nil }
             }
         } message: {
-            if let profile = removing {
+            if let profile = removingProfile {
                 Text(
                     "「从 AICC 移除」只删登记，Qoder 客户端里的登录状态与本地数据都保留。\n"
-                    + "「永久删除」会删除 AICC 保存的账号快照 \(profile.snapshotDir)，"
-                    + "这份快照里的登录态随之消失，无法撤销（客户端数据目录不会被动）。"
+                    + "「永久删除」会删除 AICC 保存的账号快照 \(profile.snapshotDir)，无法撤销"
+                    + "（客户端数据目录不会被动）。"
                 )
             }
         }
     }
 
+    // MARK: - 工具栏
+
     private var toolbar: some View {
-        HStack(spacing: 10) {
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 11))
-                    .foregroundStyle(ConsoleTheme.tertiaryText)
-                TextField("搜索昵称、UID 或邮箱", text: $query)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12))
-                    .foregroundStyle(ConsoleTheme.text)
-                if !query.isEmpty {
-                    Button {
-                        query = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 11))
-                            .foregroundStyle(ConsoleTheme.tertiaryText)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 9)
-            .frame(width: 200, height: 26)
-            .background(ConsoleTheme.card, in: RoundedRectangle(cornerRadius: 7))
-            .overlay(
-                RoundedRectangle(cornerRadius: 7).strokeBorder(ConsoleTheme.border, lineWidth: 1)
+        HStack(spacing: 8) {
+            ConsoleSearchField(placeholder: "搜索昵称、UID 或邮箱", text: $query)
+                .frame(minWidth: 140, maxWidth: 280)
+
+            ConsoleFilterMenu(
+                title: "平台筛选",
+                options: ConsolePlatformFilter.accountFilters,
+                label: { $0.title },
+                selection: $nav.accountsFilter
             )
 
-            Picker("平台", selection: $filter) {
-                ForEach(ConsolePlatformFilter.accountFilters) { option in
-                    Text(option.title).tag(option)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .tint(ConsoleTheme.accent)
-            .frame(width: 420)
-
-            Spacer(minLength: 8)
-
-            Text("\(totalVisible) 个账号")
-                .font(.system(size: 11))
+            Text("\(visibleCount) 个")
+                .font(ConsoleType.small)
                 .foregroundStyle(ConsoleTheme.secondaryText)
+                .lineLimit(1)
 
-            Button("扫描 Qoder 配置") {
-                Task { await store.scanQoderProfiles() }
+            Spacer(minLength: 6)
+
+            Button {
+                activeSheet = .qoderProfiles(.global)
+            } label: {
+                Label("本机配置", systemImage: "internaldrive")
             }
             .buttonStyle(ConsoleSecondaryButtonStyle())
-            .disabled(store.qoderActing != nil)
-            .help("把本机已有的 Qoder CN / International 配置登记成 Profile，不移动、不覆盖")
+            .help("管理本机 Qoder 客户端的认证快照（只读，不开放账号切换）")
 
-            Button("Qoder 授权") { qoderLoginEdition = .global }
-                .buttonStyle(ConsoleSecondaryButtonStyle())
-                .help("用浏览器给 Qoder CN / International 授权账号，不需要安装客户端")
-
-            Button("从 Magpie 导入") { showMagpie = true }
-                .buttonStyle(ConsoleSecondaryButtonStyle())
-                .help("复用 Magpie 已登录的 WorkBuddy 账号（只复制访问令牌）")
-
-            // 主入口现在是浏览器登录（扫码仍然可用），按钮文案别再只写"扫码"。
-            Button("添加账号") { showAdd = true }
-                .buttonStyle(ConsolePrimaryButtonStyle())
-                .help("在浏览器中登录或扫码，国内版 / 国际版都在面板里选")
+            Button {
+                activeSheet = .addAccount(ConsoleAddRequest())
+            } label: {
+                Label("添加账号", systemImage: "plus")
+            }
+            .buttonStyle(ConsolePrimaryButtonStyle())
+            .help("选择平台与授权方式，添加 WorkBuddy 或 Qoder 账号")
         }
     }
 
-    /// 本阶段的定位说明，避免用户以为这里能切账号。
-    private var readOnlyStageNote: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "lock.shield")
-                .font(.system(size: 11))
-            Text("Qoder 当前为只读管理：版本识别、扫描、导入、认证检查、保存快照。"
-                + "账号切换在完整隔离方案落地前不开放。")
-                .font(.system(size: 11))
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 8)
-        }
-        .foregroundStyle(ConsoleTheme.secondaryText)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(ConsoleTheme.cardSubtle, in: RoundedRectangle(cornerRadius: 9))
+    // MARK: - 左栏列表
+
+    private struct AccountListEntry: Identifiable {
+        let id: String
+        let selection: ConsoleAccountSelection
+        let title: String
+        let subtitle: String
+        let symbol: String
+        let tone: ConsoleTheme.Tone
+        let statusText: String
     }
 
-    /// 只报告、不自动恢复：恢复需要用户显式确认。
-    private var pendingSwitchBanner: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "clock.arrow.circlepath")
-                .font(.system(size: 11))
-            Text("检测到 \(store.qoderPendingSwitches.count) 条未完成的切换记录。"
-                + "AICC 不会自动恢复；请先完全退出 Qoder 客户端，再手动恢复。")
-                .font(.system(size: 11))
+    private struct AccountListSection: Identifiable {
+        let id: String
+        let title: String
+        let entries: [AccountListEntry]
+    }
+
+    private var sections: [AccountListSection] {
+        var result: [AccountListSection] = []
+
+        func workbuddyEntries(international: Bool) -> [AccountListEntry] {
+            store.accounts
+                .filter { $0.isWorkbuddy(international: international) }
+                .filter { trimmedQuery.isEmpty || $0.searchText.contains(trimmedQuery) }
+                .map { account in
+                    AccountListEntry(
+                        id: "wb-\(account.id)",
+                        selection: .workbuddy(account.id),
+                        title: account.nickname,
+                        subtitle: "UID \(ConsoleFormat.maskedUID(account.uid))",
+                        symbol: account.symbolName,
+                        tone: ConsoleTheme.consoleTone(account.displayAuthTone),
+                        statusText: account.displayAuthLabel
+                    )
+                }
+        }
+
+        func qoderServiceEntries(edition: QoderEdition) -> [AccountListEntry] {
+            store.qoderServiceAccounts
+                .filter { $0.edition == edition.rawValue }
+                .filter { trimmedQuery.isEmpty || $0.searchText.contains(trimmedQuery) }
+                .map { account in
+                    AccountListEntry(
+                        id: "qs-\(account.id)",
+                        selection: .qoderService(account.id),
+                        title: account.displayName,
+                        subtitle: account.email.map(ConsoleFormat.maskedEmail)
+                            ?? "UID \(account.maskedUid)",
+                        symbol: edition.symbolName,
+                        tone: tone(for: account.statusTone),
+                        statusText: account.statusLabel
+                    )
+                }
+        }
+
+        func profileEntries(edition: QoderEdition) -> [AccountListEntry] {
+            store.qoderProfiles
+                .filter { $0.edition == edition.rawValue }
+                .filter { trimmedQuery.isEmpty || $0.searchText.contains(trimmedQuery) }
+                .map { profile in
+                    AccountListEntry(
+                        id: "qp-\(profile.id)",
+                        selection: .qoderProfile(profile.id),
+                        title: profile.displayName,
+                        subtitle: profile.identityText ?? profile.identityLabel,
+                        symbol: profile.symbolName,
+                        tone: ConsoleTheme.consoleTone(profile.authTone),
+                        statusText: profile.authLabel
+                    )
+                }
+        }
+
+        if nav.accountsFilter.showsWorkbuddyCN {
+            let entries = workbuddyEntries(international: false)
+            if !entries.isEmpty {
+                result.append(AccountListSection(id: "wb-cn", title: "WorkBuddy CN", entries: entries))
+            }
+        }
+        if nav.accountsFilter.showsWorkbuddyAI {
+            let entries = workbuddyEntries(international: true)
+            if !entries.isEmpty {
+                result.append(AccountListSection(id: "wb-ai", title: "WorkBuddy AI", entries: entries))
+            }
+        }
+        if nav.accountsFilter.showsQoder {
+            for edition in QoderEdition.allCases {
+                guard nav.accountsFilter.edition == nil || nav.accountsFilter.edition == edition else { continue }
+                let serviceEntries = qoderServiceEntries(edition: edition)
+                let profiles = profileEntries(edition: edition)
+                if !serviceEntries.isEmpty {
+                    result.append(AccountListSection(
+                        id: "qs-\(edition.rawValue)",
+                        title: edition.displayName,
+                        entries: serviceEntries
+                    ))
+                }
+                if !profiles.isEmpty {
+                    result.append(AccountListSection(
+                        id: "qp-\(edition.rawValue)",
+                        title: "\(edition.displayName) · 本机配置",
+                        entries: profiles
+                    ))
+                }
+            }
+        }
+        return result
+    }
+
+    private var visibleCount: Int {
+        sections.reduce(0) { $0 + $1.entries.count }
+    }
+
+    private func tone(for status: QoderServiceStatusTone) -> ConsoleTheme.Tone {
+        switch status {
+        case .ok: return .ok
+        case .warn: return .warning
+        case .muted: return .neutral
+        }
+    }
+
+    private var listColumn: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 2, pinnedViews: []) {
+                if !store.qoderPendingSwitches.isEmpty {
+                    pendingSwitchNotice
+                        .padding(.horizontal, 8)
+                        .padding(.top, 8)
+                }
+                let sections = sections
+                if sections.isEmpty {
+                    // 主操作只有一个：工具栏的「添加账号」。空状态不重复放按钮。
+                    ConsoleEmptyState(
+                        symbol: sectionsPlaceholderSymbol,
+                        title: sectionsPlaceholderTitle,
+                        message: sectionsPlaceholderMessage
+                    )
+                } else {
+                    ForEach(sections) { section in
+                        Text(section.title)
+                            .font(ConsoleType.caption)
+                            .foregroundStyle(ConsoleTheme.tertiaryText)
+                            .padding(.horizontal, 10)
+                            .padding(.top, 10)
+                            .padding(.bottom, 2)
+                        ForEach(section.entries) { entry in
+                            listRow(entry)
+                        }
+                    }
+                }
+            }
+            .padding(.bottom, 10)
+        }
+        .frame(maxHeight: .infinity)
+    }
+
+    private var sectionsPlaceholderSymbol: String {
+        store.accounts.isEmpty && store.qoderServiceAccounts.isEmpty && store.qoderProfiles.isEmpty
+            ? "person.crop.rectangle.stack" : "line.3.horizontal.decrease.circle"
+    }
+
+    private var sectionsPlaceholderTitle: String {
+        store.accounts.isEmpty && store.qoderServiceAccounts.isEmpty && store.qoderProfiles.isEmpty
+            ? "还没有账号" : "没有匹配的账号"
+    }
+
+    private var sectionsPlaceholderMessage: String {
+        store.accounts.isEmpty && store.qoderServiceAccounts.isEmpty && store.qoderProfiles.isEmpty
+            ? "可以添加 WorkBuddy 或 Qoder 账号，也可以先扫描本机已有的 Qoder 配置。"
+            : "换个关键词，或把平台筛选切回「全部」。"
+    }
+
+    private func listRow(_ entry: AccountListEntry) -> some View {
+        let selected = nav.accountSelection == entry.selection
+        return Button {
+            nav.accountSelection = entry.selection
+            store.clearQoderDeleteFeedback()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: entry.symbol)
+                    .font(.system(size: 11))
+                    .foregroundStyle(selected ? ConsoleTheme.accent : ConsoleTheme.secondaryText)
+                    .frame(width: 16)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(entry.title)
+                        .font(ConsoleType.rowTitle)
+                        .foregroundStyle(ConsoleTheme.text)
+                        .lineLimit(1)
+                    Text(entry.subtitle)
+                        .font(ConsoleType.caption)
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 4)
+                Circle()
+                    .fill(ConsoleTheme.color(entry.tone))
+                    .frame(width: 6, height: 6)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 40)
+            .background(
+                selected ? ConsoleTheme.selectionFill : Color.clear,
+                in: RoundedRectangle(cornerRadius: 7)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("\(entry.title) · \(entry.statusText)")
+        .padding(.horizontal, 4)
+    }
+
+    private var pendingSwitchNotice: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("检测到 \(store.qoderPendingSwitches.count) 条未完成的切换记录")
+                .font(ConsoleType.caption)
+                .foregroundStyle(ConsoleTheme.warning)
                 .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 8)
-            Button("恢复…") { showRecoverConfirm = true }
+            Button("手动恢复…") { showRecoverConfirm = true }
                 .buttonStyle(ConsoleSecondaryButtonStyle())
                 .disabled(store.qoderActing != nil)
         }
-        .foregroundStyle(ConsoleTheme.warning)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(ConsoleTheme.warning.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(ConsoleTheme.warningSoft, in: RoundedRectangle(cornerRadius: 8))
     }
 
-    private enum BannerTone { case error, info }
-
-    private func banner(_ message: String, tone: BannerTone) -> some View {
-        let color = tone == .error ? ConsoleTheme.warning : ConsoleTheme.secondaryText
-        return HStack(spacing: 8) {
-            Image(systemName: tone == .error ? "exclamationmark.triangle" : "info.circle")
-                .font(.system(size: 11))
-            Text(message)
-                .font(.system(size: 11))
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 8)
-            if tone == .error {
-                Button("重试") { Task { await store.refreshQoder() } }
-                    .buttonStyle(.borderless)
-                    .font(.system(size: 11, weight: .medium))
-            }
-        }
-        .foregroundStyle(color)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(color.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
-    }
+    // MARK: - 右栏详情
 
     @ViewBuilder
-    private var content: some View {
-        if !hasAnything {
-            ConsoleCard {
-                ConsoleEmptyState(
-                    symbol: "person.crop.rectangle.stack",
-                    title: "还没有账号",
-                    message: "WorkBuddy 可以扫码或从 Magpie 导入；Qoder 支持 CN 与 International 两个版本，"
-                        + "每个账号一份独立 Profile。",
-                    actionTitle: "扫描本机 Qoder 配置",
-                    action: { Task { await store.scanQoderProfiles() } }
-                )
-            }
-        } else if totalVisible == 0 {
-            ConsoleCard {
-                ConsoleEmptyState(
-                    symbol: "line.3.horizontal.decrease.circle",
-                    title: "没有匹配的账号",
-                    message: "换个关键词，或把平台筛选切回「全部」。"
-                )
-            }
-        } else {
-            VStack(alignment: .leading, spacing: 22) {
-                if filter.showsWorkbuddyCN, !visibleWorkbuddy(false).isEmpty {
-                    workbuddySection(international: false)
+    private var detailColumn: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: ConsoleTheme.sectionSpacing) {
+                if let error = store.accountsError {
+                    ConsoleInlineNotice(kind: .error, message: error, actionTitle: "重试") {
+                        Task { await store.refreshAccounts() }
+                    }
                 }
-                if filter.showsWorkbuddyAI, !visibleWorkbuddy(true).isEmpty {
-                    workbuddySection(international: true)
+                if let error = store.qoderError {
+                    ConsoleInlineNotice(kind: .error, message: error, actionTitle: "重试") {
+                        Task { await store.refreshQoder() }
+                    }
                 }
-                if filter.showsQoder {
-                    ForEach(QoderEdition.allCases) { edition in
-                        if filter.edition == nil || filter.edition == edition {
-                            // 这一节现在带"浏览器授权"入口，账号为空时也要显示。
-                            qoderServiceSection(edition)
-                            qoderSection(edition)
+                if let notice = store.qoderDeleteNotice {
+                    ConsoleInlineNotice(kind: .info, message: notice)
+                }
+                if let error = store.qoderDeleteError {
+                    ConsoleInlineNotice(kind: .error, message: error, actionTitle: "重试") {
+                        if let target = currentQoderService {
+                            activeSheet = .deleteQoderAccount(target.id)
                         }
                     }
                 }
+                if let notice = store.qoderNotice {
+                    ConsoleInlineNotice(kind: .info, message: notice)
+                }
+                detailContent
             }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     @ViewBuilder
-    private func workbuddySection(international: Bool) -> some View {
-        let accounts = visibleWorkbuddy(international)
-        VStack(alignment: .leading, spacing: 10) {
-            ConsoleSectionTitle(
-                title: international ? "WorkBuddy AI（国际版）" : "WorkBuddy（国内版）",
-                detail: "\(accounts.count) 个账号"
+    private var detailContent: some View {
+        switch resolvedSelection {
+        case .none:
+            ConsoleEmptyState(
+                symbol: "sidebar.left",
+                title: "未选择账号",
+                message: visibleCount == 0
+                    ? "用右上角「添加账号」新增一个 WorkBuddy 或 Qoder 账号。"
+                    : "在左侧选择一个账号查看授权来源与可用能力。"
             )
-            if accounts.isEmpty {
-                ConsoleCard {
-                    Text(international
-                        ? "还没有 WorkBuddy AI 账号。点「添加账号」→ 选 WorkBuddy AI → 在浏览器中登录。"
-                        : "还没有 WorkBuddy 账号。点「添加账号」，或从 Magpie 导入已登录的账号。")
-                        .font(.system(size: 11))
-                        .foregroundStyle(ConsoleTheme.secondaryText)
-                }
+        case .some(.workbuddy(let id)):
+            if let account = store.accounts.first(where: { $0.id == id }) {
+                workbuddyDetail(account)
             } else {
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 300), spacing: ConsoleTheme.cardSpacing)],
-                    spacing: ConsoleTheme.cardSpacing
-                ) {
-                    ForEach(accounts) { account in
-                        ConsoleAccountCard(account: account, onRelogin: { showAdd = true })
-                    }
-                }
+                missingAccount
+            }
+        case .some(.qoderService(let id)):
+            if let account = store.qoderServiceAccounts.first(where: { $0.id == id }) {
+                qoderServiceDetail(account)
+            } else {
+                missingAccount
+            }
+        case .some(.qoderProfile(let id)):
+            if let profile = store.qoderProfiles.first(where: { $0.id == id }) {
+                qoderProfileDetail(profile)
+            } else {
+                missingAccount
             }
         }
     }
 
-    /// 平台服务账号：来自 Magpie 导入或浏览器授权，**不需要本机装 Qoder 客户端**。
-    ///
-    /// 和下面「本机 Profile」是两条独立的线：这里显示的是服务端账号身份，
-    /// 那里显示的是本机客户端保存的认证快照。
-    @ViewBuilder
-    private func qoderServiceSection(_ edition: QoderEdition) -> some View {
-        let accounts = visibleServiceAccounts(edition)
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center, spacing: 8) {
-                ConsoleSectionTitle(
-                    title: "\(edition.displayName) 账号",
-                    detail: "\(accounts.count) 个服务账号"
-                )
-                Button("浏览器授权") { qoderLoginEdition = edition }
-                    .buttonStyle(ConsoleSecondaryButtonStyle())
-                    .help("不装 Qoder 客户端，用浏览器给 \(edition.displayName) 授权一个账号")
-                Button("PAT") { qoderPatEdition = edition }
-                    .buttonStyle(ConsoleSecondaryButtonStyle())
-                    .help("用 \(edition.displayName) 账户页生成的 Personal Access Token 授权（备用方式）")
-            }
-            if accounts.isEmpty {
-                ConsoleCard {
-                    Text("还没有 \(edition.displayName) 服务账号。"
-                        + "可以点「浏览器授权」，或从 Magpie 导入已登录的账号。")
-                        .font(.system(size: 11))
-                        .foregroundStyle(ConsoleTheme.secondaryText)
-                }
-            } else {
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 300), spacing: ConsoleTheme.cardSpacing)],
-                    spacing: ConsoleTheme.cardSpacing
-                ) {
-                    ForEach(accounts) { account in
-                        qoderServiceCard(account)
-                    }
-                }
-            }
+    private var missingAccount: some View {
+        ConsoleEmptyState(
+            symbol: "questionmark.folder",
+            title: "账号已不在列表里",
+            message: "它可能刚被删除或刷新后不再返回。左侧重新选一个账号。"
+        )
+    }
+
+    private var currentQoderService: QoderServiceAccount? {
+        if case .qoderService(let id) = resolvedSelection {
+            return store.qoderServiceAccounts.first { $0.id == id }
+        }
+        return nil
+    }
+
+    /// 选中项失效时回落到列表第一个，避免右侧空白。
+    private var resolvedSelection: ConsoleAccountSelection? {
+        if let selection = nav.accountSelection, isAvailable(selection) { return selection }
+        return sections.first?.entries.first?.selection
+    }
+
+    private func isAvailable(_ selection: ConsoleAccountSelection) -> Bool {
+        switch selection {
+        case .workbuddy(let id): return store.accounts.contains { $0.id == id }
+        case .qoderService(let id): return store.qoderServiceAccounts.contains { $0.id == id }
+        case .qoderProfile(let id): return store.qoderProfiles.contains { $0.id == id }
         }
     }
 
-    private func qoderServiceCard(_ account: QoderServiceAccount) -> some View {
-        ConsoleCard {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Text(account.displayName)
-                        .font(.system(size: 12, weight: .semibold))
-                        .lineLimit(1)
-                    Spacer(minLength: 8)
-                    Text(account.statusLabel)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(qoderStatusColor(account.statusTone))
+    private func ensureSelection() {
+        if nav.accountSelection == nil {
+            nav.accountSelection = sections.first?.entries.first?.selection
+        }
+    }
+
+    // MARK: WorkBuddy 详情
+
+    private func workbuddyDetail(_ account: ConsoleAccount) -> some View {
+        let international = account.isWorkbuddyAI
+        return VStack(alignment: .leading, spacing: ConsoleTheme.sectionSpacing) {
+            detailHeader(
+                symbol: account.symbolName,
+                title: account.nickname,
+                subtitle: account.platformName + (international ? " · 国际版" : " · 国内版"),
+                statusText: account.displayAuthLabel,
+                tone: ConsoleTheme.consoleTone(account.displayAuthTone)
+            )
+
+            ConsoleDetailGroup(title: "基本资料") {
+                VStack(alignment: .leading, spacing: 8) {
+                    ConsoleInfoRow(label: "平台", value: account.platformName)
+                    ConsoleInfoRow(label: "账号昵称", value: account.nickname)
+                    ConsoleInfoRow(label: "UID", value: ConsoleFormat.maskedUID(account.uid), mono: true)
+                    ConsoleInfoRow(label: "邮箱", value: "未提供（该平台接口不返回邮箱）")
+                    ConsoleInfoRow(
+                        label: "最近更新",
+                        value: ConsoleFormat.shortTimestamp(account.updatedAt)
+                    )
                 }
-                HStack(spacing: 6) {
-                    Text(account.editionName)
-                        .font(.system(size: 10))
-                        .foregroundStyle(ConsoleTheme.tertiaryText)
-                    Text("·")
-                        .font(.system(size: 10))
-                        .foregroundStyle(ConsoleTheme.tertiaryText)
-                    Text("UID \(account.maskedUid)")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(ConsoleTheme.tertiaryText)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                HStack(spacing: 6) {
-                    ForEach(account.sourceLabels, id: \.self) { label in
-                        Text(label)
-                            .font(.system(size: 10, weight: .medium))
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
-                            .background(
-                                ConsoleTheme.tertiaryText.opacity(0.12),
-                                in: Capsule()
-                            )
-                            .foregroundStyle(ConsoleTheme.secondaryText)
-                    }
+            }
+
+            ConsoleDetailGroup(title: "授权来源", detail: "共 \(account.authorizations.count) 份") {
+                VStack(alignment: .leading, spacing: 10) {
                     if account.authorizations.isEmpty {
-                        Text("还没有授权来源")
-                            .font(.system(size: 10))
-                            .foregroundStyle(ConsoleTheme.tertiaryText)
+                        Text("这个账号还没有登记任何授权来源，请重新登录一次。")
+                            .font(ConsoleType.small)
+                            .foregroundStyle(ConsoleTheme.secondaryText)
+                    } else {
+                        ForEach(account.authorizations) { authorization in
+                            authorizationRow(
+                                title: authorization.isOwn ? "浏览器登录（自有）" : "Magpie 关联",
+                                authorization: authorization,
+                                note: authorization.isOwn
+                                    ? "AICC 自己持有的令牌"
+                                    : "令牌归 Magpie 刷新，AICC 只借用，不能单独验证"
+                            )
+                            Divider().overlay(ConsoleTheme.border)
+                        }
                     }
-                    Spacer(minLength: 0)
-                }
-                if account.hasPAT {
                     HStack(spacing: 8) {
-                        Button("检测 PAT") { Task { await checkPat(account) } }
+                        Button("重新授权") {
+                            activeSheet = .addAccount(ConsoleAddRequest(
+                                platform: international ? .workbuddyAI : .workbuddyCN,
+                                method: .browser
+                            ))
+                        }
+                        .buttonStyle(ConsoleSecondaryButtonStyle())
+
+                        Button("验证授权") { Task { await verify(account) } }
                             .buttonStyle(ConsoleSecondaryButtonStyle())
-                            .disabled(qoderBusyAccount == account.id)
-                        Button("移除 PAT") { Task { await removePat(account) } }
-                            .buttonStyle(ConsoleSecondaryButtonStyle())
-                            .disabled(qoderBusyAccount == account.id)
-                        if qoderBusyAccount == account.id {
+                            .disabled(busyAccount == account.id)
+
+                        if busyAccount == account.id {
                             ProgressView().controlSize(.mini)
-                        } else if let notice = qoderPatNotice {
-                            Text(notice)
-                                .font(.system(size: 10))
-                                .foregroundStyle(ConsoleTheme.secondaryText)
-                                .fixedSize(horizontal: false, vertical: true)
                         }
                         Spacer(minLength: 0)
                     }
-                }
-            }
-        }
-    }
-
-    private func qoderStatusColor(_ tone: QoderServiceStatusTone) -> Color {
-        switch tone {
-        case .ok: return ConsoleTheme.secondaryText
-        case .warn: return ConsoleTheme.warning
-        case .muted: return ConsoleTheme.tertiaryText
-        }
-    }
-
-    /// 重新验证一份已存的 PAT。成功的结论只有"身份仍然对得上"，
-    /// **不代表** Credits 接口的权限也还在。
-    private func checkPat(_ account: QoderServiceAccount) async {
-        qoderBusyAccount = account.id
-        qoderPatNotice = nil
-        defer { qoderBusyAccount = nil }
-        do {
-            switch try await store.worker.checkQoderPat(accountId: account.id) {
-            case .success(let name):
-                qoderPatNotice = "PAT 身份有效：\(name)（Credits 权限另需检测）"
-            case .failure(let error):
-                qoderPatNotice = "\(error.message)\(error.hint.isEmpty ? "" : " " + error.hint)"
-            }
-        } catch {
-            qoderPatNotice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-        }
-        await store.refreshQoder(silent: true)
-    }
-
-    /// 只删 PAT 这一份来源：浏览器授权与 Magpie 关联都不受影响。
-    private func removePat(_ account: QoderServiceAccount) async {
-        qoderBusyAccount = account.id
-        qoderPatNotice = nil
-        defer { qoderBusyAccount = nil }
-        do {
-            _ = try await store.worker.removeQoderPat(accountId: account.id)
-            qoderPatNotice = "已移除 PAT，其余来源保持不变"
-        } catch {
-            qoderPatNotice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-        }
-        await store.refreshQoder(silent: true)
-    }
-
-    @ViewBuilder
-    private func qoderSection(_ edition: QoderEdition) -> some View {
-        let profiles = visibleProfiles(edition)
-        let info = store.qoderEditions.first { $0.edition == edition.rawValue }
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                ConsoleSectionTitle(
-                    title: edition.displayName,
-                    detail: "\(profiles.count) 个 Profile"
-                )
-                if let info {
-                    Text(info.installSummary)
-                        .font(.system(size: 10))
-                        .foregroundStyle(info.installed ? ConsoleTheme.tertiaryText : ConsoleTheme.warning)
-                }
-                if let info {
-                    Text(info.parallelLabel)
-                        .font(.system(size: 10))
+                    if let notice = verifyNotice[account.id] {
+                        Text(notice)
+                            .font(ConsoleType.caption)
+                            .foregroundStyle(ConsoleTheme.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Text("当前使用：\(account.activeSourceLabel)"
+                        + (account.tokenExpiresAt.map { " · 到期 \(ConsoleFormat.shortTimestamp($0))" } ?? ""))
+                        .font(ConsoleType.caption)
                         .foregroundStyle(ConsoleTheme.tertiaryText)
                 }
-                if let hint = info?.currentAccountHint {
-                    Text("客户端当前：\(hint)")
-                        .font(.system(size: 10))
-                        .foregroundStyle(ConsoleTheme.tertiaryText)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                Spacer(minLength: 8)
-                Button {
-                    qoderSheetEdition = edition
-                    showQoderSheet = true
-                } label: {
-                    Label("添加账号", systemImage: "plus")
-                        .font(.system(size: 11, weight: .medium))
-                }
-                .buttonStyle(ConsoleSecondaryButtonStyle())
-                .help("新建一个独立 Profile，或用已有目录导入")
             }
-            if let info, !info.switchEnabled, let reason = info.switchBlockedReason {
-                HStack(spacing: 6) {
-                    Image(systemName: "lock.shield")
-                        .font(.system(size: 10))
-                    Text("账号切换未开放：\(reason)")
-                        .font(.system(size: 10))
+
+            ConsoleDetailGroup(title: "可用能力", detail: "只显示真实接入的能力") {
+                VStack(alignment: .leading, spacing: 8) {
+                    capabilityRow("每日签到", enabled: account.supportsCNTasks,
+                                  note: account.supportsCNTasks ? "已接入" : "国际版没有该接口")
+                    capabilityRow("成长中心", enabled: account.supportsCNTasks,
+                                  note: account.supportsCNTasks ? "已接入" : "国际版没有该接口")
+                    capabilityRow("Buddy 旅行", enabled: account.supportsCNTasks,
+                                  note: account.supportsCNTasks ? "已接入" : "国际版没有该接口")
+                    capabilityRow("官方额度", enabled: true, note: "账号额度看板")
+                }
+            }
+
+            ConsoleDetailGroup(title: "更多操作") {
+                HStack(spacing: 8) {
+                    Button("刷新账号信息") { Task { await verify(account) } }
+                        .buttonStyle(ConsoleSecondaryButtonStyle())
+                        .disabled(busyAccount == account.id)
+                    Button("重新登录") {
+                        activeSheet = .addAccount(ConsoleAddRequest(
+                            platform: international ? .workbuddyAI : .workbuddyCN,
+                            method: .browser
+                        ))
+                    }
+                    .buttonStyle(ConsoleSecondaryButtonStyle())
+                    Button("复制 UID") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(account.uid, forType: .string)
+                    }
+                    .buttonStyle(ConsoleSecondaryButtonStyle())
+                    Spacer(minLength: 0)
+                    Button("查看额度") {
+                        nav.page = .quota
+                        nav.quotaSource = .accounts
+                    }
+                    .buttonStyle(ConsoleSecondaryButtonStyle())
+                }
+            }
+        }
+        .task(id: account.id) { verifyNotice[account.id] = nil }
+    }
+
+    // MARK: Qoder 服务账号详情
+
+    private func qoderServiceDetail(_ account: QoderServiceAccount) -> some View {
+        let edition = QoderEdition(rawValue: account.edition) ?? .global
+        let deleting = store.qoderDeleting == account.id
+        return VStack(alignment: .leading, spacing: ConsoleTheme.sectionSpacing) {
+            detailHeader(
+                symbol: edition.symbolName,
+                title: account.displayName,
+                subtitle: account.editionName,
+                statusText: account.statusLabel,
+                tone: tone(for: account.statusTone)
+            )
+
+            ConsoleDetailGroup(title: "基本资料") {
+                VStack(alignment: .leading, spacing: 8) {
+                    ConsoleInfoRow(label: "平台", value: account.editionName)
+                    ConsoleInfoRow(label: "账号昵称", value: account.displayName)
+                    ConsoleInfoRow(label: "UID", value: ConsoleFormat.maskedUID(account.uid), mono: true)
+                    ConsoleInfoRow(
+                        label: "邮箱",
+                        value: account.email.map(ConsoleFormat.maskedEmail) ?? "未提供"
+                    )
+                    ConsoleInfoRow(label: "最近更新", value: lastQoderSyncText)
+                }
+            }
+
+            ConsoleDetailGroup(
+                title: "授权来源",
+                detail: account.authorizations.isEmpty ? "暂无" : "共 \(account.authorizations.count) 份"
+            ) {
+                VStack(alignment: .leading, spacing: 10) {
+                    if account.authorizations.isEmpty {
+                        Text("还没有授权来源。用浏览器授权或 PAT 添加一份。")
+                            .font(ConsoleType.small)
+                            .foregroundStyle(ConsoleTheme.secondaryText)
+                    } else {
+                        ForEach(Array(account.authorizations.enumerated()), id: \.offset) { _, authorization in
+                            qoderAuthorizationRow(authorization, account: account)
+                            Divider().overlay(ConsoleTheme.border)
+                        }
+                    }
+                    HStack(spacing: 8) {
+                        Button("浏览器授权") {
+                            activeSheet = .addAccount(ConsoleAddRequest(platform: platformKind(for: edition), method: .browser))
+                        }
+                        .buttonStyle(ConsoleSecondaryButtonStyle())
+                        Button("添加 PAT") {
+                            activeSheet = .addAccount(ConsoleAddRequest(platform: platformKind(for: edition), method: .pat))
+                        }
+                        .buttonStyle(ConsoleSecondaryButtonStyle())
+                        Spacer(minLength: 0)
+                    }
+                    Text("Magpie 关联只说明该账号在 Magpie 里登录过，AICC 手里没有它的凭据，因此不算已验证。")
+                        .font(ConsoleType.caption)
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
-                        .lineLimit(3)
                 }
-                .foregroundStyle(ConsoleTheme.tertiaryText)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(ConsoleTheme.cardSubtle, in: RoundedRectangle(cornerRadius: 8))
             }
-            if profiles.isEmpty {
-                ConsoleCard {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("还没有 \(edition.displayName) 的 Profile。")
-                            .font(.system(size: 11))
-                            .foregroundStyle(ConsoleTheme.secondaryText)
-                        if let info, !info.installed {
-                            Text("本机没有检测到 \(edition.displayName) 客户端（Bundle \(info.bundleId)），"
-                                + "可以先建 Profile，装好客户端后再登录。")
-                                .font(.system(size: 10))
-                                .foregroundStyle(ConsoleTheme.tertiaryText)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
+
+            ConsoleDetailGroup(title: "可用能力", detail: "按版本实际支持情况") {
+                VStack(alignment: .leading, spacing: 8) {
+                    capabilityRow(
+                        "每日 Credits 活动",
+                        enabled: account.edition == "qoder_cn" && !account.usableSources.isEmpty,
+                        note: account.edition == "qoder_cn"
+                            ? (account.usableSources.isEmpty ? "需要有效授权" : "已接入（CN）")
+                            : "该版本未验证，不会发请求"
+                    )
+                    capabilityRow("官方额度余额", enabled: false, note: "服务端没有余额接口")
+                    capabilityRow("本机 Profile 快照", enabled: false, note: "见「本机配置」分类")
                 }
-            } else {
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 320), spacing: ConsoleTheme.cardSpacing)],
-                    spacing: ConsoleTheme.cardSpacing
-                ) {
-                    ForEach(profiles) { profile in
-                        QoderProfileCard(
-                            profile: profile,
-                            busy: store.qoderActing == profile.id,
-                            onOpen: { Task { await store.qoderOpen(profile) } },
-                            onClose: { Task { await store.qoderClose(profile) } },
-                            onActivate: { Task { await store.qoderActivate(profile) } },
-                            onInspect: { Task { await store.qoderInspect(profile) } },
-                            onCapture: { Task { await store.qoderCapture(profile) } },
-                            onRename: {
-                                renameText = profile.displayName
-                                renaming = profile
-                            },
-                            onRemove: { removing = profile }
-                        )
+            }
+
+            ConsoleDetailGroup(title: "更多操作") {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Button("刷新账号信息") { Task { await store.refreshQoder() } }
+                            .buttonStyle(ConsoleSecondaryButtonStyle())
+                        Button("到签到任务") {
+                            nav.openCheckin(platform: .qoder)
+                        }
+                        .buttonStyle(ConsoleSecondaryButtonStyle())
+                        Spacer(minLength: 0)
+                        Button(deleting ? "移除中…" : "从 AICC 移除账号") {
+                            activeSheet = .deleteQoderAccount(account.id)
+                        }
+                        .buttonStyle(ConsoleSecondaryButtonStyle())
+                        .disabled(deleting || store.qoderDeleting != nil)
+                        .help("删除 AICC 保存的凭据与记录，不动 Magpie 与本机 Profile")
                     }
+                    Text("移除只影响 AICC：Magpie 配置与 Qoder 客户端本机 Profile 都会保留，"
+                        + "也不会撤销服务端 PAT。")
+                        .font(ConsoleType.caption)
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
     }
-}
 
-// MARK: - Qoder Profile 卡片
+    private var lastQoderSyncText: String {
+        store.qoderSyncedAt.map(ConsoleFormat.shortDateTime) ?? "尚未同步"
+    }
 
-private struct QoderProfileCard: View {
-    let profile: QoderProfile
-    let busy: Bool
-    let onOpen: () -> Void
-    let onClose: () -> Void
-    let onActivate: () -> Void
-    let onInspect: () -> Void
-    let onCapture: () -> Void
-    let onRename: () -> Void
-    let onRemove: () -> Void
+    private func platformKind(for edition: QoderEdition) -> ConsolePlatformKind {
+        edition == .cn ? .qoderCN : .qoderGlobal
+    }
 
-    var body: some View {
-        ConsoleCard {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: profile.symbolName)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(ConsoleTheme.accent)
-                        .frame(width: 28, height: 28)
-                        .background(ConsoleTheme.accentSoft, in: RoundedRectangle(cornerRadius: 8))
-
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(profile.displayName)
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(ConsoleTheme.text)
-                            .lineLimit(1)
-                        HStack(spacing: 5) {
-                            Text(profile.editionName)
-                                .font(.system(size: 10))
-                                .foregroundStyle(ConsoleTheme.secondaryText)
-                            Text(profile.managed ? "AICC 托管" : "仅登记")
-                                .font(.system(size: 9, weight: .medium))
-                                .foregroundStyle(ConsoleTheme.tertiaryText)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(ConsoleTheme.cardSubtle, in: RoundedRectangle(cornerRadius: 3))
-                        }
-                    }
-
-                    Spacer(minLength: 6)
-
-                    VStack(alignment: .trailing, spacing: 5) {
-                        ConsoleBadge(
-                            text: profile.authLabel,
-                            tint: ConsoleTheme.tone(profile.authTone)
-                        )
-                        ConsoleBadge(
-                            text: profile.runtimeLabel,
-                            tint: ConsoleTheme.tone(profile.runtimeTone)
-                        )
-                    }
+    private func qoderAuthorizationRow(
+        _ authorization: QoderAuthorization,
+        account: QoderServiceAccount
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(authorization.sourceLabel)
+                    .font(ConsoleType.rowTitle)
+                    .foregroundStyle(ConsoleTheme.text)
+                ConsoleBadge(
+                    text: authorization.statusLabel,
+                    tint: authorization.isUsable
+                        ? ConsoleTheme.success
+                        : (authorization.authStatus == "expired" ? ConsoleTheme.warning : ConsoleTheme.tertiaryText)
+                )
+                if !authorization.hasSecret {
+                    Text("无本地凭据")
+                        .font(ConsoleType.caption)
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
                 }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Text(profile.identityLabel)
-                            .font(.system(size: 10))
-                            .foregroundStyle(ConsoleTheme.tertiaryText)
-                        Text(profile.identityText ?? "未识别（未登录或客户端未写入身份）")
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(ConsoleTheme.secondaryText)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .textSelection(.enabled)
-                    }
-                    HStack(spacing: 6) {
-                        Text("快照")
-                            .font(.system(size: 10))
-                            .foregroundStyle(ConsoleTheme.tertiaryText)
-                        Text(profile.snapshotDir)
-                            .font(.system(size: 10))
-                            .foregroundStyle(ConsoleTheme.tertiaryText)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .help("快照目录：\(profile.snapshotDir)\n客户端数据目录：\(profile.liveDir)")
-                    }
+                Spacer(minLength: 6)
+                if let expires = authorization.expiresAt {
+                    Text("到期 \(ConsoleFormat.shortTimestamp(expires))")
+                        .font(ConsoleType.caption)
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
                 }
-
-                Divider().overlay(ConsoleTheme.border)
-
-                HStack(spacing: 14) {
-                    labelValue("Token 指纹", profile.fingerprintShort)
-                    labelValue("到期", shortDate(profile.expiresAt))
-                    labelValue("最后打开", shortTimestamp(profile.lastOpenedAt))
+            }
+            if authorization.source == "own_pat" {
+                HStack(spacing: 8) {
+                    Button("检测 PAT") {
+                        Task { await checkPat(account) }
+                    }
+                    .buttonStyle(ConsoleSecondaryButtonStyle())
+                    .disabled(busyAccount == account.id)
+                    Button("移除这份 PAT") {
+                        Task { await removePat(account) }
+                    }
+                    .buttonStyle(ConsoleSecondaryButtonStyle())
+                    .disabled(busyAccount == account.id)
+                    if busyAccount == account.id {
+                        ProgressView().controlSize(.mini)
+                    }
                     Spacer(minLength: 0)
                 }
+                Text("检测只确认身份仍有效，不代表 Credits 权限也还在。")
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+            }
+        }
+    }
 
-                if profile.runtime.isUnknown {
-                    Text("有进程存活但无法确认归属（读不到命令行或缺少 AICC 标记），AICC 不会对它发信号。")
-                        .font(.system(size: 9))
-                        .foregroundStyle(ConsoleTheme.warning)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else if profile.snapshotIncomplete {
-                    Text("上一次保存快照没有完成，快照可能只有半套文件。"
-                        + "点「保存当前登录」会先恢复到上一份完整快照，再重新保存。")
-                        .font(.system(size: 9))
-                        .foregroundStyle(ConsoleTheme.warning)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else if !profile.snapshotReady {
-                    Text("还没有认证快照：先在 Qoder 客户端里登录这个账号，再回来点「保存当前登录」。")
-                        .font(.system(size: 9))
-                        .foregroundStyle(ConsoleTheme.tertiaryText)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else if profile.active {
-                    Text("客户端当前登录的就是这个账号。")
-                        .font(.system(size: 9))
-                        .foregroundStyle(ConsoleTheme.tertiaryText)
-                        .fixedSize(horizontal: false, vertical: true)
+    // MARK: 本机 Qoder 配置详情
+
+    private func qoderProfileDetail(_ profile: QoderProfile) -> some View {
+        let edition = QoderEdition(rawValue: profile.edition) ?? .global
+        let info = store.qoderEditions.first { $0.edition == profile.edition }
+        let busy = store.qoderActing == profile.id
+        return VStack(alignment: .leading, spacing: ConsoleTheme.sectionSpacing) {
+            detailHeader(
+                symbol: profile.symbolName,
+                title: profile.displayName,
+                subtitle: "\(edition.displayName) · 本机配置",
+                statusText: profile.authLabel,
+                tone: ConsoleTheme.consoleTone(profile.authTone)
+            )
+
+            ConsoleDetailGroup(title: "基本资料") {
+                VStack(alignment: .leading, spacing: 8) {
+                    ConsoleInfoRow(label: "版本", value: edition.displayName)
+                    ConsoleInfoRow(label: "托管方式", value: profile.managed ? "AICC 托管" : "仅登记引用")
+                    ConsoleInfoRow(label: "身份", value: profile.identityText ?? "未识别")
+                    ConsoleInfoRow(label: "Token 指纹", value: profile.fingerprintShort, mono: true)
+                    ConsoleInfoRow(label: "到期", value: profile.expiresAt.map { String($0.prefix(10)) } ?? "—")
+                    ConsoleInfoRow(label: "最后打开", value: ConsoleFormat.shortTimestamp(profile.lastOpenedAt))
                 }
+            }
 
+            ConsoleDetailGroup(title: "快照与运行状态") {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        ConsoleBadge(text: profile.runtimeLabel, tint: ConsoleTheme.color(ConsoleTheme.consoleTone(profile.runtimeTone)))
+                        ConsoleBadge(
+                            text: profile.snapshotReady ? "快照完整" : "无完整快照",
+                            tint: profile.snapshotReady ? ConsoleTheme.success : ConsoleTheme.warning
+                        )
+                        if profile.active {
+                            ConsoleBadge(text: "客户端当前登录", tint: ConsoleTheme.accent)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    ConsoleInfoRow(label: "快照目录", value: profile.snapshotDir, mono: true)
+                    ConsoleInfoRow(label: "客户端目录", value: profile.liveDir, mono: true)
+                    if let info, !info.installed {
+                        ConsoleInlineNotice(
+                            kind: .warning,
+                            message: "本机没有检测到 \(edition.displayName) 客户端（Bundle \(info.bundleId)）。"
+                        )
+                    }
+                    if !profile.switchEnabled, let reason = profile.switchBlockedReason {
+                        ConsoleInlineNotice(kind: .info, message: "账号切换未开放：\(reason)")
+                    }
+                    if profile.runtime.isUnknown {
+                        ConsoleInlineNotice(
+                            kind: .warning,
+                            message: "有进程存活但无法确认归属，AICC 不会对它发信号。"
+                        )
+                    } else if profile.snapshotIncomplete {
+                        ConsoleInlineNotice(
+                            kind: .warning,
+                            message: "上次保存快照没有完成，快照可能只有半套文件；再次保存会先回到上一份完整快照。"
+                        )
+                    }
+                }
+            }
+
+            ConsoleDetailGroup(title: "更多操作", detail: "只读管理") {
                 HStack(spacing: 8) {
                     if profile.runtime.isRunning {
-                        Button("关闭", action: onClose)
+                        Button("关闭客户端") { Task { await store.qoderClose(profile) } }
                             .buttonStyle(ConsoleSecondaryButtonStyle())
-                        Button(
-                            profile.switchEnabled
-                                ? (profile.active ? "已在此账号" : "切换并打开")
-                                : "切换未开放",
-                            action: onActivate
-                        )
-                        .buttonStyle(ConsoleSecondaryButtonStyle())
-                        .disabled(profile.active || !profile.switchEnabled)
-                        .help(profile.switchBlockedReason ?? "切换到该账号")
-                    } else if profile.runtime.isUnknown {
-                        Button("关闭（需确认归属）", action: onClose)
-                            .buttonStyle(ConsoleSecondaryButtonStyle())
-                            .help("进程还活着，但无法确认是不是 AICC 启动的；关闭时会拒绝发信号")
                     } else {
-                        Button(profile.primaryActionTitle, action: onOpen)
-                            .buttonStyle(ConsolePrimaryButtonStyle())
-                            .disabled(!profile.switchEnabled)
-                            .help(profile.switchBlockedReason ?? "打开/切换这个账号")
+                        Button("打开客户端") { Task { await store.qoderOpen(profile) } }
+                            .buttonStyle(ConsoleSecondaryButtonStyle())
                     }
-                    Button("保存当前登录", action: onCapture)
+                    Button("保存当前登录") { Task { await store.qoderCapture(profile) } }
                         .buttonStyle(ConsoleSecondaryButtonStyle())
-                        .help("把客户端此刻登录的账号存进这个 Profile 的快照")
-                    Button("检查授权", action: onInspect)
+                    Button("检查授权") { Task { await store.qoderInspect(profile) } }
                         .buttonStyle(ConsoleSecondaryButtonStyle())
+                    Button("重命名") {
+                        renameText = profile.displayName
+                        renamingProfile = profile
+                    }
+                    .buttonStyle(ConsoleSecondaryButtonStyle())
                     Spacer(minLength: 0)
-                    Menu {
-                        Button("重命名", action: onRename)
-                        Button("从 AICC 移除…", action: onRemove)
-                    } label: {
-                        Image(systemName: "ellipsis")
-                            .font(.system(size: 11, weight: .semibold))
-                    }
-                    .menuStyle(.borderlessButton)
-                    .frame(width: 28)
-                    .disabled(profile.runtime.isRunning)
-                    .help(profile.runtime.isRunning ? "运行中的 Profile 不能删除，请先关闭" : "更多操作")
+                    Button("移除…") { removingProfile = profile }
+                        .buttonStyle(ConsoleSecondaryButtonStyle())
+                        .disabled(profile.runtime.isRunning)
+                        .help(profile.runtime.isRunning ? "运行中的配置不能删除，请先关闭客户端" : "从 AICC 移除这个本机配置")
                 }
                 .disabled(busy)
                 .opacity(busy ? 0.55 : 1)
             }
         }
-        .contextMenu {
-            if profile.runtime.isRunning {
-                Button("关闭", action: onClose)
-                if profile.switchEnabled {
-                    Button("切换", action: onActivate)
-                }
-            } else if profile.switchEnabled {
-                Button("打开", action: onOpen)
+    }
+
+    // MARK: 共享小件
+
+    private func detailHeader(
+        symbol: String,
+        title: String,
+        subtitle: String,
+        statusText: String,
+        tone: ConsoleTheme.Tone
+    ) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: symbol)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(ConsoleTheme.accent)
+                .frame(width: 30, height: 30)
+                .background(ConsoleTheme.accentSoft, in: RoundedRectangle(cornerRadius: 8))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(ConsoleTheme.text)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(subtitle)
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.secondaryText)
+                    .lineLimit(1)
             }
-            Button("检查授权", action: onInspect)
-            Button("保存当前登录", action: onCapture)
-            Button("重命名", action: onRename)
-            Divider()
-            Button("移除…", action: onRemove)
-                .disabled(profile.runtime.isRunning)
+            Spacer(minLength: 8)
+            ConsoleBadge(text: statusText, tint: ConsoleTheme.color(tone))
         }
     }
 
-    private func labelValue(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label)
-                .font(.system(size: 10))
+    private func authorizationRow(
+        title: String,
+        authorization: ConsoleAuthorization,
+        note: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(title)
+                    .font(ConsoleType.rowTitle)
+                    .foregroundStyle(ConsoleTheme.text)
+                ConsoleBadge(
+                    // Magpie 来源的令牌归 Magpie，AICC 只借用：不能显示成"已授权"。
+                    text: authorization.isOwn
+                        ? authorization.authLabel
+                        : (authorization.authLabel == "已授权" ? "已关联" : authorization.authLabel),
+                    tint: ConsoleTheme.tone(authorization.tone)
+                )
+                if authorization.isMigrating {
+                    ConsoleBadge(text: "迁移中", tint: ConsoleTheme.warning)
+                }
+                Spacer(minLength: 6)
+                if let expires = authorization.tokenExpiresAt {
+                    Text("到期 \(ConsoleFormat.shortTimestamp(expires))")
+                        .font(ConsoleType.caption)
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                }
+            }
+            Text(note)
+                .font(ConsoleType.caption)
                 .foregroundStyle(ConsoleTheme.tertiaryText)
-            Text(value)
+                .fixedSize(horizontal: false, vertical: true)
+            if let error = authorization.lastError, !error.isEmpty {
+                Text(error)
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func capabilityRow(_ name: String, enabled: Bool, note: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: enabled ? "checkmark.circle.fill" : "minus.circle")
                 .font(.system(size: 11))
+                .foregroundStyle(enabled ? ConsoleTheme.success : ConsoleTheme.tertiaryText)
+            Text(name)
+                .font(ConsoleType.body)
                 .foregroundStyle(ConsoleTheme.text)
+            Spacer(minLength: 6)
+            Text(note)
+                .font(ConsoleType.caption)
+                .foregroundStyle(ConsoleTheme.tertiaryText)
                 .lineLimit(1)
         }
     }
 
-    private func shortDate(_ value: String?) -> String {
-        guard let value, value.count >= 10 else { return "—" }
-        return String(value.prefix(10))
+    // MARK: - 行为
+
+    private func verify(_ account: ConsoleAccount) async {
+        busyAccount = account.id
+        defer { busyAccount = nil }
+        verifyNotice[account.id] = "检查中…"
+        verifyNotice[account.id] = await store.verifyWorkbuddyAccount(account)
     }
 
-    private func shortTimestamp(_ value: String?) -> String {
-        guard let value, !value.isEmpty else { return "—" }
-        let parser = ISO8601DateFormatter()
-        parser.formatOptions = [.withInternetDateTime]
-        guard let date = parser.date(from: value) else { return String(value.prefix(10)) }
-        let formatter = DateFormatter()
-        formatter.locale = .current
-        formatter.dateFormat = "MM-dd HH:mm"
-        return formatter.string(from: date)
+    private func checkPat(_ account: QoderServiceAccount) async {
+        busyAccount = account.id
+        defer { busyAccount = nil }
+        do {
+            switch try await store.worker.checkQoderPat(accountId: account.id) {
+            case .success(let name):
+                store.showQoderNotice("PAT 身份有效：\(name)（Credits 权限另需检测）")
+            case .failure(let error):
+                store.showQoderNotice("\(error.message)\(error.hint.isEmpty ? "" : " " + error.hint)")
+            }
+        } catch {
+            store.showQoderNotice((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+        }
+        await store.refreshQoder(silent: true)
+    }
+
+    private func removePat(_ account: QoderServiceAccount) async {
+        busyAccount = account.id
+        defer { busyAccount = nil }
+        do {
+            _ = try await store.worker.removeQoderPat(accountId: account.id)
+            store.showQoderNotice("已移除 PAT，其余来源保持不变")
+        } catch {
+            store.showQoderNotice((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+        }
+        await store.refreshQoder(silent: true)
     }
 }
 
-// MARK: - 添加 / 导入 Profile
+// MARK: - 本机 Profile 添加 / 导入
 
 struct QoderProfileSheet: View {
     @ObservedObject var store: ConsoleStore
@@ -833,7 +1006,6 @@ struct QoderProfileSheet: View {
     @State private var mode: Mode = .create
     @State private var name = ""
     @State private var path = ""
-    @State private var showScanner = false
 
     private enum Mode: String, CaseIterable, Identifiable {
         case create
@@ -842,7 +1014,7 @@ struct QoderProfileSheet: View {
         var id: String { rawValue }
         var title: String {
             switch self {
-            case .create: return "新建 Profile"
+            case .create: return "新建配置"
             case .importExisting: return "导入已有目录"
             }
         }
@@ -861,10 +1033,23 @@ struct QoderProfileSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("添加 Qoder 账号")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(ConsoleTheme.text)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 9) {
+                Image(systemName: "internaldrive")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(ConsoleTheme.accent)
+                    .frame(width: 28, height: 28)
+                    .background(ConsoleTheme.accentSoft, in: RoundedRectangle(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("本机 Qoder 配置")
+                        .font(ConsoleType.sectionTitle)
+                        .foregroundStyle(ConsoleTheme.text)
+                    Text("只读管理：识别、扫描、导入、保存快照；不开放账号切换")
+                        .font(ConsoleType.caption)
+                        .foregroundStyle(ConsoleTheme.secondaryText)
+                }
+                Spacer(minLength: 0)
+            }
 
             Picker("版本", selection: $edition) {
                 ForEach(QoderEdition.allCases) { item in
@@ -873,13 +1058,14 @@ struct QoderProfileSheet: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .tint(ConsoleTheme.accent)
 
             if let info {
                 HStack(spacing: 6) {
                     Image(systemName: info.installed ? "checkmark.circle" : "exclamationmark.triangle")
-                        .font(.system(size: 10))
+                        .font(ConsoleType.caption)
                     Text("\(info.bundleId) · \(info.installSummary)")
-                        .font(.system(size: 10))
+                        .font(ConsoleType.caption)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -893,44 +1079,44 @@ struct QoderProfileSheet: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .tint(ConsoleTheme.accent)
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 5) {
                 Text("显示名称")
-                    .font(.system(size: 10))
+                    .font(ConsoleType.caption)
                     .foregroundStyle(ConsoleTheme.tertiaryText)
                 TextField(edition.defaultProfileName, text: $name)
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12))
+                    .font(ConsoleType.body)
             }
 
             if mode == .importExisting {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 5) {
                     Text("已有账号快照目录（里面要有 auth.v1.dat）")
-                        .font(.system(size: 10))
+                        .font(ConsoleType.caption)
                         .foregroundStyle(ConsoleTheme.tertiaryText)
                     HStack(spacing: 8) {
                         TextField("选择包含 auth.v1.dat 的目录", text: $path)
                             .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(ConsoleType.mono)
                         Button("选择…") { pickDirectory() }
                             .buttonStyle(ConsoleSecondaryButtonStyle())
                     }
                     Text("只登记引用：不移动、不覆盖任何文件，也不要求重新登录。")
-                        .font(.system(size: 10))
+                        .font(ConsoleType.caption)
                         .foregroundStyle(ConsoleTheme.tertiaryText)
                 }
             } else {
                 Text("会创建一个空的账号快照。创建后请手动打开 \(edition.displayName) 客户端登录，"
-                    + "登录完成再回 AICC 点「保存当前登录」。AICC 不接触账号密码。\n"
-                    + "注意：当前阶段不提供账号切换，AICC 不会改写客户端正在使用的认证文件。")
-                    .font(.system(size: 10))
+                    + "登录完成再回 AICC 点「保存当前登录」。AICC 不接触账号密码。")
+                    .font(ConsoleType.caption)
                     .foregroundStyle(ConsoleTheme.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Spacer(minLength: 0)
+            Divider().overlay(ConsoleTheme.border)
 
-            HStack {
+            HStack(spacing: 8) {
                 Button("取消") { dismiss() }
                     .buttonStyle(ConsoleSecondaryButtonStyle())
                 Spacer()
@@ -960,7 +1146,7 @@ struct QoderProfileSheet: View {
                 .disabled(!canSubmit)
             }
         }
-        .padding(20)
+        .padding(18)
         .frame(width: 460)
         .background(ConsoleTheme.canvas)
         .onAppear {
@@ -981,180 +1167,5 @@ struct QoderProfileSheet: View {
                 name = url.lastPathComponent
             }
         }
-    }
-}
-
-// MARK: - WorkBuddy 卡片（沿用原有版式）
-
-private struct ConsoleAccountCard: View {
-    let account: ConsoleAccount
-    let onRelogin: () -> Void
-
-    var body: some View {
-        ConsoleCard {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: account.symbolName)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(ConsoleTheme.accent)
-                        .frame(width: 28, height: 28)
-                        .background(ConsoleTheme.accentSoft, in: RoundedRectangle(cornerRadius: 8))
-
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(account.nickname)
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(ConsoleTheme.text)
-                            .lineLimit(1)
-                        HStack(spacing: 5) {
-                            Text(account.platformName)
-                                .font(.system(size: 10))
-                                .foregroundStyle(ConsoleTheme.secondaryText)
-                            if account.isWorkbuddyAI {
-                                Text("国际版")
-                                    .font(.system(size: 9, weight: .medium))
-                                    .foregroundStyle(ConsoleTheme.accent)
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 1)
-                                    .background(
-                                        ConsoleTheme.accentSoft,
-                                        in: RoundedRectangle(cornerRadius: 3)
-                                    )
-                            }
-                            if let source = account.sourceLabel {
-                                Text(source)
-                                    .font(.system(size: 9, weight: .medium))
-                                    .foregroundStyle(ConsoleTheme.tertiaryText)
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 1)
-                                    .background(ConsoleTheme.cardSubtle, in: RoundedRectangle(cornerRadius: 3))
-                            }
-                        }
-                    }
-
-                    Spacer(minLength: 6)
-
-                    ConsoleBadge(
-                        text: account.displayAuthLabel,
-                        tint: ConsoleTheme.tone(account.displayAuthTone)
-                    )
-                }
-
-                HStack(spacing: 6) {
-                    Text("UID")
-                        .font(.system(size: 10))
-                        .foregroundStyle(ConsoleTheme.tertiaryText)
-                    Text(account.uid)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(ConsoleTheme.secondaryText)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
-                }
-
-                if !account.authorizations.isEmpty {
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack(spacing: 6) {
-                            AuthorizationChip(kindLabel: "自有", authorization: account.ownAuthorization)
-                            AuthorizationChip(kindLabel: "Magpie", authorization: account.magpieAuthorization)
-                            Spacer(minLength: 0)
-                        }
-                        Text("当前使用 \(account.activeSourceLabel)")
-                            .font(.system(size: 10))
-                            .foregroundStyle(ConsoleTheme.tertiaryText)
-                        if let problem = account.authorizationProblem {
-                            Text(problem)
-                                .font(.system(size: 10))
-                                .foregroundStyle(ConsoleTheme.tone(.warning))
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                }
-
-                Divider().overlay(ConsoleTheme.border)
-
-                HStack(spacing: 14) {
-                    // 国际版没有签到这项任务：不显示这一栏，而不是写"暂不支持"
-                    // —— 那读起来像"以后会有"。
-                    if account.supportsCNTasks {
-                        labelValue("签到", account.checkinEnabled ? "已开启" : "未开启")
-                    }
-                    labelValue("最近更新", shortTimestamp(account.updatedAt))
-                    Spacer(minLength: 0)
-                }
-            }
-        }
-        .contextMenu {
-            Button("复制 UID") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(account.uid, forType: .string)
-            }
-            Button("修改备注") {}.disabled(true)
-            Button("重新登录", action: onRelogin)
-            Button("删除账号") {}.disabled(true)
-        }
-    }
-
-    private func labelValue(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label)
-                .font(.system(size: 10))
-                .foregroundStyle(ConsoleTheme.tertiaryText)
-            Text(value)
-                .font(.system(size: 11))
-                .foregroundStyle(ConsoleTheme.text)
-                .lineLimit(1)
-        }
-    }
-
-    /// `2026-11-09T14:22:31Z` → `11-09 14:22`（本地时区）。
-    private func shortTimestamp(_ value: String?) -> String {
-        guard let value, !value.isEmpty else { return "—" }
-        let parser = ISO8601DateFormatter()
-        parser.formatOptions = [.withInternetDateTime]
-        guard let date = parser.date(from: value) else { return String(value.prefix(10)) }
-        let formatter = DateFormatter()
-        formatter.locale = .current
-        formatter.dateFormat = "MM-dd HH:mm"
-        return formatter.string(from: date)
-    }
-}
-
-/// 一份授权的徽章：谁、什么状态、什么时候到期。
-///
-/// 两份都在时并排显示，用户能一眼看出"Magpie 有、自有没有"这种情况；
-/// 只有一份时另一枚显示"未授权"，而不是干脆不画（否则看起来像只有一种来源）。
-private struct AuthorizationChip: View {
-    let kindLabel: String
-    let authorization: ConsoleAuthorization?
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Circle()
-                .fill(tint)
-                .frame(width: 5, height: 5)
-            Text(kindLabel)
-                .foregroundStyle(ConsoleTheme.secondaryText)
-            Text(detail)
-                .foregroundStyle(ConsoleTheme.tertiaryText)
-        }
-        .font(.system(size: 9, weight: .medium))
-        .lineLimit(1)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .background(ConsoleTheme.cardSubtle, in: RoundedRectangle(cornerRadius: 5))
-    }
-
-    private var tint: Color {
-        guard let authorization else { return ConsoleTheme.tertiaryText }
-        return ConsoleTheme.tone(authorization.tone)
-    }
-
-    private var detail: String {
-        guard let authorization else { return "未授权" }
-        if authorization.isMigrating { return "迁移中" }
-        if let expires = authorization.tokenExpiresAt, expires.count >= 10 {
-            return "\(authorization.authLabel) · \(expires.prefix(10))"
-        }
-        return authorization.authLabel
     }
 }
