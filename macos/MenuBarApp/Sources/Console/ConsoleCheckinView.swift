@@ -1,321 +1,279 @@
 import SwiftUI
 
-/// 签到任务页。
+/// 签到任务页（PRD §6）：今日摘要 → 平台 → 任务类型 → 当前任务内容。
 ///
-/// 三块已接入的能力，各自独立开关，互不牵连：
-///
-/// | 区域 | 状态 | 会不会写服务端 |
-/// | --- | --- | --- |
-/// | WorkBuddy 每日签到 | PR #69 接入 | 只在你点按钮或开了自动开关后写，且先查状态 |
-/// | 成长中心 | #67 只读扫描 / #68 自动接单与领奖 | 开关关着时只读 |
-/// | Buddy 旅行 | #64 接入 | 是你点按钮或开自动开关后才会请求 |
-///
-/// 没有执行记录就是没有，不伪造"已签到"。
+/// 三条纪律：
+/// 1. 一次只渲染**一个**任务分区，不再把四个模块纵向铺开；
+/// 2. 只读（检查状态）与写（立即签到 / 领取 / 派出）在按钮文案上分开；
+/// 3. 页面刷新、切平台、切任务类型都**不会**隐式触发任何写操作。
 struct ConsoleCheckinView: View {
     @ObservedObject var store: ConsoleStore
+    @EnvironmentObject private var nav: ConsoleNavigation
 
-    private struct TaskDefinition: Identifiable {
-        let id: String
-        let title: String
-        let detail: String
-        let symbol: String
-        let platform: String
-        /// 已经接线的任务才能点；没接线的按钮保持置灰，不假装能跑。
-        var wired: Bool = false
-    }
-
-    private let tasks: [TaskDefinition] = [
-        .init(id: "wb-daily", title: "WorkBuddy 每日签到", detail: "查询当日状态并领取，多账号独立开关",
-              symbol: "calendar.badge.checkmark", platform: "WorkBuddy", wired: true),
-        .init(id: "wb-growth", title: "成长中心任务", detail: "任务、积分、能量与连签，可自动接单与领奖",
-              symbol: "sparkles", platform: "WorkBuddy", wired: true),
-        .init(id: "wb-travel", title: "Buddy 旅行", detail: "派出、到达与奖励领取",
-              symbol: "airplane", platform: "WorkBuddy", wired: true),
-        // 奖励数量**不写死 100**：以服务端活动当天返回为准；窗口也以服务端为准。
-        .init(id: "qoder-credits", title: "Qoder CN 每日 Credits",
-              detail: "按服务端活动窗口领取（参考实现称北京时间每天 10:00 刷新，仅作说明）",
-              symbol: "circle.dotted.circle", platform: "Qoder CN", wired: true),
-    ]
-
-    @State private var platformFilter: ConsolePlatformFilter = .all
-
-    private var wiredCount: Int { tasks.filter(\.wired).count }
+    @State private var showRules = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            notice
-            overviewBar
-            taskSection
-            ConsoleCheckinSection(store: store)
-            ConsoleCreditsSection(store: store)
-            ConsoleGrowthSection(store: store)
-            ConsoleTravelSection(store: store)
-            accountSection
+        ConsolePageScaffold {
+            HStack(spacing: 8) {
+                if store.tasksOverview == nil {
+                    ProgressView().controlSize(.small)
+                }
+                Button {
+                    showRules = true
+                } label: {
+                    Label("运行规则", systemImage: "questionmark.circle")
+                }
+                .buttonStyle(ConsoleSecondaryButtonStyle())
+                .popover(isPresented: $showRules, arrowEdge: .bottom) {
+                    rulesPopover
+                }
+
+                Spacer(minLength: 8)
+
+                Button("刷新状态") {
+                    Task { await refreshStatus() }
+                }
+                .buttonStyle(ConsoleSecondaryButtonStyle())
+                .help("只读取本地记录与今日状态，不会签到或领取")
+            }
+        } content: {
+            VStack(alignment: .leading, spacing: ConsoleTheme.sectionSpacing) {
+                summaryCard
+                platformPicker
+                taskPicker
+                selectedSection
+            }
         }
         .task {
+            if store.tasksOverview == nil {
+                await store.refreshTasksOverview()
+            }
             // 首屏只读本地记录：不联网、不提交任何东西。
             if store.checkin.rows.isEmpty {
                 await store.loadCheckin(cached: true)
             }
-            if store.tasksOverview == nil {
-                await store.refreshTasksOverview()
-            }
         }
     }
 
-    /// 顶部汇总：五个数字全部来自 `tasks.overview`（本地记录），
-    /// 没有查过的项写"—"而不是 0。
-    private var overviewBar: some View {
-        ConsoleCard {
-            VStack(alignment: .leading, spacing: 10) {
+    // MARK: 第一层：今日摘要
+
+    private var summaryCard: some View {
+        ConsoleCard(padding: 12) {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text("今日概览")
-                        .font(.system(size: 12, weight: .semibold))
+                    Text("今日摘要")
+                        .font(ConsoleType.sectionTitle)
                         .foregroundStyle(ConsoleTheme.text)
                     if let overview = store.tasksOverview {
                         Text(overview.today)
-                            .font(.system(size: 10, design: .monospaced))
+                            .font(ConsoleType.mono)
                             .foregroundStyle(ConsoleTheme.tertiaryText)
                     }
                     Spacer(minLength: 8)
-                    Button("刷新") {
-                        Task { await store.refreshTasksOverview() }
-                    }
-                    .buttonStyle(ConsoleSecondaryButtonStyle())
                 }
 
                 if let error = store.tasksOverviewError {
-                    Text(error)
-                        .font(.system(size: 10))
-                        .foregroundStyle(ConsoleTheme.warning)
+                    ConsoleInlineNotice(kind: .warning, message: error)
                 } else if let overview = store.tasksOverview {
-                    HStack(spacing: 18) {
-                        stat("今日完成", "\(overview.doneToday)", ConsoleTheme.success)
-                        stat("待完成", "\(overview.pendingToday)", ConsoleTheme.secondaryText)
-                        stat("需重新授权", "\(overview.needsReauth)",
-                             overview.needsReauth > 0 ? ConsoleTheme.warning : ConsoleTheme.secondaryText)
-                        stat("自动任务开启", "\(overview.autoEnabled)", ConsoleTheme.secondaryText)
-                        stat("最近失败", "\(overview.failureCount)",
-                             overview.failureCount > 0 ? ConsoleTheme.danger : ConsoleTheme.secondaryText)
+                    HStack(spacing: 20) {
+                        metric("今日完成", "\(overview.doneToday)", ConsoleTheme.success)
+                        metric("待完成", "\(overview.pendingToday)", ConsoleTheme.secondaryText)
+                        metric("自动任务", "\(overview.autoEnabled)", ConsoleTheme.secondaryText)
+                        metric(
+                            "最近失败",
+                            "\(overview.failureCount)",
+                            overview.failureCount > 0 ? ConsoleTheme.danger : ConsoleTheme.secondaryText
+                        )
                         Spacer(minLength: 0)
                     }
                     if !overview.recentFailures.isEmpty {
                         VStack(alignment: .leading, spacing: 3) {
-                            ForEach(overview.recentFailures) { failure in
+                            ForEach(overview.recentFailures.prefix(3)) { failure in
                                 HStack(spacing: 6) {
                                     Text(failure.taskLabel)
-                                        .font(.system(size: 10, weight: .medium))
+                                        .font(ConsoleType.caption)
                                         .foregroundStyle(ConsoleTheme.warning)
                                     Text(failure.displayName)
-                                        .font(.system(size: 10))
+                                        .font(ConsoleType.caption)
                                         .foregroundStyle(ConsoleTheme.secondaryText)
                                         .lineLimit(1)
                                     if let detail = failure.detail {
                                         Text(detail)
-                                            .font(.system(size: 10))
+                                            .font(ConsoleType.caption)
                                             .foregroundStyle(ConsoleTheme.tertiaryText)
                                             .lineLimit(1)
-                                            .truncationMode(.tail)
                                     }
                                     Spacer(minLength: 0)
-                                    Text(ConsoleQuotaView.localTimestamp(failure.at))
-                                        .font(.system(size: 10, design: .monospaced))
+                                    Text(ConsoleFormat.shortTimestamp(failure.at))
+                                        .font(ConsoleType.monoSmall)
                                         .foregroundStyle(ConsoleTheme.tertiaryText)
                                 }
                             }
                         }
                     }
-                    Text("只统计本地记录，本轮没有发起任何网络请求；Qoder 的「今天能领多少」需要单独查询。")
-                        .font(.system(size: 10))
-                        .foregroundStyle(ConsoleTheme.tertiaryText)
-                        .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    Text("读取中…")
-                        .font(.system(size: 10))
-                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                    ConsoleLoadingRow(text: "读取本地任务记录…")
                 }
             }
         }
     }
 
-    private func stat(_ title: String, _ value: String, _ tint: Color) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+    private func metric(_ title: String, _ value: String, _ tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
             Text(value)
-                .font(.system(size: 16, weight: .semibold))
+                .font(ConsoleType.metricSmall)
                 .monospacedDigit()
                 .foregroundStyle(tint)
             Text(title)
-                .font(.system(size: 10))
+                .font(ConsoleType.caption)
                 .foregroundStyle(ConsoleTheme.tertiaryText)
         }
     }
 
-    private var notice: some View {
-        HStack(spacing: 9) {
-            Image(systemName: "info.circle")
-                .font(.system(size: 11))
-            Text("WorkBuddy 每日签到已接入：每个账号一个开关，默认关闭；每天 09:00（北京时间）后检查一次，服务端已签到就跳过。成长中心可自动接单与领奖，Buddy 旅行按开关执行。所有写操作都只在 AICC 运行时发生。WorkBuddy AI（国际版）没有这几项任务，不会出现在这里。")
-                .font(.system(size: 11))
-                .fixedSize(horizontal: false, vertical: true)
+    // MARK: 第二层：平台
+
+    private var platformPicker: some View {
+        HStack(spacing: 8) {
+            ForEach(ConsoleTaskPlatform.allCases) { platform in
+                let selected = nav.checkinPlatform == platform
+                Button {
+                    nav.checkinPlatform = platform
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: platform.symbol)
+                            .font(.system(size: 11, weight: .medium))
+                        Text(platform.title)
+                            .font(ConsoleType.body)
+                        if selected {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 9, weight: .bold))
+                        }
+                    }
+                    .foregroundStyle(selected ? ConsoleTheme.text : ConsoleTheme.secondaryText)
+                    .padding(.horizontal, 10)
+                    .frame(height: ConsoleTheme.controlHeight)
+                    .background(
+                        selected ? ConsoleTheme.accentSoft : ConsoleTheme.card,
+                        in: RoundedRectangle(cornerRadius: 7)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7)
+                            .strokeBorder(selected ? ConsoleTheme.accent.opacity(0.35) : ConsoleTheme.border,
+                                          lineWidth: 1)
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            Text(taskCountNote)
+                .font(ConsoleType.caption)
+                .foregroundStyle(ConsoleTheme.tertiaryText)
             Spacer(minLength: 0)
         }
-        .foregroundStyle(ConsoleTheme.secondaryText)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(ConsoleTheme.cardSubtle, in: RoundedRectangle(cornerRadius: 9))
-        .overlay(
-            RoundedRectangle(cornerRadius: 9).strokeBorder(ConsoleTheme.border, lineWidth: 1)
-        )
     }
 
-    private var taskSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ConsoleSectionTitle(title: "任务", detail: "共 \(tasks.count) 项 · \(wiredCount) 项已接入")
-            ConsoleCard(padding: 0) {
-                VStack(spacing: 0) {
-                    ForEach(Array(tasks.enumerated()), id: \.element.id) { index, task in
-                        taskRow(task)
-                        if index < tasks.count - 1 {
-                            Divider().overlay(ConsoleTheme.border).padding(.leading, 16)
-                        }
+    private var taskCountNote: String {
+        switch nav.checkinPlatform {
+        case .workbuddy: return "WorkBuddy AI 与 Qoder International 没有签到类任务，因此不在这里"
+        case .qoder: return "只有 Qoder CN 有已验证的 Credits 活动接口"
+        }
+    }
+
+    // MARK: 第三层：任务类型
+
+    @ViewBuilder
+    private var taskPicker: some View {
+        switch nav.checkinPlatform {
+        case .workbuddy:
+            HStack(spacing: 8) {
+                ForEach(WorkbuddyTaskKind.allCases) { kind in
+                    taskChip(kind.title, symbol: kind.symbol, selected: nav.workbuddyTask == kind) {
+                        nav.workbuddyTask = kind
                     }
                 }
+                Spacer(minLength: 0)
+            }
+        case .qoder:
+            HStack(spacing: 8) {
+                ForEach(QoderTaskKind.allCases) { kind in
+                    taskChip(kind.title, symbol: kind.symbol, selected: true) {}
+                }
+                Spacer(minLength: 0)
             }
         }
     }
 
-    private func taskRow(_ task: TaskDefinition) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: task.symbol)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(ConsoleTheme.accent)
-                .frame(width: 26, height: 26)
-                .background(ConsoleTheme.accentSoft, in: RoundedRectangle(cornerRadius: 7))
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(task.title)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(ConsoleTheme.text)
-                Text(task.detail)
+    private func taskChip(
+        _ title: String,
+        symbol: String,
+        selected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: symbol)
                     .font(.system(size: 10))
-                    .foregroundStyle(ConsoleTheme.secondaryText)
+                Text(title)
+                    .font(ConsoleType.small)
             }
-
-            Spacer(minLength: 8)
-
-            Text(task.platform)
-                .font(.system(size: 10))
-                .foregroundStyle(ConsoleTheme.tertiaryText)
-                .frame(width: 78, alignment: .trailing)
-
-            ConsoleBadge(
-                text: task.wired ? "已接入" : "待接入",
-                tint: task.wired ? ConsoleTheme.accent : ConsoleTheme.tertiaryText
+            .foregroundStyle(selected ? Color.white : ConsoleTheme.secondaryText)
+            .padding(.horizontal, 9)
+            .frame(height: 24)
+            .background(
+                selected ? ConsoleTheme.accent : ConsoleTheme.cardSubtle,
+                in: Capsule()
             )
-            .frame(width: 56, alignment: .trailing)
-
-            Button(task.wired ? "查看" : "立即执行") {
-                Task {
-                    // 已接入的任务各自对应下方一块区域。签到与成长中心都要联网，
-                    // 所以点「查看」触发的是对应区域的读取动作，而不是假按钮。
-                    switch task.id {
-                    case "wb-daily":
-                        await store.refreshCheckinStatus()
-                    case "wb-growth":
-                        await store.loadGrowth()
-                    default:
-                        await store.loadTravel()
-                    }
-                }
-            }
-            .buttonStyle(ConsoleSecondaryButtonStyle())
-            .disabled(!task.wired)
-            .help(taskHelp(task))
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 11)
+        .buttonStyle(.plain)
     }
 
-    private func taskHelp(_ task: TaskDefinition) -> String {
-        switch task.id {
-        case "wb-daily": return "向服务端查一次今日签到状态（只读，不会签到）"
-        case "wb-growth": return "扫描成长中心（只读）"
-        case "wb-travel": return "刷新下方的 Buddy 旅行区域"
-        default: return "后续版本接入"
+    // MARK: 任务内容
+
+    @ViewBuilder
+    private var selectedSection: some View {
+        switch nav.checkinPlatform {
+        case .workbuddy:
+            switch nav.workbuddyTask {
+            case .checkin:
+                ConsoleCheckinSection(store: store)
+            case .growth:
+                ConsoleGrowthSection(store: store)
+            case .travel:
+                ConsoleTravelSection(store: store)
+            }
+        case .qoder:
+            ConsoleCreditsSection(store: store)
         }
     }
 
-    private var accountSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                ConsoleSectionTitle(title: "按账号查看", detail: "\(filteredAccounts.count) 个账号")
-                Picker("平台", selection: $platformFilter) {
-                    ForEach(ConsolePlatformFilter.checkinFilters) { option in
-                        Text(option.title).tag(option)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .tint(ConsoleTheme.accent)
-                .frame(width: 240)
-            }
+    // MARK: 行为
 
-            ConsoleCard(padding: 0) {
-                if filteredAccounts.isEmpty {
-                    ConsoleEmptyState(
-                        symbol: "person.crop.rectangle.stack",
-                        title: "没有可展示的账号",
-                        message: "账号库为空时无法按账号查看任务状态。先到「AI 账号」页确认账号。"
-                    )
-                } else {
-                    VStack(spacing: 0) {
-                        ForEach(Array(filteredAccounts.enumerated()), id: \.element.id) { index, account in
-                            accountRow(account)
-                            if index < filteredAccounts.count - 1 {
-                                Divider().overlay(ConsoleTheme.border).padding(.leading, 16)
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    /// 只读刷新：本地记录 + 任务汇总，不发写请求。
+    private func refreshStatus() async {
+        async let overview: Void = store.refreshTasksOverview()
+        async let auto: Void = store.loadCheckinAuto()
+        _ = await (overview, auto)
+        await store.loadCheckin(cached: true, silent: true)
     }
 
-    private var filteredAccounts: [ConsoleAccount] {
-        // 国际版没有签到 / 成长 / 旅行这些任务，不进这一页。
-        store.accounts.filter { platformFilter.includes($0) && $0.supportsCNTasks }
-    }
-
-    private func accountRow(_ account: ConsoleAccount) -> some View {
-        // 签到那一列优先用真实结论；本地没记录就说"暂无记录"，不写"已签到"。
-        let checkinRow = store.checkin.row(account.id)
-        return HStack(spacing: 10) {
-            Image(systemName: account.symbolName)
-                .font(.system(size: 11))
-                .foregroundStyle(ConsoleTheme.secondaryText)
-                .frame(width: 18)
-            Text(account.nickname)
-                .font(.system(size: 12))
+    private var rulesPopover: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("自动任务运行规则")
+                .font(ConsoleType.sectionTitle)
                 .foregroundStyle(ConsoleTheme.text)
-                .lineLimit(1)
-            Text(account.platformName)
-                .font(.system(size: 10))
-                .foregroundStyle(ConsoleTheme.tertiaryText)
-            Spacer(minLength: 8)
-            Text(checkinRow?.state.title ?? "暂无记录")
-                .font(.system(size: 10))
-                .foregroundStyle(ConsoleTheme.secondaryText)
-            Text(checkinRow == nil ? "—" : checkinRow!.creditsText)
-                .font(.system(size: 10))
-                .monospacedDigit()
-                .foregroundStyle(ConsoleTheme.tertiaryText)
-                .frame(width: 52, alignment: .trailing)
-            Text(account.checkinEnabled ? "自动签到已开" : "自动签到未开")
-                .font(.system(size: 10))
-                .foregroundStyle(ConsoleTheme.secondaryText)
-                .frame(width: 96, alignment: .trailing)
+            Group {
+                Text("· 每个账号一个开关，默认关闭；只有开关打开且 AICC 在运行时才会自动执行。")
+                Text("· WorkBuddy 签到每天 09:00（北京时间）后检查一次，服务端已签到就跳过。")
+                Text("· 成长中心可自动接单与领奖；Buddy 旅行按开关派出与领取。")
+                Text("· Qoder Credits 按服务端活动窗口，自动开关默认关闭。")
+                Text("· 手动按钮不受自动开关限制，且都会先查状态再写。")
+            }
+            .font(ConsoleType.small)
+            .foregroundStyle(ConsoleTheme.secondaryText)
+            .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(14)
+        .frame(width: 360)
     }
 }

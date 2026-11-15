@@ -25,6 +25,22 @@ struct AddWorkbuddyAccountSheet: View {
     @State private var pollTask: Task<Void, Never>?
     @State private var variant: WorkbuddyVariant = .cn
 
+    /// 嵌在统一添加面板里时不再画自己的标题（外层已有面包屑），
+    /// 单独作为 sheet 使用时保留标题。
+    private let showsHeader: Bool
+
+    init(
+        store: ConsoleStore,
+        initialVariant: WorkbuddyVariant = .cn,
+        showsHeader: Bool = false,
+        onFinished: @escaping () -> Void
+    ) {
+        self.store = store
+        self.onFinished = onFinished
+        self.showsHeader = showsHeader
+        _variant = State(initialValue: initialVariant)
+    }
+
     private var isSuccess: Bool {
         if case .success = phase { return true }
         return false
@@ -34,8 +50,10 @@ struct AddWorkbuddyAccountSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider().overlay(ConsoleTheme.border)
+            if showsHeader {
+                header
+                Divider().overlay(ConsoleTheme.border)
+            }
             content
             Divider().overlay(ConsoleTheme.border)
             footer
@@ -89,6 +107,7 @@ struct AddWorkbuddyAccountSheet: View {
         }
         .pickerStyle(.segmented)
         .labelsHidden()
+        .tint(ConsoleTheme.accent)
         .disabled(starting || isSuccess)
         .onChange(of: variant) { _, _ in
             guard !starting, !isSuccess else { return }

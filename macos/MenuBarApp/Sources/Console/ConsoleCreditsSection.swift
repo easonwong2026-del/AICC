@@ -69,6 +69,18 @@ struct ConsoleCreditsSection: View {
         }
     }
 
+    /// 本次会话里服务端是否明确说"今天可领"。
+    private func canClaim(_ item: QoderCreditsAutoItem) -> Bool {
+        guard let report = store.qoderCreditsReports[item.accountId] else { return false }
+        return (report.claimable ?? 0) > 0
+    }
+
+    private func claimHelp(_ item: QoderCreditsAutoItem) -> String {
+        if !item.supported { return "该版本没有已证实的 Credits 接口，不会发请求" }
+        if canClaim(item) { return "领取服务端当前标记为可领的活动" }
+        return "先点「检查今日」，服务端确认可领后这里才会亮起"
+    }
+
     private func row(_ item: QoderCreditsAutoItem) -> some View {
         ConsoleCard {
             VStack(alignment: .leading, spacing: 8) {
@@ -111,14 +123,14 @@ struct ConsoleCreditsSection: View {
                     .buttonStyle(ConsoleSecondaryButtonStyle())
                     .disabled(store.qoderCreditsBusy == item.accountId || !item.supported)
 
+                    // 只有本次会话里「检查今日」确认确实可领时才能点：
+                    // 避免用户点下去只得到一句 already（PRD §6.3）。
                     Button("立即领取") {
                         Task { await store.claimQoderCredits(accountId: item.accountId) }
                     }
                     .buttonStyle(ConsolePrimaryButtonStyle())
-                    .disabled(store.qoderCreditsBusy == item.accountId || !item.supported)
-                    .help(item.supported
-                        ? "只领取服务端当前标记为可领的活动；已经领过会返回「已领过」"
-                        : "该版本没有已证实的 Credits 接口，不会发请求")
+                    .disabled(store.qoderCreditsBusy == item.accountId || !item.supported || !canClaim(item))
+                    .help(claimHelp(item))
 
                     Toggle("自动领取", isOn: Binding(
                         get: { item.autoEnabled },

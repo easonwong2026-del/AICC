@@ -117,6 +117,15 @@ jobs:
       - name: Render companion settings acceptance images
         run: bash scripts/smoke-test-dashboard-visual.sh
 
+      - name: Render the console UI (4 pages x 3 sizes x light/dark)
+        run: bash scripts/smoke-test-console-visual.sh
+
+      - name: Upload console acceptance images
+        uses: actions/upload-artifact@v4
+        with:
+          name: console-ui-visuals
+          path: /private/tmp/aicc-console-qa/*.png
+
       - name: Upload dashboard acceptance images
         uses: actions/upload-artifact@v4
         with:

@@ -518,8 +518,10 @@ mod tests {
     fn succeeded_since_answers_by_range_not_by_recent_count() {
         let (mut db, _dir) = db();
         let acc = account(&mut db);
-        let today = crate::clock::beijing_now().format("%Y-%m-%d").to_string();
-        let since = format!("{today}T00:00:00Z"); // 简化：只验证"范围"语义
+        // 下界用"24 小时前"（UTC RFC3339），只验证"按范围查"的语义。
+        // 不要用北京日期拼 `T00:00:00Z`：北京时间 00:00–08:00 之间那个时刻还在未来，
+        // 测试会假失败（CI 在 UTC 16:00 之后跑就会踩到）。
+        let since = crate::clock::now_rfc3339_at_days_ago(1);
         assert!(!db.qoder_credit_succeeded_since(&acc.id, &since).unwrap());
 
         db.record_qoder_credit_run(run(&acc, "ok", Some(100)))
