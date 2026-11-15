@@ -885,10 +885,24 @@ SecretTxn（.lock）                 ← 盘点、备份、迁移都在锁内，
 关于 `failed` 的边界要说清：停止自动重试**不等于**消除弹窗。仍引用 `keychain:` 的账号在执行任务时照样会读钥匙串 ——
 它们需要显式迁移（自有授权）或重新关联（借用授权），这两件事都只在用户点按钮时发生。
 
+### 复核第二轮修复（状态与引用必须一致）
+
+| 编号 | 问题 | 修复 |
+| --- | --- | --- |
+| **P0-1** | `rebind_authorization_ref` 换成 `magpie:v1:` 后没动 `key_migration_state` → 面板永远显示"旧键搬运失败"，点重试又因为拿不到钥匙串目标键报 `bad_ref`，报了就修不好 | 同一条 CAS SQL 里置 `ready`；`run` 开头再把"引用已不在钥匙串"的 `failed` 行收敛成 `ready`（只写库、幂等）；失败计数与显式重试都只算仍指向钥匙串的行 |
+| **P0-2** | 候选条件是 `NOT LIKE 'magpie:v1:%'`，会把 `unknown:v9:` 这类坏引用也选进批量重新关联，与盘点的 `reference_unusable` 结论矛盾 | 只选 `keychain:%`，循环内再用 `CredentialRef::parse` 复核一遍，解析不了就跳过并报 `reference_unusable` |
+| **P0-3** | `StorageView` 按前缀判定，`magpie:v1:`（来源键为空）被当成 Magpie；`verify` 的兜底是 `_ => {}`，这类行一条都不算异常 | 分类改用与读取路径同一个 `CredentialRef::parse`；`verify` 把"既不是本地 JSON、也不是合法 Magpie 关联"的行计进 `broken`（`reference_unusable`） |
+
+第二条的教训值得记下来：**盘点和执行必须用同一个判据**。盘点说"坏引用"、批量动作却按"不是我要的样子"去改，
+用户看到的两句话就会互相打架。
+
 ### 验证
 
 | 项 | 手段 |
 | --- | --- |
+| relink 后旧搬运失败被清除，重试变成空操作 | `relinking_a_failed_row_clears_the_obsolete_key_migration_failure` |
+| 批量 relink 不碰解析不了的引用 | `relink_skips_an_unparsable_reference_and_leaves_it_alone` |
+| 核验把空来源键 / 未知前缀算成异常 | `verify_counts_an_unparsable_reference_as_broken` |
 | `failed` 不被 Startup / `storage.init` 重试，只能显式重试 | `a_failed_migration_is_not_retried_until_the_user_asks`、`denied_read_marks_failed_and_stays_retryable` |
 | 自动路径只碰 `pending` / `migrating`（新旧混装） | `the_automatic_path_touches_only_pending_and_migrating_rows` |
 | 批量 relink 中途写失败：逐条报告、部分成功 | `a_batch_relink_reports_each_row_when_one_write_fails` |
