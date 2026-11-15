@@ -564,6 +564,32 @@ impl Db {
         &self.path
     }
 
+    /// 把当前库完整复制到 `path`（`VACUUM INTO`）。
+    ///
+    /// 用它而不是直接拷 `accounts.sqlite`：WAL 模式下还有内容没 checkpoint，
+    /// 裸拷贝会漏掉最近的事务。`VACUUM INTO` 在线进行、产出单文件、不留 WAL。
+    /// 目标必须不存在（SQLite 的硬要求，也顺便防覆盖旧备份）。
+    pub fn backup_to(&self, path: &Path) -> RpcResult<()> {
+        if path.exists() {
+            return Err(RpcError::invalid_params(format!(
+                "备份目标已存在：{}",
+                path.display()
+            )));
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        self.conn
+            .execute("VACUUM INTO ?1", params![path.to_string_lossy()])?;
+        // 备份里有授权引用与账号信息，按凭据文件的规矩收权限。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    }
+
     pub fn migrate(&mut self) -> RpcResult<i64> {
         let mut current: i64 = self
             .conn

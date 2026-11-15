@@ -566,6 +566,52 @@ pub fn write(
     write_json_new(app, account, source, access, refresh, expires_at)
 }
 
+/// 迁移专用（CRED-4）：把钥匙串里的**整组值复制**成一份本地 JSON，不碰数据库。
+///
+/// 与 `write` 的区别只有一个：`write` 按"这一行现在是什么"分流（老行继续写钥匙串），
+/// 而迁移是**显式**要求换存储。除此之外的归属校验、失败回滚全部相同。
+///
+/// 调用方拿到返回值后必须走一次 `commit`，把 `secret_ref` 换到新文件；
+/// 提交失败要 `discard_unreferenced`（新文件没有任何行引用时删掉）。
+pub fn write_json_copy(
+    app: &App,
+    account: &QoderAccountRecord,
+    row: &QoderAuthRecord,
+) -> RpcResult<QoderWrite> {
+    verify_keychain_ref(row, &account.id).map_err(|err| to_rpc(err, "qoder/ref"))?;
+    let keys = keychain_keys(&account.id, &row.source);
+    let primary = keys
+        .first()
+        .ok_or_else(|| RpcError::internal("这条来源没有钥匙串键"))?;
+    let bytes = app.secure.get(primary).map_err(secure_read_error)?;
+    let access = String::from_utf8(bytes).map_err(|_| {
+        CredentialError::new(CredentialErrorKind::Corrupt, "钥匙串里的令牌不是合法 UTF-8")
+    })?;
+    if access.trim().is_empty() {
+        return Err(to_rpc(
+            CredentialError::new(CredentialErrorKind::NotFound, "钥匙串里的令牌为空"),
+            "qoder/migrate",
+        ));
+    }
+    // refresh 是可选槽位：读不到就只搬 access（与写入路径的语义一致）。
+    let refresh = keys
+        .get(1)
+        .and_then(|key| app.secure.get(key).ok())
+        .and_then(|bytes| String::from_utf8(bytes).ok());
+    let expires = row
+        .token_expires_at
+        .as_deref()
+        .and_then(crate::auth::service::parse_rfc3339);
+    write_json_new(
+        app,
+        account,
+        &row.source,
+        &access,
+        refresh.as_deref(),
+        expires,
+    )
+}
+
 fn write_json_new(
     app: &App,
     account: &QoderAccountRecord,
@@ -987,11 +1033,35 @@ pub fn commit(
     fingerprint: Option<&str>,
     expectation: &QoderAuthExpectation,
 ) -> RpcResult<Option<QoderAuthRecord>> {
+    commit_reference(
+        app,
+        account_id,
+        source,
+        write.reference(),
+        auth_status,
+        token_expires_at,
+        fingerprint,
+        expectation,
+    )
+}
+
+/// 同 [`commit`]，但直接给引用。回滚（把引用改回钥匙串）走这条：
+/// 那次操作没有"写凭据"这一步，自然也没有 `QoderWrite`。
+pub fn commit_reference(
+    app: &App,
+    account_id: &str,
+    source: &str,
+    reference: &str,
+    auth_status: &str,
+    token_expires_at: Option<&str>,
+    fingerprint: Option<&str>,
+    expectation: &QoderAuthExpectation,
+) -> RpcResult<Option<QoderAuthRecord>> {
     app.with_db(|db| {
         db.commit_qoder_authorization(
             account_id,
             source,
-            Some(write.reference()),
+            Some(reference),
             auth_status,
             token_expires_at,
             fingerprint,

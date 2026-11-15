@@ -147,6 +147,7 @@ struct SettingsView: View {
                     Button("测试钥匙串") { Task { await accountWorker.checkSecureStore() } }
                 }
             }
+            CredentialMigrationSection(worker: accountWorker)
             Section("诊断") {
                 HStack {
                     Button("查看日志") { NSWorkspace.shared.open(AICCPaths.logsDirectory) }

@@ -125,6 +125,19 @@ impl super::Db {
         Ok(out)
     }
 
+    /// 全表：凭据迁移盘点用（CRED-4）。量级是"账号数 × 来源数"，几十条。
+    pub fn list_all_authorizations(&self) -> RpcResult<Vec<AuthorizationRecord>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {AUTH_COLUMNS} FROM account_authorizations ORDER BY account_id ASC, kind ASC"
+        ))?;
+        let rows = stmt.query_map([], map_authorization)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     pub fn get_authorization(&self, id: &str) -> RpcResult<Option<AuthorizationRecord>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {AUTH_COLUMNS} FROM account_authorizations WHERE id = ?1"

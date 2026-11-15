@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::app::App;
 use crate::providers::qoder_edition::QoderEdition;
 use crate::providers::{
-    magpie, qoder, qoder_admin, qoder_auth, qoder_pat, workbuddy, workbuddy_auth,
+    cred_migrate, magpie, qoder, qoder_admin, qoder_auth, qoder_pat, workbuddy, workbuddy_auth,
 };
 use crate::qoder_profiles::manager as qoder_manager;
 use crate::rpc::{RpcError, RpcResult};
@@ -74,6 +74,11 @@ pub const METHODS: &[&str] = &[
     "qoder.auth.pat.save",
     "qoder.auth.pat.check",
     "qoder.auth.pat.remove",
+    // ---- 旧 Keychain 凭据迁移（CRED-4）----
+    "credentials.migration.inventory",
+    "credentials.migration.run",
+    "credentials.migration.rollback",
+    "credentials.migration.verify",
     // ---- Qoder 每日 Credits（PR #75）----
     "qoder.credits.status",
     "qoder.credits.claim",
@@ -631,6 +636,15 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                 "pendingCleanup": removed.pending_cleanup,
             }))
         }
+
+        // ---- 旧 Keychain 凭据迁移（CRED-4）----
+        //
+        // 四个动作全部显式触发：没有定时任务、没有启动时迁移。读出钥匙串会弹
+        // 系统授权框，后台跑等于把 RPC 队列卡住；明文落盘也必须用户自己点头。
+        "credentials.migration.inventory" => cred_migrate::inventory(app),
+        "credentials.migration.run" => cred_migrate::run(app, &params),
+        "credentials.migration.rollback" => cred_migrate::rollback(app, &params),
+        "credentials.migration.verify" => cred_migrate::verify(app),
 
         // ---- Qoder 每日 Credits（PR #75）----
         //

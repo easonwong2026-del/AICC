@@ -779,6 +779,20 @@ impl crate::storage::Db {
             .optional()?)
     }
 
+    /// 全表：凭据迁移盘点用（CRED-4）。
+    pub fn list_all_qoder_authorizations(&self) -> RpcResult<Vec<QoderAuthRecord>> {
+        let sql = format!(
+            "SELECT {AUTH_COLUMNS} FROM qoder_authorizations ORDER BY account_id ASC, source ASC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], map_auth)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     pub fn list_qoder_authorizations(&self, account_id: &str) -> RpcResult<Vec<QoderAuthRecord>> {
         let sql = format!(
             "SELECT {AUTH_COLUMNS} FROM qoder_authorizations WHERE account_id = ?1 ORDER BY source ASC"
