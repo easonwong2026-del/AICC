@@ -64,9 +64,12 @@ pub fn relink_pending(app: &App, only_account: Option<&str>) -> RpcResult<Value>
             Ok(source_key) => {
                 let reference = reference::magpie_ref(&source_key)
                     .map_err(|err| crate::rpc::RpcError::internal(err.message))?;
+                // CAS：只在这一行还是"我读到的那个版本 + 那个引用"时才写。
                 let changed = app.with_db(|db| {
                     db.rebind_authorization_ref(
                         &row.id,
+                        row.version,
+                        &row.access_ref,
                         &reference,
                         STORAGE_MAGPIE,
                         Some(&source_key),
@@ -81,10 +84,12 @@ pub fn relink_pending(app: &App, only_account: Option<&str>) -> RpcResult<Value>
                         "accessRef": reference,
                     }));
                 } else {
+                    // 有人先改过了（重新导入 / 另一个 Worker）：不重试、不盲写。
                     skipped.push(json!({
                         "authorizationId": row.id,
                         "accountId": row.account_id,
-                        "reason": "authorization_missing",
+                        "reason": "superseded",
+                        "message": "这一行在重新关联期间被其他流程更新过，已放弃",
                     }));
                 }
             }

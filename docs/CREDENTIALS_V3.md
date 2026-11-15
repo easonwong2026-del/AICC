@@ -190,6 +190,16 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 - Worker 全链路的免弹窗收口与端到端验收 —— CRED-5。
 - `auth.magpie.relink` 还没有界面入口；当前由 RPC 显式调用。
 
+**复审后补的边界（#84 第二轮）**
+
+| 问题 | 修法 |
+| --- | --- |
+| 旧 `tokenExpiresAt` 挡住动态新令牌 | `is_usable` 对 `magpie` 引用直接放行，有效性交给文件判；`describe` 增 `effectiveStatus` / `recoverable`，库里过期但文件有效时界面显示"可恢复" |
+| 重同步按 UID 裸匹配、把文件不可读误写成 `expired` | 先认 `source_key`，缺 key 时要求「平台 + provider + UID」唯一匹配；文件不可读返回 `state=unavailable` 且**不改状态**；只有真的过期才写 `expired` |
+| 重新关联缺并发保护 | `rebind_authorization_ref` 带 CAS：`id + kind='magpie' + version + access_ref` 全中才写，否则 `superseded`，不重试 |
+| 删除动态关联仍访问钥匙串 | `delete_authorization` 对 `magpie` 引用不再生成任何钥匙串键（含旧别名），旧 `keychain:` 行仍按旧规则清理 |
+| 诊断分类混在一起 | 新增 `CredentialErrorKind::Unavailable`（→ `magpie_unavailable`）；未知引用前缀记为 `unknown` 而不是 `keychain` |
+
 **已知代价**
 
 借用授权不再写旧别名键，所以 PR #65 时代的二进制看不到"当前借用令牌"。

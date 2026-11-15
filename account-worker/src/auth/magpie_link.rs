@@ -40,12 +40,16 @@ impl LinkProblem {
         }
     }
 
-    /// 归类给 Broker：串号是"不该用"，过期/缺失是"用不了"。
+    /// 归类给 Broker。三档必须分开：
+    ///
+    /// * 串号 → `Conflict`（关联指错账号，界面要提示"重新关联"而不是"重新登录"）；
+    /// * 文件读不了 → `Unavailable`（环境问题，别把账号状态写坏）；
+    /// * 键不存在 / 已过期 → `NotFound`（这一次没有可用令牌）。
     pub fn error_kind(self) -> CredentialErrorKind {
         match self {
-            // 串号必须显眼：这不是"暂时不可用"，而是"这条关联指错了账号"。
             Self::PlatformMismatch | Self::UidMismatch => CredentialErrorKind::Conflict,
-            _ => CredentialErrorKind::NotFound,
+            Self::FileUnavailable => CredentialErrorKind::Unavailable,
+            Self::SourceMissing | Self::Expired => CredentialErrorKind::NotFound,
         }
     }
 }

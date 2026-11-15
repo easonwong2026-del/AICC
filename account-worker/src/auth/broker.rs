@@ -133,7 +133,15 @@ fn order_for<'a>(
 ///
 /// `token_expires_at` 为空时按"可用"处理：没有到期信息不等于已过期，
 /// 真的失效会由探测接口（M2）判出来。
+///
+/// **动态 Magpie 引用是例外**：库里的 `status` / `token_expires_at` 只是上一次同步
+/// 时的快照，Magpie 自己刷新之后它就过期了。拿这个快照去拦截，会把文件里那份有效
+/// 的新令牌挡在门外，而且永远恢复不了（因为没人会再来刷新）。所以这里放行，
+/// 由 `magpie_link::access_for` 按当前文件判有效性。
 pub(crate) fn is_usable(row: &crate::storage::AuthorizationRecord) -> bool {
+    if row.storage_kind() == crate::storage::authz::STORAGE_MAGPIE {
+        return true;
+    }
     if ["invalid", "expired", "denied"].contains(&row.status.as_str()) {
         return false;
     }
@@ -254,8 +262,12 @@ fn unavailable_reason(err: &CredentialError, row: &crate::storage::Authorization
         // 钥匙串被拒是"用户要再点一次授权"，和别的不可用不一样。
         (CredentialErrorKind::Denied, "keychain") => "keychain_denied",
         (CredentialErrorKind::Denied, _) => "denied",
-        // Magpie 关联指向别的账号 / 平台：不能兜底当作"没凭据"，要显式报出来。
+        // 关联指向别的账号 / 平台：不能兜底当作"没凭据"，要显式报出来。
         (CredentialErrorKind::Conflict, _) => "link_mismatch",
+        // Magpie 文件读不了是环境问题：界面该提示"稍后重试 / 检查 Magpie"，
+        // 而不是"请重新登录"。
+        (CredentialErrorKind::Unavailable, "magpie") => "magpie_unavailable",
+        (CredentialErrorKind::Unavailable, _) => "unavailable",
         (CredentialErrorKind::LockTimeout, _) => "storage_busy",
         _ => "credential_error",
     }
@@ -265,13 +277,21 @@ fn unavailable_reason(err: &CredentialError, row: &crate::storage::Authorization
 /// 界面 / `health` 用的授权快照。**不含令牌**，只给状态与指纹级信息。
 pub fn describe(app: &App, account_id: &str) -> RpcResult<Vec<Value>> {
     let rows = app.with_db(|db| db.list_authorizations(account_id))?;
+    let account = app.with_db(|db| db.get_account(account_id))?;
     Ok(rows
         .iter()
         .map(|row| {
+            // 动态 Magpie 引用的真实状态在文件里，不在库里。库里那份过期了、
+            // 但文件里的令牌已经刷新过，界面必须显示"可用"（否则用户会以为要重新登录）。
+            let effective = account
+                .as_ref()
+                .and_then(|account| effective_dynamic_status(account, row));
             json!({
                 "id": row.id,
                 "kind": row.kind,
                 "status": row.status,
+                "effectiveStatus": effective,
+                "recoverable": effective == Some("valid") && row.status != "valid",
                 "tokenExpiresAt": row.token_expires_at,
                 "sourceKey": row.source_key,
                 "storageKind": row.storage_kind(),
@@ -281,6 +301,25 @@ pub fn describe(app: &App, account_id: &str) -> RpcResult<Vec<Value>> {
             })
         })
         .collect())
+}
+
+/// 动态引用的当前状态。非动态引用返回 `None`（库里那份就是真相）。
+fn effective_dynamic_status(
+    account: &AccountRecord,
+    row: &crate::storage::AuthorizationRecord,
+) -> Option<&'static str> {
+    if row.storage_kind() != crate::storage::authz::STORAGE_MAGPIE {
+        return None;
+    }
+    let source_key = row.source_key.as_deref()?;
+    Some(match super::magpie_link::access_for(account, source_key) {
+        Ok(_) => "valid",
+        Err(err) => match err.kind {
+            CredentialErrorKind::Conflict => "mismatch",
+            CredentialErrorKind::Unavailable => "unavailable",
+            _ => "expired",
+        },
+    })
 }
 
 /// 账号层面的授权摘要：两份是否存在、当前会用哪一份。

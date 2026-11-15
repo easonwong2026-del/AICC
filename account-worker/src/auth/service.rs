@@ -409,9 +409,9 @@ pub fn sync_mirror(app: &App, account_id: &str) -> RpcResult<MirrorReport> {
         return Ok(MirrorReport { error: None });
     }
     let preferred = broker::preferred_source(app);
-    let usable = |row: &AuthorizationRecord| {
-        !["invalid", "expired", "denied"].contains(&row.status.as_str())
-    };
+    // 用 Broker 的判据，不要在这里另写一份：动态 Magpie 引用的有效性在文件里，
+    // 库里的 status 是旧快照。各写一份的话，镜像会一直跳过"其实已经刷新"的那一份。
+    let usable = |row: &AuthorizationRecord| broker::is_usable(row);
     let chosen = rows
         .iter()
         .find(|row| row.kind == preferred && usable(row))
@@ -571,22 +571,30 @@ pub fn delete_authorization(app: &App, account_id: &str, kind: &str) -> RpcResul
     };
     let account = app.with_db(|db| db.get_account(account_id))?;
 
-    let keys = keys_for(account_id, kind);
-    let mut targets = vec![keys.access];
-    if let Some(refresh) = keys.refresh {
-        targets.push(refresh);
-    }
+    // 动态 Magpie 引用**没有任何 AICC 凭据**要删：令牌在 Magpie 自己的文件里，
+    // 我们只持有一条引用。这类删除只清授权行与镜像，**不碰钥匙串**——
+    // 既包括它自己的键，也包括当年为回滚保留的旧别名（清理是后续的显式用户操作）。
+    let dynamic = row.storage_kind() == crate::storage::authz::STORAGE_MAGPIE;
 
-    // 最后一份？是的话旧别名键属于这次删除的范围。
-    let is_last = app
-        .with_db(|db| db.list_authorizations(account_id))?
-        .iter()
-        .all(|other| other.id == row.id);
-    if is_last {
-        if let Some(account) = &account {
-            let (legacy_access, legacy_refresh) = ids::legacy_keys(&account.uid);
-            targets.push(legacy_access);
-            targets.push(legacy_refresh);
+    let mut targets: Vec<String> = Vec::new();
+    if !dynamic {
+        let keys = keys_for(account_id, kind);
+        targets.push(keys.access);
+        if let Some(refresh) = keys.refresh {
+            targets.push(refresh);
+        }
+
+        // 最后一份？是的话旧别名键属于这次删除的范围。
+        let is_last = app
+            .with_db(|db| db.list_authorizations(account_id))?
+            .iter()
+            .all(|other| other.id == row.id);
+        if is_last {
+            if let Some(account) = &account {
+                let (legacy_access, legacy_refresh) = ids::legacy_keys(&account.uid);
+                targets.push(legacy_access);
+                targets.push(legacy_refresh);
+            }
         }
     }
 

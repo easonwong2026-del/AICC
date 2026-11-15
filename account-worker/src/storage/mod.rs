@@ -1382,13 +1382,17 @@ mod tests {
         );
 
         // 重新关联之后才变成 magpie，并且引用一起换掉。
-        db.rebind_authorization_ref(
-            &id,
-            "magpie:v1:workbuddy#uid-v20",
-            authz::STORAGE_MAGPIE,
-            Some("workbuddy#uid-v20"),
-        )
-        .unwrap();
+        let before = db.find_authorization(&acc.id, "magpie").unwrap().unwrap();
+        assert!(db
+            .rebind_authorization_ref(
+                &id,
+                before.version,
+                &before.access_ref,
+                "magpie:v1:workbuddy#uid-v20",
+                authz::STORAGE_MAGPIE,
+                Some("workbuddy#uid-v20"),
+            )
+            .unwrap());
         let row = db.find_authorization(&acc.id, "magpie").unwrap().unwrap();
         assert_eq!(row.storage_kind(), "magpie");
         assert_eq!(
@@ -1402,6 +1406,80 @@ mod tests {
         let row = db.find_authorization(&acc.id, "magpie").unwrap().unwrap();
         assert_eq!(row.storage_kind(), "magpie");
         assert_eq!(row.access_ref, "magpie:v1:workbuddy#uid-v20");
+    }
+
+    /// P0-3：重新关联带 CAS —— 拿旧快照去写必须失败，且不许改一个字。
+    #[test]
+    fn rebind_refuses_a_stale_snapshot() {
+        let (mut db, _dir) = temp_db();
+        let acc = db
+            .upsert_account(&AccountInput {
+                platform: "workbuddy".to_string(),
+                uid: "uid-cas".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        let id = crate::auth::ids::auth_id(&acc.id, "magpie");
+        db.upsert_authorization(&crate::storage::AuthorizationRecord {
+            id: id.clone(),
+            account_id: acc.id.clone(),
+            kind: "magpie".to_string(),
+            access_ref: format!("keychain:workbuddy/{}/magpie/access", acc.id),
+            refresh_ref: None,
+            auth_domain: None,
+            token_expires_at: None,
+            status: "valid".to_string(),
+            version: 0,
+            key_migration_state: "ready".to_string(),
+            source_key: Some("workbuddy#uid-cas".to_string()),
+            last_used_at: None,
+            last_error: None,
+            created_at: "2026-11-01T00:00:00Z".to_string(),
+            updated_at: "2026-11-01T00:00:00Z".to_string(),
+        })
+        .unwrap();
+        let stale = db.find_authorization(&acc.id, "magpie").unwrap().unwrap();
+
+        // 另一条流程（重新导入 / 另一个 Worker）先把它改成动态关联。
+        assert!(db
+            .rebind_authorization_ref(
+                &stale.id,
+                stale.version,
+                &stale.access_ref,
+                "magpie:v1:workbuddy#uid-cas",
+                authz::STORAGE_MAGPIE,
+                Some("workbuddy#uid-cas"),
+            )
+            .unwrap());
+
+        // 旧快照再来一次：版本 + 引用都对不上，必须拒绝。
+        assert!(
+            !db.rebind_authorization_ref(
+                &stale.id,
+                stale.version,
+                &stale.access_ref,
+                "magpie:v1:workbuddy#someone-else",
+                authz::STORAGE_MAGPIE,
+                Some("workbuddy#someone-else"),
+            )
+            .unwrap(),
+            "旧快照不许覆盖新引用"
+        );
+        let after = db.find_authorization(&acc.id, "magpie").unwrap().unwrap();
+        assert_eq!(after.access_ref, "magpie:v1:workbuddy#uid-cas");
+        assert_eq!(after.source_key.as_deref(), Some("workbuddy#uid-cas"));
+
+        // 只改 version、引用不变也要拒绝（引用被别处改回去过的情况）。
+        assert!(!db
+            .rebind_authorization_ref(
+                &stale.id,
+                stale.version,
+                "magpie:v1:workbuddy#uid-cas",
+                "magpie:v1:workbuddy#x",
+                authz::STORAGE_MAGPIE,
+                Some("workbuddy#x"),
+            )
+            .unwrap());
     }
 
     #[test]

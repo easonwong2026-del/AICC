@@ -23,16 +23,20 @@ pub const STATUSES: &[&str] = &["unknown", "valid", "expired", "invalid", "denie
 pub const STORAGE_KEYCHAIN: &str = "keychain";
 pub const STORAGE_LOCALJSON: &str = "localjson";
 pub const STORAGE_MAGPIE: &str = "magpie";
+/// 不认识的前缀。**不**并进 `keychain`：那会把"引用坏了"伪装成"老授权"，
+/// 让审计统计永远看不到异常（读路径仍然严格拒绝未知 scheme）。
+pub const STORAGE_UNKNOWN: &str = "unknown";
 
-/// `access_ref` → 存储种类。只认我们写得出三种前缀，别的一律按旧钥匙串算
-/// （v19 及以前的库只有 `keychain:`）。
+/// `access_ref` → 存储种类。只认我们写得出的三种前缀，其余一律 `unknown`。
 pub fn storage_kind_of(access_ref: &str) -> &'static str {
     if access_ref.starts_with(crate::credentials::reference::MAGPIE_PREFIX) {
         STORAGE_MAGPIE
     } else if access_ref.starts_with(crate::credentials::reference::LOCAL_JSON_PREFIX) {
         STORAGE_LOCALJSON
-    } else {
+    } else if access_ref.starts_with(crate::credentials::reference::KEYCHAIN_PREFIX) {
         STORAGE_KEYCHAIN
+    } else {
+        STORAGE_UNKNOWN
     }
 }
 
@@ -288,13 +292,20 @@ impl super::Db {
         Ok(n > 0)
     }
 
-    /// 改一份授权的凭据位置（v20 的重新关联用）。
+    /// 改一份授权的凭据位置（v20 的重新关联用）。**带 CAS**。
     ///
-    /// 引用变了 = 凭据换了地方，所以 `version` 必须 +1：在途的旧快照不能拿它去写。
-    /// `refresh_ref` 一起清掉：Magpie 引用永远不持有刷新令牌。
+    /// 必须同时命中 `id` + `kind = 'magpie'` + `version` + `access_ref` 才写：
+    /// 重新关联是"读旧行 → 读 Magpie → 写新引用"的三步操作，中间用户可能刚好
+    /// 重新导入过、或者另一个 Worker 已经改好了。只比 `id` 会把这些更新直接盖掉，
+    /// 而 `version + 1` 本身拦不住——它只保证"下一次写入看见的是新版本"。
+    ///
+    /// 返回 `false` = 有人先改了，调用方必须放弃（不重试、不盲写）。
+    /// 引用变了 = 凭据换了地方，所以 `version` 还会 +1；`refresh_ref` 一起清掉。
     pub fn rebind_authorization_ref(
         &self,
         id: &str,
+        expected_version: i64,
+        expected_access_ref: &str,
         access_ref: &str,
         storage_kind: &str,
         source_key: Option<&str>,
@@ -314,8 +325,19 @@ impl super::Db {
                     ref_updated_at = ?4,
                     version = version + 1,
                     updated_at = ?4
-              WHERE id = ?5",
-            params![access_ref, storage_kind, source_key, now, id],
+              WHERE id = ?5
+                AND kind = 'magpie'
+                AND version = ?6
+                AND access_ref = ?7",
+            params![
+                access_ref,
+                storage_kind,
+                source_key,
+                now,
+                id,
+                expected_version,
+                expected_access_ref
+            ],
         )?;
         Ok(changed > 0)
     }
@@ -329,7 +351,8 @@ impl super::Db {
             "SELECT CASE
                         WHEN access_ref LIKE 'magpie:v1:%' THEN 'magpie'
                         WHEN access_ref LIKE 'localjson:v1:%' THEN 'localjson'
-                        ELSE 'keychain'
+                        WHEN access_ref LIKE 'keychain:%' THEN 'keychain'
+                        ELSE 'unknown'
                     END AS storage_kind,
                     COUNT(*)
                FROM account_authorizations
@@ -686,7 +709,8 @@ pub(super) fn migrate_v20(tx: &rusqlite::Transaction<'_>) -> RpcResult<()> {
             SET storage_kind = CASE
                 WHEN access_ref LIKE 'magpie:v1:%' THEN 'magpie'
                 WHEN access_ref LIKE 'localjson:v1:%' THEN 'localjson'
-                ELSE 'keychain'
+                WHEN access_ref LIKE 'keychain:%' THEN 'keychain'
+                ELSE 'unknown'
             END;",
     )?;
     let now = now_rfc3339();

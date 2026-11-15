@@ -38,6 +38,9 @@ pub enum CredentialErrorKind {
     Corrupt,
     /// 能读，但本版本不认识（比如将来更高的 `schemaVersion`）。
     Unsupported,
+    /// 外部环境暂时不可用（Magpie 没装 / 文件读不了）。**不是**"没有凭据"，
+    /// 不能借这个提示用户重新登录。
+    Unavailable,
     /// 版本对不上：拿旧快照去覆盖新令牌，一个字节都不许写。
     Conflict,
     /// 等锁超时：另一个进程正在写。
@@ -56,6 +59,7 @@ impl CredentialErrorKind {
             Self::Denied => "denied",
             Self::Corrupt => "corrupt",
             Self::Unsupported => "unsupported",
+            Self::Unavailable => "unavailable",
             Self::Conflict => "conflict",
             Self::LockTimeout => "lock_timeout",
             Self::Unsafe => "unsafe",
