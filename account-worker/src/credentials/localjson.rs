@@ -770,8 +770,8 @@ impl LocalJsonStore {
             opts.custom_flags(O_NOFOLLOW);
         }
         let file = opts.open(&path).map_err(|err| {
-            // ELOOP（macOS / Linux 均为 62）：路径是符号链接。
-            if err.raw_os_error() == Some(62) {
+            // ELOOP：路径是符号链接。错误码按平台取，别写死一个数值。
+            if err.raw_os_error() == Some(ELOOP) {
                 CredentialError::new(
                     CredentialErrorKind::Unsafe,
                     "凭据锁文件是符号链接（已拒绝）",
@@ -797,6 +797,14 @@ impl LocalJsonStore {
                 return Err(CredentialError::new(
                     CredentialErrorKind::Unsafe,
                     "凭据锁文件属主不是当前用户",
+                ));
+            }
+            // 硬链接绕得过 O_NOFOLLOW：路径不是软链，但 inode 与外部文件是同一个。
+            // 后面的 fchmod / flock 会作用在那个共享 inode 上，所以在动手前就拒掉。
+            if meta.nlink() != 1 {
+                return Err(CredentialError::new(
+                    CredentialErrorKind::Unsafe,
+                    "凭据锁文件有硬链接（已拒绝）",
                 ));
             }
             // fd 与路径必须是同一个 inode：open 之后被换成软链 / 另一个文件要拦住。
@@ -1038,6 +1046,10 @@ fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
 #[cfg(unix)]
 fn check_file_mode(meta: &fs::Metadata, secret_id: &str) -> Result<(), CredentialError> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    // 凭据文件**不**要求 `nlink == 1`：硬链接到别处的那份也是 0600 / 同一属主，
+    // 读不到额外的东西；而 `rsync --link-dest`、快照类工具会正常制造硬链接，
+    // 在这里拒绝只会让用户的备份把凭据读坏。锁文件不同 —— 我们会对它 fchmod + flock，
+    // 那会作用到共享 inode 上，所以那边的 nlink 检查是必须的。
     if meta.uid() != current_uid() {
         return Err(CredentialError::new(
             CredentialErrorKind::Unsafe,
@@ -1134,6 +1146,20 @@ const O_NOFOLLOW: i32 = {
     #[cfg(not(target_os = "macos"))]
     {
         0o400000
+    }
+};
+
+/// `open` 遇到符号链接时的错误码。**两个平台不一样**：macOS 62、Linux 40。
+/// 写死其中一个会让另一个平台把"软链被拒"降级成普通 IO 错误。
+#[cfg(unix)]
+const ELOOP: i32 = {
+    #[cfg(target_os = "macos")]
+    {
+        62
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        40
     }
 };
 
@@ -1768,6 +1794,28 @@ mod tests {
             0o644,
             "绝不能跟随软链把外部文件 chmod 成 0600"
         );
+    }
+
+    /// 硬链接绕得过 `O_NOFOLLOW`：路径本身不是软链，但 inode 与外部文件相同。
+    /// 我们的 fchmod / flock 会作用到那个共享 inode 上，所以必须在动手前拒掉。
+    #[cfg(unix)]
+    #[test]
+    fn lock_file_hard_link_is_refused_and_the_target_is_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        store.ensure_root().expect("ensure");
+
+        let outside = dir.path().join("outside-lock-target");
+        fs::write(&outside, b"shared-inode").unwrap();
+        chmod(&outside, 0o644);
+        fs::hard_link(&outside, store.root().join(LOCK_FILE)).unwrap();
+
+        let err = store.create(draft()).unwrap_err();
+        assert_eq!(err.kind, CredentialErrorKind::Unsafe, "{err}");
+        assert!(err.message.contains("硬链接"), "错误要说明是硬链接：{err}");
+        assert_eq!(fs::read(&outside).unwrap(), b"shared-inode");
+        assert_eq!(mode_of(&outside), 0o644, "不能改到共享 inode 的权限");
+        assert_eq!(store.scan().unwrap().secrets.len(), 0, "拒绝之后不许落盘");
     }
 
     // -- 授权归属不可变（P1） -------------------------------------------
