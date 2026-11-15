@@ -111,6 +111,44 @@ pub fn credential_error(err: crate::securestore::SecretError, stage: &str) -> Rp
 // 行管理
 // ---------------------------------------------------------------------------
 
+/// 组装一行授权。
+///
+/// `refs` 给了就用它当引用（新登录会带一份 `localjson:v1:`），没给就按钥匙串默认
+/// ——后者只服务 CRED-4 之前的老账号：那类行的凭据确实还在钥匙串里。
+fn build_authorization_row(
+    account_id: &str,
+    kind: &str,
+    uid: &str,
+    refs: Option<(&str, Option<&str>)>,
+) -> AuthorizationRecord {
+    let keys = keys_for(account_id, kind);
+    let now = crate::clock::now_rfc3339();
+    let (access_ref, refresh_ref) = match refs {
+        Some((access, refresh)) => (access.to_string(), refresh.map(str::to_string)),
+        None => (
+            ids::keychain_ref(&keys.access),
+            keys.refresh.as_deref().map(ids::keychain_ref),
+        ),
+    };
+    AuthorizationRecord {
+        id: ids::auth_id(account_id, kind),
+        account_id: account_id.to_string(),
+        kind: kind.to_string(),
+        access_ref,
+        refresh_ref,
+        auth_domain: None,
+        token_expires_at: None,
+        status: "unknown".to_string(),
+        version: 0,
+        key_migration_state: KEY_STATE_READY.to_string(),
+        source_key: (kind == ids::KIND_MAGPIE).then(|| format!("workbuddy#{uid}")),
+        last_used_at: None,
+        last_error: None,
+        created_at: now.clone(),
+        updated_at: now,
+    }
+}
+
 /// 取或建一行授权。新建的行 `key_migration_state = ready`：
 /// 它的凭据本来就是按新键写的，没有旧键需要搬。
 pub fn ensure_row(
@@ -125,26 +163,7 @@ pub fn ensure_row(
     if let Some(row) = app.with_db(|db| db.find_authorization(account_id, kind))? {
         return Ok(row);
     }
-    let id = ids::auth_id(account_id, kind);
-    let keys = keys_for(account_id, kind);
-    let now = crate::clock::now_rfc3339();
-    let row = AuthorizationRecord {
-        id,
-        account_id: account_id.to_string(),
-        kind: kind.to_string(),
-        access_ref: ids::keychain_ref(&keys.access),
-        refresh_ref: keys.refresh.as_deref().map(ids::keychain_ref),
-        auth_domain: None,
-        token_expires_at: None,
-        status: "unknown".to_string(),
-        version: 0,
-        key_migration_state: KEY_STATE_READY.to_string(),
-        source_key: (kind == ids::KIND_MAGPIE).then(|| format!("workbuddy#{uid}")),
-        last_used_at: None,
-        last_error: None,
-        created_at: now.clone(),
-        updated_at: now,
-    };
+    let row = build_authorization_row(account_id, kind, uid, None);
     app.with_db(|db| db.upsert_authorization(&row))?;
     Ok(row)
 }
@@ -174,11 +193,217 @@ pub fn record_status(
 // 写入
 // ---------------------------------------------------------------------------
 
-/// 只写自有授权的钥匙串条目，**不碰数据库**。
+/// 一次自有授权写入的结果。
+///
+/// JSON 化之后，"凭据写在哪"必须跟着这一次写入走：新登录落一个随机 UUID 文件，
+/// 引用要一起交给落库那一步。回滚也跟着走 —— 钥匙串按快照回滚，JSON 按
+/// 「新建 → 删掉」/「复用 → 写回旧值」两种方式回滚。
+pub struct OwnWrite {
+    access_ref: String,
+    refresh_ref: Option<String>,
+    undo: OwnUndo,
+}
+
+enum OwnUndo {
+    Keychain(Snapshot),
+    /// 新建的凭据文件：回滚 = 删掉它。之前（如果有行）还指着别的引用。
+    Created {
+        secret_id: String,
+    },
+    /// 复用了已有文件：回滚 = 把旧令牌写回去，带 revision 检查，不会盖掉并发写入。
+    Replaced {
+        secret_id: String,
+        revision: u64,
+        previous: crate::credentials::localjson::Credentials,
+        previous_expires: Option<String>,
+    },
+}
+
+impl OwnWrite {
+    pub fn access_ref(&self) -> &str {
+        &self.access_ref
+    }
+
+    pub fn refresh_ref(&self) -> Option<&str> {
+        self.refresh_ref.as_deref()
+    }
+
+    /// 回滚这次写入。返回 false = 没恢复干净，调用方必须留痕。
+    pub fn restore(&self, app: &App) -> bool {
+        let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
+        match &self.undo {
+            OwnUndo::Keychain(snapshot) => snapshot.restore(app),
+            OwnUndo::Created { secret_id } => match store.delete(secret_id) {
+                Ok(_) => true,
+                Err(err) => {
+                    crate::handlers::log_note(&format!(
+                        "新凭据文件删不掉（{}）：{}",
+                        err.kind.as_str(),
+                        crate::rpc::sanitize(&err.message)
+                    ));
+                    false
+                }
+            },
+            OwnUndo::Replaced {
+                secret_id,
+                revision,
+                previous,
+                previous_expires,
+            } => {
+                let expires = previous_expires.as_deref().and_then(parse_rfc3339);
+                match store.replace_credentials(secret_id, *revision, previous.clone(), expires) {
+                    Ok(_) => true,
+                    Err(err) => {
+                        crate::handlers::log_note(&format!(
+                            "旧凭据写不回去（{}）：{}",
+                            err.kind.as_str(),
+                            crate::rpc::sanitize(&err.message)
+                        ));
+                        false
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// RFC3339 → UTC。解析不了就当没有到期时间（不猜）。
+pub fn parse_rfc3339(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|at| at.with_timezone(&chrono::Utc))
+}
+
+/// 写自有授权的凭据，**不碰数据库**。
 ///
 /// 拆出来的原因：登录时账号行还不存在，而授权行的外键要求它先存在。
 /// 顺序必须是「写凭据 → 建账号行 → 记授权行」，中途任何一步失败都要能回滚凭据。
+///
+/// 落点只看这一行现在是什么，**不做隐式迁移**：
+/// * **还没有行** → 新建一个 JSON 文件（CRED-3 的默认）；
+/// * **已经是 `localjson:`** → 覆盖同一个文件（一份授权一个文件，不留孤儿）；
+/// * **还是 `keychain:`**（CRED-4 之前的老账号）→ 维持钥匙串写入，
+///   等用户显式迁移再换存储，不给迁移中的账号制造半新半旧的状态。
 pub fn write_own(
+    app: &App,
+    account_id: &str,
+    platform: &str,
+    access: &str,
+    refresh: Option<&str>,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> RpcResult<OwnWrite> {
+    let existing = app.with_db(|db| db.find_authorization(account_id, ids::KIND_OWN))?;
+
+    if let Some(row) = existing.as_ref() {
+        match row.storage_kind() {
+            crate::storage::authz::STORAGE_KEYCHAIN => {
+                let snapshot = write_own_keychain(app, account_id, access, refresh)?;
+                return Ok(OwnWrite {
+                    access_ref: row.access_ref.clone(),
+                    refresh_ref: row.refresh_ref.clone(),
+                    undo: OwnUndo::Keychain(snapshot),
+                });
+            }
+            crate::storage::authz::STORAGE_LOCALJSON => {
+                return write_own_json_in_place(app, row, access, refresh, expires_at);
+            }
+            other => {
+                // own 行不该出现 magpie / unknown 引用：说明这一行被外力改脏了。
+                // 不按它去读任何东西，直接重建成一份新 JSON，让下一次读走回正轨。
+                crate::handlers::log_note(&format!(
+                    "自有授权 {account_id}/own 的引用不可用（{other}），重建为本地 JSON"
+                ));
+            }
+        }
+    }
+
+    write_own_json_new(app, account_id, platform, access, refresh, expires_at)
+}
+
+/// 新授权：建一个随机 UUID 文件。失败的话目标文件要么不存在、要么完整，没有半份。
+fn write_own_json_new(
+    app: &App,
+    account_id: &str,
+    platform: &str,
+    access: &str,
+    refresh: Option<&str>,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> RpcResult<OwnWrite> {
+    let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
+    let mut draft = crate::credentials::localjson::SecretDraft::oauth(
+        ids::auth_id(account_id, ids::KIND_OWN),
+        platform,
+        access,
+    );
+    if let Some(token) = refresh {
+        draft = draft.with_refresh_token(token);
+    }
+    if let Some(at) = expires_at {
+        draft = draft.with_expires_at(at);
+    }
+    let secret = store
+        .create(draft)
+        .map_err(|err| credential_store_error(err, "own/json"))?;
+    let reference = crate::credentials::reference::local_json_ref(&secret.secret_id)
+        .map_err(|err| RpcError::internal(err.message))?;
+    Ok(OwnWrite {
+        // 同一个文件、两个槽位：读 access 走 Access，读 refresh 走 Refresh。
+        refresh_ref: refresh.map(|_| reference.clone()),
+        access_ref: reference,
+        undo: OwnUndo::Created {
+            secret_id: secret.secret_id,
+        },
+    })
+}
+
+/// 已有 JSON 授权重新登录：覆盖同一个文件，access + refresh 一次替换。
+///
+/// 不复用「新建再删旧的」：那会在崩溃时留下一个没人引用的文件，而凭据文件
+/// 只要还在盘上就还是有效令牌。覆盖写有 `revision` 校验，并发的刷新不会被盖掉。
+fn write_own_json_in_place(
+    app: &App,
+    row: &AuthorizationRecord,
+    access: &str,
+    refresh: Option<&str>,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> RpcResult<OwnWrite> {
+    use crate::credentials::localjson::{Credentials, LocalJsonStore};
+    use crate::credentials::reference::CredentialRef;
+
+    let secret_id = match CredentialRef::parse(&row.access_ref) {
+        Ok(CredentialRef::LocalJson { secret_id }) => secret_id,
+        _ => {
+            return Err(RpcError::internal(
+                "自有授权的本地引用不可解析，无法覆盖写入",
+            ))
+        }
+    };
+    let store = LocalJsonStore::for_paths(&app.paths);
+    let current = store
+        .load(&secret_id)
+        .map_err(|err| credential_store_error(err, "own/json"))?;
+    let credentials = match refresh {
+        Some(token) => Credentials::oauth(access, token),
+        // 服务端这次没给 refresh：和钥匙串路径一样，旧的作废，不留半套。
+        None => Credentials::access_only(access),
+    };
+    let updated = store
+        .replace_credentials(&secret_id, current.revision, credentials, expires_at)
+        .map_err(|err| credential_store_error(err, "own/json"))?;
+    Ok(OwnWrite {
+        access_ref: row.access_ref.clone(),
+        refresh_ref: refresh.map(|_| row.access_ref.clone()),
+        undo: OwnUndo::Replaced {
+            secret_id,
+            revision: updated.revision,
+            previous: current.credentials,
+            previous_expires: current.expires_at,
+        },
+    })
+}
+
+/// 老路径：钥匙串写入（CRED-4 之前的老账号继续走这里）。
+fn write_own_keychain(
     app: &App,
     account_id: &str,
     access: &str,
@@ -230,7 +455,24 @@ pub fn write_own(
     Ok(snapshot)
 }
 
-/// 凭据写完之后：把这份授权记成 valid、刷新到期时间、推进版本，再同步镜像。
+/// 凭据层错误 → RPC 错误。保留分类，别把 `unsafe` / `conflict` 压成一句话。
+fn credential_store_error(err: crate::credentials::CredentialError, stage: &str) -> RpcError {
+    RpcError::new(
+        crate::rpc::E_SECURESTORE,
+        format!(
+            "写入凭据失败（{stage}）：{}",
+            crate::rpc::sanitize(&err.message)
+        ),
+    )
+    .with_data(json!({ "kind": err.kind.as_str(), "stage": stage }))
+}
+
+/// 把一次成功授权的结论落到库里：**引用、状态、有效期、存储种类一次提交**。
+///
+/// 为什么必须是一条语句：`refs` 指向的凭据（JSON 文件 / 钥匙串键）是在这之前写好的。
+/// 若先写引用再写状态，中途失败会留下「新凭据 + 旧状态」或「新状态 + 旧引用」——
+/// 后者尤其糟，库会一直指着一个不是这次登录写出来的文件。`put_authorization`
+/// 本身就是一条 UPSERT（SQLite 单语句即事务），所以只要把该改的字段一次填好。
 ///
 /// 调用前账号行必须已经存在（授权行有外键）。
 pub fn record_grant(
@@ -239,13 +481,32 @@ pub fn record_grant(
     uid: &str,
     kind: &str,
     expires_at: Option<&str>,
+    refs: Option<(&str, Option<&str>)>,
 ) -> RpcResult<Saved> {
-    ensure_row(app, account_id, kind, uid)?;
-    let row = finish_row(app, account_id, kind, "valid", expires_at, None)?;
+    if !ids::is_known_kind(kind) {
+        return Err(RpcError::invalid_params(format!("授权类型非法：{kind}")));
+    }
+    // 没有行时直接按这次写入的引用建行：不先落一行 `keychain:` 占位再改 ——
+    // 那个中间态会被并发读路径看到，而且真的会去敲钥匙串。
+    let mut row = match app.with_db(|db| db.find_authorization(account_id, kind))? {
+        Some(row) => row,
+        None => build_authorization_row(account_id, kind, uid, refs),
+    };
+    if let Some((access_ref, refresh_ref)) = refs {
+        row.access_ref = access_ref.to_string();
+        row.refresh_ref = refresh_ref.map(str::to_string);
+    }
+    row.status = "valid".to_string();
+    row.token_expires_at = expires_at.map(str::to_string).or(row.token_expires_at);
+    row.key_migration_state = KEY_STATE_READY.to_string();
+    row.last_error = None;
+    // 单条 UPSERT：引用与状态同一事务落地（含派生 `storage_kind` 与 `version + 1`）。
+    app.with_db(|db| db.replace_authorization(&row))?;
+
     let degraded = sync_mirror(app, account_id).ok().and_then(|r| r.error);
     let fresh = app
         .with_db(|db| db.find_authorization(account_id, kind))?
-        .unwrap_or(row);
+        .ok_or_else(|| RpcError::internal("授权行写入后读不到"))?;
     Ok(Saved {
         authorization: fresh,
         degraded,
@@ -359,28 +620,6 @@ fn rollback(app: &App, snapshot: &Snapshot, cause: RpcError) -> RpcError {
     .with_data(json!({ "kind": "rollback_incomplete", "cause": cause.data }))
 }
 
-/// 写完凭据后的行更新：状态置 valid、刷新到期时间、版本 +1。
-fn finish_row(
-    app: &App,
-    account_id: &str,
-    kind: &str,
-    status: &str,
-    expires: Option<&str>,
-    error: Option<&str>,
-) -> RpcResult<AuthorizationRecord> {
-    let mut row = app
-        .with_db(|db| db.find_authorization(account_id, kind))?
-        .ok_or_else(|| RpcError::internal(format!("授权行不存在：{account_id}/{kind}")))?;
-    row.status = status.to_string();
-    row.token_expires_at = expires.map(str::to_string).or(row.token_expires_at);
-    row.key_migration_state = KEY_STATE_READY.to_string();
-    row.last_error = error.map(str::to_string);
-    // `replace_authorization` 会把 version 推进一格：在途的旧快照就此作废。
-    app.with_db(|db| db.replace_authorization(&row))?;
-    app.with_db(|db| db.find_authorization(account_id, kind))?
-        .ok_or_else(|| RpcError::internal("授权行写入后读不到"))
-}
-
 // ---------------------------------------------------------------------------
 // 读取
 // ---------------------------------------------------------------------------
@@ -413,6 +652,34 @@ pub fn read_access(app: &App, account: &AccountRecord, kind: &str) -> RpcResult<
 /// 读自有授权的 refresh。**没有 magpie 分支**：借来的授权不刷新。
 pub fn read_own_refresh(app: &App, account: &AccountRecord) -> RpcResult<Option<String>> {
     let row = app.with_db(|db| db.find_authorization(&account.id, ids::KIND_OWN))?;
+
+    // JSON 行：同一个文件里的 Refresh 槽位。**读不到就是没有**，不许退到钥匙串 ——
+    // 退过去就会读到旧值，甚至又弹一次授权框。
+    if let Some(row) = &row {
+        if row.storage_kind() == crate::storage::authz::STORAGE_LOCALJSON {
+            let secret_id =
+                match crate::credentials::reference::CredentialRef::parse(&row.access_ref) {
+                    Ok(crate::credentials::reference::CredentialRef::LocalJson { secret_id }) => {
+                        secret_id
+                    }
+                    _ => {
+                        return Err(RpcError::internal("自有授权的 JSON 引用不可用"));
+                    }
+                };
+            let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
+            return match store.token(
+                &secret_id,
+                crate::credentials::reference::CredentialSlot::Refresh,
+            ) {
+                Ok(token) => Ok(Some(token)),
+                Err(err) if err.kind == crate::credentials::CredentialErrorKind::NotFound => {
+                    Ok(None)
+                }
+                Err(err) => Err(err.into()),
+            };
+        }
+    }
+
     let keys = own_keys(&account.id);
     let legacy = ids::legacy_keys(&account.uid);
     let refresh_key = keys.refresh.expect("own 一定有 refresh 键");
@@ -589,7 +856,13 @@ fn read_own_refresh_by_row(app: &App, row: &AuthorizationRecord) -> RpcResult<Op
 pub struct DeleteReport {
     pub record_deleted: bool,
     pub removed_keys: Vec<String>,
+    /// 删掉的本地凭据文件 ID（PR-CRED-3）。钥匙串路径永远为空。
+    pub removed_secrets: Vec<String>,
     pub failed_keys: Vec<String>,
+    /// 没删掉的本地凭据文件 ID。
+    pub failed_secrets: Vec<String>,
+    /// 凭据已经清掉、但授权行没删掉时的原因码（可重试）。
+    pub record_error: Option<String>,
     /// 删完之后兼容镜像没同步成功的原因（记录已经删掉了，只提示不阻断）。
     pub mirror_error: Option<String>,
 }
@@ -598,10 +871,10 @@ pub struct DeleteReport {
 ///
 /// 删的是**最后一份**时，旧别名键（`workbuddy/<uid>/access|refresh`）也要一起清：
 /// 那是 PR #65 及更早版本的读取路径，留着就是一份没有主人的令牌，下次这个 uid 重新
-/// 导入时会读到上一轮的凭据。
+/// 导入时会读到上一轮的凭据。**动态引用（magpie / localjson）不清别名**：那两种来源
+/// 从来没往别名里写过东西，而 Magpie 的别名是 CRED-4 迁移的回滚依据。
 ///
 /// 删除失败时**保留记录**：记录留着才能重试，删掉就再也找不到那次失败了。
-/// 也正因如此，别名键必须在删记录**之前**删 —— 记录没了，重试就没有抓手了。
 pub fn delete_authorization(app: &App, account_id: &str, kind: &str) -> RpcResult<DeleteReport> {
     if !ids::is_known_kind(kind) {
         return Err(RpcError::invalid_params(format!("授权类型非法：{kind}")));
@@ -613,13 +886,38 @@ pub fn delete_authorization(app: &App, account_id: &str, kind: &str) -> RpcResul
     };
     let account = app.with_db(|db| db.get_account(account_id))?;
 
-    // 动态 Magpie 引用**没有任何 AICC 凭据**要删：令牌在 Magpie 自己的文件里，
-    // 我们只持有一条引用。这类删除只清授权行与镜像，**不碰钥匙串**——
-    // 既包括它自己的键，也包括当年为回滚保留的旧别名（清理是后续的显式用户操作）。
-    let dynamic = row.storage_kind() == crate::storage::authz::STORAGE_MAGPIE;
+    // 三类引用，三种清理方式：
+    // * `magpie:v1:`   → 令牌在 Magpie 文件里，**什么都不删**（也不碰旧别名，回滚要用）；
+    // * `localjson:v1:` → 只删 AICC 自己的那个凭据文件，**不碰钥匙串**；
+    // * `keychain:`     → 老规则：自己的键 + 最后一份时的旧别名。
+    let storage = row.storage_kind();
+    let dynamic = storage == crate::storage::authz::STORAGE_MAGPIE;
+    let local_json = storage == crate::storage::authz::STORAGE_LOCALJSON;
+
+    let mut removed_secrets: Vec<String> = Vec::new();
+    let mut failed_secrets: Vec<String> = Vec::new();
+    if local_json {
+        match crate::credentials::reference::CredentialRef::parse(&row.access_ref) {
+            Ok(crate::credentials::reference::CredentialRef::LocalJson { secret_id }) => {
+                let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
+                match store.delete(&secret_id) {
+                    Ok(_) => removed_secrets.push(secret_id),
+                    Err(err) => {
+                        crate::handlers::log_note(&format!(
+                            "删除凭据文件失败 {secret_id}：{}",
+                            crate::rpc::sanitize(&err.message)
+                        ));
+                        failed_secrets.push(secret_id);
+                    }
+                }
+            }
+            // 引用坏了：不猜、不删。留给 CRED-4 的一致性检查。
+            _ => failed_secrets.push(row.access_ref.clone()),
+        }
+    }
 
     let mut targets: Vec<String> = Vec::new();
-    if !dynamic {
+    if !dynamic && !local_json {
         let keys = keys_for(account_id, kind);
         targets.push(keys.access);
         if let Some(refresh) = keys.refresh {
@@ -657,8 +955,29 @@ pub fn delete_authorization(app: &App, account_id: &str, kind: &str) -> RpcResul
         }
     }
 
-    let record_deleted = if failed.is_empty() {
-        app.with_db(|db| db.delete_authorization(&row.id))?
+    // 顺序固定为「先凭据、后记录」，两个方向都有代价，这里选可重试的那个：
+    //
+    // * 凭据先删：若记录删除失败，行会指着一份不存在的文件 —— 读的时候是 `not_found`，
+    //   界面提示重新登录；而**删除本身可以原样重试**（删文件、删行都幂等）。
+    // * 记录先删：文件名是随机 UUID，行一没就再也定位不到那个文件，只能扫目录找孤儿，
+    //   而孤儿里躺着的还是有效令牌。
+    //
+    // 所以不是"顺手这么写"，而是刻意选的可恢复性更差的那一侧留给不存在的状态。
+    let mut record_error: Option<String> = None;
+    let record_deleted = if failed.is_empty() && failed_secrets.is_empty() {
+        match app.with_db(|db| db.delete_authorization(&row.id)) {
+            Ok(deleted) => deleted,
+            Err(err) => {
+                // 凭据已经删了，行因数据库错误留下：不假装成功，也不掩盖。
+                crate::handlers::log_note(&format!(
+                    "授权记录删除失败（{}）：{}",
+                    row.id,
+                    crate::rpc::sanitize(&err.message)
+                ));
+                record_error = Some("record_delete_failed".to_string());
+                false
+            }
+        }
     } else {
         app.with_db(|db| db.set_authorization_error(&row.id, "credential_delete_failed"))?;
         false
@@ -675,7 +994,10 @@ pub fn delete_authorization(app: &App, account_id: &str, kind: &str) -> RpcResul
     Ok(DeleteReport {
         record_deleted,
         removed_keys: removed,
+        removed_secrets,
         failed_keys: failed,
+        failed_secrets,
+        record_error,
         mirror_error,
     })
 }
@@ -732,6 +1054,48 @@ pub fn account_purge_plan(rows: &[AuthorizationRecord], account: &AccountRecord)
     targets.sort();
     targets.dedup();
     targets
+}
+
+/// 账号删除要删的本地凭据文件 ID（PR-CRED-3）。动态 Magpie 行没有文件。
+pub fn account_secret_plan(rows: &[AuthorizationRecord]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for row in rows {
+        if row.storage_kind() != crate::storage::authz::STORAGE_LOCALJSON {
+            continue;
+        }
+        for reference in [Some(row.access_ref.as_str()), row.refresh_ref.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Ok(crate::credentials::reference::CredentialRef::LocalJson { secret_id }) =
+                crate::credentials::reference::CredentialRef::parse(reference)
+            {
+                ids.push(secret_id);
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// 删除本地凭据文件，返回删不掉的 ID。文件不存在算成功（幂等）。
+pub fn purge_secrets(app: &App, ids: &[String]) -> Vec<String> {
+    let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
+    let mut failed = Vec::new();
+    for id in ids {
+        match store.delete(id) {
+            Ok(_) => {}
+            Err(err) => {
+                crate::handlers::log_note(&format!(
+                    "删除凭据文件失败 {id}：{}",
+                    crate::rpc::sanitize(&err.message)
+                ));
+                failed.push(id.clone());
+            }
+        }
+    }
+    failed
 }
 
 /// 执行清理计划，返回删不掉的键名（不含值）。

@@ -1,10 +1,11 @@
 # 凭据存储 v3：本地 JSON + 动态 Magpie
 
 > 状态：**CRED-1 已合并**（`LocalJsonStore` + 引用解析 + 文件系统边界加固）；
-> **CRED-2 已交付待验收**（SQLite v20 + Magpie 动态关联 + 统一 Broker 解析）。
-> CRED-3/4/5 尚未开始：自有登录仍写钥匙串，旧 Keychain 迁移也还没做 —— 本文件随每个 PR 更新。
+> **CRED-2 已合并**（SQLite v20 + Magpie 动态关联 + 统一 Broker 解析）；
+> **CRED-3a 已交付待验收**（WorkBuddy 自有授权 JSON 化）。
+> CRED-3b（Qoder 两种授权）/ CRED-4（旧 Keychain 迁移）/ CRED-5（免弹窗收口）尚未开始。
 >
-> 基线：`main` @ `3d8f23c`（#82 已合并），数据库 Schema **v20**。
+> 基线：`main` @ `6adde70`（#84 已合并），数据库 Schema **v20**。
 > 范围：只动凭据的**存取方式**，不动账号模型、签到 / 成长 / 旅行 / Credits 业务。
 
 ## 1. 为什么要换掉钥匙串
@@ -43,7 +44,7 @@ Magpie 授权             AICC 自有授权
 | refresh | **严禁读取 / 复制 / 刷新** | 保存登录实际返回的值 |
 | 落盘位置 | `~/.config/magpie/plugin-auth.json` | `<data>/secrets/v1/<uuid>.json` |
 
-## 3. 引用方案（本 PR 交付）
+## 3. 引用方案（CRED-1 交付）
 
 SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的余地：
 
@@ -126,7 +127,7 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 * JSON 解析失败只报行列号：`serde` 的原始消息会把字段值抄进错误里，那可能是令牌。
 * 坏文件不参与读取，但**不删、不覆盖**；`scan()` 把它单独列进 `broken`，健康文件照常可用。
 
-## 7. 本 PR 的范围
+## 7. CRED-1 的范围
 
 **做了**：`src/credentials/reference.rs`（引用解析）、`src/credentials/localjson.rs`
 （存储）、35 个测试（并发写、revision 冲突、锁超时、注入写失败、rename 前中断、
@@ -146,14 +147,15 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 旧 Keychain 迁移 UI、Worker 免弹窗收口。本 PR 不改变生产默认行为，也不创建
 `secrets/` 目录 —— 没有任何调用方。
 
-## 8. 五个 PR 的顺序
+## 8. 阶段顺序
 
 | PR | 内容 | 状态 |
 | --- | --- | --- |
 | CRED-1 | JSON 存储底层 + 引用解析 | 已合并（#82） |
 | CRED-2 | SQLite v20 + Magpie 动态授权 | **本 PR** |
-| CRED-3 | 自有登录 JSON 化（四平台） | 待开始 |
-| CRED-4 | 旧 Keychain 显式迁移（备份 / 核对 / 回滚） | 待开始 |
+| CRED-3a | WorkBuddy 自有授权 JSON 化 | **本 PR** |
+| CRED-3b | Qoder CN / International 浏览器、设备授权、PAT JSON 化 | 待开始（等 3a 合并） |
+| CRED-4 | 旧 Keychain 显式迁移（备份 / 核对 / 回滚） | 待开始（两平台都 JSON 化之后） |
 | CRED-5 | Worker 免弹窗收口 + 端到端验收 | 待开始 |
 
 ## 8bis. CRED-2：Magpie 动态关联
@@ -211,6 +213,60 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 
 借用授权不再写旧别名键，所以 PR #65 时代的二进制看不到"当前借用令牌"。
 回退到旧版本必须用迁移前的数据库备份（PRD §7.4 已接受）。
+
+## 8ter. CRED-3a：WorkBuddy 自有授权 JSON 化
+
+**落点矩阵**（`auth/service.rs::write_own`）
+
+| 账号现状 | 写哪里 | 回滚方式 |
+| --- | --- | --- |
+| 还没有自有授权行 | 新建 `<uuid>.json`，`localjson:v1:<uuid>` | 删掉刚建的文件 |
+| 已经是 `localjson:` | **覆盖同一个文件**（一份授权一个文件，不留孤儿） | 把旧 access/refresh 写回去（带 revision 校验） |
+| 还是 `keychain:`（CRED-4 之前的老账号） | 维持钥匙串写入，一个字段都不迁移 | 快照恢复 |
+
+**三条硬规则**
+
+1. **引用与状态一次提交。** `record_grant` 用单条 UPSERT 同时写 `access_ref` /
+   `refresh_ref` / `status` / `token_expires_at` / `storage_kind` / `version+1`。
+   先写引用再写状态会留下「新凭据 + 旧状态」或「新状态 + 旧引用」，后者会让库永远
+   指着一份不是这次登录写出来的文件。
+2. **删除顺序固定为「先凭据、后记录」。** 反过来的话，文件名是随机 UUID，行一删就再也
+   定位不到那个文件，只能扫目录找孤儿，而孤儿里躺着的是**有效令牌**。现在这一侧最坏
+   是「文件已删、行还在」：读得到 `not_found`，界面提示重新登录，而删除可以原样重试
+   （删文件、删行都幂等）。行删除失败会返回 `recordError = record_delete_failed`，
+   不谎报成功。
+3. **老账号不迁移。** 只要行的引用还是 `keychain:`，读写都照旧：`write_own` 走原快照
+   路径、`read_access` / `read_own_refresh` 走钥匙串、删除按旧规则连旧别名一起清。
+   CRED-3 一个字节都不搬 —— 迁移是 CRED-4 的显式动作。
+
+**刷新路径**（`handlers.rs::persist_rotated_json` / `commit_rotated_json`）
+
+* `replace_credentials` 在锁内一次换掉 access + refresh，不存在"新 access + 旧 refresh"；
+* 写失败 → 文件保持旧内容（原子替换），但服务端已作废旧 refresh，所以行标 `invalid`；
+* `revision` 冲突 → `superseded`（不覆盖、不标失效），盘上那份是别人先写成功的新令牌。
+
+**删除清理矩阵**
+
+| 引用 | 钥匙串键 | 本地文件 | 旧别名 |
+| --- | --- | --- | --- |
+| `keychain:` | 自己的 access / refresh | — | 最后一份时清 |
+| `localjson:v1:` | **不产生任何键** | 删自己那个文件 | 不清（从没写过） |
+| `magpie:v1:` | **不产生任何键** | — | 不清（CRED-4 的回滚依据） |
+
+`DeleteReport` 分列 `removedKeys` / `removedSecrets` / `failedKeys` / `failedSecrets` /
+`recordError`；`accounts.delete` 的响应同样分列 `failedKeys` 与 `failedSecrets`。
+
+**本阶段没做**
+
+- Qoder 的浏览器 / 设备授权、PAT（`credits` 读取路径）—— CRED-3b。
+- 旧 Keychain 批量迁移与 UI —— CRED-4。
+- Worker 全链路免弹窗收口与端到端验收 —— CRED-5。
+
+**已知限制**
+
+钥匙串与 SQLite 之间没有跨存储事务（`#84` 复审已记录）。可能出现的中间态只有一种：
+凭据已删、记录还在。两个删除步骤都是幂等的，重试即收敛；CRED-4/5 会补一致性检查与
+恢复提示。
 
 ## 9. 风险
 
