@@ -54,7 +54,9 @@ struct AddWorkbuddyAccountSheet: View {
                 header
                 Divider().overlay(ConsoleTheme.border)
             }
-            content
+            // 内容区独立滚动：最小窗口下二维码与状态说明再多也不会把底部按钮挤出去。
+            ScrollView { content }
+                .frame(maxHeight: 420)
             Divider().overlay(ConsoleTheme.border)
             footer
         }
@@ -128,7 +130,7 @@ struct AddWorkbuddyAccountSheet: View {
             .disabled(start == nil || starting || isTerminal)
 
             Text("浏览器里登录完成后这里会自动刷新；也可以用下面的二维码在手机上扫。")
-                .font(.system(size: 10))
+                .font(.system(size: 11))
                 .foregroundStyle(ConsoleTheme.tertiaryText)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
@@ -226,7 +228,7 @@ struct AddWorkbuddyAccountSheet: View {
                         .foregroundStyle(ConsoleTheme.text)
                     if let deadline {
                         Text("二维码 \(remainingText(until: deadline)) 后过期")
-                            .font(.system(size: 10))
+                            .font(.system(size: 11))
                             .foregroundStyle(ConsoleTheme.tertiaryText)
                     }
                 }
@@ -259,7 +261,7 @@ struct AddWorkbuddyAccountSheet: View {
     private var footer: some View {
         HStack(spacing: 8) {
             Text("凭据保存在本机钥匙串，不会写入数据库或日志")
-                .font(.system(size: 10))
+                .font(.system(size: 11))
                 .foregroundStyle(ConsoleTheme.tertiaryText)
             Spacer(minLength: 8)
             if !isSuccess {

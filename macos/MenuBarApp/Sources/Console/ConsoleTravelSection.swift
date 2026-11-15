@@ -104,7 +104,7 @@ struct ConsoleTravelSection: View {
                         }
                     }
                     Text(status?.secondaryText ?? "还没检查")
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundStyle(ConsoleTheme.tertiaryText)
                         .lineLimit(1)
                 }
@@ -165,7 +165,7 @@ struct ConsoleTravelSection: View {
 
             if let warning = status?.warningText {
                 Text(warning)
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(ConsoleTheme.warning)
                     .lineLimit(2)
                     .padding(.leading, 2)
@@ -213,11 +213,11 @@ struct ConsoleTravelSection: View {
         VStack(alignment: .leading, spacing: 3) {
             if let notice = store.travelNotice {
                 Text(notice)
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(ConsoleTheme.secondaryText)
             }
             Text(hostNote)
-                .font(.system(size: 10))
+                .font(.system(size: 11))
                 .foregroundStyle(ConsoleTheme.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }

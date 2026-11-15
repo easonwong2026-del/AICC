@@ -89,7 +89,7 @@ struct MagpieImportSheet: View {
                     .foregroundStyle(candidate.expired ? ConsoleTheme.tertiaryText : ConsoleTheme.text)
                     .lineLimit(1)
                 Text(candidate.uid)
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(ConsoleTheme.tertiaryText)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -98,7 +98,7 @@ struct MagpieImportSheet: View {
             Spacer(minLength: 8)
 
             Text(candidate.statusText)
-                .font(.system(size: 10))
+                .font(.system(size: 11))
                 .foregroundStyle(candidate.expired ? ConsoleTheme.danger : ConsoleTheme.secondaryText)
         }
         .padding(.horizontal, 12)

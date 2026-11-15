@@ -43,7 +43,8 @@ struct QoderDeviceAuthSheet: View {
         VStack(spacing: 0) {
             header
             Divider().overlay(ConsoleTheme.border)
-            content
+            ScrollView { content }
+                .frame(maxHeight: 400)
             Divider().overlay(ConsoleTheme.border)
             footer
         }
@@ -102,7 +103,7 @@ struct QoderDeviceAuthSheet: View {
             .disabled(start == nil || starting || isTerminal)
 
             Text("浏览器里选好账号并确认授权后，这里会自动完成；也会显示二维码，方便换到手机上扫。")
-                .font(.system(size: 10))
+                .font(.system(size: 11))
                 .foregroundStyle(ConsoleTheme.tertiaryText)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
@@ -192,7 +193,7 @@ struct QoderDeviceAuthSheet: View {
             }
             if let failure {
                 Text(failure)
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(ConsoleTheme.tertiaryText)
                     .multilineTextAlignment(.center)
             }

@@ -9,7 +9,7 @@ import SwiftUI
 //
 // 数据本身不代表任何真实账号：UID、邮箱、额度都是编的。
 
-#if AICC_VISUAL_TEST
+#if AICC_CONSOLE_VISUAL
 
 struct ConsoleVisualFixture {
     var accounts: [ConsoleAccount] = []

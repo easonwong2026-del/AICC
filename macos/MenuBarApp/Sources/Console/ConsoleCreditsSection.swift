@@ -57,7 +57,7 @@ struct ConsoleCreditsSection: View {
 
             if let notice = store.qoderCreditsNotice {
                 Text(notice)
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(ConsoleTheme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -89,26 +89,26 @@ struct ConsoleCreditsSection: View {
                         .font(.system(size: 12, weight: .semibold))
                         .lineLimit(1)
                     Text(item.editionName)
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundStyle(ConsoleTheme.tertiaryText)
                     Spacer(minLength: 8)
                     if !item.supported {
                         Text("未支持")
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(size: 11, weight: .medium))
                             .padding(.horizontal, 7)
                             .padding(.vertical, 3)
                             .background(ConsoleTheme.tertiaryText.opacity(0.12), in: Capsule())
                             .foregroundStyle(ConsoleTheme.secondaryText)
                     } else if item.autoEnabled {
                         Text("自动已开")
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(size: 11, weight: .medium))
                             .padding(.horizontal, 7)
                             .padding(.vertical, 3)
                             .background(ConsoleTheme.accentSoft, in: Capsule())
                             .foregroundStyle(ConsoleTheme.accent)
                     } else {
                         Text("自动关闭")
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(size: 11, weight: .medium))
                             .padding(.horizontal, 7)
                             .padding(.vertical, 3)
                             .background(ConsoleTheme.tertiaryText.opacity(0.12), in: Capsule())
@@ -140,7 +140,7 @@ struct ConsoleCreditsSection: View {
                     ))
                     .toggleStyle(.switch)
                     .controlSize(.mini)
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     // 未验证的版本打开开关只会制造"为什么没领到"的假问题。
                     .disabled(!item.supported || store.qoderCreditsBusy == item.accountId)
 
@@ -153,24 +153,24 @@ struct ConsoleCreditsSection: View {
                 if let last = item.lastRun {
                     HStack(spacing: 6) {
                         Text(last.triggerLabel)
-                            .font(.system(size: 10))
+                            .font(.system(size: 11))
                             .foregroundStyle(ConsoleTheme.tertiaryText)
                         Text(last.outcomeLabel)
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(last.isSuccess ? ConsoleTheme.success : ConsoleTheme.warning)
                         if let credits = last.credits {
                             Text("+\(WorkerQuotaRow.format(credits)) Credits")
-                                .font(.system(size: 10))
+                                .font(.system(size: 11))
                                 .foregroundStyle(ConsoleTheme.secondaryText)
                         }
                         Text(ConsoleQuotaView.localTimestamp(last.executedAt))
-                            .font(.system(size: 10))
+                            .font(.system(size: 11))
                             .foregroundStyle(ConsoleTheme.tertiaryText)
                         Spacer(minLength: 0)
                     }
                 } else {
                     Text("还没有领取记录")
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundStyle(ConsoleTheme.tertiaryText)
                 }
 
@@ -179,22 +179,22 @@ struct ConsoleCreditsSection: View {
                         ForEach(runs.prefix(5)) { run in
                             HStack(spacing: 6) {
                                 Text(run.triggerLabel)
-                                    .font(.system(size: 10))
+                                    .font(.system(size: 11))
                                     .foregroundStyle(ConsoleTheme.tertiaryText)
                                     .frame(width: 28, alignment: .leading)
                                 Text(run.outcomeLabel)
-                                    .font(.system(size: 10))
+                                    .font(.system(size: 11))
                                     .foregroundStyle(run.isSuccess ? ConsoleTheme.success : ConsoleTheme.warning)
                                 if let detail = run.errorDetail, !detail.isEmpty {
                                     Text(detail)
-                                        .font(.system(size: 10))
+                                        .font(.system(size: 11))
                                         .foregroundStyle(ConsoleTheme.tertiaryText)
                                         .lineLimit(1)
                                         .truncationMode(.tail)
                                 }
                                 Spacer(minLength: 0)
                                 Text(ConsoleQuotaView.localTimestamp(run.executedAt))
-                                    .font(.system(size: 10, design: .monospaced))
+                                    .font(.system(size: 11, design: .monospaced))
                                     .foregroundStyle(ConsoleTheme.tertiaryText)
                             }
                         }

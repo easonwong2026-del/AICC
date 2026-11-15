@@ -41,7 +41,8 @@ struct QoderPatSheet: View {
         VStack(spacing: 0) {
             header
             Divider().overlay(ConsoleTheme.border)
-            content
+            ScrollView { content }
+                .frame(maxHeight: 380)
             Divider().overlay(ConsoleTheme.border)
             footer
         }
@@ -93,7 +94,7 @@ struct QoderPatSheet: View {
                 }
                 .buttonStyle(.link)
                 Text("生成的令牌只在那个页面显示一次，复制后立刻回到这里粘贴。")
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(ConsoleTheme.tertiaryText)
             }
 
@@ -106,7 +107,7 @@ struct QoderPatSheet: View {
                     .font(.system(size: 12, design: .monospaced))
                     .disabled(saving || saved != nil)
                 Text("令牌只写进系统钥匙串；AICC 的数据库、日志和截图里都不会出现它。")
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(ConsoleTheme.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -125,7 +126,7 @@ struct QoderPatSheet: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(ConsoleTheme.success)
                 Text("身份验证通过不代表它有权领取 Credits。请在「额度」页对 \(saved.edition.displayName) 运行一次检测，看实际权限。")
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(ConsoleTheme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -140,7 +141,7 @@ struct QoderPatSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
                 if !failure.hint.isEmpty {
                     Text(failure.hint)
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundStyle(ConsoleTheme.secondaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
