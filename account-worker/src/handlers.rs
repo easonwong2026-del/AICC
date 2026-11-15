@@ -339,7 +339,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                 None => Ok(json!({
                     "settings": {
                         crate::auth::broker::PREFERRED_SETTING: crate::auth::broker::preferred_source(app),
-                        crate::auth::consent::JSON_CONSENT_SETTING: if crate::auth::consent::json_storage_enabled(app) { "1" } else { "0" },
+                        crate::auth::consent::JSON_CONSENT_SETTING: crate::auth::consent::stored_value(app),
                     }
                 })),
             }
@@ -1959,17 +1959,17 @@ fn persist_login(
 /// 不存在"新 access + 旧 refresh"的中间态；写失败时旧凭据原样有效。
 fn persist_rotated_json(
     app: &App,
+    account: &crate::storage::AccountRecord,
     row: &crate::storage::AuthorizationRecord,
     access: &str,
     refresh: Option<&str>,
     expires: Option<&str>,
 ) -> RpcResult<Value> {
     use crate::credentials::localjson::LocalJsonStore;
-    use crate::credentials::reference::CredentialRef;
 
-    let secret_id = match CredentialRef::parse(&row.access_ref) {
-        Ok(CredentialRef::LocalJson { secret_id }) => secret_id,
-        _ => {
+    let secret_id = match crate::auth::owned::secret_id_of(row) {
+        Ok(secret_id) => secret_id,
+        Err(_) => {
             return Ok(json!({
                 "state": "invalid",
                 "needsRelogin": true,
@@ -1980,60 +1980,66 @@ fn persist_rotated_json(
             }))
         }
     };
-    let store = LocalJsonStore::for_paths(&app.paths);
-    let current = match store.load(&secret_id) {
-        Ok(record) => record,
-        Err(err) => {
-            return Ok(json!({
-                "state": "invalid",
-                "needsRelogin": true,
-                "error": {
-                    "kind": "credential_unreadable",
-                    "message": crate::rpc::sanitize(&err.message),
-                },
-            }))
-        }
+    // 轮换会**写**这个文件：和读路径一样先验归属。引用指错时写下去就是覆盖别人的令牌。
+    let verified = match crate::auth::owned::load(app, account, row) {
+        Ok(secret) => secret,
+        Err(err) => return Ok(unverified_rotation(&err)),
     };
+    let store = LocalJsonStore::for_paths(&app.paths);
     commit_rotated_json(
-        app,
-        row,
-        &store,
-        &secret_id,
-        current.revision,
-        access,
-        refresh,
-        expires,
+        app, row, &store, &secret_id, &verified, access, refresh, expires,
     )
+}
+
+/// 归属/可读性校验没过时的回应。
+///
+/// 串号（`conflict`）**不**标 `needsRelogin`：重新登录解决不了"库指错了文件"，
+/// 还会把这条坏引用盖成一条新授权，问题就此消失。让它显式留在界面上。
+fn unverified_rotation(err: &crate::credentials::CredentialError) -> Value {
+    let kind = match err.kind {
+        crate::credentials::CredentialErrorKind::Conflict => "credential_ownership_mismatch",
+        crate::credentials::CredentialErrorKind::NotFound => "credential_unreadable",
+        other => other.as_str(),
+    };
+    json!({
+        "state": "invalid",
+        "needsRelogin": err.kind != crate::credentials::CredentialErrorKind::Conflict,
+        "error": {
+            "kind": kind,
+            "message": crate::rpc::sanitize(&err.message),
+        },
+    })
 }
 
 /// 真正落盘的那一步。`expected_revision` 显式传进来：调用方读到的版本是多少，
 /// 这次写入就必须建立在那个版本上。并发刷新时后到的那一方会拿到 `conflict`，
 /// 结果是 `superseded`（不覆盖、不标失效），而不是把人家的新令牌盖掉。
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn commit_rotated_json(
     app: &App,
     row: &crate::storage::AuthorizationRecord,
     store: &crate::credentials::localjson::LocalJsonStore,
     secret_id: &str,
-    expected_revision: u64,
+    // 已经验过归属的那份快照：`revision` 与旧 refresh 都从它取。
+    verified: &crate::credentials::localjson::StoredSecret,
     access: &str,
     refresh: Option<&str>,
     expires: Option<&str>,
 ) -> RpcResult<Value> {
     use crate::credentials::localjson::Credentials;
-    use crate::credentials::reference::CredentialSlot;
 
-    // 服务端没轮换 refresh 时，旧的那份继续有效：从文件里读回来一起写。
+    // 服务端没轮换 refresh 时，旧的那份继续有效：用验过的那份快照里的值一起写。
     let credentials = match refresh {
         Some(next) => Credentials::oauth(access, next),
-        None => match store.token(secret_id, CredentialSlot::Refresh) {
-            Ok(previous) => Credentials::oauth(access, previous),
-            Err(_) => Credentials::access_only(access),
+        None => match verified.credentials.refresh_token.as_deref() {
+            Some(previous) => Credentials::oauth(access, previous),
+            None => Credentials::access_only(access),
         },
     };
     let expires_at = expires.and_then(crate::auth::service::parse_rfc3339);
 
-    match store.replace_credentials(secret_id, expected_revision, credentials, expires_at) {
+    match store.replace_credentials(secret_id, verified.revision, credentials, expires_at) {
         Ok(updated) => {
             let _ = crate::auth::service::record_status(app, row, "valid", expires, None);
             Ok(json!({
@@ -2174,7 +2180,7 @@ fn persist_rotated_tokens(
     };
     // PR-CRED-3：JSON 行整组换令牌（access + refresh 一次替换），不碰钥匙串。
     if row.storage_kind() == crate::storage::authz::STORAGE_LOCALJSON {
-        return persist_rotated_json(app, &row, access, refresh, expires);
+        return persist_rotated_json(app, &current, &row, access, refresh, expires);
     }
     let keys = crate::auth::service::own_keys(&current.id);
     let refresh_key = keys.refresh.clone().expect("own 一定有 refresh 键");
@@ -3930,6 +3936,102 @@ mod tests {
         assert_eq!(own_row(&app, &account_id).status, "invalid");
     }
 
+    /// P0 回归：轮换**写**路径也必须验归属 —— 引用指错时不能改写别人的令牌。
+    #[test]
+    fn rotation_refuses_to_write_another_accounts_secret() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid_a = "6f1c2d94-0000-0001-0002-0000000000f1";
+        let uid_b = "6f1c2d94-0000-0001-0002-0000000000f2";
+        persist_login(
+            &app,
+            &payload(uid_a, "access-a", Some("refresh-a")),
+            WbVariant::Cn,
+        )
+        .expect("login a");
+        persist_login(
+            &app,
+            &payload(uid_b, "access-b", Some("refresh-b")),
+            WbVariant::Cn,
+        )
+        .expect("login b");
+        let a = account(&app, uid_a);
+        let b = account(&app, uid_b);
+        let b_secret = secret_id_of(&app, &b.id);
+        let b_path = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths)
+            .root()
+            .join(format!("{b_secret}.json"));
+        let b_bytes = std::fs::read(&b_path).expect("read b");
+
+        // A 的引用被改成 B 的合法文件。
+        app.with_db(|db| {
+            db.exec_raw(&format!(
+                "UPDATE account_authorizations
+                    SET access_ref = 'localjson:v1:{b_secret}',
+                        refresh_ref = 'localjson:v1:{b_secret}'
+                  WHERE account_id = '{}' AND kind = 'own'",
+                a.id
+            ))
+        })
+        .expect("tamper");
+
+        let out = persist_rotated_tokens(
+            &app,
+            &a,
+            a.auth_epoch,
+            "attacker-access",
+            Some("attacker-refresh"),
+            None,
+        )
+        .expect("返回 invalid 而不是抛错");
+
+        assert_eq!(out["state"], json!("invalid"), "{out}");
+        assert_eq!(
+            out["error"]["kind"],
+            json!("credential_ownership_mismatch"),
+            "{out}"
+        );
+        assert_eq!(
+            out["needsRelogin"],
+            json!(false),
+            "串号不是「重新登录」能解决的，别把坏引用盖掉：{out}"
+        );
+
+        // B 的凭据一个字节都没变，而且仍然可读。
+        assert_eq!(std::fs::read(&b_path).expect("read b"), b_bytes);
+        assert_eq!(own_access(&app, &b.id).as_deref(), Some("access-b"));
+        assert_eq!(own_refresh(&app, &b.id).as_deref(), Some("refresh-b"));
+        // A 那一行也没被标成 invalid（不掩盖数据损坏）。
+        assert_eq!(own_row(&app, &a.id).status, "valid");
+    }
+
+    /// P1 回归：`settings.set` 认的键，单键 `settings.get` 也必须能读回来。
+    #[tokio::test]
+    async fn settings_round_trip_covers_the_plaintext_consent_key() {
+        let (app, _dir) = test_app_without_consent(SecureStore::memory());
+        let key = crate::auth::consent::JSON_CONSENT_SETTING;
+
+        let before = dispatch(&app, "settings.get", &json!({ "key": key }))
+            .await
+            .expect("get before");
+        assert_eq!(before["value"], json!("0"), "{before}");
+
+        dispatch(&app, "settings.set", &json!({ "key": key, "value": "1" }))
+            .await
+            .expect("set");
+
+        let after = dispatch(&app, "settings.get", &json!({ "key": key }))
+            .await
+            .expect("get after");
+        assert_eq!(after["value"], json!("1"), "{after}");
+        assert!(crate::auth::consent::json_storage_enabled(&app));
+
+        // 全量查询也要一致。
+        let all = dispatch(&app, "settings.get", &json!({}))
+            .await
+            .expect("get all");
+        assert_eq!(all["settings"][key], json!("1"), "{all}");
+    }
+
     /// 轮换成功：access 与 refresh 一次换掉，版本只前进一格。
     #[test]
     fn rotation_replaces_both_tokens_in_one_write() {
@@ -3980,7 +4082,7 @@ mod tests {
         let row = own_row(&app, &acc.id);
         let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
         let secret_id = secret_id_of(&app, &acc.id);
-        let snapshot = store.load(&secret_id).expect("load");
+        let snapshot = crate::auth::owned::load(&app, &acc, &row).expect("verified snapshot");
 
         // 另一个进程先写了同一个文件（它看到了同一个 revision）。
         store
@@ -3998,7 +4100,7 @@ mod tests {
             &row,
             &store,
             &secret_id,
-            snapshot.revision,
+            &snapshot,
             "new-access",
             Some("new-refresh"),
             None,

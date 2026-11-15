@@ -68,6 +68,11 @@ pub fn set_preferred_source(app: &App, value: &str) -> RpcResult<()> {
 pub fn read_setting(app: &App, key: &str) -> RpcResult<Option<String>> {
     match key {
         PREFERRED_SETTING => Ok(Some(preferred_source(app))),
+        // 能写就必须能读：`settings.set` 认的键，单键 `settings.get` 也要认，
+        // 否则界面只能靠 health 猜当前值。
+        crate::auth::consent::JSON_CONSENT_SETTING => {
+            Ok(Some(crate::auth::consent::stored_value(app)))
+        }
         other => Err(RpcError::invalid_params(format!("未知设置项：{other}"))),
     }
 }

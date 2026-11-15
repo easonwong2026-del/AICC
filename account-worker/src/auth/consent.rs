@@ -25,6 +25,16 @@ pub fn set_json_storage(app: &App, enabled: bool) -> RpcResult<()> {
     app.with_db(|db| db.set_setting(JSON_CONSENT_SETTING, if enabled { "1" } else { "0" }))
 }
 
+/// 设置表里的字面值（`"1"` / `"0"`）。`settings.get` 单键查询用它，避免
+/// "能写不能读"这种半截接口。
+pub fn stored_value(app: &App) -> String {
+    if json_storage_enabled(app) {
+        "1".to_string()
+    } else {
+        "0".to_string()
+    }
+}
+
 /// 给界面看的现状：`consentRequired` 为真时，前端必须先弹说明再让用户确认。
 pub fn status(app: &App) -> serde_json::Value {
     let enabled = json_storage_enabled(app);

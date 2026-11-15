@@ -277,6 +277,23 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 | 非法引用被静默重建 / 回退钥匙串 | `write_own` 遇到 `magpie:` / `unknown` 直接报 `credential_ref_unusable`；`read_own_refresh` 只有明确 `keychain:` 才走钥匙串；Broker 额外校验"引用种类配得上授权种类" |
 | 明文落盘早于风险告知 | 新登录**默认不写 JSON**：`credentials_json_consent` 未置位时继续写钥匙串，`health.credentials` 暴露 `consentRequired`，登录响应带 `credentialStorage` / `jsonConsentRequired` |
 
+**复审第三轮（#85 第三次提交）**
+
+| 问题 | 修法 |
+| --- | --- |
+| 轮换写（`persist_rotated_json`）绕过归属校验 | 写之前也走 `owned::load`；`commit_rotated_json` 改成吃"已验证快照"，`revision` 与旧 refresh 都从它取。串号返回 `credential_ownership_mismatch` 且**不**标 `needsRelogin`（重新登录只会把坏引用盖成一条新授权） |
+| `settings.get` 单键读不到新设置 | `broker::read_setting` 认 `credentials_json_consent`，返回 `"1"` / `"0"`；全量查询复用同一个 `stored_value()` |
+| 跨进程证据只有线程级 | 新增离线 harness `src/cred_harness.rs`：两个**真进程**共享临时 SQLite + `secrets/`，文件握手摆出竞争窗口，父进程断言最终状态 |
+
+**跨进程 harness 的两个场景**
+
+| 用例 | 断言 |
+| --- | --- |
+| 并发首次登录 | 恰好一个 `won` / 一个 `superseded`；DB 只有一条 own 授权；`secrets/` 只剩 1 份且就是被引用的那份，内容属于赢家 |
+| 迟到的登录（另一个进程） | 引用被挪走后旧快照写入被拒（`superseded`）；行仍是新引用；迟到者写的旧文件被清掉，不留有效令牌 |
+
+harness 不联网、不使用真实令牌（`SecureStore::memory` + 临时目录），跑一次约 0.1s。
+
 ### 归属校验为什么必须在业务层
 
 文件 `0600` 只回答"别的用户能不能读"，回答不了"这个文件是不是这条授权的"。引用写错
