@@ -819,6 +819,16 @@ pub(super) fn validate_migration(record: &CredentialMigrationRecord) -> RpcResul
     if !record.migrated_ref.starts_with(LOCAL_JSON_PREFIX) {
         return Err(bad("migratedRef"));
     }
+    // 原令牌摘要必须存在：没有它，"回滚前核对还是不是那一份令牌"这道门就是空的
+    // （第七轮复审 P1-1，对应 v22 曾经允许写入 None 的那条路径）。
+    if record
+        .original_fingerprint
+        .as_deref()
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err(bad("originalFingerprint"));
+    }
     if record.migrated_version < 1 {
         return Err(bad("migratedVersion"));
     }
@@ -826,11 +836,16 @@ pub(super) fn validate_migration(record: &CredentialMigrationRecord) -> RpcResul
 }
 
 /// 写迁移记录，**在调用方给的事务里执行**。
+///
+/// `ON CONFLICT` 上的 `WHERE` 是第七轮复审 P0-1 的补丁：待清理的旧记录
+/// （`cleanup_pending = 1`）**不许被下一次迁移的 UPSERT 抹掉**。否则
+/// "回滚留下的副本 F1 删不掉 → 用户再点一次迁移 → 记录被改成 F2、标志清零"
+/// 会让 F1 永远留在盘上，而且再没有任何地方记得它。
 pub(super) fn write_migration(
     conn: &rusqlite::Connection,
     record: &CredentialMigrationRecord,
 ) -> RpcResult<()> {
-    conn.execute(
+    let changed = conn.execute(
         "INSERT INTO credential_migrations (
              id, domain, account_id, source, original_ref, original_fingerprint,
              original_refresh_fingerprint, migrated_ref, migrated_version, created_at,
@@ -843,7 +858,9 @@ pub(super) fn write_migration(
              migrated_ref = excluded.migrated_ref,
              migrated_version = excluded.migrated_version,
              created_at = excluded.created_at,
-             cleanup_pending = excluded.cleanup_pending",
+             cleanup_pending = excluded.cleanup_pending
+         WHERE credential_migrations.cleanup_pending = 0
+            OR credential_migrations.migrated_ref = excluded.migrated_ref",
         params![
             record.id,
             record.domain,
@@ -858,6 +875,16 @@ pub(super) fn write_migration(
             i64::from(record.cleanup_pending),
         ],
     )?;
+    if changed == 0 {
+        // WHERE 把这次 UPSERT 拒了：同一个 id 上还压着一笔没还的清理债务。
+        return Err(RpcError::storage(
+            "上一轮回滚留下的副本还没清理掉，本次迁移已放弃（先让清理完成再迁移）",
+        )
+        .with_data(serde_json::json!({
+            "kind": "cleanup_pending",
+            "migrationId": record.id,
+        })));
+    }
     Ok(())
 }
 

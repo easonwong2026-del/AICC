@@ -121,14 +121,17 @@ pub fn keychain_reference(account_id: &str, source: &str) -> String {
 /// 所以钥匙串的写入、读-比-删、以及回滚都必须持同一把锁 —— 这里直接复用凭据目录的
 /// `.lock`，JSON 写入与钥匙串写入因此在同一把锁上排队。
 struct KeychainLock {
-    _lock: crate::credentials::localjson::FileLock,
+    _gate: crate::credentials::gate::CredentialGate,
 }
 
+/// 钥匙串操作也走**同一道门**（进程内互斥 + 跨进程 flock）。
+///
+/// 之前这里只取文件锁：单进程内它与 `auth_write_guard` 是两把锁，WorkBuddy 的
+/// 登录/刷新可以在这段"读-比-删"中间写进整组新令牌（第七轮复审 P0-2）。
 fn keychain_lock(app: &App) -> Result<KeychainLock, CredentialError> {
-    let store = LocalJsonStore::for_paths(&app.paths);
-    Ok(KeychainLock {
-        _lock: store.lock_exclusive()?,
-    })
+    crate::credentials::gate::begin(app)
+        .map(|gate| KeychainLock { _gate: gate })
+        .map_err(|err| CredentialError::new(CredentialErrorKind::LockTimeout, err.message))
 }
 
 /// 一次**凭据事务**：同一来源的「读观察 → 写凭据 → 数据库条件提交 → 失败清理」
@@ -155,23 +158,19 @@ fn keychain_lock(app: &App) -> Result<KeychainLock, CredentialError> {
 /// 只允许 `.lock` → SQLite。持锁期间**不做**任何会反向取锁的事；`LocalJsonStore`
 /// 的每个方法会重入同一把锁（`FileLock` 支持同线程重入），不会自我阻塞。
 ///
-/// ## 读路径为什么不进来
-///
-/// `credits::resolve_token` 只读令牌、不写任何状态，而写入顺序永远是
-/// "先写凭据、后提交行"，所以它读到的最坏情况是**上一版令牌**，不会读到半份
-/// （钥匙串的 access/refresh 是两份值，但请求只需要 access）。让它也排队只会
-/// 把一次网络请求压到凭据写入后面，没有收益。
+/// 第七轮复审 P0-2 之后，这把锁不再只是 Qoder 的：它由
+/// [`crate::credentials::gate`] 统一提供（进程内互斥 + 跨进程 flock，顺序固定），
+/// WorkBuddy 的登录 / 刷新 / 删除 / 迁移走同一道门 —— 否则"迁移读到 access 之后、
+/// 读到 refresh 之前，另一个进程写进整组新令牌"会造出一份 access/refresh 混搭的副本。
 pub struct SecretTxn {
-    _lock: crate::credentials::localjson::FileLock,
+    _gate: crate::credentials::gate::CredentialGate,
 }
 
 /// 开始一次凭据事务。**调用方必须把它持有到提交/回滚都结束。**
 pub fn begin(app: &App) -> RpcResult<SecretTxn> {
-    let store = LocalJsonStore::for_paths(&app.paths);
-    let lock = store
-        .lock_exclusive()
-        .map_err(|err| to_rpc(err, "qoder/lock"))?;
-    Ok(SecretTxn { _lock: lock })
+    Ok(SecretTxn {
+        _gate: crate::credentials::gate::begin(app)?,
+    })
 }
 
 /// 这一行现在把凭据放在哪里。

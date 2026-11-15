@@ -342,6 +342,11 @@ pub fn write_own(
     refresh: Option<&str>,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> RpcResult<OwnWrite> {
+    // 凭证写入的**唯一门禁**（第七轮复审 P0-2）：WorkBuddy 的登录 / 刷新 / 迁移读取
+    // 与 Qoder 的写入共用同一把锁（进程内互斥 + 跨进程 flock）。放在这里而不是只放在
+    // 各调用点：这是 WorkBuddy 自有令牌唯一的落盘入口，将来新增调用方也不会漏。
+    // 同线程可重入，外层已经进过门时这层是空守卫。
+    let _gate = crate::credentials::gate::begin(app)?;
     let existing = app.with_db(|db| db.find_authorization(account_id, ids::KIND_OWN))?;
 
     if let Some(row) = existing.as_ref() {

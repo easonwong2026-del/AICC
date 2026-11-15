@@ -4,7 +4,9 @@
 
 use serde_json::{json, Value};
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 
 use crate::app::App;
 use crate::providers::qoder_edition::QoderEdition;
@@ -196,7 +198,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
         "accounts.delete" => {
             let id = require_str(params, "id")?;
             // 与导入 / resync / refresh 串行：否则删除刚完成，在途的 resync 又会把令牌写回去。
-            let _guard = auth_write_guard();
+            let _gate = crate::credentials::gate::begin(app)?;
             let Some(account) = app.with_db(|db| db.get_account(&id))? else {
                 return Ok(json!({
                     "deleted": false,
@@ -358,7 +360,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
             match key.as_str() {
                 crate::auth::broker::PREFERRED_SETTING => {
                     // 与授权写入串行：切首选来源的同时在跑 resync，镜像会来回翻。
-                    let _guard = auth_write_guard();
+                    let _gate = crate::credentials::gate::begin(app)?;
                     crate::auth::broker::set_preferred_source(app, &value)?;
                     // 首选变了，旧版兼容镜像必须跟着换。失败不回滚设置本身 ——
                     // 设置是用户意图，镜像是派生值，报出来比悄悄不一致好。
@@ -386,7 +388,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
         "auth.authorization.delete" => {
             let account_id = require_str(params, "accountId")?;
             let kind = require_str(params, "kind")?;
-            let _guard = auth_write_guard();
+            let _gate = crate::credentials::gate::begin(app)?;
             if app.with_db(|db| db.get_account(&account_id))?.is_none() {
                 return Err(RpcError::not_found(format!("账号不存在：{account_id}")));
             }
@@ -1039,19 +1041,12 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
     }
 }
 
-/// 凭据写入的进程内互斥。
+/// 凭据写入的**唯一门禁**在 `crate::credentials::gate`。
 ///
-/// 会改凭据的路径不止一条：扫码落库、Magpie 导入、401 重同步、刷新轮换、删除账号。
-/// worker 是单进程，一把锁就够保证「同一时刻只有一个写入者」，配合 `auth_epoch`
-/// 的版本比对，即便写入者拿的是几秒前的账号快照，也不会覆盖掉别人刚写好的授权。
-static AUTH_WRITE_LOCK: Mutex<()> = Mutex::new(());
-
-fn auth_write_guard() -> MutexGuard<'static, ()> {
-    // 上一个持锁者 panic 过也继续：这把锁保护的是"别同时写"，不是被保护的数据本身。
-    AUTH_WRITE_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-}
+/// 这里刻意不再提供一把"只有进程内 Mutex"的锁：那正是第七轮复审 P0-2 的根因
+/// （迁移持跨进程锁、WorkBuddy 写入只持进程内锁，于是两份令牌能混搭进同一份副本）。
+/// 会改凭据的路径统一 `let _gate = crate::credentials::gate::begin(app)?;` ——
+/// 先进程内互斥、后跨进程 flock，全代码只有这一个顺序。
 
 /// 快照已经过期（账号换了授权 / 其间被别的路径写过）。**不是错误，是拒绝写入**。
 pub(crate) fn superseded(reason: &str) -> RpcError {
@@ -1516,7 +1511,7 @@ fn import_logins(app: &App, logins: Vec<magpie::MagpieLogin>, keys: &[String]) -
         run_import_race_hook(&login.uid);
 
         // 每个账号的"写钥匙串 → 写库"必须在锁里完成，来源判断也在锁里。
-        let _guard = auth_write_guard();
+        let _gate = crate::credentials::gate::begin(app)?;
 
         let existing = app.with_db(|db| db.find_account("workbuddy", &login.uid))?;
         let provider = login.account_provider().unwrap_or("workbuddy");
@@ -1697,7 +1692,7 @@ pub(crate) fn resync_magpie_access(
     app: &App,
     account: &crate::storage::AccountRecord,
 ) -> RpcResult<Value> {
-    let _guard = auth_write_guard();
+    let _gate = crate::credentials::gate::begin(app)?;
     // 调用方可能拿着几秒前的快照（自动旅行就是这样）。先按 id 重新读一次库：
     // 版本变了说明"我手上这份已经不是现在这个账号"，直接放弃。
     let current = app
@@ -1898,7 +1893,7 @@ fn persist_login(
 ) -> RpcResult<Value> {
     // 整个落库过程都在锁里：钥匙串写入 + 数据库写入必须成对出现，
     // 否则并发的 resync / refresh 会看到中间态。
-    let _guard = auth_write_guard();
+    let _gate = crate::credentials::gate::begin(app)?;
     let uid = payload.profile.uid.clone();
     let account_id = crate::storage::account_id("workbuddy", &uid);
 
@@ -2258,7 +2253,7 @@ fn persist_rotated_tokens(
     refresh: Option<&str>,
     expires: Option<&str>,
 ) -> RpcResult<Value> {
-    let _guard = auth_write_guard();
+    let _gate = crate::credentials::gate::begin(app)?;
     // 刷新是一次网络往返：出发时读的账号，回来时可能已经被扫码换成了新的授权。
     // 版本对不上就什么都不写 —— 那份新令牌属于"上一个授权"，写下去就是覆盖。
     let current = match app.with_db(|db| db.get_account(&account.id))? {

@@ -653,7 +653,9 @@ credential_migrations
 
 `cleanup_pending` 是 v23 加的：回滚**不能先删记录再删文件**，否则文件删失败就再也
 说不清哪个副本该清。现在标记与改引用同一个事务，删文件失败时记录留着，
-`verify` 上报、下一次 `run` / `rollback` 重试。
+`verify` 上报、下一次 `run` / `rollback` 重试。而**有未清理债务的记录不容许被下一次
+迁移的 UPSERT 覆盖**（`ON CONFLICT … WHERE cleanup_pending = 0`，迁移入口还会先给出
+`cleanup_pending` 原因码），否则旧副本会失联。
 
 ### RPC 契约
 
@@ -691,12 +693,14 @@ SecretTxn（.lock）                 ← 盘点、备份、迁移都在锁内，
 ### 回滚的六道门
 
 1. 必须有迁移记录（否则 `not_migrated`，跳过）；
-2. 记录里的 `original_ref` 必须是钥匙串键（空串 → `record_unusable`，跳过）；
+2. 记录里的 `original_ref` 必须是钥匙串键（空串 → `record_unusable`，跳过），
+   且 `original_fingerprint` 必须存在（缺 → `record_without_digest`，跳过）；
 3. 行当前引用必须仍是记录里的 `migrated_ref`；
 4. 行版本必须仍是 `migrated_version`（之后重新登录过 → 跳过，**不动有效授权**）；
 5. 原 Keychain 的 access 与 refresh 必须可读，且摘要与记录一致（换了就不回滚）；
-6. **一个事务**：改回引用 + 标记 `cleanup_pending` → 之后才删副本；删之前对
-   **两张表**做全局引用核对 + 归属核对；删失败就把记录留着等重试。
+6. **一个事务**：改回引用 + 标记 `cleanup_pending` → 之后才删副本；删之前核对
+   两张表引用 + 四项归属（`authorizationId` / `platform` / `source` / `credentialKind`）
+   + revision CAS；删失败就把记录留着等重试。
 
 
 ### 备份里有什么
@@ -725,7 +729,9 @@ SecretTxn（.lock）                 ← 盘点、备份、迁移都在锁内，
 | 扫描 `secrets/v1` 中没有任何行引用的文件 | 迁移/删除中途被打断留下的副本（**只报不删**） |
 | `cleanup_pending` 的记录单独列在 `pendingCleanup[]` | 回滚过、副本没删掉：可定位、下次回滚重试 |
 
-### 第七轮复审修复（事务一致性收口）
+### 第八轮复审修复（事务一致性收口）
+
+> 编号按 PR #88 的评审轮次（这次评审意见标注为「第六轮」），与上面 CRED-3b 的轮次无关。
 
 | 编号 | 问题 | 修复 |
 | --- | --- | --- |
@@ -734,6 +740,20 @@ SecretTxn（.lock）                 ← 盘点、备份、迁移都在锁内，
 | P0-C | 摘要二次读取、失败可空、只有 8 位 | `write_json_copy` 返回**同一份字节**的完整 SHA-256；读失败即迁移失败；校验兼容旧 8 位指纹但不新写 |
 | P1-D | 历史迁移记录被当成校验依据 → 新授权误报损坏；refresh 换内容漏报 | 记录只在 `(migrated_ref, migrated_version)` 仍匹配时作数；live 记录追加 refresh 摘要比对；`staleRecords` 单独计数 |
 | P1-E | 回滚先删记录、再尽力删文件，失败只剩日志 | v23 `cleanup_pending`：标记与改引用同一事务；删成功才删记录；`verify` 上报、`run` / `rollback` 开头重试 |
+
+### 第九轮复审修复（锁域统一、清理债务、归属收紧）
+
+> 评审意见标注为「368076f 最终复审」。
+
+| 编号 | 问题 | 修复 | 错误时状态 |
+| --- | --- | --- | --- |
+| **P0-1** | 待清理记录被下一次迁移的 UPSERT 覆盖 → 旧副本 F1 失联 | 迁移入口先查同源 `cleanup_pending`，有就 `skipped: cleanup_pending`；`write_migration` 的 `ON CONFLICT ... WHERE cleanup_pending = 0 OR migrated_ref = excluded.migrated_ref` 是第二道，命中 0 行直接报错 | 债务记录原封不动、不产生新副本；清理完成后迁移自动恢复 |
+| **P0-2** | WorkBuddy 令牌写入只持进程内锁，迁移持跨进程锁 → 能造出 access/refresh 混搭的副本 | 新增 `credentials::gate`：**进程内 Mutex + 跨进程 flock**，顺序固定、同线程可重入。`auth::service::write_own`（唯一落盘入口）、handlers 的 7 处 mutate、`qoder_secret::begin` / `keychain_lock` 全部改走它；`auth_write_guard` 删除 | 拿不到锁就失败（"另一个进程正在写凭据"），绝不无锁改写 |
+| P1-1 | 旧 v22 记录 `original_fingerprint = NULL` 时回滚跳过一致性检查 | `rollback_basis` 与 `validate_migration` 都要求摘要非空；`verify_original` 签名改成 `&str`，缺失即 `record_without_digest` 跳过。旧 8 位摘要仍兼容（读旧写新） | 不显示可回滚、不执行回滚、行与副本都不动 |
+| P1-2 | Qoder 核验用"任何记录"判断 refresh 需求 → 重新授权后误报损坏 | `wants_refresh` 改用 **live** 记录 | 新授权报 `ok`，旧记录只计 `staleRecords` |
+| P1-3 | 删副本只核 `authorizationId`，且没有 revision 守卫 | `cleanup_copy` 四道核对（两张表引用 / `authorizationId` / `platform`+`source`+`credentialKind` / `delete_at_revision` CAS） | 不符就保留文件与 `cleanup_pending`，`verify` 报出来 |
+
+锁序只有一种：**进程内 Mutex → 跨进程 flock → SQLite**。`gate::begin` 同线程重入返回空守卫，所以嵌套调用（`write_own` 在 `persist_login` 里、`LocalJsonStore` 的每个写方法在事务里）不会自锁。
 
 
 ### 不做的
@@ -771,6 +791,14 @@ SecretTxn（.lock）                 ← 盘点、备份、迁移都在锁内，
 | 迁移后重新授权 → 不误报损坏（P1-D） | `verify_does_not_report_a_reauthorized_row_as_broken` |
 | refresh 被换 → 报异常（P1-D） | `verify_flags_a_migrated_file_whose_refresh_was_swapped` |
 | 副本删不掉 → 留痕 + 重试（P1-E） | `a_copy_that_cannot_be_deleted_stays_visible_and_is_retried` |
+| 清理债务不被下一次迁移覆盖（P0-1） | `a_pending_cleanup_is_never_overwritten_by_the_next_migration` |
+| 没有原令牌摘要的旧记录不可回滚（P1-1） | `a_record_without_an_original_digest_cannot_be_rolled_back` |
+| 旧 8 位摘要仍能回滚（P1-1 兼容策略） | `a_legacy_short_digest_still_rolls_back` |
+| 重新授权后没有 refresh → 核验不误报（P1-2） | `verify_accepts_a_reauthorized_qoder_row_that_dropped_its_refresh` |
+| 副本身份不符 → 保留不删（P1-3） | `cleanup_keeps_a_copy_whose_identity_does_not_match` |
+| 锁域唯一 + 同线程可重入（P0-2） | `credentials::gate::tests::the_gate_is_reentrant_on_one_thread_and_holds_the_lock_once` |
+| 第二个写入者必须排队（P0-2） | `credentials::gate::tests::a_second_writer_cannot_enter_while_the_gate_is_held` |
+| WorkBuddy 令牌写入也在门后（P0-2） | `credentials::gate::tests::a_workbuddy_token_write_waits_for_the_same_gate` |
 | v22 / v23 迁移幂等 | `storage::tests::v22_adds_the_credential_migration_table_idempotently` |
 | 面板解析与"可回滚才可点"、待清理不算故障 | `macos/MenuBarApp/Tests/CredentialMigrationModelsTests` |
 
