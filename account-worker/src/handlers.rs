@@ -89,6 +89,8 @@ pub const METHODS: &[&str] = &[
     "auth.workbuddy.refresh",
     "providers.magpie.accounts",
     "auth.magpie.import",
+    // PR-CRED-2：把旧的钥匙串引用改成 Magpie 动态关联（幂等、不猜归属）。
+    "auth.magpie.relink",
     "auth.workbuddy.status",
     // ---- Buddy 旅行（PR1c）----
     "travel.summary",
@@ -922,6 +924,14 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
             import_magpie_accounts(app, &keys)
         }
 
+        "auth.magpie.relink" => {
+            let account_id = params
+                .get("accountId")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            crate::auth::relink::relink_pending(app, account_id.as_deref())
+        }
+
         other => Err(RpcError::method_not_found(other)),
     }
 }
@@ -1040,7 +1050,20 @@ fn authorization_fleet(app: &App) -> Value {
         }
         rows.push(json!({ "kind": kind, "status": status, "count": n }));
     }
-    json!({ "usable": usable, "rows": rows, "preferred": crate::auth::broker::preferred_source(app) })
+    // v20：凭据现在可能落在三处。`keychain` 仍有份数 = 还没走动态关联的旧授权，
+    // 界面据此判断"迁移是否做完"，所以这里按存储种类给一份计数。
+    let storage = app
+        .with_db(|db| db.authorization_storage_counts())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(kind, count)| json!({ "kind": kind, "count": count }))
+        .collect::<Vec<_>>();
+    json!({
+        "usable": usable,
+        "rows": rows,
+        "storage": storage,
+        "preferred": crate::auth::broker::preferred_source(app),
+    })
 }
 
 fn env_info(app: &App) -> Value {
@@ -1449,8 +1472,7 @@ fn import_logins(app: &App, logins: Vec<magpie::MagpieLogin>, keys: &[String]) -
             app,
             &account.id,
             &login.uid,
-            &login.access_token,
-            Some(&login.key),
+            &login.key,
             expires_at.as_deref(),
         ) {
             Ok(saved) => {
@@ -1619,8 +1641,7 @@ pub(crate) fn resync_magpie_access(
         app,
         &current.id,
         &current.uid,
-        &login.access_token,
-        Some(&login.key),
+        &login.key,
         expires.as_deref(),
     )?;
     Ok(json!({
@@ -2235,10 +2256,15 @@ mod tests {
         )
         .expect("browser login");
 
+        let want_ref = format!("magpie:v1:{}", "workbuddy-ai");
         assert_eq!(
-            magpie_access(&app, &record.id).as_deref(),
-            Some("borrowed-ai"),
+            magpie_ref(&app, &record.id).as_deref(),
+            Some(want_ref.as_str()),
             "自有登录不能覆盖借用授权"
+        );
+        assert!(
+            magpie_access(&app, &record.id).is_none(),
+            "借用授权不进钥匙串"
         );
         assert_eq!(
             own_access(&app, &record.id).as_deref(),
@@ -2414,6 +2440,13 @@ mod tests {
         read_key(app, &ids::refresh_key(account_id, ids::KIND_OWN))
     }
 
+    fn magpie_ref(app: &App, account_id: &str) -> Option<String> {
+        app.with_db(|db| db.find_authorization(account_id, ids::KIND_MAGPIE))
+            .ok()
+            .flatten()
+            .map(|row| row.access_ref)
+    }
+
     fn magpie_access(app: &App, account_id: &str) -> Option<String> {
         read_key(app, &ids::access_key(account_id, ids::KIND_MAGPIE))
     }
@@ -2450,15 +2483,34 @@ mod tests {
         assert_eq!(acc.auth_source, "own");
     }
 
+    /// PR-CRED-2 起导入**只登记引用**：钥匙串里既没有新键也没有旧别名。
     #[test]
-    fn magpie_import_writes_only_the_magpie_key() {
+    fn magpie_import_registers_a_reference_and_writes_no_keychain_key() {
         let (app, _dir) = test_app(SecureStore::memory());
         let uid = "6f1c2d94-2222-3333-4444-555566667777";
         let out = import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
         assert_eq!(out["imported"], json!(1), "{out}");
 
         let acc = account(&app, uid);
-        assert_eq!(magpie_access(&app, &acc.id).as_deref(), Some("borrowed"));
+        let row = app
+            .with_db(|db| db.find_authorization(&acc.id, ids::KIND_MAGPIE))
+            .expect("query")
+            .expect("row");
+        assert_eq!(row.storage_kind(), "magpie");
+        assert_eq!(row.access_ref, format!("magpie:v1:workbuddy#{uid}"));
+        assert_eq!(
+            row.source_key.as_deref(),
+            Some(format!("workbuddy#{uid}").as_str())
+        );
+
+        assert!(
+            magpie_access(&app, &acc.id).is_none(),
+            "不得把 Magpie 令牌复制进钥匙串"
+        );
+        assert!(
+            legacy_access(&app, uid).is_none(),
+            "借用授权不写旧别名：那又是一次钥匙串写入"
+        );
         assert!(
             own_access(&app, &acc.id).is_none(),
             "导入不能凭空造一份自有授权"
@@ -2469,6 +2521,140 @@ mod tests {
                 .is_err(),
             "magpie/refresh 这个键不允许存在"
         );
+    }
+
+    /// 借用授权的令牌**每次现读**：Magpie 刷新之后，AICC 下一次请求就是新值。
+    #[test]
+    fn borrowed_access_is_read_fresh_on_every_use() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-2222-0001-0002-00000000000b";
+        magpie::test_set_logins(Some(vec![magpie_login(uid, "borrowed-1")]));
+        import_logins(&app, vec![magpie_login(uid, "borrowed-1")], &[]).expect("import");
+        let acc = account(&app, uid);
+
+        match broker::resolve(&app, &acc).expect("resolve") {
+            broker::Outcome::Resolved(resolved) => assert_eq!(resolved.access, "borrowed-1"),
+            broker::Outcome::Unavailable { reason, .. } => panic!("不该不可用：{reason}"),
+        }
+
+        // 模拟 Magpie 自己刷新了令牌：AICC 不做任何写入就该读到新值。
+        magpie::test_set_logins(Some(vec![magpie_login(uid, "borrowed-2")]));
+        match broker::resolve(&app, &acc).expect("resolve") {
+            broker::Outcome::Resolved(resolved) => assert_eq!(
+                resolved.access, "borrowed-2",
+                "动态关联必须现读，不能缓存旧令牌"
+            ),
+            broker::Outcome::Unavailable { reason, .. } => panic!("不该不可用：{reason}"),
+        }
+        assert!(
+            magpie_access(&app, &acc.id).is_none(),
+            "读到新令牌也不许把它复制进钥匙串"
+        );
+        magpie::test_set_logins(None);
+    }
+
+    /// Magpie 日志里换成别的 UID：这是串号，必须报出来，不能当"没凭据"糊过去。
+    #[test]
+    fn a_link_pointing_at_another_account_is_reported_as_mismatch() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-2222-0001-0002-00000000000c";
+        magpie::test_set_logins(Some(vec![magpie_login(uid, "borrowed")]));
+        import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
+        let acc = account(&app, uid);
+
+        // 同一个来源键，但文件里那条登录态属于别人。
+        magpie::test_set_logins(Some(vec![magpie_login_with(
+            &format!("workbuddy#{uid}"),
+            "someone-else",
+            "stolen",
+        )]));
+        match broker::resolve(&app, &acc).expect("resolve") {
+            broker::Outcome::Resolved(resolved) => {
+                panic!("不能拿别人的令牌：{}", resolved.access)
+            }
+            broker::Outcome::Unavailable { reason, .. } => {
+                assert_eq!(reason, "link_mismatch", "串号要有独立分类");
+            }
+        }
+        magpie::test_set_logins(None);
+    }
+
+    /// Magpie 没装 / 文件丢了：按既有规则兜底到自有授权，并把原因带上。
+    #[test]
+    fn unavailable_magpie_falls_back_to_the_own_authorization() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-2222-0001-0002-00000000000d";
+        magpie::test_set_logins(Some(vec![magpie_login(uid, "borrowed")]));
+        import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
+        persist_login(&app, &payload(uid, "own-access", None), WbVariant::Cn).expect("login");
+        let acc = account(&app, uid);
+
+        // 文件突然读不了了。
+        magpie::test_set_logins(None);
+        match broker::resolve(&app, &acc).expect("resolve") {
+            broker::Outcome::Resolved(resolved) => {
+                assert_eq!(resolved.kind, "own", "首选不可用要兜底");
+                assert!(resolved.degraded.is_some(), "兜底必须说明原因");
+            }
+            broker::Outcome::Unavailable { reason, .. } => panic!("不该整体不可用：{reason}"),
+        }
+        // 借用授权那一行不能被误删：文件暂时不可读不等于账号没授权。
+        assert!(app
+            .with_db(|db| db.find_authorization(&acc.id, "magpie"))
+            .unwrap()
+            .is_some());
+    }
+
+    /// v20 重新关联：旧钥匙串引用 → `magpie:v1:`，旧键保留可回滚。
+    #[test]
+    fn relink_moves_a_legacy_keychain_ref_to_the_dynamic_link() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-2222-0001-0002-00000000000e";
+        magpie::test_set_logins(Some(vec![magpie_login(uid, "borrowed")]));
+        import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
+        let acc = account(&app, uid);
+
+        // 退回 v19 的形状：引用指向钥匙串，里面躺着当年复制进去的令牌。
+        let key = ids::access_key(&acc.id, ids::KIND_MAGPIE);
+        app.secure.set(&key, b"legacy-token").unwrap();
+        app.with_db(|db| {
+            db.exec_raw(&format!(
+                "UPDATE account_authorizations
+                    SET access_ref = 'keychain:{key}', ref_updated_at = NULL
+                  WHERE account_id = '{}' AND kind = 'magpie'",
+                acc.id
+            ))
+        })
+        .expect("rewind to v19");
+        let before = app
+            .with_db(|db| db.find_authorization(&acc.id, "magpie"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.storage_kind(), "keychain");
+
+        let out = crate::auth::relink::relink_pending(&app, None).expect("relink");
+        assert_eq!(out["relinked"], json!(1), "{out}");
+        assert_eq!(out["pending"], json!(0), "{out}");
+        assert_eq!(out["legacyKeysKept"], json!(true), "不许自动删旧键");
+
+        let after = app
+            .with_db(|db| db.find_authorization(&acc.id, "magpie"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.storage_kind(), "magpie");
+        assert_eq!(after.access_ref, format!("magpie:v1:workbuddy#{uid}"));
+        assert!(after.version > before.version, "换引用要推进版本");
+        assert_eq!(
+            read_key(&app, &key).as_deref(),
+            Some("legacy-token"),
+            "旧钥匙串条目原样保留"
+        );
+
+        // 幂等：再跑一次没有可改的行。
+        let again = crate::auth::relink::relink_pending(&app, None).expect("relink again");
+        assert_eq!(again["relinked"], json!(0), "{again}");
+        assert_eq!(again["pending"], json!(0), "{again}");
+        magpie::test_set_logins(None);
     }
 
     #[test]
@@ -2584,11 +2770,19 @@ mod tests {
             "重新导入不能覆盖自有授权"
         );
         assert_eq!(own_refresh(&app, &acc.id).as_deref(), Some("own-refresh"));
-        assert_eq!(
-            magpie_access(&app, &acc.id).as_deref(),
-            Some("borrowed-2"),
-            "重新导入只更新借用授权"
+        assert!(
+            magpie_access(&app, &acc.id).is_none(),
+            "重新导入同样不写钥匙串"
         );
+        let magpie_row = app
+            .with_db(|db| db.find_authorization(&acc.id, "magpie"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            magpie_row.source_key.as_deref(),
+            Some(format!("workbuddy#{uid}").as_str())
+        );
+        assert_eq!(magpie_row.storage_kind(), "magpie");
 
         let rows = app.with_db(|db| db.list_authorizations(&acc.id)).unwrap();
         assert_eq!(rows.len(), 2, "两份授权并存，各一行");
@@ -2610,11 +2804,15 @@ mod tests {
         .expect("login");
         let acc = account(&app, uid);
 
-        // 默认 magpie 优先
+        // 默认 magpie 优先：只登记引用，别名里什么都不写。
         assert_eq!(acc.auth_source, "magpie");
-        assert_eq!(legacy_access(&app, uid).as_deref(), Some("borrowed"));
+        assert!(legacy_access(&app, uid).is_none(), "借用授权不写旧别名");
+        magpie::test_set_logins(Some(vec![magpie_login(uid, "borrowed")]));
         match broker::resolve(&app, &acc).expect("resolve") {
-            broker::Outcome::Resolved(resolved) => assert_eq!(resolved.kind, "magpie"),
+            broker::Outcome::Resolved(resolved) => {
+                assert_eq!(resolved.kind, "magpie");
+                assert_eq!(resolved.access, "borrowed", "动态关联要现读文件里的令牌");
+            }
             broker::Outcome::Unavailable { reason, .. } => panic!("不该不可用：{reason}"),
         }
 
@@ -2855,10 +3053,15 @@ mod tests {
         .expect_err("库里写不进去就该失败");
         assert_eq!(err.code, crate::rpc::E_STORAGE);
 
+        let want_ref = format!("magpie:v1:workbuddy#{uid}");
         assert_eq!(
-            magpie_access(&app, &acc.id).as_deref(),
-            Some("borrowed-access"),
+            magpie_ref(&app, &acc.id).as_deref(),
+            Some(want_ref.as_str()),
             "借用授权必须原样保留"
+        );
+        assert!(
+            magpie_access(&app, &acc.id).is_none(),
+            "借用授权始终不进钥匙串"
         );
         assert!(
             own_access(&app, &acc.id).is_none(),
@@ -3093,14 +3296,32 @@ mod tests {
         assert_eq!(row.status, "invalid");
     }
 
-    /// P0：Magpie 的 access 写进钥匙串了、授权行却写不进去 —— 必须把钥匙串恢复原样。
-    /// 否则会留下"新令牌在钥匙串、库里还是旧状态"的组合。
+    /// PR-CRED-2 的核心不变量：Magpie 导入**一个字节都不进钥匙串**。
+    ///
+    /// 旧实现先写钥匙串再写库，写库失败要回滚；现在只登记 `magpie:v1:` 引用，
+    /// 连"回滚"这个动作都不存在了 —— 失败时天然没有半成品。
     #[test]
-    fn magpie_db_failure_restores_the_keychain() {
+    fn magpie_import_writes_no_keychain_entry_even_when_storage_fails() {
         let (app, _dir) = test_app(SecureStore::memory());
         let uid = "6f1c2d94-7777-0001-0002-000000000001";
         import_logins(&app, vec![magpie_login(uid, "borrowed-1")], &[]).expect("import");
         let acc = account(&app, uid);
+
+        assert!(
+            magpie_access(&app, &acc.id).is_none(),
+            "导入不得把 Magpie 令牌复制进钥匙串"
+        );
+        let row = app
+            .with_db(|db| db.find_authorization(&acc.id, "magpie"))
+            .expect("query")
+            .expect("row");
+        assert_eq!(row.storage_kind(), "magpie");
+        assert_eq!(
+            row.access_ref,
+            format!("magpie:v1:workbuddy#{uid}"),
+            "只登记来源引用"
+        );
+        assert!(row.refresh_ref.is_none(), "借用授权永远没有刷新令牌");
 
         app.with_db(|db| {
             db.exec_raw(
@@ -3110,15 +3331,15 @@ mod tests {
         })
         .expect("install trigger");
 
-        let err = match service::save_magpie(&app, &acc.id, uid, "borrowed-2", None, None) {
+        let err = match service::save_magpie(&app, &acc.id, uid, &format!("workbuddy#{uid}"), None)
+        {
             Ok(_) => panic!("库里写不进去就该失败"),
             Err(err) => err,
         };
         assert_eq!(err.code, crate::rpc::E_STORAGE);
-        assert_eq!(
-            magpie_access(&app, &acc.id).as_deref(),
-            Some("borrowed-1"),
-            "钥匙串必须回到写入前的内容"
+        assert!(
+            magpie_access(&app, &acc.id).is_none(),
+            "失败路径同样不写钥匙串"
         );
     }
 
@@ -3132,6 +3353,8 @@ mod tests {
         let (app, _dir) = test_app(SecureStore::memory());
         let uid = "6f1c2d94-7777-0001-0002-000000000002";
         import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
+        // 借用授权的令牌现在从 Magpie 文件现读，单测里用线程局部的登录态代替。
+        magpie::test_set_logins(Some(vec![magpie_login(uid, "borrowed")]));
         // 自有授权有 access、没有 refresh：refresh 一定失败，且不需要联网
         persist_login(&app, &payload(uid, "own-access", None), WbVariant::Cn).expect("login");
         broker::set_preferred_source(&app, "own").expect("prefer own");
@@ -3145,10 +3368,15 @@ mod tests {
         let result = runtime.block_on(tokens.resync(&acc));
 
         assert_eq!(result.as_deref(), Ok("borrowed"), "主路失败要兜底到另一份");
+        let want_ref = format!("magpie:v1:workbuddy#{uid}");
         assert_eq!(
-            magpie_access(&app, &acc.id).as_deref(),
-            Some("borrowed"),
-            "兜底只读，不许改另一份"
+            magpie_ref(&app, &acc.id).as_deref(),
+            Some(want_ref.as_str()),
+            "兜底只读，不许改另一份的引用"
+        );
+        assert!(
+            magpie_access(&app, &acc.id).is_none(),
+            "兜底也不会把令牌复制进钥匙串"
         );
         let own = app
             .with_db(|db| db.find_authorization(&acc.id, "own"))
@@ -3199,9 +3427,10 @@ mod tests {
         assert!(report.record_deleted);
         assert!(own_access(&app, &acc.id).is_none());
         assert!(own_refresh(&app, &acc.id).is_none());
+        let want_ref = format!("magpie:v1:workbuddy#{uid}");
         assert_eq!(
-            magpie_access(&app, &acc.id).as_deref(),
-            Some("borrowed"),
+            magpie_ref(&app, &acc.id).as_deref(),
+            Some(want_ref.as_str()),
             "另一份授权必须原样保留"
         );
         assert!(app
@@ -3244,7 +3473,15 @@ mod tests {
         let uid = "6f1c2d94-9999-0001-0002-000000000004";
         import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
         let acc = account(&app, uid);
-        assert_eq!(legacy_access(&app, uid).as_deref(), Some("borrowed"));
+        assert!(legacy_access(&app, uid).is_none(), "新导入不再写旧别名");
+        // 模拟旧安装：别名里还留着当年复制进去的令牌，删除时要一并清掉。
+        let (legacy_access_key, legacy_refresh_key) = ids::legacy_keys(uid);
+        app.secure
+            .set(&legacy_access_key, b"legacy-access")
+            .unwrap();
+        app.secure
+            .set(&legacy_refresh_key, b"legacy-refresh")
+            .unwrap();
 
         let report = service::delete_authorization(&app, &acc.id, "magpie").expect("delete");
         assert!(report.record_deleted, "{:?}", report.failed_keys);
@@ -3286,10 +3523,11 @@ mod tests {
         let acc = account(&app, uid);
 
         service::delete_authorization(&app, &acc.id, "own").expect("delete");
-        assert_eq!(
-            legacy_access(&app, uid).as_deref(),
-            Some("borrowed"),
-            "镜像应切到还活着的那份，而不是把别名删掉"
+        let acc = account(&app, uid);
+        assert_eq!(acc.auth_source, "magpie", "镜像应切到还活着的那份");
+        assert!(
+            legacy_access(&app, uid).is_none(),
+            "镜像切到借用授权后也不写别名（宁可旧版本读不到，也不再碰钥匙串）"
         );
         assert!(
             read_key(&app, &ids::legacy_keys(uid).1).is_none(),
@@ -3312,7 +3550,10 @@ mod tests {
         .expect("login");
         let acc = account(&app, uid);
         assert_eq!(acc.auth_source, "magpie");
-        assert_eq!(legacy_access(&app, uid).as_deref(), Some("borrowed"));
+        assert!(
+            legacy_access(&app, uid).is_none(),
+            "借用授权不写旧别名：那是又一次隐性钥匙串写入"
+        );
 
         // 走真正的 RPC 路径：settings.set 而不是直接改 broker
         let out = dispatch(

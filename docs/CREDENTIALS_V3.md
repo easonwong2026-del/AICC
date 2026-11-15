@@ -1,10 +1,10 @@
 # 凭据存储 v3：本地 JSON + 动态 Magpie
 
-> 状态：**PR-CRED-1 已交付底层**（`LocalJsonStore` + 引用解析 + 故障注入测试；
-> 含 #82 复审后的文件系统边界加固：目录链、锁文件、归属不可变）。
-> CRED-2/3/4/5 尚未开始，生产路径仍走旧钥匙串 —— 本文件随每个 PR 更新。
+> 状态：**CRED-1 已合并**（`LocalJsonStore` + 引用解析 + 文件系统边界加固）；
+> **CRED-2 已交付待验收**（SQLite v20 + Magpie 动态关联 + 统一 Broker 解析）。
+> CRED-3/4/5 尚未开始：自有登录仍写钥匙串，旧 Keychain 迁移也还没做 —— 本文件随每个 PR 更新。
 >
-> 基线：`main` @ `d846339`（#79 / #80 / #81 已合并），数据库 Schema **v19**。
+> 基线：`main` @ `3d8f23c`（#82 已合并），数据库 Schema **v20**。
 > 范围：只动凭据的**存取方式**，不动账号模型、签到 / 成长 / 旅行 / Credits 业务。
 
 ## 1. 为什么要换掉钥匙串
@@ -145,11 +145,50 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 
 | PR | 内容 | 状态 |
 | --- | --- | --- |
-| CRED-1 | JSON 存储底层 + 引用解析 | **本 PR** |
-| CRED-2 | SQLite v20 + Magpie 动态授权 | 待开始 |
+| CRED-1 | JSON 存储底层 + 引用解析 | 已合并（#82） |
+| CRED-2 | SQLite v20 + Magpie 动态授权 | **本 PR** |
 | CRED-3 | 自有登录 JSON 化（四平台） | 待开始 |
 | CRED-4 | 旧 Keychain 显式迁移（备份 / 核对 / 回滚） | 待开始 |
 | CRED-5 | Worker 免弹窗收口 + 端到端验收 | 待开始 |
+
+## 8bis. CRED-2：Magpie 动态关联
+
+**做了什么**
+
+| 项 | 落点 |
+| --- | --- |
+| SQLite **v20**：`account_authorizations.storage_kind` + `ref_updated_at` | `storage/authz.rs::migrate_v20` |
+| 迁移**只回填、不改引用**（不猜归属） | 同上 |
+| Broker 按引用分派：`keychain` / `localjson` / `magpie` | `auth/broker.rs::access_for` |
+| Magpie 现读：平台 + provider + UID + 有效期校验 | `auth/magpie_link.rs` |
+| 导入只登记 `magpie:v1:<source_key>`，**零钥匙串写入** | `auth/service.rs::save_magpie` |
+| 旧别名键只给仍是 `keychain` 引用的授权写 | `auth/service.rs::sync_mirror` |
+| 显式重新关联 `auth.magpie.relink`（幂等、留旧键） | `auth/relink.rs` |
+| `health.authorizations.storage` 按引用统计三种存储 | `handlers.rs::authorization_fleet` |
+
+**几条硬规则**
+
+1. `save_magpie` 不再接收 access：令牌只存在于 Magpie 的文件里，AICC 一行都不存。
+2. 来源键是硬要求。没有 `source_key` 就无法确定对应哪条登录态，宁可报
+   `magpie_source_key_missing` 也不猜。
+3. 读路径分三类失败：`missing_credential`（真没有）、`link_mismatch`（串号，
+   拿错账号/平台）、`denied`（读不了）。串号**不会**被兜底成"没凭据"。
+4. 重新关联只改 `access_ref` / `source_key` / `storage_kind`，`version` +1；
+   旧钥匙串条目保留，删不删留给用户（CRED-4）。
+5. `storage_kind` 列是**审计留痕**：Rust 侧一律由 `access_ref` 前缀推导，
+   统计 SQL 也用前缀算，列漂移不会影响判断。
+
+**本阶段没做**（照 PRD 留给后续）
+
+- 自有授权（浏览器 / 扫码 / PAT）仍在钥匙串 —— CRED-3 换成 `localjson:v1:`。
+- 旧 Keychain 批量迁移与 UI —— CRED-4。
+- Worker 全链路的免弹窗收口与端到端验收 —— CRED-5。
+- `auth.magpie.relink` 还没有界面入口；当前由 RPC 显式调用。
+
+**已知代价**
+
+借用授权不再写旧别名键，所以 PR #65 时代的二进制看不到"当前借用令牌"。
+回退到旧版本必须用迁移前的数据库备份（PRD §7.4 已接受）。
 
 ## 9. 风险
 

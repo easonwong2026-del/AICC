@@ -13,6 +13,9 @@
 use serde_json::{json, Value};
 
 use crate::app::App;
+use crate::credentials::localjson::LocalJsonStore;
+use crate::credentials::reference::{CredentialRef, CredentialSlot};
+use crate::credentials::{CredentialError, CredentialErrorKind};
 use crate::rpc::{RpcError, RpcResult};
 use crate::securestore::SecretErrorKind;
 use crate::storage::AccountRecord;
@@ -88,7 +91,7 @@ pub fn resolve(app: &App, account: &AccountRecord) -> RpcResult<Outcome> {
         if !is_usable(row) {
             continue;
         }
-        match read_access(app, account, row) {
+        match access_for(app, account, row) {
             Ok(access) => {
                 return Ok(Outcome::Resolved(Resolved {
                     authorization_id: row.id.clone(),
@@ -98,15 +101,9 @@ pub fn resolve(app: &App, account: &AccountRecord) -> RpcResult<Outcome> {
                         .then(|| format!("首选 {preferred} 不可用，已兜底到 {}", row.kind)),
                 }));
             }
-            Err(err) if err.kind == SecretErrorKind::NotFound => {
-                blocked.get_or_insert((
-                    "missing_credential".to_string(),
-                    format!("{} 的凭据不在钥匙串里", row.kind),
-                ));
-            }
             Err(err) => {
                 blocked.get_or_insert((
-                    "keychain_denied".to_string(),
+                    unavailable_reason(&err, row),
                     crate::rpc::sanitize(&err.message),
                 ));
             }
@@ -152,16 +149,42 @@ pub(crate) fn is_usable(row: &crate::storage::AuthorizationRecord) -> bool {
     }
 }
 
-/// 读 access。`key_migration_state = ready` 之前读旧键（G4）。
+/// 读 access。**引用决定从哪读**，而不是"默认钥匙串"。
+///
+/// | 引用 | 读取方式 |
+/// | --- | --- |
+/// | `keychain:<key>` | 老逻辑（含迁移中断时的双键兜底） |
+/// | `localjson:v1:<id>` | 本地 JSON 存储（PR-CRED-1 的 `LocalJsonStore`） |
+/// | `magpie:v1:<key>` | 现读 Magpie 原始文件，只取 access |
+///
+/// 关键：**解析失败不许退到钥匙串**。`CredentialRef::parse` 对未知前缀直接报错，
+/// 这里原样上抛 —— 否则迁移之后还会偶发系统授权弹窗，而且极难排查。
+pub(crate) fn access_for(
+    app: &App,
+    account: &AccountRecord,
+    row: &crate::storage::AuthorizationRecord,
+) -> Result<String, CredentialError> {
+    match CredentialRef::parse(&row.access_ref)? {
+        CredentialRef::Keychain { .. } => read_keychain_access(app, account, row),
+        CredentialRef::LocalJson { secret_id } => {
+            LocalJsonStore::for_paths(&app.paths).token(&secret_id, CredentialSlot::Access)
+        }
+        CredentialRef::Magpie { source_key } => {
+            super::magpie_link::access_for(account, &source_key)
+        }
+    }
+}
+
+/// 旧的钥匙串读法：`key_migration_state = ready` 之前读旧键（G4）。
 ///
 /// 迁移中断时会出现"库里写着新键、钥匙串里还没有"的组合，所以两侧都试：
 /// 先按迁移状态选首选位置，读不到再退到另一个位置。读到 `Denied` 直接上抛 ——
 /// 那不是"没有"，而是"现在读不了"，不能当成空。
-fn read_access(
+fn read_keychain_access(
     app: &App,
     account: &AccountRecord,
     row: &crate::storage::AuthorizationRecord,
-) -> Result<String, crate::securestore::SecretError> {
+) -> Result<String, CredentialError> {
     let (legacy_access, _) = ids::legacy_keys(&account.uid);
     let new_key = row.access_key();
 
@@ -182,12 +205,11 @@ fn read_access(
     for key in order {
         match app.secure.get(key) {
             Ok(bytes) => {
-                let token =
-                    String::from_utf8(bytes).map_err(|_| crate::securestore::SecretError {
-                        kind: SecretErrorKind::Other,
-                        message: "凭据不是 UTF-8".to_string(),
-                        os_status: None,
-                    })?;
+                let token = String::from_utf8(bytes).map_err(|_| CredentialError {
+                    kind: CredentialErrorKind::Corrupt,
+                    message: "凭据不是 UTF-8".to_string(),
+                    os_status: None,
+                })?;
                 if token.trim().is_empty() {
                     last = Some(crate::securestore::SecretError {
                         kind: SecretErrorKind::NotFound,
@@ -201,14 +223,43 @@ fn read_access(
             Err(err) if err.kind == SecretErrorKind::NotFound => {
                 last = Some(err);
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                return Err(CredentialError {
+                    kind: match err.kind {
+                        SecretErrorKind::Denied => CredentialErrorKind::Denied,
+                        SecretErrorKind::Unavailable => CredentialErrorKind::Io,
+                        SecretErrorKind::NotFound => CredentialErrorKind::NotFound,
+                        SecretErrorKind::Other => CredentialErrorKind::Io,
+                    },
+                    message: err.message,
+                    os_status: err.os_status,
+                })
+            }
         }
     }
-    Err(last.unwrap_or(crate::securestore::SecretError {
-        kind: SecretErrorKind::NotFound,
-        message: "凭据不存在".to_string(),
-        os_status: None,
-    }))
+    Err(match last {
+        Some(err) => CredentialError {
+            kind: CredentialErrorKind::NotFound,
+            message: err.message,
+            os_status: err.os_status,
+        },
+        None => CredentialError::new(CredentialErrorKind::NotFound, "凭据不存在"),
+    })
+}
+
+/// 把读取失败翻译成稳定的 reason（界面与日志按它分支，不按文案）。
+fn unavailable_reason(err: &CredentialError, row: &crate::storage::AuthorizationRecord) -> String {
+    match (err.kind, row.storage_kind()) {
+        (CredentialErrorKind::NotFound, _) => "missing_credential",
+        // 钥匙串被拒是"用户要再点一次授权"，和别的不可用不一样。
+        (CredentialErrorKind::Denied, "keychain") => "keychain_denied",
+        (CredentialErrorKind::Denied, _) => "denied",
+        // Magpie 关联指向别的账号 / 平台：不能兜底当作"没凭据"，要显式报出来。
+        (CredentialErrorKind::Conflict, _) => "link_mismatch",
+        (CredentialErrorKind::LockTimeout, _) => "storage_busy",
+        _ => "credential_error",
+    }
+    .to_string()
 }
 
 /// 界面 / `health` 用的授权快照。**不含令牌**，只给状态与指纹级信息。
@@ -223,6 +274,7 @@ pub fn describe(app: &App, account_id: &str) -> RpcResult<Vec<Value>> {
                 "status": row.status,
                 "tokenExpiresAt": row.token_expires_at,
                 "sourceKey": row.source_key,
+                "storageKind": row.storage_kind(),
                 "keyMigrationState": row.key_migration_state,
                 "lastUsedAt": row.last_used_at,
                 "lastError": row.last_error,

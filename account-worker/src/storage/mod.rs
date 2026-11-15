@@ -410,9 +410,15 @@ const MIGRATIONS: &[Migration] = &[
         version: 19,
         steps: &[MigrationStep::Rust(qoder_accounts::migrate_v19)],
     },
+    // v20：凭据存储种类（PR-CRED-2）。只加列 + 按引用前缀回填，**不改任何 access_ref**；
+    // 旧 Magpie 授权改成动态引用要走显式的重新关联。
+    Migration {
+        version: 20,
+        steps: &[MigrationStep::Rust(authz::migrate_v20)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 19;
+pub const LATEST_VERSION: i64 = 20;
 
 pub struct Db {
     conn: Connection,
@@ -1327,6 +1333,75 @@ mod tests {
         db.conn.pragma_update(None, "user_version", 18).unwrap();
         db.migrate().unwrap();
         assert_eq!(db.get_qoder_account(&a.id).unwrap().unwrap().generation, ga);
+    }
+
+    /// v20：只加列 + 按引用前缀回填，**不改任何 access_ref**。
+    ///
+    /// 旧库里的借用授权还指着钥匙串；要改成动态关联必须走显式的重新关联，
+    /// 迁移本身不许猜归属（PRD §3.3）。
+    #[test]
+    fn v20_records_the_storage_kind_without_rewriting_references() {
+        let (mut db, _dir) = temp_db();
+        let acc = db
+            .upsert_account(&AccountInput {
+                platform: "workbuddy".to_string(),
+                uid: "uid-v20".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        let id = crate::auth::ids::auth_id(&acc.id, "magpie");
+        db.exec_raw(&format!(
+            "INSERT INTO account_authorizations (
+                 id, account_id, kind, access_ref, refresh_ref, auth_domain, token_expires_at,
+                 status, version, key_migration_state, source_key, last_used_at, last_error,
+                 created_at, updated_at
+             ) VALUES ('{id}', '{}', 'magpie', 'keychain:workbuddy/{}/magpie/access', NULL,
+                       NULL, NULL, 'valid', 0, 'ready', 'workbuddy#uid-v20', NULL, NULL,
+                       '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z')",
+            acc.id, acc.id
+        ))
+        .expect("退回 v19 的形状");
+        db.exec_raw("ALTER TABLE account_authorizations DROP COLUMN storage_kind;")
+            .unwrap();
+        db.exec_raw("ALTER TABLE account_authorizations DROP COLUMN ref_updated_at;")
+            .unwrap();
+        db.conn.pragma_update(None, "user_version", 19).unwrap();
+
+        assert_eq!(db.migrate().unwrap(), LATEST_VERSION);
+        let row = db.find_authorization(&acc.id, "magpie").unwrap().unwrap();
+        assert!(
+            row.access_ref.starts_with("keychain:"),
+            "迁移不许改引用：{}",
+            row.access_ref
+        );
+        assert_eq!(row.storage_kind(), "keychain");
+        assert_eq!(
+            db.authorization_storage_counts().unwrap(),
+            vec![("keychain".to_string(), 1)],
+            "回填要按前缀算"
+        );
+
+        // 重新关联之后才变成 magpie，并且引用一起换掉。
+        db.rebind_authorization_ref(
+            &id,
+            "magpie:v1:workbuddy#uid-v20",
+            authz::STORAGE_MAGPIE,
+            Some("workbuddy#uid-v20"),
+        )
+        .unwrap();
+        let row = db.find_authorization(&acc.id, "magpie").unwrap().unwrap();
+        assert_eq!(row.storage_kind(), "magpie");
+        assert_eq!(
+            db.authorization_storage_counts().unwrap(),
+            vec![("magpie".to_string(), 1)]
+        );
+
+        // 回拨再跑一次：幂等，不能把已经是 magpie 的改回 keychain。
+        db.conn.pragma_update(None, "user_version", 19).unwrap();
+        db.migrate().unwrap();
+        let row = db.find_authorization(&acc.id, "magpie").unwrap().unwrap();
+        assert_eq!(row.storage_kind(), "magpie");
+        assert_eq!(row.access_ref, "magpie:v1:workbuddy#uid-v20");
     }
 
     #[test]
