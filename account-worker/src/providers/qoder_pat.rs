@@ -27,12 +27,16 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::app::App;
-use crate::auth::service::{credential_error, Snapshot};
+use crate::credentials::localjson::CredentialKind;
+use crate::credentials::CredentialErrorKind;
 use crate::providers::qoder_auth::{parse_identity, userinfo_url, Identity};
 use crate::providers::qoder_edition::QoderEdition;
+use crate::providers::qoder_secret;
 use crate::rpc::{RpcError, RpcResult};
 use crate::securestore::fingerprint;
-use crate::storage::qoder_accounts::{QoderLifecycle, SOURCE_OWN_PAT};
+use crate::storage::qoder_accounts::{
+    QoderAccountRecord, QoderAuthRecord, QoderLifecycle, SOURCE_OWN_PAT,
+};
 
 /// `userinfo` 单次请求上限。换身份只是一次只读请求，12 秒足够。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
@@ -98,10 +102,6 @@ pub fn normalize(raw: &str) -> Result<String, PatError> {
 /// 删掉其中一条永远不该影响另一条。
 pub fn pat_key(account_id: &str) -> String {
     format!("qoder/{account_id}/pat/token")
-}
-
-pub fn keychain_ref(account_id: &str) -> String {
-    format!("keychain:{}", pat_key(account_id))
 }
 
 /// 用一次 `userinfo` 换身份。**这是唯一能证明"这张 PAT 属于这个账号"的动作。**
@@ -171,6 +171,8 @@ pub struct Persisted {
     pub nickname: String,
     pub email: Option<String>,
     pub fingerprint: String,
+    /// 这次 PAT 落在哪：`keychain` / `localjson`（CRED-3b）。
+    pub credential_storage: &'static str,
 }
 
 impl Persisted {
@@ -186,6 +188,7 @@ impl Persisted {
             "fingerprint": self.fingerprint,
             "source": SOURCE_OWN_PAT,
             "hasSecret": true,
+            "credentialStorage": self.credential_storage,
             "identity": "verified",
             "credits": "unknown",
             "warning": "PAT 已保存并通过身份验证；它是否能领取 Credits 需要单独检测，两者不是同一件事",
@@ -193,9 +196,10 @@ impl Persisted {
     }
 }
 
-/// 落库：PAT 进钥匙串，账号与授权进 SQLite。
+/// 落库：PAT 按**这一行现在是什么**落到钥匙串或 JSON，账号与授权行进 SQLite。
 ///
-/// 顺序与浏览器授权一致：先写钥匙串（唯一需要显式回滚的一步），再写库。
+/// 顺序与浏览器授权一致：写凭据（唯一需要显式回滚的一步）→ 条件提交授权行。
+/// PAT 与设备授权是两个文件 / 两组键，任何一步失败都不会动到另一份。
 pub fn persist(
     app: &App,
     edition: QoderEdition,
@@ -216,81 +220,79 @@ pub fn persist(
         )
     })?;
 
-    let key = pat_key(&account.id);
-    // 读旧凭据失败也在这条链上：`?` 提前返回同样会留下刚建的账号，
-    // 所以这里的失败也要走同一个清理路径。
-    let snapshot = match Snapshot::capture(app, std::slice::from_ref(&key)) {
-        Ok(snapshot) => snapshot,
+    let existing = app.with_db(|db| db.get_qoder_authorization(&account.id, SOURCE_OWN_PAT))?;
+    let lifecycle = match app.with_db(|db| db.qoder_lifecycle(&account.id))? {
+        Some(lifecycle) => lifecycle,
+        None => {
+            qoder_secret::cleanup_created_account(app, &account.id, created);
+            return Err(RpcError::internal("账号刚写入却读不到生命周期"));
+        }
+    };
+
+    // PAT 是长期凭据：不带 refresh，也没有到期时间。
+    let write = match qoder_secret::write(app, &account, SOURCE_OWN_PAT, pat, None, None) {
+        Ok(write) => write,
         Err(err) => {
-            cleanup_created_account(app, &account.id, created);
+            qoder_secret::cleanup_created_account(app, &account.id, created);
             return Err(err);
         }
     };
-    if let Err(err) = app.secure.set(&key, pat.as_bytes()) {
-        cleanup_created_account(app, &account.id, created);
-        return Err(credential_error(err, "qoder/pat"));
-    }
 
     let digest = fingerprint(pat.as_bytes());
-    let written = app.with_db(|db| {
-        db.upsert_qoder_authorization(
-            &account.id,
-            SOURCE_OWN_PAT,
-            None,
-            Some(&keychain_ref(&account.id)),
-            "valid",
-            // PAT 不随请求下发到期时间：有就是有，失效靠 401 发现。
-            None,
-            Some(&digest),
-        )
-    });
-    if let Err(err) = written {
-        // 库没写成功：钥匙串里不该留一份没人认领的令牌。
-        snapshot.restore(app);
-        cleanup_created_account(app, &account.id, created);
-        return Err(err);
-    }
+    let expectation = qoder_secret::expectation_of(existing.as_ref(), &lifecycle);
+    let committed = qoder_secret::commit(
+        app,
+        &account.id,
+        SOURCE_OWN_PAT,
+        &write,
+        "valid",
+        None,
+        Some(&digest),
+        &expectation,
+    );
 
-    Ok(Persisted {
-        account_id: account.id,
-        edition: edition.as_str(),
-        uid: identity.uid.clone(),
-        nickname: account.nickname,
-        email: account.email,
-        fingerprint: digest,
-    })
-}
-
-/// 回滚"刚新建的账号"。只在本次调用是**新建**时才动手，且必须确认它确实
-/// 一条授权都没有——否则可能把并发写入的 Magpie 关联一起删掉。
-fn cleanup_created_account(app: &App, account_id: &str, created: bool) {
-    if !created {
-        return;
-    }
-    let removed = app
-        .with_db(|db| {
-            let rows = db.list_qoder_authorizations(account_id)?;
-            if !rows.is_empty() {
-                return Ok(false);
-            }
-            db.delete_qoder_account(account_id)
-        })
-        .unwrap_or(false);
-    if !removed {
-        // 清不掉要留痕：用户在账号页会看到一个没有来源的账号，得知道原因。
-        crate::handlers::log_note("PAT 保存失败后未能清掉新建的 Qoder 账号，请手动移除");
+    match committed {
+        Ok(Some(_)) => Ok(Persisted {
+            account_id: account.id,
+            edition: edition.as_str(),
+            uid: identity.uid.clone(),
+            nickname: account.nickname,
+            email: account.email,
+            fingerprint: digest,
+            credential_storage: write.storage().as_str(),
+        }),
+        Ok(None) => {
+            write.discard_unreferenced(app);
+            Err(qoder_secret::conflict_error())
+        }
+        Err(err) => {
+            write.restore(app);
+            qoder_secret::cleanup_created_account(app, &account.id, created);
+            Err(err)
+        }
     }
 }
 
 /// 读回已存的 PAT。**只在 worker 内部使用**，不经过 RPC。
-pub fn read_secret(app: &App, account_id: &str) -> Result<String, PatError> {
-    let key = pat_key(account_id);
-    let bytes = app
-        .secure
-        .get(&key)
-        .map_err(|err| PatError::new(KIND_NO_SECRET, format!("读不到 PAT：{}", err.message)))?;
-    String::from_utf8(bytes)
-        .map_err(|_| PatError::new(KIND_NO_SECRET, "钥匙串里的 PAT 不是合法 UTF-8"))
+///
+/// 按授权行的 `secret_ref` 分派：`localjson:v1:` 读文件、`keychain:` 读钥匙串。
+/// 未知引用、归属不符、文件不可读都不回落钥匙串 —— 那会让"迁移后还偶尔弹窗"
+/// 这件事重新出现，也会掩盖串号。
+pub fn read_secret(
+    app: &App,
+    account: &QoderAccountRecord,
+    row: &QoderAuthRecord,
+) -> Result<String, PatError> {
+    qoder_secret::read(app, account, row, CredentialKind::Pat).map_err(|err| {
+        let kind = match err.kind {
+            CredentialErrorKind::NotFound => KIND_NO_SECRET,
+            other => other.as_str(),
+        };
+        PatError::new(
+            kind,
+            format!("读不到 PAT：{}", crate::rpc::sanitize(&err.message)),
+        )
+    })
 }
 
 /// 重新检查一份已存的 PAT（界面上的「检测」按钮）。
@@ -305,12 +307,20 @@ pub async fn recheck(
     // 请求前的生命周期：网络回来时要确认"还是这个账号、这份授权"，否则不写状态。
     // 账号 id 由 `(edition, uid)` 决定，删号重建后 id 相同、`auth_epoch` 也归零，
     // 所以必须带上 `generation`。
+    let account = app
+        .with_db(|db| db.get_qoder_account(account_id))
+        .map_err(|err| PatError::new(KIND_UNKNOWN_ACCOUNT, err.message))?
+        .ok_or_else(|| PatError::new(KIND_UNKNOWN_ACCOUNT, "Qoder 账号不存在"))?;
     let lifecycle = app
         .with_db(|db| db.qoder_lifecycle(account_id))
         .map_err(|err| PatError::new(KIND_NO_SECRET, err.message))?
         .ok_or_else(|| PatError::new(KIND_UNKNOWN_ACCOUNT, "Qoder 账号不存在"))?;
+    let row = app
+        .with_db(|db| db.get_qoder_authorization(account_id, SOURCE_OWN_PAT))
+        .map_err(|err| PatError::new(KIND_NO_SECRET, err.message))?
+        .ok_or_else(|| PatError::new(KIND_NO_SECRET, "这个账号还没有保存过 PAT"))?;
 
-    let pat = read_secret(app, account_id)?;
+    let pat = read_secret(app, &account, &row)?;
     match verify(edition, &pat).await {
         Ok(identity) => {
             write_status_if_current(app, account_id, "valid", &lifecycle);
@@ -345,36 +355,35 @@ pub struct Removed {
 
 /// 删掉 PAT 这一份来源。
 ///
-/// **顺序：先删钥匙串，再删授权行。** 反过来的话，钥匙串删除失败会留下
-/// 一份没有主人的凭据——库里看不出它存在，用户也无从重试。
+/// **顺序：先删凭据，再删授权行。** 反过来的话，凭据删除失败会留下一份没有主人
+/// 的令牌——库里看不出它存在，用户也无从重试。
 ///
-/// 钥匙串删除失败时**保留授权行并报错**，让用户能再点一次；下一次进来
-/// 若凭据已经不在了（`NotFound`），视为删干净，继续把行删掉，所以这个
-/// 半途状态是可自愈的。
+/// 凭据按行的引用删除：`localjson:v1:` 删文件（先验归属），`keychain:` 只删这一
+/// 来源的键。**不碰设备授权、不碰 Magpie**。删除失败时保留授权行并报错，
+/// 让用户能再点一次；下一次进来若凭据已经不在了（`NotFound`），视为删干净，
+/// 继续把行删掉，所以这个半途状态是可自愈的。
 pub fn remove(app: &App, account_id: &str) -> RpcResult<Removed> {
-    if app
+    let account = app
         .with_db(|db| db.get_qoder_account(account_id))?
-        .is_none()
-    {
-        return Err(RpcError::not_found(format!(
-            "Qoder 账号不存在：{account_id}"
-        )));
-    }
+        .ok_or_else(|| RpcError::not_found(format!("Qoder 账号不存在：{account_id}")))?;
+    let row = app.with_db(|db| db.get_qoder_authorization(account_id, SOURCE_OWN_PAT))?;
 
-    let key = pat_key(account_id);
-    match app.secure.delete(&key) {
-        Ok(_) => {}
-        // 本来就没有这份凭据，算删干净。
-        Err(err) if err.kind == crate::securestore::SecretErrorKind::NotFound => {}
-        Err(err) => {
+    if let Some(row) = row.as_ref() {
+        if let Err(err) = qoder_secret::delete(app, &account, row, CredentialKind::Pat) {
             return Err(RpcError::new(
                 crate::rpc::E_SECURESTORE,
                 format!(
-                    "删除钥匙串里的 PAT 失败：{}。授权记录已保留，可重试",
-                    err.message
+                    "删除 PAT 凭据失败：{}。授权记录已保留，可重试",
+                    crate::rpc::sanitize(&err.message)
                 ),
             )
-            .with_data(json!({ "kind": "secret_delete_failed", "key": key })))
+            .with_data(json!({
+                "kind": "secret_delete_failed",
+                "reason": err.kind.as_str(),
+                "storage": qoder_secret::storage_of(row)
+                    .map(|storage| storage.as_str())
+                    .unwrap_or("unknown"),
+            })));
         }
     }
 
@@ -431,7 +440,10 @@ mod tests {
     #[test]
     fn keys_are_scoped_per_account_and_differ_from_browser_keys() {
         assert_eq!(pat_key("qa_1"), "qoder/qa_1/pat/token");
-        assert_eq!(keychain_ref("qa_1"), "keychain:qoder/qa_1/pat/token");
+        assert_eq!(
+            qoder_secret::keychain_reference("qa_1", SOURCE_OWN_PAT),
+            "keychain:qoder/qa_1/pat/token"
+        );
         assert_ne!(
             pat_key("qa_1"),
             crate::providers::qoder_auth::access_key("qa_1")

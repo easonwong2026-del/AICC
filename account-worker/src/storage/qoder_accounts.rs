@@ -156,6 +156,30 @@ impl QoderLifecycle {
     }
 }
 
+/// 条件提交的预期（CRED-3b）。
+///
+/// `qoder_authorizations` **没有** WorkBuddy 那样的 `version` 列，所以这里用
+/// "写凭据之前观察到的那一行" + 账号生命周期一起做守卫：
+///
+/// | 场景 | 判定 |
+/// | --- | --- |
+/// | 首次授权，两进程同时写 | 只有一个 `INSERT` 成功，另一个拿到 `None` |
+/// | 重复授权 / PAT 更新 | `UPDATE` 必须命中同一个 `secret_ref` |
+/// | 引用被别人迁走 | `secret_ref` 对不上 → `None` |
+/// | 删号后同 UID 重建 | `generation` 变了 → `None`（epoch 会归零，单看它挡不住） |
+///
+/// 不新增列是刻意的：这几条判据已经够用，多一列就多一次迁移和一份兼容测试。
+#[derive(Debug, Clone)]
+pub enum QoderAuthExpectation {
+    /// 写凭据时这一行还不存在：只允许 `INSERT`，别人先建了就放弃。
+    Absent,
+    /// 写凭据时看到的是这一行：`UPDATE` 必须命中同一引用与同一生命周期。
+    Present {
+        secret_ref: Option<String>,
+        lifecycle: QoderLifecycle,
+    },
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QoderAccountRecord {
@@ -450,6 +474,119 @@ impl crate::storage::Db {
             .ok_or_else(|| RpcError::storage("写入后读不到 Qoder 授权"))
     }
 
+    /// 条件提交一份授权：**引用、状态、有效期、指纹一次落库**，并在同一事务里
+    /// 推进 `auth_epoch`。
+    ///
+    /// 返回 `Ok(None)` = 这一行在我写凭据期间被别人改过，什么都没写。
+    /// 调用方必须按竞争失败处理（新建的凭据文件要清掉，覆盖写的那份保持不动）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_qoder_authorization(
+        &mut self,
+        account_id: &str,
+        source: &str,
+        secret_ref: Option<&str>,
+        auth_status: &str,
+        token_expires_at: Option<&str>,
+        fingerprint: Option<&str>,
+        expectation: &QoderAuthExpectation,
+    ) -> RpcResult<Option<QoderAuthRecord>> {
+        if !SOURCES.contains(&source) {
+            return Err(RpcError::invalid_params(format!(
+                "source 只支持 magpie / own_browser / own_pat，收到 {source}"
+            )));
+        }
+        if !AUTH_STATUSES.contains(&auth_status) {
+            return Err(RpcError::invalid_params(format!(
+                "authStatus 取值非法：{auth_status}"
+            )));
+        }
+        if source == SOURCE_MAGPIE && secret_ref.is_some() {
+            return Err(RpcError::invalid_params(
+                "magpie 来源不能持有 AICC 自己的凭据引用",
+            ));
+        }
+        if self.get_qoder_account(account_id)?.is_none() {
+            return Err(RpcError::not_found(format!(
+                "Qoder 账号不存在：{account_id}"
+            )));
+        }
+
+        let id = qoder_auth_id(account_id, source);
+        let now = now_rfc3339();
+        let tx = self.conn.transaction()?;
+        let changed = match expectation {
+            QoderAuthExpectation::Absent => match tx.execute(
+                "INSERT INTO qoder_authorizations (
+                     id, account_id, source, source_key, secret_ref, auth_status,
+                     token_expires_at, fingerprint, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?8)",
+                params![
+                    id,
+                    account_id,
+                    source,
+                    secret_ref,
+                    auth_status,
+                    token_expires_at,
+                    fingerprint,
+                    now
+                ],
+            ) {
+                Ok(_) => 1,
+                // `(account_id, source)` 唯一：别人先建了。这是**正常**的竞争结果。
+                Err(err) if is_constraint_violation(&err) => 0,
+                Err(err) => return Err(err.into()),
+            },
+            QoderAuthExpectation::Present {
+                secret_ref: expected,
+                lifecycle,
+            } => tx.execute(
+                "UPDATE qoder_authorizations
+                    SET secret_ref = ?1, auth_status = ?2, token_expires_at = ?3,
+                        fingerprint = ?4, updated_at = ?5
+                  WHERE account_id = ?6 AND source = ?7
+                    AND secret_ref IS ?8
+                    AND EXISTS (SELECT 1 FROM qoder_accounts
+                                WHERE id = ?6 AND generation = ?9 AND auth_epoch = ?10)",
+                params![
+                    secret_ref,
+                    auth_status,
+                    token_expires_at,
+                    fingerprint,
+                    now,
+                    account_id,
+                    source,
+                    expected,
+                    lifecycle.generation,
+                    lifecycle.auth_epoch
+                ],
+            )?,
+        };
+
+        if changed == 0 {
+            // `tx` 在这里 Drop → 自动回滚，一个字节都没写。
+            return Ok(None);
+        }
+        // 授权换了一份 = 在途的旧额度快照 / 领取请求立刻作废。
+        tx.execute(
+            "UPDATE qoder_accounts SET auth_epoch = auth_epoch + 1, updated_at = ?1 WHERE id = ?2",
+            params![now, account_id],
+        )?;
+        tx.commit()?;
+        self.get_qoder_authorization(account_id, source)
+    }
+
+    /// 有多少行授权引用着这个 `secret_ref`。
+    ///
+    /// 竞争失败清理用：只有在**没有任何行引用**时才允许删掉刚建的文件，
+    /// 否则删的可能正是胜者的那一条。
+    pub fn qoder_authorizations_referencing(&self, reference: &str) -> RpcResult<usize> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT COUNT(*) FROM qoder_authorizations WHERE secret_ref = ?1")?;
+        let count: i64 = stmt.query_row(params![reference], |row| row.get(0))?;
+        Ok(count.max(0) as usize)
+    }
+
     /// 只改授权状态（例如 401 后标 `invalid`），**不推进版本号**。
     ///
     /// 状态是观测结论，不是新的凭据事实：把"我刚被拒绝"也当成授权变更，
@@ -601,6 +738,15 @@ impl crate::storage::Db {
             .execute("DELETE FROM qoder_accounts WHERE id = ?1", params![id])?;
         Ok(changed > 0)
     }
+}
+
+/// 唯一键冲突。竞争的**正常**结果，不是"数据库坏了"。
+fn is_constraint_violation(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(inner, _)
+            if inner.code == rusqlite::ErrorCode::ConstraintViolation
+    )
 }
 
 #[cfg(test)]
@@ -758,6 +904,198 @@ mod tests {
             .list_qoder_authorizations(&account.id)
             .unwrap()
             .is_empty());
+    }
+
+    // -- 条件提交（CRED-3b）---------------------------------------------
+
+    fn lifecycle_of(db: &Db, account_id: &str) -> QoderLifecycle {
+        db.qoder_lifecycle(account_id).unwrap().expect("生命周期")
+    }
+
+    #[test]
+    fn an_absent_row_can_only_be_inserted_once() {
+        let (mut db, _dir) = db();
+        let account = db
+            .upsert_qoder_account("qoder_cn", "u-1", None, None)
+            .unwrap();
+        let first = db
+            .commit_qoder_authorization(
+                &account.id,
+                SOURCE_OWN_BROWSER,
+                Some("localjson:v1:aaaa-1111"),
+                "valid",
+                None,
+                None,
+                &QoderAuthExpectation::Absent,
+            )
+            .unwrap();
+        assert!(first.is_some());
+
+        // 另一个进程也以为是"首次"：必须放弃，而不是覆盖。
+        let second = db
+            .commit_qoder_authorization(
+                &account.id,
+                SOURCE_OWN_BROWSER,
+                Some("localjson:v1:bbbb-2222"),
+                "valid",
+                None,
+                None,
+                &QoderAuthExpectation::Absent,
+            )
+            .unwrap();
+        assert!(second.is_none(), "竞争失败必须是 None，不是错误也不是覆盖");
+        assert_eq!(
+            db.get_qoder_authorization(&account.id, SOURCE_OWN_BROWSER)
+                .unwrap()
+                .unwrap()
+                .secret_ref
+                .as_deref(),
+            Some("localjson:v1:aaaa-1111")
+        );
+    }
+
+    #[test]
+    fn a_present_row_is_only_updated_when_the_reference_still_matches() {
+        let (mut db, _dir) = db();
+        let account = db
+            .upsert_qoder_account("qoder_cn", "u-1", None, None)
+            .unwrap();
+        db.commit_qoder_authorization(
+            &account.id,
+            SOURCE_OWN_BROWSER,
+            Some("localjson:v1:old"),
+            "valid",
+            None,
+            None,
+            &QoderAuthExpectation::Absent,
+        )
+        .unwrap();
+        let expected = QoderAuthExpectation::Present {
+            secret_ref: Some("localjson:v1:old".to_string()),
+            lifecycle: lifecycle_of(&db, &account.id),
+        };
+
+        // 引用被迁到别的文件之后，迟到的写入必须落空。
+        db.commit_qoder_authorization(
+            &account.id,
+            SOURCE_OWN_BROWSER,
+            Some("localjson:v1:moved"),
+            "valid",
+            None,
+            None,
+            &QoderAuthExpectation::Present {
+                secret_ref: Some("localjson:v1:old".to_string()),
+                lifecycle: expected_lifecycle(&expected),
+            },
+        )
+        .unwrap();
+
+        let stale = db
+            .commit_qoder_authorization(
+                &account.id,
+                SOURCE_OWN_BROWSER,
+                Some("localjson:v1:late"),
+                "valid",
+                None,
+                None,
+                &expected,
+            )
+            .unwrap();
+        assert!(stale.is_none(), "引用已变，迟到写入不许覆盖");
+        assert_eq!(
+            db.get_qoder_authorization(&account.id, SOURCE_OWN_BROWSER)
+                .unwrap()
+                .unwrap()
+                .secret_ref
+                .as_deref(),
+            Some("localjson:v1:moved")
+        );
+    }
+
+    fn expected_lifecycle(expectation: &QoderAuthExpectation) -> QoderLifecycle {
+        match expectation {
+            QoderAuthExpectation::Present { lifecycle, .. } => lifecycle.clone(),
+            QoderAuthExpectation::Absent => panic!("必须是 Present"),
+        }
+    }
+
+    /// 删号后用同一个 UID 重建：`auth_epoch` 回到 0，只有 `generation` 能挡住旧写入。
+    #[test]
+    fn a_recreated_account_rejects_writes_from_the_old_lifecycle() {
+        let (mut db, _dir) = db();
+        let old = db
+            .upsert_qoder_account("qoder_cn", "u-1", None, None)
+            .unwrap();
+        db.commit_qoder_authorization(
+            &old.id,
+            SOURCE_OWN_BROWSER,
+            Some("localjson:v1:old"),
+            "valid",
+            None,
+            None,
+            &QoderAuthExpectation::Absent,
+        )
+        .unwrap();
+        let old_lifecycle = lifecycle_of(&db, &old.id);
+
+        db.delete_qoder_account(&old.id).unwrap();
+        let fresh = db
+            .upsert_qoder_account("qoder_cn", "u-1", None, None)
+            .unwrap();
+        assert_eq!(fresh.id, old.id, "账号 id 由 (edition, uid) 决定");
+        assert_eq!(lifecycle_of(&db, &fresh.id).auth_epoch, 0);
+
+        let stale = db
+            .commit_qoder_authorization(
+                &old.id,
+                SOURCE_OWN_BROWSER,
+                Some("localjson:v1:old"),
+                "valid",
+                None,
+                None,
+                &QoderAuthExpectation::Present {
+                    secret_ref: Some("localjson:v1:old".to_string()),
+                    lifecycle: old_lifecycle,
+                },
+            )
+            .unwrap();
+        assert!(stale.is_none(), "旧生命周期的写入必须被拒");
+        assert!(db
+            .get_qoder_authorization(&old.id, SOURCE_OWN_BROWSER)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn committing_advances_the_epoch_and_reference_counts_are_exact() {
+        let (mut db, _dir) = db();
+        let account = db
+            .upsert_qoder_account("qoder_cn", "u-1", None, None)
+            .unwrap();
+        let before = lifecycle_of(&db, &account.id);
+        db.commit_qoder_authorization(
+            &account.id,
+            SOURCE_OWN_PAT,
+            Some("localjson:v1:p"),
+            "valid",
+            None,
+            None,
+            &QoderAuthExpectation::Absent,
+        )
+        .unwrap();
+        let after = lifecycle_of(&db, &account.id);
+        assert_eq!(after.auth_epoch, before.auth_epoch + 1);
+        assert_eq!(after.generation, before.generation, "换授权不换生命周期");
+        assert_eq!(
+            db.qoder_authorizations_referencing("localjson:v1:p")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.qoder_authorizations_referencing("localjson:v1:nope")
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

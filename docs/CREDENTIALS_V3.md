@@ -3,10 +3,11 @@
 > 状态：**CRED-1 已合并**（`LocalJsonStore` + 引用解析 + 文件系统边界加固）；
 > **CRED-2 已合并**（SQLite v20 + Magpie 动态关联 + 统一 Broker 解析）；
 > **CRED-3a 已合并**（WorkBuddy 自有授权 JSON 化，**默认关闭**，见 §8ter）；
-> **CRED-3-UI 已交付待验收**（明文的告知 / 确认与开关，见 §8quater）。
-> CRED-3b（Qoder 两种授权）/ CRED-4（旧 Keychain 迁移）/ CRED-5（免弹窗收口）尚未开始。
+> **CRED-3-UI 已合并**（明文的告知 / 确认与开关，见 §8quater）；
+> **CRED-3b 已交付待验收**（Qoder 设备授权 / PAT 的存储分派、读取与删除，见 §8quinquies）。
+> CRED-4（旧 Keychain 迁移）/ CRED-5（免弹窗收口）尚未开始。
 >
-> 基线：`main` @ `6adde70`（#84 已合并），数据库 Schema **v20**。
+> 基线：`main` @ `8da2e80`（#86 已合并），数据库 Schema **v20**（CRED-3b 未新增列）。
 > 范围：只动凭据的**存取方式**，不动账号模型、签到 / 成长 / 旅行 / Credits 业务。
 
 ## 1. 为什么要换掉钥匙串
@@ -152,10 +153,11 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 
 | PR | 内容 | 状态 |
 | --- | --- | --- |
-| CRED-1 | JSON 存储底层 + 引用解析 | 已合并（#82） |
-| CRED-2 | SQLite v20 + Magpie 动态授权 | **本 PR** |
-| CRED-3a | WorkBuddy 自有授权 JSON 化 | **本 PR** |
-| CRED-3b | Qoder CN / International 浏览器、设备授权、PAT JSON 化 | 待开始（等 3a 合并） |
+| CRED-1 | JSON 存储底层 + 引用解析 | 已合并（#82、#83） |
+| CRED-2 | SQLite v20 + Magpie 动态授权 | 已合并（#84） |
+| CRED-3a | WorkBuddy 自有授权 JSON 化 | 已合并（#85） |
+| CRED-3-UI | 明文的告知 / 确认与开关 | 已合并（#86） |
+| CRED-3b | Qoder CN / International 设备授权 + PAT + Credits 读取 | **本 PR**（见 §8quinquies） |
 | CRED-4 | 旧 Keychain 显式迁移（备份 / 核对 / 回滚） | 待开始（两平台都 JSON 化之后） |
 | CRED-5 | Worker 免弹窗收口 + 端到端验收 | 待开始 |
 
@@ -393,6 +395,95 @@ F 已经不被任何行引用，没人会读到那半秒的新令牌；最终状
 
 > 本机没有 Xcode / XCTest，`swift test` 只能靠 CI；本地用 `swiftc -typecheck` + 离屏渲染
 > 覆盖编译与版式，两者的边界已在上面写清。
+
+## 8quinquies. CRED-3b：Qoder 自有授权 JSON 化
+
+Qoder 有**两条**自有授权来源，各占 `qoder_authorizations` 的一行：设备授权
+（`own_browser`，OAuth）与 PAT（`own_pat`）。本期把两者都接入 `LocalJsonStore`，
+并让 Credits 的读取与账号删除**按引用**工作。**没有**批量迁移旧凭据（那是 CRED-4）。
+
+### 落点规则（只看这一行现在是什么）
+
+| 行的状态 | 新令牌写到哪里 |
+| --- | --- |
+| 还没有这一行，且用户没同意明文 | 钥匙串（与 CRED-3b 之前完全一致） |
+| 还没有这一行，且已同意明文 | 新建 JSON 文件（随机 UUID） |
+| 已是 `localjson:v1:` | 覆盖同一文件（`revision` 校验，归属不可变） |
+| 仍是 `keychain:` | 继续写钥匙串，**不隐式迁移** |
+| 引用是 magpie / 未知前缀 / 指向别的键 | 显式拒绝（`unsupported` / `conflict`），不回退 |
+
+同一账号的设备授权与 PAT 是**两个文件、两个引用**，互不覆盖：删掉 PAT 不影响设备授权，
+反之亦然。
+
+### 文件内容
+
+| 字段 | 设备授权 | PAT |
+| --- | --- | --- |
+| `platform` | 实际 edition：`qoder_cn` / `qoder_global` | 同左 |
+| `source` | `own` | `own` |
+| `credentialKind` | `oauth` | `pat` |
+| `authorizationId` | `qoder_auth_id(account, "own_browser")` | `qoder_auth_id(account, "own_pat")` |
+| `accessToken` | 接口实际返回的 device token | 用户粘贴的 PAT |
+| `refreshToken` | 只在服务端真的返回时保存 | **恒为空**（PAT 不刷新） |
+| `expiresAt` | 以接口响应为准 | 恒为空（失效靠 401 发现） |
+
+### 条件提交：不加列
+
+`qoder_authorizations` 没有 WorkBuddy 那样的 `version` 列。沿用既有字段做守卫，
+**不新增迁移**：
+
+| 场景 | 判定 |
+| --- | --- |
+| 首次授权，两进程同时写 | `INSERT`，唯一键冲突 → `None`（放弃，不覆盖） |
+| 重复授权 / PAT 更新 | `UPDATE ... WHERE secret_ref IS <写凭据前看到的那条>` |
+| 引用被别人迁走 | 同上，`secret_ref` 对不上 → `None` |
+| 删号后同 UID 重建 | `EXISTS(... AND generation = ? AND auth_epoch = ?)`，单看 epoch 挡不住 |
+
+`None` 的收尾分两种：**新建**的文件只在"没有任何行引用它"时删掉（`qoder_authorizations_referencing`）；
+**覆盖写**的那份保持不动（盘上那份本来就属于这条授权，里面是刚拿到的有效令牌）。
+
+### 四条生产路径
+
+| 文件 | 改动 |
+| --- | --- |
+| `providers/qoder_secret.rs`（新） | 落点决策、归属校验（4 个判据）、写入 / 回滚 / 删除、条件提交封装 |
+| `providers/qoder_auth.rs::persist` | 令牌按引用分流；授权行改为条件提交；失败回滚凭据 + 新建账号 |
+| `providers/qoder_pat.rs::persist / read_secret / remove` | 同上；读取按行分派，删除只清这一来源 |
+| `credits.rs::resolve_token` | 按 `secret_ref` 读凭据；读失败**不换来源**，错误保留分类（`not_found` / `conflict` / `denied` …） |
+| `providers/qoder_admin.rs::delete` | 先读授权快照制定清理计划，再删凭据、删行；JSON-only 账号全程不碰钥匙串 |
+
+### 存储前后行为对照
+
+| 行为 | CRED-3b 之前 | CRED-3b 之后 |
+| --- | --- | --- |
+| 新设备授权（同意明文） | 钥匙串 `qoder/<id>/own/access|refresh` | 一个 JSON 文件；钥匙串零访问 |
+| 新 PAT（同意明文） | 钥匙串 `qoder/<id>/pat/token` | 另一个 JSON 文件；不含 refresh |
+| 未同意明文 | 钥匙串 | 钥匙串（不变） |
+| 老账号（已授权） | 钥匙串 | 钥匙串（**不迁移**，CRED-4 显式做） |
+| Credits 读取 | 固定按账号键名读钥匙串 | 按授权行 `secret_ref` 分派 |
+| 引用坏了 | 读不到就报错 | `not_found` / `conflict` 显式分类，仍不回落 |
+| 删号 | 无条件删三条固定钥匙串键 | 按引用清理；引用不可信时**拒绝删除** |
+| JSON-only 账号删号 | 会碰三次钥匙串（可能弹框） | 零次钥匙串访问 |
+| 并发首次授权 | 后写覆盖先写 | 只有一个成功，失败方不留孤儿令牌文件 |
+
+### 已知限制
+
+1. **不做迁移**：CRED-3b 之前登录的账号，凭据仍在钥匙串，读取时仍可能触发一次系统授权。
+2. **服务端不下发 refresh 时保留旧值**（与钥匙串路径一致）：如果服务端换了会话，
+   旧的 refresh 会留在文件里直到下一次真的下发。
+3. **PAT 不刷新**：401 只能提示用户重新生成；AICC 没有轮换它的能力。
+4. **一个账号一份凭据一个文件**：不接受"一份文件装多平台"，换账号必须新建。
+
+### 验证
+
+| 项 | 手段 |
+| --- | --- |
+| 存储分派与归属 | `providers::qoder_secret::tests`（18 条，含全拒钥匙串后端） |
+| 条件提交 | `storage::qoder_accounts::tests`（4 条，含删号重建） |
+| 读取与降级 | `credits::tests`（JSON 设备授权 / JSON PAT / 文件缺失不换来源 / 归属错配） |
+| 删除 | `providers::qoder_admin::tests`（含 JSON-only、混合、拒绝删除、失败可重试） |
+| 真实跨进程竞争 | `concurrent_first_grants_leave_exactly_one_secret_and_one_row`（4 个子进程） |
+| 全量 | `cargo fmt --check` / `cargo check --locked --all-targets` / `cargo test --locked` |
 
 ## 9. 风险
 

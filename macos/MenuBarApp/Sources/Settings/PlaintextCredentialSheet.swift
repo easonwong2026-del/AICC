@@ -33,7 +33,7 @@ struct PlaintextCredentialSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     // 不用 `**加粗**`：这里渲染出来是字面量，`Text` 只在部分上下文里解析 markdown。
-                    Text("AICC 可以把之后新建的 WorkBuddy 授权保存为本机 JSON 文件，不再写入 macOS 钥匙串。这样后台任务不会因为 App 重新构建、签名变化而反复弹出授权框。")
+                    Text("AICC 可以把之后新建的 WorkBuddy 与 Qoder 自有授权（设备授权、PAT）保存为本机 JSON 文件，不再写入 macOS 钥匙串。这样后台任务不会因为 App 重新构建、签名变化而反复弹出授权框。")
                         .fixedSize(horizontal: false, vertical: true)
 
                     point(
@@ -51,7 +51,7 @@ struct PlaintextCredentialSheet: View {
                     point(
                         icon: "clock.arrow.circlepath",
                         title: "只影响之后新建的授权",
-                        detail: "已经登录的账号保持原来的存储方式，不会因为打开这个开关而自动迁移；把旧账号搬到本地文件是后续版本里的显式操作。"
+                        detail: "已经登录的账号（含 Qoder）保持原来的存储方式，不会因为打开这个开关而自动迁移；把旧账号搬到本地文件是后续版本里的显式操作。"
                     )
                     point(
                         icon: "arrow.uturn.backward",
@@ -61,7 +61,7 @@ struct PlaintextCredentialSheet: View {
                     point(
                         icon: "key",
                         title: "钥匙串仍会用到",
-                        detail: "Qoder 客户端自身的登录凭据、以及你主动导入时读取的第三方钥匙串条目不受这个开关影响。"
+                        detail: "Qoder 客户端自身的登录凭据、以及你主动导入时读取的第三方钥匙串条目不受这个开关影响；再打开这个开关之前保存的 AICC 授权也仍在钥匙串里。"
                     )
 
                     if let failure {

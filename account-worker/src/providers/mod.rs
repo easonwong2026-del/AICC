@@ -20,5 +20,6 @@ pub mod qoder_edition;
 pub mod qoder_global;
 pub mod qoder_identity;
 pub mod qoder_pat;
+pub mod qoder_secret;
 pub mod workbuddy;
 pub mod workbuddy_auth;
