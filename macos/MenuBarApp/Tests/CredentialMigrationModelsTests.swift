@@ -13,6 +13,7 @@ final class CredentialMigrationModelsTests: XCTestCase {
                 "alreadyJson": 3,
                 "magpie": 1,
                 "blocked": 1,
+                "rollbackable": 2,
                 "total": 7,
             ],
             "items": [
@@ -41,12 +42,14 @@ final class CredentialMigrationModelsTests: XCTestCase {
 
         XCTAssertEqual(state.summary.migratable, 2)
         XCTAssertEqual(state.summary.alreadyJSON, 3)
+        XCTAssertEqual(state.summary.rollbackable, 2)
         XCTAssertTrue(state.summary.needsAttention)
 
         XCTAssertEqual(state.items.count, 2)
         XCTAssertTrue(state.items[0].migratable)
         XCTAssertEqual(state.items[0].storageText, "钥匙串")
         XCTAssertNil(state.items[0].blockedText)
+        XCTAssertEqual(state.items[0].rollbackable, false)
         XCTAssertEqual(state.items[1].blockedText, "已经是本地 JSON")
         XCTAssertEqual(state.items[1].storageText, "本地 JSON")
         // 没有昵称时退回账号 id，不显示空白行。
@@ -64,9 +67,23 @@ final class CredentialMigrationModelsTests: XCTestCase {
             alreadyJSON: 4,
             magpie: 2,
             blocked: 0,
+            rollbackable: 0,
             total: 6
         )
         XCTAssertFalse(summary.needsAttention)
+    }
+
+    /// 原生 JSON（没有迁移记录）不算可回滚：面板的按钮必须跟着这个数走。
+    func testRollbackRequiresARecord() {
+        let summary = CredentialMigrationSummary(
+            migratable: 0,
+            alreadyJSON: 3,
+            magpie: 0,
+            blocked: 0,
+            rollbackable: 0,
+            total: 3
+        )
+        XCTAssertEqual(summary.rollbackable, 0, "没有迁移记录就不能回滚")
     }
 
     func testVerifyReportSurfacesProblems() throws {

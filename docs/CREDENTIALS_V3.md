@@ -8,7 +8,7 @@
 > **CRED-4 本 PR**（旧 Keychain 显式迁移：盘点 / 备份 / 迁移 / 核验 / 回滚，见 §8sexies）。
 > CRED-5（免弹窗收口）尚未开始。
 >
-> 基线：`main` @ `8da2e80`（#86 已合并），数据库 Schema **v21**（CRED-3b 复审为 `qoder_authorizations` 增加 `auth_version`）。
+> 基线：`main` @ `08ba783`（#87 已合并），数据库 Schema **v22**（CRED-4 增加 `credential_migrations` 记录表）。
 > 范围：只动凭据的**存取方式**，不动账号模型、签到 / 成长 / 旅行 / Credits 业务。
 
 ## 1. 为什么要换掉钥匙串
@@ -625,83 +625,121 @@ CRED-3a / 3b 之后**新**授权都落本地 JSON，但在此之前登录的账�
 
 所以本阶段只提供四个**显式**动作，没有任何定时任务、没有启动时迁移。
 
-### 四条硬规则
+### 六条硬规则
 
 | 规则 | 落点 |
 | --- | --- |
 | 不自动迁移 | 只有 `credentials.migration.*` 四个 RPC；没有 scheduler 入口 |
-| 迁移前备份 | `VACUUM INTO` 出库快照 + 一份清单，**清单不含任何令牌** |
-| 核验成功前不删钥匙串 | 整个 CRED-4 一个 Keychain 条目都不删；回滚的依据就是"原条目还在" |
-| 迁移可回滚 | 回滚 = 引用改回 `keychain:` + 删掉本次新建的 JSON 副本（先确认无人引用） |
+| **后端也要授意** | `run` 自己检查 `credentials_json_consent`，不依赖界面那层确认（RPC 可直调） |
+| 迁移前备份 | `VACUUM INTO` 快照 + 清单（**不含令牌**）；目录 `0700` + 随机后缀 + 完整性检查 |
+| 核验成功前不删钥匙串 | 整个 CRED-4 一个 Keychain 条目都不删 |
+| **回滚只命中迁移实例** | 靠 `credential_migrations`（v22）判定：记录在 + 行仍指迁移产物 + 版本未变 + 原条目指纹一致 |
+| 参数错不扩大范围 | `domain` / `accountId` 显式传了但类型错或为空 → `invalid_params`，**不**退化成全量 |
+
+### 迁移记录（v22）
+
+```
+credential_migrations
+  domain / account_id / source        这一行是谁
+  original_ref                        迁移前的钥匙串引用（回滚目标）
+  original_fingerprint                access 的摘要：回滚前核对"还是那一份"
+  original_refresh_fingerprint        refresh 同上
+  migrated_ref / migrated_version     迁移后的文件与行版本
+```
+
+没有这张表，"回滚"只能按"当前是 localjson"筛选 —— 那会把 CRED-3a/3b 正常登录
+得到的**有效授权**切回可能已经失效的旧钥匙串条目。表里只有引用与摘要，没有令牌。
 
 ### RPC 契约
 
 | 方法 | 作用 | 关键返回 |
 | --- | --- | --- |
-| `credentials.migration.inventory` | 只读盘点：WorkBuddy + Qoder 两侧有授权行的凭据 | `summary{migratable,alreadyJson,magpie,blocked,total}` + `items[]` |
-| `credentials.migration.run` | 备份 → 逐条迁移（可带 `domain` / `accountId` 限定范围） | `backup`（目录路径）、`migrated`、`failed`、`items[]` |
-| `credentials.migration.verify` | 逐条读回并比对，另扫没有行引用的文件 | `ok`、`broken`、`pendingKeychain`、`orphans[]`、`brokenFiles` |
-| `credentials.migration.rollback` | 引用改回钥匙串并删副本 | `rolledBack`、`failed`、`items[]` |
+| `credentials.migration.inventory` | 只读盘点 WorkBuddy + Qoder 两侧 | `summary{migratable,alreadyJson,magpie,blocked,rollbackable,total}` + `items[]` |
+| `credentials.migration.run` | 备份 → 逐条迁移（可带 `domain` / `accountId`） | `backup`、`migrated`、`migratedWithoutRollback`、`skipped`、`failed`、`items[]` |
+| `credentials.migration.verify` | 逐条读回比对 + 孤儿扫描 | `ok`、`broken`、`pendingKeychain`、`rollbackable`、`orphans[]` |
+| `credentials.migration.rollback` | 只回滚可回滚的那些 | `rolledBack`、`skipped`、`failed`、`items[]` |
 
-`items[].blocked` 是**原因码**而不是文案：`already_json` / `magpie_managed` /
-`reference_unusable`。界面按码给文案，不做字符串匹配。
+`items[].blocked` / `reason` 都是**原因码**（`already_json` / `magpie_managed` /
+`reference_unusable` / `authorization_changed` / `row_reauthorized_since_migration` …），
+文案在界面。
 
 ### 单条迁移的顺序
 
 ```text
-SecretTxn（.lock）
-  ├─ 校验引用正好是本账号本来源的键（指向别处 → 拒绝迁移，不固化串号）
-  ├─ 读钥匙串整组值（access + refresh；Denied 一律失败，不当成"空"）
-  ├─ 写一个新的 JSON 文件（随机 UUID，0600）
-  ├─ 条件提交引用（WorkBuddy：version + access_ref；Qoder：secret_ref + auth_version + generation）
-  └─ 提交落空 → 删掉刚建的文件（还没人引用），本条记 skipped/authorization_changed
+SecretTxn（.lock）                 ← 盘点、备份、迁移都在锁内，同一时点
+  ├─ 锁内复核：行 id / 引用 / 版本还是计划里那一条？不是 → skipped
+  ├─ 校验 access 与 refresh 引用**各自**指向本账号本来源的键
+  ├─ 读钥匙串整组值：NotFound / Denied / IO / 非 UTF-8 全部显式分类
+  ├─ 写新 JSON（`PendingCopy` 托管：任何提前返回都会清理未引用的副本）
+  ├─ 条件提交引用（WorkBuddy：version + access_ref；Qoder：**计划快照** secret_ref + auth_version + generation）
+  ├─ 成功后写迁移记录（写失败 → 迁移仍算成功但标记"暂时无法回滚"）
+  └─ 同步 `key_migration_state = ready` 与账号镜像列
 ```
 
 **原钥匙串条目一个字节都不碰**，所以"迁移失败"和"迁移后反悔"都是安全的。
 
+### 回滚的五道门
+
+1. 必须有迁移记录（否则 `not_migrated`，跳过）；
+2. 行当前引用必须仍是记录里的 `migrated_ref`；
+3. 行版本必须仍是 `migrated_version`（之后重新登录过 → 跳过，**不动有效授权**）；
+4. 原 Keychain 的 access 与 refresh 必须可读，且指纹与记录一致（换了就不回滚）；
+5. 改回引用后才删副本，删之前对**两张表**做全局引用核对 + 归属核对；任一不满足只报告不删。
+
 ### 备份里有什么
 
 ```text
-<data>/backups/cred-migration-<时间戳>/
-  accounts.sqlite     VACUUM INTO 出来的完整库（0600）
-  inventory.json      迁移清单：账号 / 来源 / 引用 / 指纹（0600，**无令牌**）
+<data>/backups/cred-migration-<时间戳>-<随机8位>/
+  accounts.sqlite     VACUUM INTO 的完整库（0600），迁移后立刻做 integrity_check
+  inventory.json      账号 / 来源 / 引用 / 指纹（0600，**无令牌**）
 ```
 
-用 `VACUUM INTO` 而不是拷 `accounts.sqlite`：WAL 模式下还有内容没 checkpoint，
-裸拷贝会漏掉最近的事务。
+目录用 `create_dir`（目标已存在就失败）+ `0700`，不跟随符号链接；时间戳带随机后缀，
+同一秒连跑两次也不会撞名。用 `VACUUM INTO` 而不是拷 `accounts.sqlite`：WAL 模式下
+还有内容没 checkpoint，裸拷贝会漏掉最近的事务。
+
+**它不是完整的凭据备份**：回滚依赖原 Keychain 条目仍然可用。
 
 ### 核验做什么
 
 | 检查 | 失败含义 |
 | --- | --- |
 | 文件能读、归属四字段与行一致 | 引用串号 / 文件被换 |
-| 令牌非空、指纹与行里记录的一致 | 文件内容与授权行脱节 |
+| access 非空；行声明了 refresh 槽就必须也有 | "核验全 OK 但刷新失效" |
+| 迁移过的行：指纹与迁移记录一致 | 文件内容与授权行脱节 |
 | 读路径（`owned::token` / `qoder_secret::read`）拿到的与文件内容一致 | "文件对、引用指错" |
-| 扫描 `secrets/v1` 中没有任何行引用的文件 | 迁移或删除中途被打断留下的副本 |
-
-孤儿文件**只报不删**：清理是显式动作（可在后续补一个"清理孤儿"的按钮）。
+| 扫描 `secrets/v1` 中没有任何行引用的文件 | 迁移/删除中途被打断留下的副本（**只报不删**） |
 
 ### 不做的
 
-* 没有任何授权行的旧钥匙串条目（G4 之前的极老安装）：没有引用可依，
-  无法判断它属于哪个账号，**不盘点也不迁移**。
-* 不删任何 Keychain 条目 —— 那是 CRED-5 的显式动作。
-* 不改 Qoder 客户端自身的认证文件。
+* 没有任何授权行的旧钥匙串条目（G4 之前的极老安装）：没有引用可依，不盘点也不迁移。
+  要覆盖需要先有一个"认领"流程（把旧键绑定到某个账号），属于另一个 PR。
+* 不删任何 Keychain 条目 —— CRED-5 的显式动作。
+* 不改 Qoder 客户端自身认证文件、不改 Credits 规则。
 
 ### 验证
 
 | 项 | 手段 |
 | --- | --- |
-| 盘点可迁移数正确且不回显令牌 | `cred_migrate::tests::inventory_lists_keychain_rows_as_migratable_and_never_reveals_tokens` |
-| WorkBuddy 迁移：换引用、留钥匙串 | `..._migration_moves_the_reference_and_keeps_the_keychain_entry`（迁移后 `owned::token` 可读同一条令牌） |
-| Qoder 迁移：Credits 仍可读 | `..._qoder_keychain_authorization_migrates_and_stays_readable` |
-| 回滚：改回钥匙串并删副本 | `..._rollback_restores_the_keychain_reference_and_removes_the_copy` |
-| 读钥匙串被拒 → 失败而不是"迁空" | `..._a_denied_keychain_read_is_a_failure_not_an_empty_migration` |
-| 迁移期间行被改 → skipped 且不留文件 | `..._a_row_changed_during_migration_is_skipped_and_leaves_no_file` |
-| 备份不含令牌、快照可打开 | `..._the_backup_manifest_never_contains_tokens` |
-| 孤儿扫描只报不删 | `..._verify_reports_an_unreferenced_file_as_an_orphan` |
-| 范围限定到单个账号 | `..._migration_is_scoped_to_one_account_when_asked` |
-| 面板解析不猜字段 | `macos/MenuBarApp/Tests/CredentialMigrationModelsTests` |
+| 盘点不回显令牌、可回滚计数正确 | `inventory_lists_keychain_rows_as_migratable_and_never_reveals_tokens` |
+| WorkBuddy 迁移：换引用、留钥匙串、写记录、`key_migration_state` | `migration_moves_the_reference_records_it_and_keeps_the_keychain_entry` |
+| Qoder 迁移 + 回滚 | `qoder_keychain_authorization_migrates_and_stays_readable` |
+| **原生 JSON 绝不回滚**（P0-1） | `rollback_never_touches_a_natively_created_json_authorization` |
+| 迁移后重新登录 → 不回滚（P0-1） | `rollback_skips_a_row_that_was_reauthorized_after_migration` |
+| 原 refresh 变了 → 拒绝回滚（P0-3） | `rollback_refuses_when_the_original_refresh_changed` |
+| 盘点后 Qoder 重登 → 计划落空、新令牌胜出（P0-2） | `a_qoder_relogin_during_migration_wins_and_the_plan_is_dropped` |
+| refresh 引用指向别的键 → 拒绝（P0-3） | `a_refresh_reference_to_another_key_blocks_the_migration` |
+| Qoder refresh 被拒 → 失败而非静默丢弃（P0-3） | `a_denied_qoder_refresh_read_fails_the_migration` |
+| 错误 scope 零修改（P0-4） | `a_malformed_scope_is_rejected_and_changes_nothing` |
+| 无明文同意 → 后端拒绝（P1-4） | `migration_requires_the_json_storage_consent` |
+| 副本清理协议（P1-1） | `a_pending_copy_is_removed_unless_it_is_kept` |
+| 备份不含令牌、快照完整性、目录 0700（P1-2） | `the_backup_manifest_never_contains_tokens_and_the_snapshot_is_sound` |
+| 同秒两次运行不撞名（P1-2） | `two_runs_in_the_same_second_get_distinct_backups` |
+| 核验发现缺 refresh（P1-4） | `verify_flags_a_file_that_lost_its_refresh_slot` |
+| 孤儿只报不删 | `verify_reports_an_unreferenced_file_as_an_orphan` |
+| 范围限定单账号 | `migration_is_scoped_to_one_account_when_asked` |
+| v22 迁移幂等 | `storage::tests::v22_adds_the_credential_migration_table_idempotently` |
+| 面板解析与"可回滚才可点" | `macos/MenuBarApp/Tests/CredentialMigrationModelsTests` |
 
 ## 9. 风险
 

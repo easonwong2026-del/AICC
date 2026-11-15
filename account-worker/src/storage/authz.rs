@@ -87,6 +87,58 @@ impl AuthorizationRecord {
     }
 }
 
+/// CRED-4 的一次迁移记录：**这一行是从钥匙串搬过来的**。
+///
+/// 回滚的唯一依据。没有它就只能按"当前是本地 JSON"筛，会把 CRED-3a/3b 正常
+/// 登录得到的有效授权一起切回可能已经失效的旧钥匙串条目。
+///
+/// **不含令牌**：`*_fingerprint` 是令牌的稳定摘要，够判"还是不是那一份"。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialMigrationRecord {
+    pub id: String,
+    /// `workbuddy` / `qoder`。
+    pub domain: String,
+    pub account_id: String,
+    /// WorkBuddy 是授权 kind（`own`），Qoder 是来源（`own_browser` / `own_pat`）。
+    pub source: String,
+    /// 迁移前的钥匙串引用，回滚要回到它。
+    pub original_ref: String,
+    pub original_fingerprint: Option<String>,
+    pub original_refresh_fingerprint: Option<String>,
+    /// 迁移后应该仍在用的本地文件引用。
+    pub migrated_ref: String,
+    /// 迁移后的行版本：行被重新授权过就不能回滚。
+    pub migrated_version: i64,
+    pub created_at: String,
+}
+
+impl CredentialMigrationRecord {
+    pub fn id_of(domain: &str, account_id: &str, source: &str) -> String {
+        format!("{domain}:{account_id}:{source}")
+    }
+}
+
+const MIGRATION_COLUMNS: &str = "id, domain, account_id, source, original_ref,
+    original_fingerprint, original_refresh_fingerprint, migrated_ref, migrated_version,
+    created_at";
+
+fn map_credential_migration(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<CredentialMigrationRecord> {
+    Ok(CredentialMigrationRecord {
+        id: row.get(0)?,
+        domain: row.get(1)?,
+        account_id: row.get(2)?,
+        source: row.get(3)?,
+        original_ref: row.get(4)?,
+        original_fingerprint: row.get(5)?,
+        original_refresh_fingerprint: row.get(6)?,
+        migrated_ref: row.get(7)?,
+        migrated_version: row.get(8)?,
+        created_at: row.get(9)?,
+    })
+}
+
 const AUTH_COLUMNS: &str = "id, account_id, kind, access_ref, refresh_ref, auth_domain,
     token_expires_at, status, version, key_migration_state, source_key,
     last_used_at, last_error, created_at, updated_at";
@@ -136,6 +188,69 @@ impl super::Db {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// 写下（或覆盖）一条迁移记录。同一条授权再次迁移时旧记录被替换：
+    /// 只保留"最近一次迁移"作为回滚依据。
+    pub fn upsert_credential_migration(&self, record: &CredentialMigrationRecord) -> RpcResult<()> {
+        self.conn.execute(
+            "INSERT INTO credential_migrations (
+                 id, domain, account_id, source, original_ref, original_fingerprint,
+                 original_refresh_fingerprint, migrated_ref, migrated_version, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT (id) DO UPDATE SET
+                 original_ref = excluded.original_ref,
+                 original_fingerprint = excluded.original_fingerprint,
+                 original_refresh_fingerprint = excluded.original_refresh_fingerprint,
+                 migrated_ref = excluded.migrated_ref,
+                 migrated_version = excluded.migrated_version,
+                 created_at = excluded.created_at",
+            params![
+                record.id,
+                record.domain,
+                record.account_id,
+                record.source,
+                record.original_ref,
+                record.original_fingerprint,
+                record.original_refresh_fingerprint,
+                record.migrated_ref,
+                record.migrated_version,
+                record.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn find_credential_migration(
+        &self,
+        id: &str,
+    ) -> RpcResult<Option<CredentialMigrationRecord>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {MIGRATION_COLUMNS} FROM credential_migrations WHERE id = ?1"
+        ))?;
+        Ok(stmt
+            .query_row(params![id], map_credential_migration)
+            .optional()?)
+    }
+
+    pub fn list_credential_migrations(&self) -> RpcResult<Vec<CredentialMigrationRecord>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {MIGRATION_COLUMNS} FROM credential_migrations ORDER BY created_at ASC"
+        ))?;
+        let rows = stmt.query_map([], map_credential_migration)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn delete_credential_migration(&self, id: &str) -> RpcResult<bool> {
+        let changed = self.conn.execute(
+            "DELETE FROM credential_migrations WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(changed > 0)
     }
 
     pub fn get_authorization(&self, id: &str) -> RpcResult<Option<AuthorizationRecord>> {

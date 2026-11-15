@@ -213,21 +213,24 @@ final class AccountWorkerManager: ObservableObject {
     // MARK: - 旧 Keychain 凭据迁移（CRED-4）
 
     /// 刷新盘点。**只读**：不会读钥匙串里的令牌，只列引用与摘要。
-    func refreshCredentialMigration() async {
+    ///
+    /// `keepNotice` 用于"操作之后顺带刷新"：那时用户要看的是刚拿到的结果，
+    /// 不能被"没有需要迁移的凭据"这类状态文案盖掉。
+    func refreshCredentialMigration(keepNotice: Bool = false) async {
         guard let client, client.isRunning else {
-            credentialMigrationNotice = "助手未运行，无法读取凭据状态"
+            if !keepNotice { credentialMigrationNotice = "助手未运行，无法读取凭据状态" }
             return
         }
         do {
             let result = try await client.call("credentials.migration.inventory", timeout: 10)
             credentialMigration = CredentialMigrationState.parse(result)
-            if let state = credentialMigration {
+            if !keepNotice, let state = credentialMigration {
                 credentialMigrationNotice = state.summary.needsAttention
                     ? nil
                     : "没有需要迁移的凭据"
             }
         } catch {
-            credentialMigrationNotice = Self.describe(error)
+            if !keepNotice { credentialMigrationNotice = Self.describe(error) }
         }
     }
 
@@ -241,10 +244,14 @@ final class AccountWorkerManager: ObservableObject {
             successPrefix: "已迁移"
         ) { result in
             let migrated = result["migrated"] as? Int ?? 0
+            let skipped = result["skipped"] as? Int ?? 0
             let failed = result["failed"] as? Int ?? 0
+            let noRollback = result["migratedWithoutRollback"] as? Int ?? 0
             let backup = result["backup"] as? String
             var text = "已迁移 \(migrated) 条"
-            if failed > 0 { text += "，失败 \(failed) 条（可在下方重新核验）" }
+            if skipped > 0 { text += "，跳过 \(skipped) 条（期间已被重新授权）" }
+            if failed > 0 { text += "，失败 \(failed) 条（可重新核验）" }
+            if noRollback > 0 { text += "，其中 \(noRollback) 条暂时无法回滚" }
             if let backup { text += "。备份：\(backup)" }
             return text
         }
@@ -257,10 +264,12 @@ final class AccountWorkerManager: ObservableObject {
             successPrefix: "已回滚"
         ) { result in
             let done = result["rolledBack"] as? Int ?? 0
+            let skipped = result["skipped"] as? Int ?? 0
             let failed = result["failed"] as? Int ?? 0
-            return failed > 0
-                ? "已回滚 \(done) 条，\(failed) 条失败"
-                : "已回滚 \(done) 条"
+            var text = "已回滚 \(done) 条"
+            if skipped > 0 { text += "，跳过 \(skipped) 条（已被重新授权）" }
+            if failed > 0 { text += "，失败 \(failed) 条" }
+            return text
         }
     }
 
@@ -303,7 +312,8 @@ final class AccountWorkerManager: ObservableObject {
         do {
             let result = try await client.call(method, timeout: 60)
             credentialMigrationNotice = summarize(result)
-            await refreshCredentialMigration()
+            // 刷新只是更新计数，不能把刚拿到的结果盖掉。
+            await refreshCredentialMigration(keepNotice: true)
         } catch {
             credentialMigrationNotice = Self.describe(error)
         }

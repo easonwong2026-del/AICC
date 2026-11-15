@@ -12,6 +12,8 @@ struct CredentialMigrationSummary: Equatable {
     var alreadyJSON: Int
     var magpie: Int
     var blocked: Int
+    /// 有迁移记录、且当前行仍是那次迁移产物的条数 —— 只有这些能回滚。
+    var rollbackable: Int
     var total: Int
 
     static let empty = CredentialMigrationSummary(
@@ -19,6 +21,7 @@ struct CredentialMigrationSummary: Equatable {
         alreadyJSON: 0,
         magpie: 0,
         blocked: 0,
+        rollbackable: 0,
         total: 0
     )
 
@@ -36,6 +39,7 @@ struct CredentialMigrationItem: Equatable, Identifiable {
     var storage: String
     var reference: String?
     var migratable: Bool
+    var rollbackable: Bool
     var blocked: String?
 
     var id: String { "\(domain)/\(accountId)/\(source)" }
@@ -79,6 +83,7 @@ struct CredentialMigrationState: Equatable {
                 storage: raw["storage"] as? String ?? "",
                 reference: raw["reference"] as? String,
                 migratable: raw["migratable"] as? Bool ?? false,
+                rollbackable: raw["rollbackable"] as? Bool ?? false,
                 blocked: raw["blocked"] as? String
             )
         }
@@ -88,6 +93,7 @@ struct CredentialMigrationState: Equatable {
                 alreadyJSON: summary["alreadyJson"] as? Int ?? 0,
                 magpie: summary["magpie"] as? Int ?? 0,
                 blocked: summary["blocked"] as? Int ?? 0,
+                rollbackable: summary["rollbackable"] as? Int ?? 0,
                 total: summary["total"] as? Int ?? 0
             ),
             items: items

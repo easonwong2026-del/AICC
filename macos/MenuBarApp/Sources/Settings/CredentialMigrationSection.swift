@@ -43,8 +43,15 @@ struct CredentialMigrationSection: View {
                     Text("\(summary.blocked) 条").foregroundStyle(.red)
                 }
             }
+            if summary.rollbackable > 0 {
+                HStack {
+                    Text("可回滚（本次迁移产生）")
+                    Spacer()
+                    Text("\(summary.rollbackable) 条").foregroundStyle(.secondary)
+                }
+            }
 
-            Text("迁移会把钥匙串里的旧令牌**复制**成本机 JSON 文件（明文）。迁移前会先备份数据库与清单（备份不含令牌），原始钥匙串条目一个都不删，所以随时可以回滚。")
+            Text("迁移会把钥匙串里的旧令牌**复制**成本机 JSON 文件（明文）。迁移前会先备份数据库与清单（备份不含令牌），原始钥匙串条目一个都不删。回滚只针对**本次迁移产生**的副本：之后重新登录过的授权不会被切回旧令牌。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -63,7 +70,7 @@ struct CredentialMigrationSection: View {
                 .disabled(worker.credentialMigrationBusy)
 
                 Button("回滚…") { confirmRollback = true }
-                    .disabled(worker.credentialMigrationBusy || summary.alreadyJSON == 0)
+                    .disabled(worker.credentialMigrationBusy || summary.rollbackable == 0)
 
                 if worker.credentialMigrationBusy {
                     ProgressView().controlSize(.small)
@@ -113,7 +120,7 @@ struct CredentialMigrationSection: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("迁移产生的本地 JSON 副本会被删掉，凭据重新从钥匙串读取（可能触发系统授权框）。")
+            Text("只回滚本次迁移产生、之后没有被重新授权的副本。副本删除前会核对引用；凭据重新从钥匙串读取（可能触发系统授权框）。")
         }
     }
 

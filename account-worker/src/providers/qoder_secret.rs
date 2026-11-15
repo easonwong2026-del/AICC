@@ -593,11 +593,19 @@ pub fn write_json_copy(
             "qoder/migrate",
         ));
     }
-    // refresh 是可选槽位：读不到就只搬 access（与写入路径的语义一致）。
-    let refresh = keys
-        .get(1)
-        .and_then(|key| app.secure.get(key).ok())
-        .and_then(|bytes| String::from_utf8(bytes).ok());
+    // refresh 是**可选**槽位：不存在 = 服务端没下发（合法）；但拒绝访问、IO 错误、
+    // 内容不是 UTF-8 都不能当成"没有 refresh"——那会让迁移报告成功、令牌却失去
+    // 刷新能力（审计 P0-3）。
+    let refresh = match keys.get(1) {
+        None => None,
+        Some(key) => match app.secure.get(key) {
+            Ok(bytes) => Some(String::from_utf8(bytes).map_err(|_| {
+                CredentialError::new(CredentialErrorKind::Corrupt, "refresh 不是合法 UTF-8")
+            })?),
+            Err(err) if err.kind == crate::securestore::SecretErrorKind::NotFound => None,
+            Err(err) => return Err(to_rpc(secure_read_error(err), "qoder/migrate")),
+        },
+    };
     let expires = row
         .token_expires_at
         .as_deref()
