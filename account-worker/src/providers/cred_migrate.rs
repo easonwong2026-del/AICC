@@ -425,21 +425,21 @@ fn digest_matches(stored: &str, bytes: &[u8]) -> bool {
     }
 }
 
-/// 引用前缀 → 存储种类。**不做猜测**：未知前缀单独一类。
+/// 引用 → 存储种类。**用严格解析器判定，不做前缀猜测。**
+///
+/// 前缀判断会把 `magpie:v1:`（来源键为空）、`unknown:v9:x` 这类坏引用算成
+/// "Magpie" / "Keychain"，盘点显示得好像没问题，而真正读取时的
+/// `CredentialRef::parse` 会直接拒绝它。两个界面的结论必须来自同一个判据。
 struct StorageView;
 
 impl StorageView {
     fn of(reference: &str) -> &'static str {
-        if reference.is_empty() {
-            "unusable"
-        } else if reference.starts_with(reference::LOCAL_JSON_PREFIX) {
-            STORAGE_LOCALJSON
-        } else if reference.starts_with(reference::KEYCHAIN_PREFIX) {
-            STORAGE_KEYCHAIN
-        } else if reference.starts_with("magpie:") {
-            STORAGE_MAGPIE
-        } else {
-            "unusable"
+        match reference::CredentialRef::parse(reference) {
+            Ok(reference::CredentialRef::Keychain { .. }) => STORAGE_KEYCHAIN,
+            Ok(reference::CredentialRef::LocalJson { .. }) => STORAGE_LOCALJSON,
+            Ok(reference::CredentialRef::Magpie { .. }) => STORAGE_MAGPIE,
+            // 空串、未知前缀、缺来源键 —— 都是"引用不可用"。
+            Err(_) => "unusable",
         }
     }
 }
@@ -1469,7 +1469,21 @@ pub fn verify(app: &App) -> RpcResult<Value> {
                     }
                 }
             }
-            _ => {}
+            // 动态关联由 Magpie 文件负责，这里不比对本机文件，也不算异常。
+            STORAGE_MAGPIE => {}
+            // 其它都说明**引用本身坏了**（空串、未知前缀、`magpie:v1:` 缺来源键、
+            // 引用种类与授权种类不匹配）。以前这里静默跳过，核验会漏报：
+            // 盘点报 "unusable"，核验却说"全正常"。
+            _ => {
+                broken += 1;
+                items.push(json!({
+                    "domain": entry.domain,
+                    "accountId": entry.account_id,
+                    "source": entry.source,
+                    "state": "broken",
+                    "reason": "reference_unusable",
+                }));
+            }
         }
     }
 
@@ -2048,6 +2062,57 @@ mod tests {
         assert_eq!(value["summary"]["needsRelink"], 1, "{value}");
         assert_eq!(value["summary"]["blocked"], 0, "{value}");
         assert_eq!(value["summary"]["total"], 3, "{value}");
+    }
+
+    /// 复审第二轮 #3：核验也要把坏引用算成异常。
+    ///
+    /// `magpie:v1:`（来源键为空）前缀看着像 Magpie，真正读取时
+    /// `CredentialRef::parse` 会拒绝它。以前 verify 的兜底分支是 `_ => {}`，
+    /// 于是盘点说"引用不可用"，核验说"0 条异常"。
+    #[test]
+    fn verify_counts_an_unparsable_reference_as_broken() {
+        let (app, _dir) = json_app();
+        for (uid, reference) in [
+            ("uid-empty-magpie-key", "magpie:v1:"),
+            ("uid-unknown-prefix", "unknown:v9:broken"),
+        ] {
+            let acc = account(&app, uid);
+            app.with_db(|db| {
+                db.insert_authorization_if_absent(&AuthorizationRecord {
+                    id: ids::auth_id(&acc.id, ids::KIND_MAGPIE),
+                    account_id: acc.id.clone(),
+                    kind: ids::KIND_MAGPIE.to_string(),
+                    access_ref: reference.to_string(),
+                    refresh_ref: None,
+                    auth_domain: None,
+                    token_expires_at: None,
+                    status: "valid".to_string(),
+                    version: 1,
+                    key_migration_state: KEY_STATE_READY.to_string(),
+                    source_key: None,
+                    last_used_at: None,
+                    last_error: None,
+                    created_at: "2026-11-01T00:00:00Z".to_string(),
+                    updated_at: "2026-11-01T00:00:00Z".to_string(),
+                })
+            })
+            .unwrap();
+        }
+
+        let value = inventory(&app).unwrap();
+        assert_eq!(value["summary"]["blocked"], 2, "{value}");
+        assert_eq!(value["summary"]["magpie"], 0, "坏引用不能算 Magpie");
+        assert_eq!(value["summary"]["needsRelink"], 0, "也不该提示重新关联");
+
+        let report = verify(&app).unwrap();
+        assert_eq!(report["broken"], 2, "核验必须报出来：{report}");
+        let broken_states = report["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["state"] == "broken")
+            .count();
+        assert_eq!(broken_states, 2, "{report}");
     }
 
     #[test]

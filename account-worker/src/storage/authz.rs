@@ -600,6 +600,10 @@ impl super::Db {
                     storage_kind = ?2,
                     source_key = COALESCE(?3, source_key),
                     ref_updated_at = ?4,
+                    -- 换成动态关联之后，旧键搬运对它已经没有意义。
+                    -- 留着 failed 会让面板永远显示旧键搬运失败，
+                    -- 而显式重试又拿不到钥匙串目标键（move_one 报 bad_ref）。
+                    key_migration_state = 'ready',
                     version = version + 1,
                     updated_at = ?4
               WHERE id = ?5
@@ -672,12 +676,18 @@ impl super::Db {
     }
 
     /// 还没走 Magpie 动态关联的借用授权（v20 重新关联的输入）。
+    ///
+    /// **只选明确写着 `keychain:` 的行**。以前的条件是"不是 `magpie:v1:` 就算"，
+    /// 那会把 `unknown:v9:` 这种坏引用也选进来 —— 盘点已经把它报成
+    /// `reference_unusable`，批量重新关联却可能顺手把它改写成动态关联，
+    /// 两个界面的结论互相矛盾。
     pub fn authorizations_pending_magpie_relink(&self) -> RpcResult<Vec<AuthorizationRecord>> {
         // 判据是**引用**，不是列：列可能因为人工 SQL / 旧版本写入而漂移。
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {AUTH_COLUMNS} FROM account_authorizations
-              WHERE kind = 'magpie' AND access_ref NOT LIKE 'magpie:v1:%'
-              ORDER BY account_id ASC"
+              WHERE kind = 'magpie' AND access_ref LIKE '{}%'
+              ORDER BY account_id ASC",
+            crate::credentials::reference::KEYCHAIN_PREFIX
         ))?;
         let rows = stmt.query_map([], map_authorization)?;
         let mut out = Vec::new();
@@ -765,11 +775,16 @@ impl super::Db {
     }
 
     /// 搬运失败、等用户显式重试的行（面板上显示"旧键搬运失败 N 条"）。
+    ///
+    /// 只算**还需要搬运**的：引用已经不在钥匙串上的行，搬运失败已经没有意义，
+    /// 由 [`settle_obsolete_key_migration_failures`] 收敛成 `ready`。
     pub fn authorizations_failed_key_migration(&self) -> RpcResult<Vec<AuthorizationRecord>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {AUTH_COLUMNS} FROM account_authorizations
               WHERE key_migration_state = '{KEY_STATE_FAILED}'
-              ORDER BY account_id ASC, kind ASC"
+                AND access_ref LIKE '{}%'
+              ORDER BY account_id ASC, kind ASC",
+            crate::credentials::reference::KEYCHAIN_PREFIX
         ))?;
         let rows = stmt.query_map([], map_authorization)?;
         let mut out = Vec::new();
@@ -780,12 +795,35 @@ impl super::Db {
     }
 
     /// 把 `failed` 放回 `pending`。只由显式重试调用，返回被重置的行数。
+    ///
+    /// 同样只处理仍指向钥匙串的行：对 `localjson:` / `magpie:` 引用重试，
+    /// `move_one` 拿不到钥匙串目标键，只会把状态再打回 `failed`。
     pub fn reset_failed_key_migrations(&self) -> RpcResult<usize> {
         let changed = self.conn.execute(
             &format!(
                 "UPDATE account_authorizations
                     SET key_migration_state = '{KEY_STATE_PENDING}', last_error = NULL
-                  WHERE key_migration_state = '{KEY_STATE_FAILED}'"
+                  WHERE key_migration_state = '{KEY_STATE_FAILED}'
+                    AND access_ref LIKE '{}%'",
+                crate::credentials::reference::KEYCHAIN_PREFIX
+            ),
+            [],
+        )?;
+        Ok(changed)
+    }
+
+    /// 引用已经不在钥匙串上的 `failed` 行：搬运没有意义了，收敛成 `ready`。
+    ///
+    /// 覆盖两个来源：relink 之前在 `failed` 的老行（新逻辑下 relink 会顺手置 ready），
+    /// 以及任何被外部改过引用的脏数据。幂等、不读钥匙串。
+    pub fn settle_obsolete_key_migration_failures(&self) -> RpcResult<usize> {
+        let changed = self.conn.execute(
+            &format!(
+                "UPDATE account_authorizations
+                    SET key_migration_state = '{KEY_STATE_READY}'
+                  WHERE key_migration_state = '{KEY_STATE_FAILED}'
+                    AND access_ref NOT LIKE '{}%'",
+                crate::credentials::reference::KEYCHAIN_PREFIX
             ),
             [],
         )?;

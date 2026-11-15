@@ -50,6 +50,11 @@ enum Copy {
 /// `migrating`（上次崩在途中的）。失败意味着用户拒绝过钥匙串授权，再自动读一次
 /// 就是再弹一次系统框、再卡一次 RPC 队列。要重试必须显式调用 [`retry_failed`]。
 pub fn run(app: &App) -> RpcResult<Report> {
+    // 引用已经不在钥匙串上的 `failed` 行先收敛掉：它们既不该被报成"待重试"，
+    // 也不该被重试（`move_one` 找不到钥匙串目标键只会再失败一次）。
+    // 这一步只写库、不读钥匙串，幂等。
+    app.with_db(|db| db.settle_obsolete_key_migration_failures())?;
+
     let pending = app.with_db(|db| db.authorizations_pending_key_migration())?;
     let mut report = Report::default();
 

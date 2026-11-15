@@ -3549,6 +3549,126 @@ mod tests {
         magpie::test_set_logins(None);
     }
 
+    /// 复审第二轮 #1：relink 成功后，旧键搬运的 `failed` 必须一并清掉。
+    ///
+    /// 否则面板一直显示「旧键搬运失败」，用户点重试又会拿不到钥匙串目标键
+    /// （`move_one` 报 `bad_ref`），陷入"报了修不了"的状态。
+    #[test]
+    fn relinking_a_failed_row_clears_the_obsolete_key_migration_failure() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-2222-0001-0002-000000000041";
+        magpie::test_set_logins(Some(vec![magpie_login(uid, "borrowed")]));
+        import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
+        let acc = account(&app, uid);
+
+        let key = ids::access_key(&acc.id, ids::KIND_MAGPIE);
+        app.secure.set(&key, b"legacy-token").unwrap();
+        app.with_db(|db| {
+            db.exec_raw(&format!(
+                "UPDATE account_authorizations
+                    SET access_ref = 'keychain:{key}', source_key = NULL, ref_updated_at = NULL
+                  WHERE account_id = '{}' AND kind = 'magpie'",
+                acc.id
+            ))
+        })
+        .expect("rewind");
+        let auth_id = ids::auth_id(&acc.id, ids::KIND_MAGPIE);
+        app.with_db(|db| {
+            db.set_key_migration_state(
+                &auth_id,
+                crate::storage::authz::KEY_STATE_FAILED,
+                Some("denied"),
+            )
+        })
+        .unwrap();
+        assert_eq!(
+            crate::auth::migrate::failed_count(&app).unwrap(),
+            1,
+            "先确认它能被报出来"
+        );
+
+        let out = crate::providers::cred_migrate::relink(&app, &json!({})).expect("relink");
+        assert_eq!(out["relinked"], json!(1), "{out}");
+
+        let state = app
+            .with_db(|db| db.get_authorization(&auth_id))
+            .unwrap()
+            .expect("row")
+            .key_migration_state;
+        assert_eq!(state, "ready", "引用换了，搬运状态必须跟着收敛");
+        assert_eq!(
+            crate::auth::migrate::failed_count(&app).unwrap(),
+            0,
+            "面板不该再报这条失败"
+        );
+
+        let value = crate::providers::cred_migrate::inventory(&app).expect("inventory");
+        assert_eq!(value["keyMigration"]["failed"], json!(0), "{value}");
+
+        // 再点一次重试也是安全的：没有待搬运的行，也不会去读钥匙串。
+        let (reset, report) = crate::auth::migrate::retry_failed(&app).expect("retry");
+        assert_eq!(reset, 0, "没有 failed 行可重置");
+        assert_eq!(report.moved + report.failed, 0, "{report:?}");
+        magpie::test_set_logins(None);
+    }
+
+    /// 复审第二轮 #2：批量 relink 不许碰坏引用。
+    ///
+    /// 候选以前是「不是 `magpie:v1:` 就算」，`unknown:v9:` 也会被选进来；
+    /// 一旦 Magpie 里有匹配的 UID，这条坏引用就会被顺手改写，而盘点明明报的是
+    /// `reference_unusable`。
+    #[test]
+    fn relink_skips_an_unparsable_reference_and_leaves_it_alone() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let good_uid = "6f1c2d94-2222-0001-0002-000000000042";
+        let bad_uid = "6f1c2d94-2222-0001-0002-000000000043";
+        let logins = vec![
+            magpie_login(good_uid, "borrowed"),
+            magpie_login(bad_uid, "borrowed"),
+        ];
+        magpie::test_set_logins(Some(logins.clone()));
+        import_logins(&app, logins, &[]).expect("import");
+
+        let good = account(&app, good_uid);
+        let bad = account(&app, bad_uid);
+        let good_key = ids::access_key(&good.id, ids::KIND_MAGPIE);
+        app.secure.set(&good_key, b"legacy-token").unwrap();
+        app.with_db(|db| {
+            db.exec_raw(&format!(
+                "UPDATE account_authorizations
+                    SET access_ref = 'keychain:{good_key}', source_key = NULL, ref_updated_at = NULL
+                  WHERE account_id = '{}' AND kind = 'magpie'",
+                good.id
+            ))
+        })
+        .expect("rewind good");
+        app.with_db(|db| {
+            db.exec_raw(&format!(
+                "UPDATE account_authorizations
+                    SET access_ref = 'unknown:v9:broken', source_key = NULL, ref_updated_at = NULL
+                  WHERE account_id = '{}' AND kind = 'magpie'",
+                bad.id
+            ))
+        })
+        .expect("break bad");
+
+        let out = crate::providers::cred_migrate::relink(&app, &json!({})).expect("relink");
+        assert_eq!(out["relinked"], json!(1), "只该改那一条正常的：{out}");
+        let bad_row = app
+            .with_db(|db| db.find_authorization(&bad.id, ids::KIND_MAGPIE))
+            .unwrap()
+            .expect("row");
+        assert_eq!(
+            bad_row.access_ref, "unknown:v9:broken",
+            "坏引用一个字节都不许动"
+        );
+
+        let value = crate::providers::cred_migrate::inventory(&app).expect("inventory");
+        assert_eq!(value["summary"]["blocked"], json!(1), "{value}");
+        assert_eq!(value["summary"]["needsRelink"], json!(0), "{value}");
+        magpie::test_set_logins(None);
+    }
+
     /// CRED-5：启用本地 JSON 之后，没有授权行的账号**不再**去读旧别名钥匙串。
     ///
     /// 回退会在后台任务里弹一次授权框并阻塞 RPC 队列 —— 那正是本轮要消灭的东西。

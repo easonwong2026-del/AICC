@@ -77,6 +77,28 @@ pub(crate) fn relink_pending_with(
             continue;
         };
 
+        // 只处理**严格可解析**的 `keychain:` 引用。`keychain:` 后面为空、
+        // 或者别的坏引用，一律不动 —— 盘点已经把它们报成 `reference_unusable`，
+        // 这里顺手改写只会让两个界面的结论互相矛盾。
+        match reference::CredentialRef::parse(&row.access_ref) {
+            Ok(reference::CredentialRef::Keychain { .. }) => {}
+            _ => {
+                skipped.push(json!({
+                    "authorizationId": row.id,
+                    "accountId": row.account_id,
+                    "reason": "reference_unusable",
+                    "message": "这一行的凭据引用无法解析，已跳过（不猜测、不改写）",
+                }));
+                items.push(json!({
+                    "authorizationId": row.id,
+                    "accountId": row.account_id,
+                    "ok": false,
+                    "reason": "reference_unusable",
+                }));
+                continue;
+            }
+        }
+
         let target = match &logins {
             Err(err) => Err(("magpie_unavailable".to_string(), Some(err.message()))),
             Ok(logins) => match link_target(logins, &account, &row, now) {
