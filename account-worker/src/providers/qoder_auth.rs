@@ -593,7 +593,13 @@ impl Persisted {
 /// 或提交失败都要走 [`qoder_secret::QoderWrite::restore`]；提交"被别人抢了"
 /// 则只丢一个没人引用的新文件，**不撤账号行**（那可能是胜者写的）。
 pub fn persist(app: &App, edition: QoderEdition, token: &DeviceToken) -> RpcResult<Persisted> {
-    // 先看这是不是一行新账号：决定失败时要不要连行一起清掉。
+    // 整个"看账号 → 观察 → 写凭据 → 条件提交 → 失败清理"在**同一个凭据事务**里。
+    // 否则另一个进程可以在其中任一步之间插进来：写成功但提交失败时，
+    // 数据库与盘上的令牌会分属两个人（审计 P0-1 / P0-2）。
+    let _txn = qoder_secret::begin(app)?;
+
+    // 现在看这是不是一行新账号：决定失败时要不要连行一起清掉。
+    // 必须在锁内判断，锁外判断会与"别人刚建了同一个账号"冲突。
     let created = app
         .with_db(|db| db.find_qoder_account(edition.as_str(), &token.identity.uid))?
         .is_none();
@@ -606,13 +612,16 @@ pub fn persist(app: &App, edition: QoderEdition, token: &DeviceToken) -> RpcResu
             token.identity.email.as_deref(),
         )
     })?;
+    // 只有"本次真的新建"才记下它的 generation：失败清理必须限定在这一代，
+    // 否则同一个 UID 删了又建时会把别人刚建的账号删掉（审计 P1-1）。
+    let created_generation = created.then(|| account.generation.clone());
 
     // **只观察一次**：写凭据的落点与条件提交的预期都来自这一份快照。
     // （复审 P0-1：让 write() 自己重查一次，两次观察就会错位，输家可能覆盖赢家的令牌。）
     let observed = match qoder_secret::observe(app, &account.id, SOURCE_OWN_BROWSER) {
         Ok(observed) => observed,
         Err(err) => {
-            qoder_secret::cleanup_created_account(app, &account.id, created);
+            qoder_secret::cleanup_created_account(app, &account.id, created_generation.as_deref());
             return Err(err);
         }
     };
@@ -632,7 +641,7 @@ pub fn persist(app: &App, edition: QoderEdition, token: &DeviceToken) -> RpcResu
     ) {
         Ok(write) => write,
         Err(err) => {
-            qoder_secret::cleanup_created_account(app, &account.id, created);
+            qoder_secret::cleanup_created_account(app, &account.id, created_generation.as_deref());
             return Err(err);
         }
     };
@@ -669,7 +678,7 @@ pub fn persist(app: &App, edition: QoderEdition, token: &DeviceToken) -> RpcResu
         Err(err) => {
             // 授权行没落下来 = 这次登录没有完成。凭据回滚，新建的账号也撤掉。
             write.restore(app);
-            qoder_secret::cleanup_created_account(app, &account.id, created);
+            qoder_secret::cleanup_created_account(app, &account.id, created_generation.as_deref());
             Err(err)
         }
     }

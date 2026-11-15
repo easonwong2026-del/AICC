@@ -24,9 +24,11 @@
 //! 读失败**不许**降级成"没有凭据"：`Denied`（没权限）与 `NotFound`（真没有）
 //! 必须分开，否则上层的兜底逻辑会以为该账号没授权，进而去碰钥匙串。
 
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -776,27 +778,33 @@ impl LocalJsonStore {
 
     fn lock(&self) -> Result<FileLock, CredentialError> {
         self.ensure_root()?;
-        let file = self.open_lock_file()?;
+        let path = self.root.join(LOCK_FILE);
 
-        let deadline = Instant::now() + self.lock_timeout;
-        loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(FileLock { file }),
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    if Instant::now() >= deadline {
-                        // 超时必须报错：挂着不动会让整个 RPC 队列卡死（PRD §8）。
-                        return Err(CredentialError::new(
-                            CredentialErrorKind::LockTimeout,
-                            "凭据目录被另一个 AICC 进程占用",
-                        ));
-                    }
-                    std::thread::sleep(LOCK_POLL_INTERVAL);
-                }
-                Err(std::fs::TryLockError::Error(err)) => {
-                    return Err(CredentialError::io(&err, "凭据目录加锁失败"))
-                }
-            }
+        // 快路径：本进程已经持有这个目录的锁实例。
+        if let Some(inner) = existing_lock(&path) {
+            return inner.enter(self.lock_timeout);
         }
+
+        // 慢路径：创建实例。持有 registry 锁做 open + flock，避免两个线程
+        // 同时创建、后一个在 flock 上白等到超时。flock 的等待仍有 2s 上限。
+        let mut registry = lock_registry().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(inner) = registry.get(&path).and_then(|weak| weak.upgrade()) {
+            drop(registry);
+            return inner.enter(self.lock_timeout);
+        }
+        let file = self.open_lock_file()?;
+        flock_with_timeout(&file, self.lock_timeout)?;
+        let inner = Arc::new(LockInner {
+            file,
+            state: Mutex::new(LockState {
+                owner: None,
+                depth: 0,
+            }),
+            cv: Condvar::new(),
+        });
+        registry.insert(path, Arc::downgrade(&inner));
+        drop(registry);
+        inner.enter(self.lock_timeout)
     }
 
     /// 打开锁文件：no-follow、必须是当前用户拥有的普通文件、fd 与路径指向同一个
@@ -988,12 +996,120 @@ impl std::fmt::Debug for LocalJsonStore {
 /// compare-and-delete，读与删之间必须互斥，而"写新令牌"与"删旧令牌"必须在
 /// 同一把锁下排队（PR-CRED-3b 复审）。
 pub struct FileLock {
+    inner: Arc<LockInner>,
+}
+
+/// 一个凭据目录的锁实例。**进程内可重入、跨线程互斥、跨进程 flock**。
+///
+/// 为什么需要可重入：CRED-3b 复审要求"同一来源的凭据写入 + 数据库提交 + 失败回滚"
+/// 处在同一个锁域里，而 `LocalJsonStore` 自己的每个写方法也会取锁。没有重入，
+/// 外层一旦持锁，内层就会在自己的 flock 上等到超时（2s 后报 `lock_timeout`）。
+///
+/// 为什么不能只做进程内重入：两个线程同时改同一个目录也必须排队 —— 否则
+/// "读-比-删"仍可被另一线程的写入插队，这也是审计 P0-1/P0-2 的根因。
+struct LockInner {
+    /// 持有 flock 的 fd。**只在所有 `FileLock` 都 drop 后关闭**（关闭即解锁）。
     file: File,
+    state: Mutex<LockState>,
+    cv: Condvar,
+}
+
+#[derive(Default)]
+struct LockState {
+    owner: Option<std::thread::ThreadId>,
+    depth: usize,
+}
+
+impl LockInner {
+    /// 进入临界区：同一线程重入只加计数，别的线程排队等（带超时）。
+    fn enter(self: &Arc<Self>, timeout: Duration) -> Result<FileLock, CredentialError> {
+        let me = std::thread::current().id();
+        let deadline = Instant::now() + timeout;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            match state.owner {
+                None => {
+                    state.owner = Some(me);
+                    state.depth = 1;
+                    return Ok(FileLock {
+                        inner: Arc::clone(self),
+                    });
+                }
+                Some(owner) if owner == me => {
+                    state.depth += 1;
+                    return Ok(FileLock {
+                        inner: Arc::clone(self),
+                    });
+                }
+                Some(_) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        // 超时必须报错：挂着不动会让整个 RPC 队列卡死（PRD §8）。
+                        return Err(CredentialError::new(
+                            CredentialErrorKind::LockTimeout,
+                            "凭据目录被同一个 AICC 进程的另一个任务占用",
+                        ));
+                    }
+                    let (next, _) = self
+                        .cv
+                        .wait_timeout(state, deadline - now)
+                        .unwrap_or_else(|e| e.into_inner());
+                    state = next;
+                }
+            }
+        }
+    }
+}
+
+impl Drop for LockInner {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
 }
 
 impl Drop for FileLock {
     fn drop(&mut self) {
-        let _ = self.file.unlock();
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.depth = state.depth.saturating_sub(1);
+        if state.depth == 0 {
+            state.owner = None;
+            drop(state);
+            self.inner.cv.notify_one();
+        }
+    }
+}
+
+/// 进程内"路径 → 锁实例"。只放弱引用：最后一个 `FileLock` 消失时实例随之销毁，
+/// 文件描述符关闭 → flock 释放。
+fn lock_registry() -> &'static Mutex<HashMap<PathBuf, Weak<LockInner>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Weak<LockInner>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn existing_lock(path: &Path) -> Option<Arc<LockInner>> {
+    let registry = lock_registry().lock().unwrap_or_else(|e| e.into_inner());
+    registry.get(path).and_then(|weak| weak.upgrade())
+}
+
+/// 带超时的 `flock`：`try_lock` 轮询，超时报 `lock_timeout`。
+fn flock_with_timeout(file: &File, timeout: Duration) -> Result<(), CredentialError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    return Err(CredentialError::new(
+                        CredentialErrorKind::LockTimeout,
+                        "凭据目录被另一个 AICC 进程占用",
+                    ));
+                }
+                std::thread::sleep(LOCK_POLL_INTERVAL);
+            }
+            Err(std::fs::TryLockError::Error(err)) => {
+                return Err(CredentialError::io(&err, "凭据目录加锁失败"))
+            }
+        }
     }
 }
 
@@ -1603,12 +1719,26 @@ mod tests {
         assert_eq!(store.load(&created.secret_id).unwrap().revision, 1);
     }
 
+    /// 锁被**另一个线程**持有时，等待必须有上限。
+    ///
+    /// 注意不能像以前那样在同一个线程里先 `lock()` 再 `create()`：锁现在是可重入的
+    /// （同一线程重入是有意为之，见 `LockInner`），那样写会立刻拿到锁。
     #[test]
     fn lock_contention_surfaces_as_a_bounded_error() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(&dir).with_lock_timeout(Duration::from_millis(60));
-        let held = store.lock().expect("hold lock");
+        let root = dir.path().to_path_buf();
 
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let store = LocalJsonStore::new(root.join(SECRETS_DIR).join(SCHEMA_DIR));
+            let _held = store.lock().expect("hold lock");
+            ready_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        ready_rx.recv().unwrap();
+
+        let store = store(&dir).with_lock_timeout(Duration::from_millis(60));
         let started = Instant::now();
         let err = store.create(draft()).unwrap_err();
         assert_eq!(err.kind, CredentialErrorKind::LockTimeout);
@@ -1617,8 +1747,22 @@ mod tests {
             "等锁必须有上限，不能挂死 RPC 队列"
         );
 
-        drop(held);
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
         assert!(store.create(draft()).is_ok(), "锁释放后应能正常写入");
+    }
+
+    /// 同一线程重入：拿到锁之后再调用本存储的写方法（它会自己再取一次锁）
+    /// 必须直接进入，而不是在自己的 flock 上等到超时。
+    #[test]
+    fn the_lock_is_reentrant_within_one_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir).with_lock_timeout(Duration::from_millis(60));
+        let held = store.lock().expect("hold lock");
+        // 这两个方法内部都会再取一次锁。
+        let created = store.create(draft()).expect("重入必须成功");
+        assert!(store.load(&created.secret_id).is_ok());
+        drop(held);
     }
 
     // -- 崩溃恢复与故障注入 ---------------------------------------------

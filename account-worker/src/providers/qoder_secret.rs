@@ -131,6 +131,49 @@ fn keychain_lock(app: &App) -> Result<KeychainLock, CredentialError> {
     })
 }
 
+/// 一次**凭据事务**：同一来源的「读观察 → 写凭据 → 数据库条件提交 → 失败清理」
+/// 全部在这把锁内完成。
+///
+/// ## 为什么需要它（审计 P0-1 / P0-2 / P0-3）
+///
+/// 之前的实现每次操作只锁各自的片段：`write_keychain` 锁住"写"，`commit` 单独提交
+/// SQLite，中间的间隙足够另一个进程插进来：
+///
+/// ```text
+/// A: 写 Keychain = A-TOKEN
+/// B: 写 Keychain = B-TOKEN，提交成功          ← 行归 B
+/// A: 提交（基于旧快照）失败                     ← 失败路径什么都不补偿
+/// 结果：行记 B 的 fingerprint，Keychain 里是 A 的令牌
+/// ```
+///
+/// JSON 原地覆盖同理（文件被写成 B，行是 A）。现在四条 mutate 路径
+/// （`qoder_auth::persist` / `qoder_pat::persist` / `qoder_pat::remove` /
+/// `qoder_admin::delete`）整段持锁，写-提交-回滚不可分割，上面的交错不可能出现。
+///
+/// ## 锁顺序
+///
+/// 只允许 `.lock` → SQLite。持锁期间**不做**任何会反向取锁的事；`LocalJsonStore`
+/// 的每个方法会重入同一把锁（`FileLock` 支持同线程重入），不会自我阻塞。
+///
+/// ## 读路径为什么不进来
+///
+/// `credits::resolve_token` 只读令牌、不写任何状态，而写入顺序永远是
+/// "先写凭据、后提交行"，所以它读到的最坏情况是**上一版令牌**，不会读到半份
+/// （钥匙串的 access/refresh 是两份值，但请求只需要 access）。让它也排队只会
+/// 把一次网络请求压到凭据写入后面，没有收益。
+pub struct SecretTxn {
+    _lock: crate::credentials::localjson::FileLock,
+}
+
+/// 开始一次凭据事务。**调用方必须把它持有到提交/回滚都结束。**
+pub fn begin(app: &App) -> RpcResult<SecretTxn> {
+    let store = LocalJsonStore::for_paths(&app.paths);
+    let lock = store
+        .lock_exclusive()
+        .map_err(|err| to_rpc(err, "qoder/lock"))?;
+    Ok(SecretTxn { _lock: lock })
+}
+
 /// 这一行现在把凭据放在哪里。
 ///
 /// `secret_ref = None` 视为钥匙串：那是 CRED-3b 之前写下的老行，凭据确实在钥匙串里。
@@ -981,24 +1024,40 @@ pub fn conflict_error() -> RpcError {
     }))
 }
 
-/// 回滚"刚新建的账号"：只在本次调用**新建**时才动手，且必须确认它一条授权都没有
-/// —— 否则可能把并发写入的另一份来源一起删掉。
-pub fn cleanup_created_account(app: &App, account_id: &str, created: bool) {
-    if !created {
+/// 回滚"刚新建的账号"。
+///
+/// 三个条件缺一不可（审计 P1-1）：
+///
+/// 1. 本次调用**确实新建**了账号（`created` 是那句 upsert 之前观察到的）；
+/// 2. 账号还是**我建的那一代**（`generation` 相同）—— 同一个 UID 删了又建会
+///    得到同一个 account_id，只比 id 会把别人刚建的账号删掉；
+/// 3. 它**一条授权行都没有** —— 有就说明别人已经写进来了（例如同一账号的另一个
+///    来源），那不是"我建的空账号"。
+///
+/// 三条判断与删除在同一条 SQL 里，没有"查完再删"的窗口。
+pub fn cleanup_created_account(app: &App, account_id: &str, created: Option<&str>) {
+    let Some(generation) = created else {
         return;
-    }
+    };
     let removed = app
-        .with_db(|db| {
-            let rows = db.list_qoder_authorizations(account_id)?;
-            if !rows.is_empty() {
-                return Ok(false);
-            }
-            db.delete_qoder_account(account_id)
-        })
+        .with_db(|db| db.delete_qoder_account_if_empty(account_id, generation))
         .unwrap_or(false);
     if !removed {
-        crate::handlers::log_note("Qoder 保存失败后未能清掉新建的账号，请手动移除");
+        // 清不掉要留痕：账号页会看到一个没有来源的账号，得知道为什么。
+        crate::handlers::log_note(
+            "Qoder 保存失败后未能清掉本次新建的账号（可能已被其他流程使用），请手动移除",
+        );
     }
+}
+
+/// 只读：某个来源现在的授权行。
+///
+/// 用于"删除凭据之前确认这一行没有被重建"：删除动作是按**旧快照**做的，
+/// 一旦行被重新插入，旧 guard 的字节比对可能正好命中新凭据。
+pub fn row_of(app: &App, account_id: &str, source: &str) -> Option<QoderAuthRecord> {
+    app.with_db(|db| db.get_qoder_authorization(account_id, source))
+        .ok()
+        .flatten()
 }
 
 /// 授权来源是否属于"自有"（只有这两种才可能持有 AICC 自己的凭据）。
@@ -1448,10 +1507,20 @@ mod tests {
             .unwrap()
             .expect("钥匙串里有凭据");
 
-        // 模拟另一个进程正握着锁（默认 2 秒超时）。
-        let held = LocalJsonStore::for_paths(&app.paths)
-            .lock_exclusive()
-            .expect("拿到锁");
+        // 模拟**另一个进程**握着锁：真的起一个线程持有同一目录的锁。
+        // （同一线程拿锁是可重入的，那样测不出"删除必须持锁"。）
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let lock_root = app.paths.data_dir.clone();
+        let holder = std::thread::spawn(move || {
+            let paths = paths(&lock_root);
+            let store = LocalJsonStore::for_paths(&paths);
+            let _held = store.lock_exclusive().expect("拿到锁");
+            ready_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        ready_rx.recv().unwrap();
+
         let err = delete_guarded(&app, &account, &row, CredentialKind::Oauth, &guard)
             .expect_err("拿不到锁就不能继续");
         assert_eq!(err.kind, CredentialErrorKind::LockTimeout, "{err}");
@@ -1463,7 +1532,8 @@ mod tests {
             "没拿到锁时一个字节都不许动"
         );
 
-        drop(held);
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
         assert!(delete_guarded(&app, &account, &row, CredentialKind::Oauth, &guard).unwrap());
     }
 
@@ -1667,6 +1737,73 @@ mod tests {
             "dt-b",
             "刚拿到的有效令牌要留在盘上"
         );
+    }
+
+    /// **审计 P0-1 / P0-2 的跨进程证据**：多个进程同时覆盖**同一来源**的凭据。
+    ///
+    /// 锁域把整段"观察 → 写 → 提交"串起来之后，最终必须满足：
+    /// **行的 fingerprint == 盘上令牌的 fingerprint == 读路径拿到的令牌**。
+    /// 之前只锁"写"的那一版，允许出现"行记 A、文件是 B"。
+    #[test]
+    fn concurrent_rewrites_keep_the_row_and_the_file_in_sync() {
+        let (app, _dir) = json_app();
+        // 先有一份，让子进程全部走"覆盖写"这条路径。
+        let saved =
+            crate::providers::qoder_auth::persist(&app, QoderEdition::Cn, &token("u-rw", "BASE"))
+                .unwrap();
+        let account = account_of(&app, &saved.account_id);
+
+        let start_at = now_ms() + 1_500;
+        let children: Vec<_> = (0..4)
+            .map(|index| {
+                child_command(&app, "u-rw", &format!("REWRITE-{index}"), start_at)
+                    .spawn()
+                    .expect("spawn child")
+            })
+            .collect();
+
+        let mut wins = 0;
+        for child in children {
+            let output = child.wait_with_output().expect("wait child");
+            if String::from_utf8_lossy(&output.stdout).contains("CHILD-RESULT=ok") {
+                wins += 1;
+            }
+        }
+        assert!(wins >= 1, "至少有一个子进程要成功");
+
+        let rows = app
+            .with_db(|db| db.list_qoder_authorizations(&account.id))
+            .unwrap();
+        assert_eq!(rows.len(), 1, "同一来源只能有一行");
+
+        let row = &rows[0];
+        let reference = row.secret_ref.as_deref().expect("引用");
+        let secret_id = reference.trim_start_matches("localjson:v1:");
+        let secret = LocalJsonStore::for_paths(&app.paths)
+            .load(secret_id)
+            .expect("文件必须存在");
+        let on_disk = secret
+            .token(CredentialSlot::Access)
+            .expect("文件里必须有令牌")
+            .to_string();
+        assert!(
+            on_disk.starts_with("REWRITE-"),
+            "盘上应当是某个子进程写进去的令牌：{on_disk}"
+        );
+
+        // 三者必须是同一个胜者。
+        assert_eq!(
+            row.fingerprint.as_deref(),
+            Some(crate::securestore::fingerprint(on_disk.as_bytes()).as_str()),
+            "行的指纹必须对应盘上的令牌"
+        );
+        let account = account_of(&app, &account.id);
+        assert_eq!(
+            read(&app, &account, row, CredentialKind::Oauth).unwrap(),
+            on_disk,
+            "读路径拿到的必须就是盘上那一份"
+        );
+        assert_eq!(secret_files(&app), 1, "不许出现第二份文件");
     }
 
     // -- 归属与错误分类 -------------------------------------------------

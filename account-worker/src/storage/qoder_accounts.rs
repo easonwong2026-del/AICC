@@ -177,23 +177,24 @@ impl QoderLifecycle {
 
 /// 条件提交的预期（CRED-3b）。
 ///
-/// `qoder_authorizations` **没有** WorkBuddy 那样的 `version` 列，所以这里用
-/// "写凭据之前观察到的那一行" + 账号生命周期一起做守卫：
+/// 判据是"写凭据之前观察到的那一行" + 账号生命周期 + 行版本：
 ///
 /// | 场景 | 判定 |
 /// | --- | --- |
 /// | 首次授权，两进程同时写 | 只有一个 `INSERT` 成功，另一个拿到 `None` |
-/// | 重复授权 / PAT 更新 | `UPDATE` 必须命中同一个 `secret_ref` |
+/// | 重复授权 / PAT 更新 | `UPDATE` 必须命中同一个 `secret_ref` 与同一个 `auth_version` |
 /// | 引用被别人迁走 | `secret_ref` 对不上 → `None` |
 /// | 删号后同 UID 重建 | `generation` 变了 → `None`（epoch 会归零，单看它挡不住） |
 /// | 期间别的授权推进了 epoch | `auth_epoch` 变了 → `None` |
+/// | 行被删掉又重建 | `auth_version` 取 `epoch + 1`，旧版本命中不到 |
 ///
 /// **`Absent` 也必须带生命周期**：账号 id 是 `(edition, uid)` 的确定性哈希，
 /// 删号后用同一个 UID 重建会得到**同一个 id**、`generation` 却是新的。只靠
 /// "这一行还不存在"判断就够的话，一个在删号前发起的旧登录会在重建之后
 /// 把旧会话的令牌插进新账号。
 ///
-/// 不新增列是刻意的：这几条判据已经够用，多一列就多一次迁移和一份兼容测试。
+/// **版本号不能回拨**：`auth_version` 初值与补偿恢复都取 `auth_epoch + 1`，
+/// 所以同一账号内它严格单调（详见 `migrate_v21` 与 `restore_qoder_authorization`）。
 #[derive(Debug, Clone)]
 pub enum QoderAuthExpectation {
     /// 写凭据时这一行还不存在：只允许 `INSERT`，且账号必须还是写凭据时那一个。
@@ -572,7 +573,11 @@ impl crate::storage::Db {
                      id, account_id, source, source_key, secret_ref, auth_status,
                      token_expires_at, fingerprint, created_at, updated_at, auth_version
                  )
-                 SELECT ?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?8, 1
+                 SELECT ?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?8,
+                        -- 版本取「账号当前 epoch + 1」而不是常数 1：同一来源的行被删掉
+                        -- 再插入时必须比上一次大（审计 P0-4 的 ABA）。epoch 只增不减，
+                        -- 所以这个值在账号内严格单调，旧操作带旧版本永远命中不到新行。
+                        (SELECT auth_epoch + 1 FROM qoder_accounts WHERE id = ?2)
                   WHERE EXISTS (SELECT 1 FROM qoder_accounts
                                 WHERE id = ?2 AND generation = ?9 AND auth_epoch = ?10)",
                 params![
@@ -821,7 +826,10 @@ impl crate::storage::Db {
     /// `DELETE WHERE account_id + source` 会把别人刚写好的**新**授权一起删掉，
     /// 留下一份没人引用的文件、而界面以为保存成功了。
     ///
-    /// 核验项：同一 `secret_ref` + 同一账号生命周期（`generation` + `auth_epoch`）。
+    /// 核验项：同一 `secret_ref` + 同一 `auth_version`（行版本）+ 同一 `generation`。
+    ///
+    /// **不用 `auth_epoch`**：它是账号级的，别的来源（例如设备授权）写入也会推进
+    /// 它，那样"移除 PAT"会被一次无关的写入挡下来。行版本才是"这一份凭据"的版本。
     /// 返回 `false` = 已经被改过，**什么都没删**。
     pub fn delete_qoder_authorization_if_current(
         &mut self,
@@ -884,7 +892,10 @@ impl crate::storage::Db {
                  id, account_id, source, source_key, secret_ref, auth_status,
                  token_expires_at, fingerprint, created_at, updated_at, auth_version
              )
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?12
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                    -- 恢复出来的行也要拿一个**比旧版本大**的版本（审计 P0-4）：
+                    -- 用旧版本号复活，等于让迟到的旧操作重新命中这一行。
+                    (SELECT auth_epoch + 1 FROM qoder_accounts WHERE id = ?2)
               WHERE EXISTS (SELECT 1 FROM qoder_accounts
                             WHERE id = ?2 AND generation = ?11)
                AND NOT EXISTS (SELECT 1 FROM qoder_authorizations
@@ -900,8 +911,7 @@ impl crate::storage::Db {
                 row.fingerprint,
                 row.created_at,
                 now_rfc3339(),
-                observed.generation,
-                row.auth_version
+                observed.generation
             ],
         )?;
         Ok(changed > 0)
@@ -938,6 +948,10 @@ impl crate::storage::Db {
         self.qoder_lifecycle(account_id)
     }
 
+    /// 无条件删账号（外键级联删授权行）。**生产路径不走它**：删号要按引用清理
+    /// 凭据、还要带生命周期条件，见 `providers::qoder_admin`。这里保留给测试与
+    /// 一次性数据修复。
+    #[allow(dead_code)]
     pub fn delete_qoder_account(&mut self, id: &str) -> RpcResult<bool> {
         // 与 accounts 一样：快照表无外键，删账号时显式清快照。
         self.purge_account_quota_snapshots(id)?;
@@ -945,6 +959,29 @@ impl crate::storage::Db {
             .conn
             .execute("DELETE FROM qoder_accounts WHERE id = ?1", params![id])?;
         Ok(changed > 0)
+    }
+
+    /// 失败清理：**只删"还是我这一代、且确实一条授权都没有"的账号行**。
+    ///
+    /// 单条语句，所以"没有授权行"的判断与删除是原子的。`generation` 条件挡住
+    /// 同一个 UID 删了又建的账号：旧调用拿到的 generation 已经不匹配，删不掉
+    /// 新账号（审计 P1-1）。
+    ///
+    /// 返回 `true` 表示真的删掉了；`false` 表示"那已经不是我建的账号了"或
+    /// "它已经有授权行"，两种都**不该由这次失败清理处理**。
+    pub fn delete_qoder_account_if_empty(&mut self, id: &str, generation: &str) -> RpcResult<bool> {
+        let changed = self.conn.execute(
+            "DELETE FROM qoder_accounts
+              WHERE id = ?1 AND generation = ?2
+                AND NOT EXISTS (SELECT 1 FROM qoder_authorizations WHERE account_id = ?1)",
+            params![id, generation],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        // 与 `delete_qoder_account` 一致：快照表无外键，删账号后显式清。
+        self.purge_account_quota_snapshots(id)?;
+        Ok(true)
     }
 
     /// 带生命周期核验的删账号：**只有账号还停在我推进过的那一代才删**。
@@ -1486,6 +1523,128 @@ mod tests {
             .get_qoder_authorization(&account.id, SOURCE_OWN_PAT)
             .unwrap()
             .is_none());
+    }
+
+    /// 审计 P0-4：删行重建后**不能复用旧的 `auth_version`**。
+    ///
+    /// 版本号曾经是常数 1，删行再插入又变回 1 —— 一个在途的旧操作（带 1）就会
+    /// 命中新实例。现在初值取 `账号 epoch + 1`，epoch 只增不减，所以旧版本永远
+    /// 命中不到新行。
+    #[test]
+    fn a_reinserted_row_never_reuses_an_old_auth_version() {
+        let (mut db, _dir) = db();
+        let account = db
+            .upsert_qoder_account("qoder_cn", "u-aba", None, None)
+            .unwrap();
+        let first = db
+            .commit_qoder_authorization(
+                &account.id,
+                SOURCE_OWN_PAT,
+                Some("localjson:v1:one"),
+                "valid",
+                None,
+                None,
+                &QoderAuthExpectation::Absent {
+                    lifecycle: lifecycle_of(&db, &account.id),
+                },
+            )
+            .unwrap()
+            .expect("首次授权");
+        let old_version = first.auth_version;
+
+        // 删掉这一行，再用同一来源重新授权（等价于"用户移除 PAT 后重新保存"）。
+        assert!(db
+            .delete_qoder_authorization_if_current(
+                &account.id,
+                SOURCE_OWN_PAT,
+                Some("localjson:v1:one"),
+                old_version,
+                &lifecycle_of(&db, &account.id).generation,
+            )
+            .unwrap());
+        let rebuilt = db
+            .commit_qoder_authorization(
+                &account.id,
+                SOURCE_OWN_PAT,
+                Some("localjson:v1:two"),
+                "valid",
+                None,
+                None,
+                &QoderAuthExpectation::Absent {
+                    lifecycle: lifecycle_of(&db, &account.id),
+                },
+            )
+            .unwrap()
+            .expect("重建授权");
+        assert!(
+            rebuilt.auth_version > old_version,
+            "重建后的版本必须更大：{} vs {}",
+            rebuilt.auth_version,
+            old_version
+        );
+
+        // 一个拿着旧版本的迟到操作不能碰新行。
+        assert!(
+            !db.set_qoder_auth_status_if_version(
+                &account.id,
+                SOURCE_OWN_PAT,
+                "missing",
+                &lifecycle_of(&db, &account.id).generation,
+                old_version,
+            )
+            .unwrap(),
+            "旧版本必须命中不到新实例"
+        );
+        assert_eq!(
+            db.get_qoder_authorization(&account.id, SOURCE_OWN_PAT)
+                .unwrap()
+                .unwrap()
+                .auth_status,
+            "valid"
+        );
+    }
+
+    /// 审计 P1-1：失败清理只能删"我建的那一代、且一条授权都没有"的账号。
+    #[test]
+    fn cleanup_refuses_a_rebuilt_account_or_one_with_authorizations() {
+        let (mut db, _dir) = db();
+        let old = db
+            .upsert_qoder_account("qoder_cn", "u-clean", None, None)
+            .unwrap();
+        let stale_generation = old.generation.clone();
+        db.delete_qoder_account(&old.id).unwrap();
+
+        // 同一个 UID 重建：id 相同、generation 不同。
+        let fresh = db
+            .upsert_qoder_account("qoder_cn", "u-clean", None, None)
+            .unwrap();
+        assert_eq!(fresh.id, old.id);
+        assert!(
+            !db.delete_qoder_account_if_empty(&fresh.id, &stale_generation)
+                .unwrap(),
+            "旧 generation 的清理不许删新账号"
+        );
+        assert!(db.get_qoder_account(&fresh.id).unwrap().is_some());
+
+        // 同一代但已经有授权行：也不许删（那是别人的账号，不是"我建的空账号"）。
+        db.commit_qoder_authorization(
+            &fresh.id,
+            SOURCE_OWN_PAT,
+            Some("localjson:v1:p"),
+            "valid",
+            None,
+            None,
+            &QoderAuthExpectation::Absent {
+                lifecycle: lifecycle_of(&db, &fresh.id),
+            },
+        )
+        .unwrap();
+        assert!(
+            !db.delete_qoder_account_if_empty(&fresh.id, &fresh.generation)
+                .unwrap(),
+            "有授权行时不许删"
+        );
+        assert!(db.get_qoder_account(&fresh.id).unwrap().is_some());
     }
 
     /// 补偿写入：删凭据失败时把行以 `missing` 放回去，可重试。

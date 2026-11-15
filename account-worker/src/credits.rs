@@ -329,7 +329,6 @@ pub async fn status(app: &Arc<App>, account_id: &str) -> RpcResult<Value> {
                     value["supported"] = json!(true);
                     value["authSource"] = resolved.to_json();
                     value["authStorage"] = resolved.storage_json();
-                    value["authStorage"] = resolved.storage_json();
                     value["refreshHint"] = json!(
                         "以服务端活动窗口（windowEnd）为准；参考实现说北京时间每天 10:00 刷新，仅作说明"
                     );
@@ -601,15 +600,13 @@ pub async fn claim_with(
                     },
                 );
                 return Ok(json!({
-                            "accountId": account.id,
-                            "state": "failed",
-                            "claimed": false,
-                            "authSource": resolved.to_json(),
-                        "authStorage": resolved.storage_json(),
-                            "authStorage": resolved.storage_json(),
+                    "accountId": account.id,
+                    "state": "failed",
+                    "claimed": false,
+                    "authSource": resolved.to_json(),
                 "authStorage": resolved.storage_json(),
-                            "error": { "kind": err.kind(), "message": err.detail() },
-                        }));
+                    "error": { "kind": err.kind(), "message": err.detail() },
+                }));
             }
         },
         Err(err) => {
@@ -634,14 +631,13 @@ pub async fn claim_with(
                 },
             );
             return Ok(json!({
-                    "accountId": account.id,
-                    "state": "failed",
-                    "claimed": false,
-                    "authSource": resolved.to_json(),
-                    "authStorage": resolved.storage_json(),
-            "authStorage": resolved.storage_json(),
-                    "error": { "kind": err.kind(), "message": err.detail() },
-                }));
+                "accountId": account.id,
+                "state": "failed",
+                "claimed": false,
+                "authSource": resolved.to_json(),
+                "authStorage": resolved.storage_json(),
+                "error": { "kind": err.kind(), "message": err.detail() },
+            }));
         }
     };
 

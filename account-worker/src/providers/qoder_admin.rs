@@ -256,6 +256,11 @@ pub(crate) fn delete_with(
     before_secret_delete: impl FnOnce(),
     before_account_delete: impl FnOnce(),
 ) -> RpcResult<Deleted> {
+    // 制定计划、推进 epoch、逐份删凭据、删账号行 —— 整段在同一个凭据事务里。
+    // 否则"计划之后、删凭据之前"新插入的授权不在计划里，删完账号就成了孤儿
+    // （审计 P0-1 / P0-2 / P0-3 的共同根因）。
+    let _txn = qoder_secret::begin(app)?;
+
     let account = app
         .with_db(|db| db.get_qoder_account(account_id))?
         .ok_or_else(|| RpcError::not_found(format!("Qoder 账号不存在：{account_id}")))?;
@@ -1533,6 +1538,60 @@ mod tests {
             .with_db(|db| db.get_qoder_account(&id))
             .unwrap()
             .is_none());
+    }
+
+    /// **审计 P1-2 的恢复路径**：部分删除让行变成 `missing` 之后，重新登录必须
+    /// 能把它救回来（同一个文件 / 同一组键，行上是新的令牌与版本）。
+    ///
+    /// 否则"删除失败一次"就等于永久停用这个账号 —— 那比不删更糟。
+    #[test]
+    fn a_relogin_after_a_half_finished_delete_brings_the_account_back() {
+        let (app, _dir) = app_with(SecureStore::faulty(&[], &["own/refresh"]));
+        let saved = crate::providers::qoder_auth::persist(
+            &app,
+            QoderEdition::Cn,
+            &token("u-recover", "OLD-TOKEN"),
+        )
+        .unwrap();
+        let id = saved.account_id.clone();
+        app.secure.arm();
+        // 第一次删除：access 删掉、refresh 失败 → 行标 missing。
+        let _ = delete(&app, &id).err().expect("必须先失败一次");
+        app.secure.disarm();
+        assert_eq!(
+            app.with_db(|db| db.get_qoder_authorization(&id, SOURCE_OWN_BROWSER))
+                .unwrap()
+                .unwrap()
+                .auth_status,
+            "missing"
+        );
+
+        // 用户重新授权：应当把这一行救回 valid，并且拿到新令牌。
+        let recovered = crate::providers::qoder_auth::persist(
+            &app,
+            QoderEdition::Cn,
+            &token("u-recover", "NEW-TOKEN"),
+        )
+        .expect("删失败之后重新授权必须能成功");
+        assert_eq!(recovered.account_id, id);
+        let row = app
+            .with_db(|db| db.get_qoder_authorization(&id, SOURCE_OWN_BROWSER))
+            .unwrap()
+            .expect("行必须还在");
+        assert_eq!(row.auth_status, "valid", "重新授权必须把状态救回 valid");
+        let account = app
+            .with_db(|db| db.get_qoder_account(&id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            qoder_secret::read(&app, &account, &row, CredentialKind::Oauth).unwrap(),
+            "NEW-TOKEN"
+        );
+        assert_eq!(
+            crate::credits::resolve_token(&app, &account).unwrap().token,
+            "NEW-TOKEN",
+            "Credits 必须能用新令牌"
+        );
     }
 
     /// 引用指向别的账号的键：**拒绝删除**，账号与凭据都留着。

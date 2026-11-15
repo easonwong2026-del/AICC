@@ -532,10 +532,58 @@ JSON 的读-比-删天然原子（`delete_at_revision` 在跨进程锁内比对 
 `write_json_in_place` 过去直接报"凭据不存在"，用户重新授权永远失败。现在这种情形按"新建一份"处理 ——
 否则并发保护等于把重新登录功能关掉了。
 
+### 第六轮复审修复（统一凭据事务协议）
+
+前五轮都是逐条补 guard，这一轮改成**结构性收口**：所有 mutate 路径进入同一个
+锁域，凭据与数据库不再可能各自为政。
+
+#### 锁顺序与状态机
+
+```text
+          ┌─────────────────────── SecretTxn（.lock，跨进程 flock）───────────────────────┐
+persist   │ observe(DB) → write(Keychain|JSON) → commit(DB, CAS) → [失败] restore/cleanup │
+remove    │ observe → observe_for_delete → 删行(CAS) → 确认没被重建 → 删凭据              │
+delete    │ plan(DB+凭据预验证) → 关自动领取 → bump epoch → 逐份删 → 删账号行(CAS)         │
+          └──────────────────────────────────────────────────────────────────────────────┘
+```
+
+- **只允许 `.lock` → SQLite**，不存在反向顺序：持锁期间只调 SQLite 与钥匙串，
+  而 SQLite 事务内部不会再取 `.lock`。
+- `FileLock` 现在**同线程可重入、跨线程互斥、跨进程 flock**。可重入是必需的：
+  `LocalJsonStore` 的每个写方法都会自己取锁，外层一旦持锁，没有重入就会在自己
+  的 flock 上等到超时。
+
+#### 修复点
+
+| 编号 | 问题 | 修法 |
+| --- | --- | --- |
+| **P0-1** | `write_keychain` 只锁"写"，`commit` 在锁外提交：A 写、B 写并提交、A 提交失败 → 行归 B，钥匙串是 A | 四条 mutate 路径整段持 `SecretTxn`，写-提交-回滚不可分割 |
+| **P0-2** | JSON 原地覆盖同理（文件是 B、行记 A） | 同上；`Ok(None)` 现在几乎只可能来自"账号被删"这种真实冲突 |
+| **P0-3** | PAT 移除在"删行后、删凭据前"可被重建插队；Keychain 键名固定、PAT 可能同值，旧 guard 会通过 | 移除整段持锁；**并在删凭据前再读一次行**，发现被重建就停手（`authorization_changed`） |
+| **P0-4** | `auth_version` 首次插入固定为 1，删行重建后复用旧值 → 在途旧操作可能命中新实例 | 初值与补偿恢复都取 `账号 auth_epoch + 1`：epoch 只增不减，版本在账号内严格单调 |
+| **P1-1** | `cleanup_created_account` 只按 `created: bool` + "无授权行"判断，可能删掉并发重建的账号 | 改成单条 `DELETE ... WHERE id=? AND generation=? AND NOT EXISTS(授权行)`，三条判断原子完成 |
+| **P1-2** | 部分删除失败后的收敛路径没有正向验证 | `a_relogin_after_a_half_finished_delete_brings_the_account_back`：missing 之后重新授权必须回到 valid 且 Credits 可用 |
+| **P2** | `authStorage` 在响应里重复写 3 次；两处注释仍描述 `auth_epoch` 守卫 | 去重为每响应一次；注释改述行版本 |
+
+#### 读写一致性
+
+读路径（`credits::resolve_token`）**不进**这把锁：它只读令牌、不写任何状态，
+而写入永远是"先写凭据、后提交行"，所以读到的最坏情况是"上一版令牌"，
+不会是半份。这一点在 `qoder_secret` 的模块注释里写明。
+
 ### 验证
 
 | 项 | 手段 |
 | --- | --- |
+| 跨进程覆盖写后行与文件一致（P0-1/P0-2） | `qoder_secret::tests::concurrent_rewrites_keep_the_row_and_the_file_in_sync`：4 进程同时覆盖同一来源，断言 **行的 fingerprint == 盘上令牌的 fingerprint == 读路径拿到的令牌** |
+| 同来源并发首次授权 | `..._concurrent_first_grants_leave_exactly_one_secret_and_one_row`（1 行 / 1 文件 / 行指向该文件） |
+| 锁可重入（结构前提） | `localjson::tests::the_lock_is_reentrant_within_one_thread`；跨线程仍互斥：`lock_contention_surfaces_as_a_bounded_error` |
+| 删除必须真的持锁 | `qoder_secret::tests::the_keychain_delete_actually_waits_for_the_cross_process_lock`（另一线程持锁 → `lock_timeout`，一个字节未动） |
+| PAT 删行后被重建（P0-3） | `qoder_pat::tests::a_rebuilt_pat_row_is_not_deleted_by_the_older_removal`（**同一串** PAT 重建：行仍 valid、PAT 可读、Credits 可用） |
+| 版本不可复用（P0-4） | `storage::qoder_accounts::tests::a_reinserted_row_never_reuses_an_old_auth_version` |
+| 失败清理不误删（P1-1） | `..._cleanup_refuses_a_rebuilt_account_or_one_with_authorizations` |
+| 部分删除后的恢复（P1-2） | `qoder_admin::tests::a_relogin_after_a_half_finished_delete_brings_the_account_back` |
+| v21 迁移 | `storage::tests::v21_adds_an_authorization_version_without_touching_existing_rows` |
 | 旧账号补 refresh 后停手（P0-A） | `qoder_admin::tests::a_relogin_that_adds_a_refresh_key_blocks_the_legacy_delete`（`deleted == 0`、access 与 refresh 都在） |
 | 迟到回滚不覆盖赢家（P0-B） | `qoder_secret::tests::a_late_rollback_never_overwrites_a_newer_write`（回滚返回 false、盘上是 `B-TOKEN`）；反向 `a_rollback_still_restores_when_the_token_is_still_mine` |
 | 同一串令牌重登（P1-C） | `qoder_admin::tests::a_relogin_with_the_same_token_keeps_the_new_row_valid`（断言指纹不变、`auth_version` 前进、行仍 `valid`、Credits 可读） |
