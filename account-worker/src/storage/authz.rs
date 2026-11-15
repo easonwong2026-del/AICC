@@ -292,6 +292,61 @@ impl super::Db {
         Ok(n > 0)
     }
 
+    /// 带 CAS 的整份覆盖写：`expected_version` 与 `expected_access_ref` 必须同时命中，
+    /// 否则一个字节都不写，返回 `false`。
+    ///
+    /// 和 [`Self::replace_authorization`] 的差别就是这两个条件。Magpie 来源会被多个
+    /// 进程反复重写（导入 / resync / relink），只比 `id` 就是"谁最后写谁赢"，
+    /// 而"最后"往往正是那个最慢返回的旧快照。
+    pub fn replace_authorization_cas(
+        &self,
+        record: &AuthorizationRecord,
+        expected_version: i64,
+        expected_access_ref: &str,
+    ) -> RpcResult<bool> {
+        if !ids::is_known_kind(&record.kind) {
+            return Err(RpcError::invalid_params(format!(
+                "授权类型非法：{}",
+                record.kind
+            )));
+        }
+        let now = now_rfc3339();
+        let changed = self.conn.execute(
+            "UPDATE account_authorizations
+                SET access_ref = ?1,
+                    refresh_ref = ?2,
+                    auth_domain = ?3,
+                    token_expires_at = ?4,
+                    status = ?5,
+                    version = version + 1,
+                    key_migration_state = ?6,
+                    storage_kind = ?7,
+                    source_key = ?8,
+                    last_used_at = COALESCE(?9, last_used_at),
+                    last_error = ?10,
+                    ref_updated_at = CASE WHEN ?14 <> ?1 THEN ?11 ELSE ref_updated_at END,
+                    updated_at = ?11
+              WHERE id = ?12 AND version = ?13 AND access_ref = ?14",
+            params![
+                record.access_ref,
+                record.refresh_ref,
+                record.auth_domain,
+                record.token_expires_at,
+                record.status,
+                record.key_migration_state,
+                storage_kind_of(&record.access_ref),
+                record.source_key,
+                record.last_used_at,
+                record.last_error,
+                now,
+                record.id,
+                expected_version,
+                expected_access_ref
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// 改一份授权的凭据位置（v20 的重新关联用）。**带 CAS**。
     ///
     /// 必须同时命中 `id` + `kind = 'magpie'` + `version` + `access_ref` 才写：

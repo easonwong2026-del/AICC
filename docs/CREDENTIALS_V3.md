@@ -200,6 +200,13 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 | 删除动态关联仍访问钥匙串 | `delete_authorization` 对 `magpie` 引用不再生成任何钥匙串键（含旧别名），旧 `keychain:` 行仍按旧规则清理 |
 | 诊断分类混在一起 | 新增 `CredentialErrorKind::Unavailable`（→ `magpie_unavailable`）；未知引用前缀记为 `unknown` 而不是 `keychain` |
 
+**复审第二轮（#84 第三次提交）**
+
+| 问题 | 修法 |
+| --- | --- |
+| `accounts.delete` 无条件碰钥匙串 | 先读授权快照再算清理计划：`keychain:` 行按自己的引用清、动态行**一个键都不产生**、旧别名只在"还有钥匙串凭据或根本没有授权行"时才清；顺序改为**先清凭据再删库**，清理失败保留账号以便重试（不产生无法按 id 重试的孤儿） |
+| `save_magpie` 无跨进程 CAS | `save_magpie_guarded(..., MagpieGuard)` 用 `version + access_ref` 做 CAS（`replace_authorization_cas`），竞争返回 `superseded`；resync 传入"读文件之前"那一行的快照 |
+
 **已知代价**
 
 借用授权不再写旧别名键，所以 PR #65 时代的二进制看不到"当前借用令牌"。

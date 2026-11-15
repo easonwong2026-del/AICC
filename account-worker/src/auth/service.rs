@@ -258,6 +258,23 @@ pub struct Saved {
     pub degraded: Option<String>,
 }
 
+/// 调用方手上那份 Magpie 授权快照。给了它，这次写入就必须建立在
+/// "这一行还是我读到的样子"之上（跨进程 CAS）。
+#[derive(Debug, Clone)]
+pub struct MagpieGuard {
+    pub version: i64,
+    pub access_ref: String,
+}
+
+impl MagpieGuard {
+    pub fn of(row: &AuthorizationRecord) -> Self {
+        Self {
+            version: row.version,
+            access_ref: row.access_ref.clone(),
+        }
+    }
+}
+
 /// 登记借用授权：**只写引用，不复制任何令牌**（PR-CRED-2 / PRD §3.2）。
 ///
 /// 旧实现会把 access 复制进 AICC 钥匙串，于是每次重建二进制都可能弹一次授权框，
@@ -273,6 +290,23 @@ pub fn save_magpie(
     source_key: &str,
     expires_at: Option<&str>,
 ) -> RpcResult<Saved> {
+    save_magpie_guarded(app, account_id, uid, source_key, expires_at, None)
+}
+
+/// 同 [`save_magpie`]，但可以带一份"我读到的是这个版本"的守卫。
+///
+/// resync / 自动任务都是"先读行、再读 Magpie 文件、最后写"的三步流程；
+/// 中间用户可能重新导入、另一个 Worker 可能刚 relink 过。`auth_write_guard`
+/// 只是**进程内** Mutex，挡不住跨进程的迟到写入，所以写之前必须用
+/// `version + access_ref` 做一次 CAS；对不上就 `superseded`，不重试、不盲写。
+pub fn save_magpie_guarded(
+    app: &App,
+    account_id: &str,
+    uid: &str,
+    source_key: &str,
+    expires_at: Option<&str>,
+    guard: Option<MagpieGuard>,
+) -> RpcResult<Saved> {
     if source_key.trim().is_empty() {
         return Err(
             RpcError::new(crate::rpc::E_AUTH, "缺少 Magpie 来源键，无法建立动态关联")
@@ -283,6 +317,8 @@ pub fn save_magpie(
         .map_err(|err| RpcError::new(crate::rpc::E_AUTH, err.message))?;
 
     let mut row = ensure_row(app, account_id, ids::KIND_MAGPIE, uid)?;
+    // 有守卫就按守卫的版本写；没有就按刚读到的这一份写（至少能挡住本函数执行期间的变更）。
+    let expectation = guard.unwrap_or_else(|| MagpieGuard::of(&row));
     row.access_ref = reference;
     // 借用授权永远不持有刷新令牌，引用也一起清掉（表上的 CHECK 同样不允许）。
     row.refresh_ref = None;
@@ -291,8 +327,14 @@ pub fn save_magpie(
     row.status = "valid".to_string();
     row.key_migration_state = KEY_STATE_READY.to_string();
     row.last_error = None;
-    // `ref_updated_at` 由 `put_authorization` 维护：引用变了才刷新，不是每次写都动。
-    app.with_db(|db| db.replace_authorization(&row))?;
+    let applied = app.with_db(|db| {
+        db.replace_authorization_cas(&row, expectation.version, &expectation.access_ref)
+    })?;
+    if !applied {
+        // 有人在这中间改了这一行（重新导入 / relink / 另一个 Worker）：
+        // 我这份结论已经过时，放弃，绝不覆盖。
+        return Err(crate::handlers::superseded("magpie_source_changed"));
+    }
 
     let degraded = sync_mirror(app, account_id).ok().and_then(|r| r.error);
     let fresh = app
@@ -658,23 +700,45 @@ pub fn resync_all_mirrors(app: &App) -> RpcResult<Vec<(String, String)>> {
     Ok(failures)
 }
 
-/// 完整账号删除时清 5 条键：3 条新键 + 2 条旧别名。返回删不掉的键名（不含值）。
-pub fn purge_account_keys(app: &App, account: &AccountRecord) -> Vec<String> {
-    let own = own_keys(&account.id);
-    let magpie = magpie_keys(&account.id);
-    let (legacy_access, legacy_refresh) = ids::legacy_keys(&account.uid);
-    let mut targets = vec![
-        own.access.clone(),
-        magpie.access,
-        legacy_access,
-        legacy_refresh,
-    ];
-    if let Some(refresh) = own.refresh {
-        targets.push(refresh);
+/// 账号删除要清的钥匙串键。**按实际引用算，不按"账号大概有哪几种授权"猜**。
+///
+/// * `keychain:` 引用：只清它自己记录的那几个键（access + 可选 refresh）；
+/// * 动态引用（`magpie:v1:` / `localjson:v1:`）：**一个键都不产生** —— 令牌不在我们这里；
+/// * 旧别名键：只在"确实还有钥匙串凭据"或"连授权行都没有"（v6 之前的安装，
+///   别名是唯一凭据）时才清。全是动态引用的账号保留别名，那是回滚用的。
+///
+/// 结果排序去重，便于日志与测试比较。
+pub fn account_purge_plan(rows: &[AuthorizationRecord], account: &AccountRecord) -> Vec<String> {
+    let has_keychain = rows
+        .iter()
+        .any(|row| row.storage_kind() == crate::storage::authz::STORAGE_KEYCHAIN);
+    let mut targets = Vec::new();
+    for row in rows {
+        if row.storage_kind() != crate::storage::authz::STORAGE_KEYCHAIN {
+            continue;
+        }
+        if let Some(key) = row.access_key() {
+            targets.push(key);
+        }
+        if let Some(key) = row.refresh_key() {
+            targets.push(key);
+        }
     }
+    if rows.is_empty() || has_keychain {
+        let (legacy_access, legacy_refresh) = ids::legacy_keys(&account.uid);
+        targets.push(legacy_access);
+        targets.push(legacy_refresh);
+    }
+    targets.sort();
+    targets.dedup();
+    targets
+}
+
+/// 执行清理计划，返回删不掉的键名（不含值）。
+pub fn purge_keys(app: &App, keys: &[String]) -> Vec<String> {
     let mut failed = Vec::new();
-    for key in targets {
-        match app.secure.delete(&key) {
+    for key in keys {
+        match app.secure.delete(key) {
             Ok(_) => {}
             Err(err) if err.kind == SecretErrorKind::NotFound => {}
             Err(err) => {
@@ -682,7 +746,7 @@ pub fn purge_account_keys(app: &App, account: &AccountRecord) -> Vec<String> {
                     "清理凭据失败 {key}：{}",
                     crate::rpc::sanitize(&err.message)
                 ));
-                failed.push(key);
+                failed.push(key.clone());
             }
         }
     }
