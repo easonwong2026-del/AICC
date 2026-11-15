@@ -2078,17 +2078,41 @@ pub(crate) fn commit_rotated_json(
             "tokenExpiresAt": expires,
             "secretRevision": updated.revision,
         })),
-        // 引用/版本在这中间被改掉了（重新导入、迁移、另一个 Worker）：把文件写回旧内容，
-        // 报告 superseded。**绝不**当作刷新成功。
+        // CAS 失败。**版本变了不等于引用变了**，这两件事的后果相反：
         Ok(false) => {
-            let reverted = revert_rotation(store, secret_id, &updated, verified);
-            Ok(json!({
-                "state": "superseded",
-                "reason": "authorization_moved",
-                "fileReverted": reverted,
-                // 回滚失败 = 一份没人引用的文件里留着刚拿到的有效令牌，必须让调用方看见。
-                "orphanSecret": !reverted,
-            }))
+            match app.with_db(|db| db.find_authorization(&row.account_id, &row.kind)) {
+                // ① 还指着同一份文件：别的流程只是更新了状态 / 有效期。
+                // 我们刚写进去的令牌是最新的，回滚只会把账号退回到服务端已作废的旧 refresh。
+                // 保留新令牌，如实报告版本冲突。
+                Ok(Some(current)) if current.access_ref == row.access_ref => Ok(json!({
+                    "state": "superseded",
+                    "reason": "authorization_version_changed",
+                    "fileReverted": false,
+                    "fileUpdated": true,
+                })),
+                // ② 引用被迁到别的文件（或整行被删）：F 已经没人引用，撤销这次写入。
+                Ok(_) => {
+                    let reverted = revert_rotation(store, secret_id, &updated, verified);
+                    Ok(json!({
+                        "state": "superseded",
+                        "reason": "authorization_moved",
+                        "fileReverted": reverted,
+                        // 回滚失败 = 一份没人引用的文件里留着刚拿到的有效令牌，必须让调用方看见。
+                        "orphanSecret": !reverted,
+                    }))
+                }
+                // ③ 读不出来：不知道 F 还有没有主人。回滚的风险更大（可能毁掉唯一有效的
+                // refresh），所以保留新令牌，但**不**声称成功。
+                Err(err) => Ok(json!({
+                    "state": "invalid",
+                    "needsRelogin": false,
+                    "fileUpdated": true,
+                    "error": {
+                        "kind": "rotation_state_unknown",
+                        "message": crate::rpc::sanitize(&err.message),
+                    },
+                })),
+            }
         }
         // 库写不进去：文件里的新令牌是真的、可用的（旧 refresh 已被服务端作废），
         // 所以**不回滚**，但也不能声称成功。
@@ -4219,6 +4243,59 @@ mod tests {
         );
         assert_eq!(own_row(&app, &acc.id).access_ref, other_ref, "行必须还是 G");
         assert_eq!(own_access(&app, &acc.id).as_deref(), Some("moved-access"));
+    }
+
+    /// P0 回归：**版本变了 ≠ 引用变了** —— 只更新过状态的账号不许被回滚成旧令牌。
+    ///
+    /// 交错：`owned::load` 取到快照 → 另一个流程只调了 `record_status`（版本 +1，引用仍是 F）
+    /// → 迟到的轮换提交。此时回滚会把服务端已作废的旧 refresh 写回去，账号反而更坏。
+    #[test]
+    fn rotation_keeps_the_new_tokens_when_only_the_row_version_changes() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-0000-0001-0002-0000000000g3";
+        persist_login(
+            &app,
+            &payload(uid, "old-access", Some("old-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
+        let acc = account(&app, uid);
+        let row = own_row(&app, &acc.id);
+        let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
+        let f_id = secret_id_of(&app, &acc.id);
+        let verified = crate::auth::owned::load(&app, &acc, &row).expect("verified");
+
+        // 另一个流程只更新了状态：版本 +1，`access_ref` 一个字符都没变。
+        assert!(app
+            .with_db(|db| db.set_authorization_status(&row.id, row.version, "valid", None, None))
+            .expect("status"));
+
+        let out = commit_rotated_json(
+            &app,
+            &row,
+            &store,
+            &f_id,
+            &verified,
+            "new-access",
+            Some("new-refresh"),
+            None,
+        )
+        .expect("superseded 不是错误");
+
+        assert_eq!(out["state"], json!("superseded"), "{out}");
+        assert_eq!(
+            out["reason"],
+            json!("authorization_version_changed"),
+            "{out}"
+        );
+        assert_eq!(out["fileReverted"], json!(false), "不许回滚：{out}");
+        assert_eq!(out["fileUpdated"], json!(true), "{out}");
+
+        // 新令牌必须留在 F 里 —— 回滚等于毁掉唯一有效的 refresh。
+        let f = store.load(&f_id).expect("load");
+        assert_eq!(f.credentials.access_token.as_deref(), Some("new-access"));
+        assert_eq!(f.credentials.refresh_token.as_deref(), Some("new-refresh"));
+        assert_eq!(own_access(&app, &acc.id).as_deref(), Some("new-access"));
     }
 
     /// P0 回归：状态提交失败时**不许**回报 `state=valid`。

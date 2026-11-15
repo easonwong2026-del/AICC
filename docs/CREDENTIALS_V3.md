@@ -299,7 +299,8 @@ harness 不联网、不使用真实令牌（`SecureStore::memory` + 临时目录
 | 问题 | 修法 |
 | --- | --- |
 | 轮换写完文件后不校验 SQLite 引用是否还在 | `commit_rotated_json` 在文件写完后用 `record_status` 做 `version` CAS：失败就把文件写回旧内容并返回 `superseded`（`fileReverted` / `orphanSecret` 如实上报），绝不报 `valid` |
-| `record_status` 的返回值被 `let _ =` 吞掉 | 三条分支分别处理：`Ok(true)` → valid；`Ok(false)` → superseded + 回滚文件；`Err` → `rotation_not_committed`（文件保留新令牌，因为旧 refresh 已被服务端作废，回滚只会让账号更坏） |
+| `record_status` 的返回值被 `let _ =` 吞掉 | 分三支处理：`Ok(true)` → valid；`Ok(false)` → 再读一次行决定（见下）；`Err` → `rotation_not_committed`（文件保留新令牌，因为旧 refresh 已被服务端作废，回滚只会让账号更坏） |
+| **CAS 失败一律当成"引用被迁走"** | `Ok(false)` 之后再读一次授权行：仍指向同一份文件 → **保留新令牌**，返回 `authorization_version_changed`；引用换了 / 行没了 → 才回滚并返回 `authorization_moved`；行读不出来 → 保留新令牌，返回 `rotation_state_unknown` |
 | 老 keychain 行同样"写完就报成功" | 钥匙串分支也检查 `record_status` 的 CAS 结果 |
 
 **为什么是"写完再撤销"而不是"先查一次"**
@@ -319,6 +320,17 @@ record_status（CAS on version）→ false
 F 已经不被任何行引用，没人会读到那半秒的新令牌；最终状态是"F 里是旧值、G 未被碰过、
 行指向 G、界面收到 superseded"。回归：`rotation_supersedes_when_the_authorization_moves_mid_flight`
 （进程内确定性交错）与 harness 的 `a_rotation_in_another_process_reports_superseded_after_the_reference_moves`（真双进程）。
+
+**但"版本变了"不等于"引用变了"**：另一支只更新状态、仍指向 F 时，把 F 回滚成旧令牌等于
+毁掉服务端之后唯一有效的 refresh。所以 `Ok(false)` 之后必须再读一次行：
+
+| 重新读取的结果 | 处理 | 回应 |
+| --- | --- | --- |
+| 仍指向 F | 保留新令牌（回滚风险更大） | `superseded` / `authorization_version_changed` / `fileReverted=false` |
+| 指向 G 或行已删 | 撤销对 F 的写入 | `superseded` / `authorization_moved` / `fileReverted` + `orphanSecret` |
+| 读不出来 | 保留新令牌，不声称成功 | `invalid` / `rotation_state_unknown` |
+
+回归：`rotation_keeps_the_new_tokens_when_only_the_row_version_changes`。
 
 ### 归属校验为什么必须在业务层
 
