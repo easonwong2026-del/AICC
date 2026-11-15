@@ -4,8 +4,75 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SERVER_ROOT="${SERVER_ROOT:-$ROOT}"
 BUNDLE_SERVER="${BUNDLE_SERVER:-0}"
-SIGNING_IDENTITY="${AICC_SIGNING_IDENTITY:--}"
 VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
+
+# === 签名身份 ===
+#
+# 为什么不能默认 ad-hoc：ad-hoc 签名的 designated requirement 是**这一次构建的
+# cdhash**。钥匙串条目 ACL 记的是"哪个程序能读"，所以每重建一次就变成陌生程序，
+# macOS 就要用户重新输登录密码。固定证书的 DR 是
+# `identifier "..." and certificate root = H"..."`，与单次构建无关，才谈得上"授权一次"。
+#
+# 解析顺序：
+#   1. `AICC_SIGNING_IDENTITY` 显式指定（`-` 表示明确要 ad-hoc）；
+#   2. 本机固定身份（`AICC_LOCAL_IDENTITY`，默认 `AICC Local Code Signing`）；
+#   3. 都没有 → 直接报错；要 ad-hoc 必须显式 `AICC_ALLOW_ADHOC=1`（CI / 临时构建）。
+LOCAL_IDENTITY="${AICC_LOCAL_IDENTITY:-AICC Local Code Signing}"
+REQUESTED_IDENTITY="${AICC_SIGNING_IDENTITY:-}"
+
+# 只看证书是否在钥匙串里，不看 `find-identity -p codesigning`：
+# 本机自签证书通常没有"信任设置"（CSSMERR_TP_NOT_TRUSTED），find-identity 会报
+# 0 valid identities，但 codesign 照样能用——它的 DR 只需要证书根。
+identity_present() {
+  # 关键：`security find-certificate` 找不到证书时也可能退出 0（错误只写到 stderr），
+  # 所以要判断输出，不能只看退出码。CI 上正是这里误判成"有证书"，
+  # 接着 codesign 报 "The specified item could not be found in the keychain"。
+  [[ -n "$(security find-certificate -a -c "$1" 2>/dev/null)" ]]
+}
+
+if [[ -n "$REQUESTED_IDENTITY" ]]; then
+  SIGNING_IDENTITY="$REQUESTED_IDENTITY"
+elif identity_present "$LOCAL_IDENTITY"; then
+  SIGNING_IDENTITY="$LOCAL_IDENTITY"
+elif [[ "${AICC_ALLOW_ADHOC:-0}" == "1" ]]; then
+  SIGNING_IDENTITY="-"
+  echo "WARNING: 没有可用的固定签名身份，按 AICC_ALLOW_ADHOC=1 使用 ad-hoc。" >&2
+  echo "WARNING: ad-hoc 每次构建都会让钥匙串重新要求授权，只用于 CI / 临时构建。" >&2
+else
+  cat >&2 <<'MSG'
+ERROR: 找不到可用的代码签名身份，构建中止。
+
+  ad-hoc 签名会让钥匙串在每次重建后重新要求输入密码，所以本机安装构建
+  默认要求一张固定证书，不再静默退回 ad-hoc。
+
+  三选一：
+    1) 用本机固定证书（默认名字 AICC Local Code Signing）：
+         bash macos/build-aicc-swiftui.sh
+       证书不存在时，用「钥匙串访问 → 证书助理 → 创建证书」建一张
+       「代码签名」证书，或指定已有身份：
+         AICC_SIGNING_IDENTITY="<身份名>" bash macos/build-aicc-swiftui.sh
+    2) 明确接受 ad-hoc（CI、测速、临时验证）：
+         AICC_ALLOW_ADHOC=1 bash macos/build-aicc-swiftui.sh
+    3) 正式分发用 Developer ID：
+         AICC_SIGNING_IDENTITY="Developer ID Application: ..." bash macos/build-release-mac.sh
+MSG
+  exit 1
+fi
+
+# 只有 Developer ID 才加时间戳与 hardened runtime：自签证书配 --timestamp
+# 会让本地构建依赖 Apple 的时间戳服务（离线即失败），而它对本机使用没有意义。
+SIGN_ARGS=(--force --sign "$SIGNING_IDENTITY")
+case "$SIGNING_IDENTITY" in
+  "Developer ID Application:"*)
+    SIGN_ARGS+=(--options runtime --timestamp)
+    ;;
+esac
+
+echo "Signing identity: ${SIGNING_IDENTITY}"
+if [[ "$SIGNING_IDENTITY" != "-" ]] && ! security find-identity -v -p codesigning 2>/dev/null | grep -qF "\"$SIGNING_IDENTITY\""; then
+  echo "NOTE: 该身份不在 find-identity 的有效身份列表里（自签证书多半没有信任设置），"
+  echo "      codesign 仍然可用；这只影响需要 trust 的工具链自检。"
+fi
 
 # Required server directories for BUNDLE_SERVER=1
 REQUIRED_SERVER_DIRS=("collectors")
@@ -215,35 +282,25 @@ fi
 echo "=== Signing ==="
 # 嵌套可执行文件必须先签，再签外层 bundle，否则 --deep --strict 会失败。
 if [[ "$HELPER_BUILT" == "1" ]]; then
-  if [[ "$SIGNING_IDENTITY" == "-" ]]; then
-    codesign --force --sign - "$HELPER_BIN"
-  else
-    codesign --force --options runtime --timestamp \
-      --sign "$SIGNING_IDENTITY" "$HELPER_BIN"
-  fi
+  codesign "${SIGN_ARGS[@]}" "$HELPER_BIN"
   codesign --verify --strict "$HELPER_BIN"
 fi
-if [[ "$SIGNING_IDENTITY" == "-" ]]; then
-  codesign --force --sign - --entitlements "$WIDGET_ENTITLEMENTS" "$WIDGET_APP_DIR"
-else
-  codesign --force --options runtime --timestamp \
-    --entitlements "$WIDGET_ENTITLEMENTS" \
-    --sign "$SIGNING_IDENTITY" "$WIDGET_APP_DIR"
-fi
+codesign "${SIGN_ARGS[@]}" --entitlements "$WIDGET_ENTITLEMENTS" "$WIDGET_APP_DIR"
 codesign --verify --strict "$WIDGET_APP_DIR"
 
-if [[ "$SIGNING_IDENTITY" == "-" ]]; then
-  codesign --force --sign - "$APP_DIR"
-else
-  codesign --force --options runtime --timestamp \
-    --entitlements "$ROOT/macos/entitlements.plist" \
-    --sign "$SIGNING_IDENTITY" "$APP_DIR"
-fi
+codesign "${SIGN_ARGS[@]}" --entitlements "$ROOT/macos/entitlements.plist" "$APP_DIR"
 test -x "$WIDGET_MACOS_DIR/AICCWidget"
 test "$(plutil -extract CFBundleShortVersionString raw -o - "$WIDGET_INFO")" = "$VERSION"
 test "$(plutil -extract CFBundleVersion raw -o - "$WIDGET_INFO")" = "$BUILD_VERSION"
 codesign --verify --strict "$WIDGET_APP_DIR"
 codesign --verify --deep --strict "$APP_DIR"
+
+echo "=== Signature ==="
+codesign -dvv "$APP_DIR" 2>&1 | grep -E "^(Identifier|Authority|TeamIdentifier)=" || true
+echo "helper:"
+codesign -dvv "$HELPER_BIN" 2>&1 | grep -E "^(Identifier|Authority)=" || true
+echo "requirement:"
+codesign -d --requirements - "$APP_DIR" 2>&1 | tail -1 || true
 
 echo "=== Done ==="
 echo "$APP_DIR"
