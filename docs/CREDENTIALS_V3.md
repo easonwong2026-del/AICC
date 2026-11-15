@@ -2,7 +2,7 @@
 
 > 状态：**CRED-1 已合并**（`LocalJsonStore` + 引用解析 + 文件系统边界加固）；
 > **CRED-2 已合并**（SQLite v20 + Magpie 动态关联 + 统一 Broker 解析）；
-> **CRED-3a 已交付待验收**（WorkBuddy 自有授权 JSON 化）。
+> **CRED-3a 已交付待验收**（WorkBuddy 自有授权 JSON 化，**默认关闭**，见 §8ter）。
 > CRED-3b（Qoder 两种授权）/ CRED-4（旧 Keychain 迁移）/ CRED-5（免弹窗收口）尚未开始。
 >
 > 基线：`main` @ `6adde70`（#84 已合并），数据库 Schema **v20**。
@@ -267,6 +267,43 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 钥匙串与 SQLite 之间没有跨存储事务（`#84` 复审已记录）。可能出现的中间态只有一种：
 凭据已删、记录还在。两个删除步骤都是幂等的，重试即收敛；CRED-4/5 会补一致性检查与
 恢复提示。
+
+**复审后补的边界（#85 第二轮）**
+
+| 问题 | 修法 |
+| --- | --- |
+| 引用只是 UUID，没校验文件属于这一行 | `auth/owned.rs`：读 / 刷新 / 覆盖写 / 删除四个入口统一 `load` + 校验 `authorizationId` / `platform` / `source` / `credentialKind`，不符返回 `conflict`，**不返回令牌、不写、不删**；整账号删除逐行验归属（`SecretPlan { owned, refused }`），有 `refused` 就整次拒绝 |
+| 首次并发登录两个 UPSERT 都成功 → 孤儿文件 | `write_own` 把"当时看到的是不是已有行"记进 `GrantExpectation`：没有行只允许 `INSERT ... DO NOTHING`，有行走 `version + access_ref` CAS；输的那一方只删"没有任何行引用"的文件（`count_authorizations_referencing`） |
+| 非法引用被静默重建 / 回退钥匙串 | `write_own` 遇到 `magpie:` / `unknown` 直接报 `credential_ref_unusable`；`read_own_refresh` 只有明确 `keychain:` 才走钥匙串；Broker 额外校验"引用种类配得上授权种类" |
+| 明文落盘早于风险告知 | 新登录**默认不写 JSON**：`credentials_json_consent` 未置位时继续写钥匙串，`health.credentials` 暴露 `consentRequired`，登录响应带 `credentialStorage` / `jsonConsentRequired` |
+
+### 归属校验为什么必须在业务层
+
+文件 `0600` 只回答"别的用户能不能读"，回答不了"这个文件是不是这条授权的"。引用写错
+（迁移出错、并发覆盖、库损坏）时，按 UUID 直接读就会把**另一个账号的有效令牌**当成自己的。
+四个入口全部校验，且错误分类为 `conflict`（`credential_ownership_mismatch`），不是
+`not_found` —— 后者会被上层当成"没凭据，请重新登录"，把串号糊过去。
+
+### 并发首次登录的收敛方式
+
+```text
+进程 A: 读库(无 own 行) → 写 file-A → INSERT ... DO NOTHING ✔
+进程 B: 读库(无 own 行) → 写 file-B → INSERT ... DO NOTHING ✘ → superseded
+                                        → 删 file-B（无任何行引用）→ 返回 superseded
+```
+
+已有行则走 `version + access_ref` CAS：谁先把引用改掉，后到的旧快照写不进去。
+**不回滚赢家的文件**：清理前先查 `count_authorizations_referencing`，被引用就一个字节都不动。
+
+### 明文存储的开关
+
+| 状态 | 新登录写哪 | 界面提示 |
+| --- | --- | --- |
+| `credentials_json_consent` 未设置（默认） | 钥匙串（与 #84 一致） | `health.credentials.consentRequired = true`，登录响应 `jsonConsentRequired = true` |
+| 置为 `1` | 新建 `<uuid>.json` | `jsonStorageEnabled = true` |
+
+这条闸门只管**新建**：已有 JSON 行照旧读写（文件早就落盘了，退回钥匙串不会减少暴露，
+还会让同一份授权分裂成两处）。老 `keychain:` 行不因开关变化而迁移。
 
 ## 9. 风险
 

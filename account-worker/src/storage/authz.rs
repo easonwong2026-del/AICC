@@ -158,8 +158,45 @@ impl super::Db {
     }
 
     /// 凭据写入后调用：更新字段并把 `version` 推进一格（在途旧快照就此作废）。
-    pub fn replace_authorization(&self, record: &AuthorizationRecord) -> RpcResult<()> {
-        put_authorization(self, record, true)
+    /// **只插入**：行已经存在就什么都不做，返回 `false`。
+    ///
+    /// 首次登录用的就是它。两个 Worker 进程同时看到"没有 own 行"时，两边都会各建一份
+    /// JSON；先到的那一方插入成功，后到的一方拿到 `false`，于是可以把自己那份未被引用的
+    /// 文件删掉 —— 而不是两个 UPSERT 都成功、库里留一份、盘上多一份有效令牌。
+    pub fn insert_authorization_if_absent(&self, record: &AuthorizationRecord) -> RpcResult<bool> {
+        if !ids::is_known_kind(&record.kind) {
+            return Err(RpcError::invalid_params(format!(
+                "授权类型非法：{}",
+                record.kind
+            )));
+        }
+        let now = now_rfc3339();
+        let changed = self.conn.execute(
+            "INSERT INTO account_authorizations (
+                 id, account_id, kind, access_ref, refresh_ref, auth_domain, token_expires_at,
+                 status, version, key_migration_state, storage_kind, source_key, last_used_at,
+                 last_error, created_at, updated_at, ref_updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?15)
+             ON CONFLICT (id) DO NOTHING",
+            params![
+                record.id,
+                record.account_id,
+                record.kind,
+                record.access_ref,
+                record.refresh_ref,
+                record.auth_domain,
+                record.token_expires_at,
+                record.status,
+                record.version,
+                record.key_migration_state,
+                storage_kind_of(&record.access_ref),
+                record.source_key,
+                record.last_used_at,
+                record.last_error,
+                now,
+            ],
+        )?;
+        Ok(changed > 0)
     }
 
     /// 带版本校验的状态写入。返回 false 表示版本对不上（旧快照，一个字节都没写）。
@@ -345,6 +382,20 @@ impl super::Db {
             ],
         )?;
         Ok(changed > 0)
+    }
+
+    /// 有多少条授权行引用着这个凭据引用（`access_ref` 或 `refresh_ref`）。
+    ///
+    /// 竞争失败后清理"自己新建的文件"之前必须问一次：只有**没人引用**才删得掉，
+    /// 否则删的可能是刚赢下竞争的那一份。
+    pub fn count_authorizations_referencing(&self, reference: &str) -> RpcResult<i64> {
+        let count = self.conn.query_row(
+            "SELECT COUNT(*) FROM account_authorizations
+              WHERE access_ref = ?1 OR refresh_ref = ?1",
+            params![reference],
+            |row| row.get(0),
+        )?;
+        Ok(count)
     }
 
     /// 改一份授权的凭据位置（v20 的重新关联用）。**带 CAS**。

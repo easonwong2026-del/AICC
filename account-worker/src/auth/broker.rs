@@ -13,7 +13,6 @@
 use serde_json::{json, Value};
 
 use crate::app::App;
-use crate::credentials::localjson::LocalJsonStore;
 use crate::credentials::reference::{CredentialRef, CredentialSlot};
 use crate::credentials::{CredentialError, CredentialErrorKind};
 use crate::rpc::{RpcError, RpcResult};
@@ -172,10 +171,30 @@ pub(crate) fn access_for(
     account: &AccountRecord,
     row: &crate::storage::AuthorizationRecord,
 ) -> Result<String, CredentialError> {
-    match CredentialRef::parse(&row.access_ref)? {
+    let reference = CredentialRef::parse(&row.access_ref)?;
+    // 引用种类必须配得上授权种类。一条被改脏的 `own` 行如果写着 `magpie:v1:`，
+    // 不拦就会去读 Magpie 的文件 —— 换个地方读到的"没有凭据"会把数据损坏糊过去。
+    let magpie_row = row.kind == crate::auth::ids::KIND_MAGPIE;
+    let shape_ok = match &reference {
+        CredentialRef::Magpie { .. } => magpie_row,
+        // 老行两种 kind 都可能还指着钥匙串。
+        CredentialRef::Keychain { .. } => true,
+        // 只有自有授权会落 JSON：借用授权的令牌永远不进 AICC 的存储。
+        CredentialRef::LocalJson { .. } => !magpie_row,
+    };
+    if !shape_ok {
+        return Err(CredentialError::new(
+            crate::credentials::CredentialErrorKind::Conflict,
+            "凭据引用与授权种类不一致（已拒绝读取）",
+        ));
+    }
+
+    match reference {
         CredentialRef::Keychain { .. } => read_keychain_access(app, account, row),
-        CredentialRef::LocalJson { secret_id } => {
-            LocalJsonStore::for_paths(&app.paths).token(&secret_id, CredentialSlot::Access)
+        // 归属校验：引用只是 UUID，文件里的 authorizationId / platform 必须对得上
+        // 这一行。对不上就是串号，宁可报 conflict 也不能把别人的令牌返回出去。
+        CredentialRef::LocalJson { .. } => {
+            super::owned::token(app, account, row, CredentialSlot::Access)
         }
         CredentialRef::Magpie { source_key } => {
             super::magpie_link::access_for(account, &source_key)
@@ -262,8 +281,11 @@ fn unavailable_reason(err: &CredentialError, row: &crate::storage::Authorization
         // 钥匙串被拒是"用户要再点一次授权"，和别的不可用不一样。
         (CredentialErrorKind::Denied, "keychain") => "keychain_denied",
         (CredentialErrorKind::Denied, _) => "denied",
-        // 关联指向别的账号 / 平台：不能兜底当作"没凭据"，要显式报出来。
-        (CredentialErrorKind::Conflict, _) => "link_mismatch",
+        // Magpie 关联指向别的账号 / 平台：不能兜底当作"没凭据"，要显式报出来。
+        (CredentialErrorKind::Conflict, "magpie") => "link_mismatch",
+        // 本地 JSON 文件的 authorizationId / platform 和这一行对不上：那是串号，
+        // 比"没凭据"严重得多，必须单独分类。
+        (CredentialErrorKind::Conflict, _) => "credential_ownership_mismatch",
         // Magpie 文件读不了是环境问题：界面该提示"稍后重试 / 检查 Magpie"，
         // 而不是"请重新登录"。
         (CredentialErrorKind::Unavailable, "magpie") => "magpie_unavailable",
