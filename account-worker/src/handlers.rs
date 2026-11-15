@@ -83,6 +83,8 @@ pub const METHODS: &[&str] = &[
     "credentials.migration.verify",
     // CRED-5：借用授权只改引用、不搬令牌，因此不要求明文同意。
     "credentials.migration.relink",
+    // CRED-5 复核 P0-1：旧键搬运失败后**只有**这个显式动作会重试。
+    "credentials.keychain.retry",
     // ---- Qoder 每日 Credits（PR #75）----
     "qoder.credits.status",
     "qoder.credits.claim",
@@ -650,6 +652,22 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
         "credentials.migration.rollback" => cred_migrate::rollback(app, &params),
         "credentials.migration.verify" => cred_migrate::verify(app),
         "credentials.migration.relink" => cred_migrate::relink(app, &params),
+
+        // 旧键搬运（G4）的显式重试。这是 `failed` 回到自动流程的唯一入口：
+        // 会读一次钥匙串，可能弹系统授权框，所以必须由用户点。
+        "credentials.keychain.retry" => {
+            let _gate = crate::credentials::gate::begin(app)?;
+            let (reset, report) = crate::auth::migrate::retry_failed(app)?;
+            let remaining = crate::auth::migrate::failed_count(app)?;
+            Ok(json!({
+                "reset": reset,
+                "moved": report.moved,
+                "unchanged": report.unchanged,
+                "failed": report.failed,
+                "failedRemaining": remaining,
+                "errorKind": report.error_kind,
+            }))
+        }
 
         // ---- Qoder 每日 Credits（PR #75）----
         //
@@ -3453,6 +3471,81 @@ mod tests {
             .map(|report| report.secrets.len())
             .unwrap_or(0);
         assert_eq!(secrets, 0, "重新关联不得落任何 secrets 文件");
+        magpie::test_set_logins(None);
+    }
+
+    /// CRED-5 复核 S4：批量重新关联逐条提交。
+    ///
+    /// 第 2 条写库失败时，前一条的成功必须如实报出来，后面那条照常处理 ——
+    /// 以前的写法用 `?` 直接中止，界面只拿到一个错误，已经改成功的行没人知道。
+    #[test]
+    fn a_batch_relink_reports_each_row_when_one_write_fails() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uids = [
+            "6f1c2d94-2222-0001-0002-000000000031",
+            "6f1c2d94-2222-0001-0002-000000000032",
+            "6f1c2d94-2222-0001-0002-000000000033",
+        ];
+        let logins: Vec<_> = uids
+            .iter()
+            .map(|uid| magpie_login(uid, "borrowed"))
+            .collect();
+        magpie::test_set_logins(Some(logins.clone()));
+        import_logins(&app, logins, &[]).expect("import");
+
+        // 全部退回 v19 形状：引用指着钥匙串，没有来源键。
+        app.with_db(|db| {
+            db.exec_raw(
+                "UPDATE account_authorizations
+                    SET access_ref = 'keychain:' || account_id || '/magpie/access',
+                        source_key = NULL,
+                        ref_updated_at = NULL
+                  WHERE kind = 'magpie'",
+            )
+        })
+        .expect("rewind");
+
+        // 第 2 条写入时模拟数据库异常。
+        let mut seen = 0usize;
+        let out = crate::auth::relink::relink_pending_with(&app, None, |_row| {
+            seen += 1;
+            if seen == 2 {
+                return Err(crate::rpc::RpcError::internal("模拟数据库写失败"));
+            }
+            Ok(())
+        })
+        .expect("批量不该整体失败");
+
+        assert_eq!(out["relinked"], json!(2), "{out}");
+        assert_eq!(out["failed"], json!(1), "{out}");
+        let items = out["items"].as_array().expect("items");
+        assert_eq!(items.len(), 3, "三条都要有逐条结果：{out}");
+
+        let failed_item = items
+            .iter()
+            .find(|item| item["ok"] == json!(false))
+            .expect("必须有一条失败");
+        assert_eq!(failed_item["reason"], json!("write_failed"));
+        assert!(failed_item["message"].as_str().is_some(), "要带原因");
+        assert!(
+            !out.to_string().contains("borrowed"),
+            "结果里不许出现令牌：{out}"
+        );
+
+        // 失败那一行引用没动，成功那两行已经换成动态关联。
+        let failed_id = failed_item["authorizationId"].as_str().expect("id");
+        let row = app
+            .with_db(|db| db.get_authorization(failed_id))
+            .unwrap()
+            .expect("row");
+        assert!(row.access_ref.starts_with("keychain:"), "{row:?}");
+        let changed = app
+            .with_db(|db| db.list_all_authorizations())
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.kind == ids::KIND_MAGPIE && row.access_ref.starts_with("magpie:v1:"))
+            .count();
+        assert_eq!(changed, 2, "成功的两行必须已经落库");
         magpie::test_set_logins(None);
     }
 

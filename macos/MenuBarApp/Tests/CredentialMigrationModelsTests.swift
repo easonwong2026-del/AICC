@@ -198,4 +198,55 @@ final class CredentialMigrationModelsTests: XCTestCase {
         XCTAssertEqual(report.pendingKeychain, 1)
         XCTAssertFalse(report.hasProblems, "待关联不是故障")
     }
+
+    /// CRED-5 复核 P0-1：旧键搬运失败要单独出来，并带一个显式重试的入口。
+    ///
+    /// 这个数字为 0 时面板不显示任何按钮 —— 自动流程永远不碰 `failed`。
+    func testKeyMigrationFailureIsParsedSeparately() throws {
+        let state = try XCTUnwrap(CredentialMigrationState.parse([
+            "summary": [
+                "migratable": 0,
+                "alreadyJson": 0,
+                "magpie": 0,
+                "needsRelink": 0,
+                "blocked": 0,
+                "rollbackable": 0,
+                "total": 0,
+            ],
+            "keyMigration": ["failed": 2, "pending": 1],
+            "items": [],
+        ]))
+        XCTAssertEqual(state.keyMigration.failed, 2)
+        XCTAssertEqual(state.keyMigration.pending, 1)
+        XCTAssertTrue(state.keyMigration.needsAttention)
+
+        // 老助手不返回这个块：按 0 处理，不显示按钮。
+        let legacy = try XCTUnwrap(CredentialMigrationState.parse([
+            "summary": [
+                "migratable": 0,
+                "alreadyJson": 0,
+                "magpie": 0,
+                "blocked": 0,
+                "rollbackable": 0,
+                "total": 0,
+            ],
+            "items": [],
+        ]))
+        XCTAssertEqual(legacy.keyMigration.failed, 0)
+        XCTAssertFalse(legacy.keyMigration.needsAttention)
+    }
+
+    /// 批量重新关联的结果要列出**全部**失败原因，而不只是第一条。
+    func testReasonSummaryCountsEveryFailedRow() {
+        let items: [[String: Any]] = [
+            ["accountId": "a", "ok": true],
+            ["accountId": "b", "ok": false, "reason": "source_missing"],
+            ["accountId": "c", "ok": false, "reason": "write_failed"],
+            ["accountId": "d", "ok": false, "reason": "source_missing"],
+        ]
+        let text = AccountWorkerManager.reasonSummary(items)
+        XCTAssertTrue(text.contains("source_missing ×2"), text)
+        XCTAssertTrue(text.contains("write_failed ×1"), text)
+        XCTAssertTrue(AccountWorkerManager.reasonSummary([]).isEmpty, "全成功时不显示原因")
+    }
 }

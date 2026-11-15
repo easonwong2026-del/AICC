@@ -74,12 +74,28 @@ struct CredentialMigrationItem: Equatable, Identifiable {
     }
 }
 
+/// 旧键搬运（G4 时代：旧钥匙串键 → 新键）的状态。
+///
+/// 它是**另一套**状态机，和 `credential_migrations` 无关：`failed` 表示用户
+/// 拒绝过钥匙串授权，或者写入失败，**不会**被启动路径自动重试。
+struct CredentialKeyMigration: Equatable {
+    var failed: Int
+    var pending: Int
+
+    static let empty = CredentialKeyMigration(failed: 0, pending: 0)
+
+    /// 有失败行：给一个显式的"重试"按钮，写清楚会弹授权框。
+    var needsAttention: Bool { failed > 0 }
+}
+
 /// 一次盘点结果。
 struct CredentialMigrationState: Equatable {
     var summary: CredentialMigrationSummary
     var items: [CredentialMigrationItem]
     /// 库里有迁移记录的条数（含后来被重新授权、记录已不再描述当前行的）。
     var migratedRecords: Int = 0
+    /// 旧键搬运的失败 / 待处理条数。
+    var keyMigration: CredentialKeyMigration = .empty
 
     static let empty = CredentialMigrationState(summary: .empty, items: [])
 
@@ -111,7 +127,14 @@ struct CredentialMigrationState: Equatable {
                 needsRelink: summary["needsRelink"] as? Int ?? 0
             ),
             items: items,
-            migratedRecords: json["migratedRecords"] as? Int ?? 0
+            migratedRecords: json["migratedRecords"] as? Int ?? 0,
+            keyMigration: {
+                guard let raw = json["keyMigration"] as? [String: Any] else { return .empty }
+                return CredentialKeyMigration(
+                    failed: raw["failed"] as? Int ?? 0,
+                    pending: raw["pending"] as? Int ?? 0
+                )
+            }()
         )
     }
 }

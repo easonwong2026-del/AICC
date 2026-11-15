@@ -13,6 +13,7 @@ struct CredentialMigrationSection: View {
     @State private var confirmMigrate = false
     @State private var confirmRollback = false
     @State private var confirmRelink = false
+    @State private var confirmKeyRetry = false
 
     private var state: CredentialMigrationState? { worker.credentialMigration }
     private var summary: CredentialMigrationSummary { state?.summary ?? .empty }
@@ -61,6 +62,19 @@ struct CredentialMigrationSection: View {
                     Spacer()
                     Text("\(summary.blocked) 条").foregroundStyle(.red)
                 }
+            }
+            // 旧键搬运（另一套状态机）：失败不会被自动重试，必须由用户点。
+            if state?.keyMigration.failed ?? 0 > 0 {
+                HStack {
+                    Text("旧键搬运失败")
+                    Spacer()
+                    Text("\(state?.keyMigration.failed ?? 0) 条").foregroundStyle(.red)
+                }
+                Text("失败表示上次读钥匙串被拒绝或写入出错。自动流程不会再试，所以要重试只能点下面这个按钮 —— 它会读一次钥匙串，可能弹出系统授权框。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("重试旧键搬运…") { confirmKeyRetry = true }
+                    .disabled(worker.credentialMigrationBusy)
             }
             if summary.rollbackable > 0 {
                 HStack {
@@ -162,6 +176,17 @@ struct CredentialMigrationSection: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("只改引用，不读取、不复制、不删除任何令牌；旧钥匙串条目原样保留。需要 Magpie 已登录且该账号能唯一匹配。")
+        }
+        .confirmationDialog(
+            "重试会读一次旧钥匙串条目",
+            isPresented: $confirmKeyRetry
+        ) {
+            Button("重试旧键搬运") {
+                Task { await worker.retryKeychainKeyMigration() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("系统可能弹出授权框。若之前点过「不允许」，请这次选择允许；仍然失败就保持原样，不影响已有授权。")
         }
     }
 

@@ -322,14 +322,51 @@ final class AccountWorkerManager: ObservableObject {
         do {
             let result = try await client.call("credentials.migration.relink", timeout: 60)
             let relinked = result["relinked"] as? Int ?? 0
+            let failed = result["failed"] as? Int ?? 0
             let pending = result["pending"] as? Int ?? 0
-            let skipped = result["skipped"] as? [[String: Any]] ?? []
             var text = "已重新关联 \(relinked) 条"
             if pending > 0 { text += "，\(pending) 条还没关联上" }
-            if let first = skipped.first,
-               let reason = first["reason"] as? String {
-                text += "（首个原因：\(reason)）。请确认 Magpie 已登录，并在主控制台重新关联"
-            }
+            // 逐条结果里所有失败原因都要露出来，不只第一条。
+            let reasons = Self.reasonSummary(result["items"] as? [[String: Any]] ?? [])
+            if failed > 0 { text += "，写入失败 \(failed) 条" }
+            if !reasons.isEmpty { text += "（\(reasons)）" }
+            credentialMigrationNotice = text
+            await refreshCredentialMigration(keepNotice: true)
+        } catch {
+            credentialMigrationNotice = Self.describe(error)
+        }
+    }
+
+    /// 把 `items[]` 里 `ok == false` 的原因聚合成一句，按出现次数排序。
+    nonisolated static func reasonSummary(_ items: [[String: Any]]) -> String {
+        var counts: [String: Int] = [:]
+        for item in items where item["ok"] as? Bool == false {
+            let reason = item["reason"] as? String ?? "unknown"
+            counts[reason, default: 0] += 1
+        }
+        return counts
+            .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
+            .map { "\($0.key) ×\($0.value)" }
+            .joined(separator: "、")
+    }
+
+    /// 旧键搬运（G4）的显式重试。**只有**这里会让 `failed` 重新进自动流程。
+    ///
+    /// 会读一次钥匙串，可能弹系统授权框，所以必须由用户点。
+    func retryKeychainKeyMigration() async {
+        guard let client, client.isRunning else {
+            credentialMigrationNotice = "助手未运行，重试没有执行"
+            return
+        }
+        credentialMigrationBusy = true
+        defer { credentialMigrationBusy = false }
+        do {
+            let result = try await client.call("credentials.keychain.retry", timeout: 60)
+            let reset = result["reset"] as? Int ?? 0
+            let moved = result["moved"] as? Int ?? 0
+            let stillFailed = result["failedRemaining"] as? Int ?? 0
+            var text = "已重试 \(reset) 条，搬运成功 \(moved) 条"
+            if stillFailed > 0 { text += "，仍有 \(stillFailed) 条失败（可能还是被拒绝）" }
             credentialMigrationNotice = text
             await refreshCredentialMigration(keepNotice: true)
         } catch {

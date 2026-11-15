@@ -873,11 +873,27 @@ SecretTxn（.lock）                 ← 盘点、备份、迁移都在锁内，
 待迁移（自有授权）、待重新关联（借用授权）、由 Magpie 管理（Qoder 只有借用关联）。
 修前统统算 `pendingKeychain`，用户看到的是"还有 N 条在钥匙串"，其实只有一部分需要动手。
 
+### 复核修复（P0-1 / S4 / 入口统一）
+
+| 编号 | 问题 | 修复 |
+| --- | --- | --- |
+| **P0-1** | 启动路径（`main.rs`）与 `storage.init` 都跑 `auth::migrate::run`，筛选条件是 `key_migration_state <> 'ready'` → **`failed` 每次启动都被重试**，用户拒绝过一次后每开一次 App 弹一次系统授权框，单线程 worker 的 RPC 队列一起卡住 | 筛选改成 `IN ('pending','migrating')`；新增 `credentials.keychain.retry`（持 `gate`）作为 `failed` **唯一**的回归入口，面板显示"旧键搬运失败 N 条"+ 按钮 |
+| **S4** | `relink_pending` 里 `rebind_authorization_ref(...)?` 一旦报错就中止整批，前面已改成功的行丢失报告 | 逐条提交：写失败只跳过这一行，返回 `failed` 计数 + `items[]`（每条 `ok` / `reason` / `message`），界面聚合**全部**失败原因 |
+| 入口统一 | `credentials.migration.relink` 加了锁，旧的 `auth.magpie.relink` 没加 | 锁移进 `relink::relink_pending` 本身（`qoder_secret::begin`），两个入口自动同域；以后新增调用方也不会漏 |
+| 分类 | `magpie` kind + 非法引用（`unknown:` / 裸键）被归成 `magpie_managed`（"由 Magpie 管理"） | 按引用细分：`keychain:` → `needs_relink`、`magpie:v1:` → `magpie_managed`、其它 → `reference_unusable` |
+
+关于 `failed` 的边界要说清：停止自动重试**不等于**消除弹窗。仍引用 `keychain:` 的账号在执行任务时照样会读钥匙串 ——
+它们需要显式迁移（自有授权）或重新关联（借用授权），这两件事都只在用户点按钮时发生。
+
 ### 验证
 
 | 项 | 手段 |
 | --- | --- |
-| 借用授权单独归档、不算可迁移/已管理、不给令牌 | `a_legacy_magpie_row_is_needs_relink_not_migratable_nor_managed` |
+| `failed` 不被 Startup / `storage.init` 重试，只能显式重试 | `a_failed_migration_is_not_retried_until_the_user_asks`、`denied_read_marks_failed_and_stays_retryable` |
+| 自动路径只碰 `pending` / `migrating`（新旧混装） | `the_automatic_path_touches_only_pending_and_migrating_rows` |
+| 批量 relink 中途写失败：逐条报告、部分成功 | `a_batch_relink_reports_each_row_when_one_write_fails` |
+| 非法引用报成异常而不是"已管理" | `an_unusable_reference_on_a_magpie_row_is_broken_not_managed` |
+| 老自有 / 新 JSON / 借用四种行各归各档 | `old_and_new_rows_are_classified_one_by_one` |
 | 重新关联只改引用、不产生明文文件、旧键保留 | `migration_relink_repoints_a_borrowed_row_without_copying_any_token` |
 | 启用 JSON 后不再回退旧别名键 | `read_access_stops_falling_back_to_the_legacy_alias_once_json_storage_is_on` |
 | 纯 v2 老库仍能回退（兼容） | `read_access_keeps_the_legacy_alias_fallback_for_a_pure_v2_database` |

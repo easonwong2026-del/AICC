@@ -744,10 +744,17 @@ impl super::Db {
     }
 
     /// 需要搬运的授权（`pending` / `migrating` / `failed`）。
+    /// 自动搬运的输入：**只**包含还没试过、或上次崩在搬运途中的行。
+    ///
+    /// `failed` 刻意排除（CRED-5 复核 P0-1）：那意味着用户拒绝过钥匙串授权，
+    /// 或者写入失败。每次启动再读一次钥匙串 = 每次启动弹一次系统授权框，
+    /// 而 worker 是单线程处理 RPC 的，弹框会把整个队列卡住。
+    /// 重试必须是用户的显式动作（`auth::migrate::retry_failed`）。
     pub fn authorizations_pending_key_migration(&self) -> RpcResult<Vec<AuthorizationRecord>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {AUTH_COLUMNS} FROM account_authorizations
-              WHERE key_migration_state <> 'ready' ORDER BY account_id ASC, kind ASC"
+              WHERE key_migration_state IN ('{KEY_STATE_PENDING}', '{KEY_STATE_MIGRATING}')
+              ORDER BY account_id ASC, kind ASC"
         ))?;
         let rows = stmt.query_map([], map_authorization)?;
         let mut out = Vec::new();
@@ -755,6 +762,34 @@ impl super::Db {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// 搬运失败、等用户显式重试的行（面板上显示"旧键搬运失败 N 条"）。
+    pub fn authorizations_failed_key_migration(&self) -> RpcResult<Vec<AuthorizationRecord>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {AUTH_COLUMNS} FROM account_authorizations
+              WHERE key_migration_state = '{KEY_STATE_FAILED}'
+              ORDER BY account_id ASC, kind ASC"
+        ))?;
+        let rows = stmt.query_map([], map_authorization)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// 把 `failed` 放回 `pending`。只由显式重试调用，返回被重置的行数。
+    pub fn reset_failed_key_migrations(&self) -> RpcResult<usize> {
+        let changed = self.conn.execute(
+            &format!(
+                "UPDATE account_authorizations
+                    SET key_migration_state = '{KEY_STATE_PENDING}', last_error = NULL
+                  WHERE key_migration_state = '{KEY_STATE_FAILED}'"
+            ),
+            [],
+        )?;
+        Ok(changed)
     }
 
     /// 读设置项。M1 只需要它来定首选来源；RPC 面在 M3 才开。
