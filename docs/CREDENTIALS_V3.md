@@ -636,55 +636,68 @@ CRED-3a / 3b 之后**新**授权都落本地 JSON，但在此之前登录的账�
 | **回滚只命中迁移实例** | 靠 `credential_migrations`（v22）判定：记录在 + 行仍指迁移产物 + 版本未变 + 原条目指纹一致 |
 | 参数错不扩大范围 | `domain` / `accountId` 显式传了但类型错或为空 → `invalid_params`，**不**退化成全量 |
 
-### 迁移记录（v22）
+### 迁移记录（v22 + v23）
 
 ```
 credential_migrations
   domain / account_id / source        这一行是谁
-  original_ref                        迁移前的钥匙串引用（回滚目标）
-  original_fingerprint                access 的摘要：回滚前核对"还是那一份"
+  original_ref                        迁移前的钥匙串引用（回滚目标）—— **必须非空且是 keychain:**
+  original_fingerprint                access 的**完整 SHA-256**：回滚前核对"还是那一份"
   original_refresh_fingerprint        refresh 同上
   migrated_ref / migrated_version     迁移后的文件与行版本
+  cleanup_pending                     v23：回滚已切回引用、副本还没删掉
 ```
 
 没有这张表，"回滚"只能按"当前是 localjson"筛选 —— 那会把 CRED-3a/3b 正常登录
 得到的**有效授权**切回可能已经失效的旧钥匙串条目。表里只有引用与摘要，没有令牌。
+
+`cleanup_pending` 是 v23 加的：回滚**不能先删记录再删文件**，否则文件删失败就再也
+说不清哪个副本该清。现在标记与改引用同一个事务，删文件失败时记录留着，
+`verify` 上报、下一次 `run` / `rollback` 重试。
 
 ### RPC 契约
 
 | 方法 | 作用 | 关键返回 |
 | --- | --- | --- |
 | `credentials.migration.inventory` | 只读盘点 WorkBuddy + Qoder 两侧 | `summary{migratable,alreadyJson,magpie,blocked,rollbackable,total}` + `items[]` |
-| `credentials.migration.run` | 备份 → 逐条迁移（可带 `domain` / `accountId`） | `backup`、`migrated`、`migratedWithoutRollback`、`skipped`、`failed`、`items[]` |
-| `credentials.migration.verify` | 逐条读回比对 + 孤儿扫描 | `ok`、`broken`、`pendingKeychain`、`rollbackable`、`orphans[]` |
-| `credentials.migration.rollback` | 只回滚可回滚的那些 | `rolledBack`、`skipped`、`failed`、`items[]` |
+| `credentials.migration.run` | 备份 → 逐条迁移（可带 `domain` / `accountId`） | `backup`、`migrated`、`skipped`、`failed`、`items[]` |
+| `credentials.migration.verify` | 逐条读回比对 + 孤儿扫描 | `ok`、`broken`、`pendingKeychain`、`rollbackable`、`staleRecords`、`pendingCleanup[]`、`orphans[]` |
+| `credentials.migration.rollback` | 只回滚可回滚的那些 | `rolledBack`、`cleanupPending`、`skipped`、`failed`、`items[]` |
 
 `items[].blocked` / `reason` 都是**原因码**（`already_json` / `magpie_managed` /
-`reference_unusable` / `authorization_changed` / `row_reauthorized_since_migration` …），
-文案在界面。
+`reference_unusable` / `authorization_changed` / `row_reauthorized_since_migration` /
+`record_unusable` …），文案在界面。
+
+`run` 不再有 `migratedWithoutRollback`：记录与引用同一个事务写，**迁移成功就一定
+可回滚**，那个计数只可能恒为 0。
 
 ### 单条迁移的顺序
 
 ```text
 SecretTxn（.lock）                 ← 盘点、备份、迁移都在锁内，同一时点
+  ├─ 收尾：重试上一次没删掉的副本（cleanup_pending）
   ├─ 锁内复核：行 id / 引用 / 版本还是计划里那一条？不是 → skipped
   ├─ 校验 access 与 refresh 引用**各自**指向本账号本来源的键
-  ├─ 读钥匙串整组值：NotFound / Denied / IO / 非 UTF-8 全部显式分类
+  ├─ 读钥匙串整组值**一次**：NotFound / Denied / IO / 非 UTF-8 全部显式分类
+  │    └─ 同步算出完整 SHA-256 —— 摘要与写进副本的是同一份字节
   ├─ 写新 JSON（`PendingCopy` 托管：任何提前返回都会清理未引用的副本）
-  ├─ 条件提交引用（WorkBuddy：version + access_ref；Qoder：**计划快照** secret_ref + auth_version + generation）
-  ├─ 成功后写迁移记录（写失败 → 迁移仍算成功但标记"暂时无法回滚"）
+  ├─ **一个事务**：条件提交引用 + 写迁移记录
+  │    （WorkBuddy：version + access_ref；Qoder：**计划快照** secret_ref + auth_version + generation）
   └─ 同步 `key_migration_state = ready` 与账号镜像列
 ```
 
 **原钥匙串条目一个字节都不碰**，所以"迁移失败"和"迁移后反悔"都是安全的。
 
-### 回滚的五道门
+### 回滚的六道门
 
 1. 必须有迁移记录（否则 `not_migrated`，跳过）；
-2. 行当前引用必须仍是记录里的 `migrated_ref`；
-3. 行版本必须仍是 `migrated_version`（之后重新登录过 → 跳过，**不动有效授权**）；
-4. 原 Keychain 的 access 与 refresh 必须可读，且指纹与记录一致（换了就不回滚）；
-5. 改回引用后才删副本，删之前对**两张表**做全局引用核对 + 归属核对；任一不满足只报告不删。
+2. 记录里的 `original_ref` 必须是钥匙串键（空串 → `record_unusable`，跳过）；
+3. 行当前引用必须仍是记录里的 `migrated_ref`；
+4. 行版本必须仍是 `migrated_version`（之后重新登录过 → 跳过，**不动有效授权**）；
+5. 原 Keychain 的 access 与 refresh 必须可读，且摘要与记录一致（换了就不回滚）；
+6. **一个事务**：改回引用 + 标记 `cleanup_pending` → 之后才删副本；删之前对
+   **两张表**做全局引用核对 + 归属核对；删失败就把记录留着等重试。
+
 
 ### 备份里有什么
 
@@ -706,9 +719,22 @@ SecretTxn（.lock）                 ← 盘点、备份、迁移都在锁内，
 | --- | --- |
 | 文件能读、归属四字段与行一致 | 引用串号 / 文件被换 |
 | access 非空；行声明了 refresh 槽就必须也有 | "核验全 OK 但刷新失效" |
-| 迁移过的行：指纹与迁移记录一致 | 文件内容与授权行脱节 |
+| 迁移记录**仍然描述当前行**时：access 与 refresh 的摘要都要与记录一致 | 文件内容与授权行脱节 / refresh 被换过 |
+| 记录已不再描述当前行（迁移后重新授权）→ 只计入 `staleRecords`，**不判损坏** | 拿历史记录比对会把正常新授权报成坏 |
 | 读路径（`owned::token` / `qoder_secret::read`）拿到的与文件内容一致 | "文件对、引用指错" |
 | 扫描 `secrets/v1` 中没有任何行引用的文件 | 迁移/删除中途被打断留下的副本（**只报不删**） |
+| `cleanup_pending` 的记录单独列在 `pendingCleanup[]` | 回滚过、副本没删掉：可定位、下次回滚重试 |
+
+### 第七轮复审修复（事务一致性收口）
+
+| 编号 | 问题 | 修复 |
+| --- | --- | --- |
+| P0-A | Qoder 老行 `secret_ref = NULL` → 记录原引用为空，显示可回滚但必然失败 | `original_ref` 一律由 `keychain_reference(account, source)` 派生；存储层 `validate_migration` 拒绝空/非钥匙串原引用；`rollback_basis` 是"可回滚"的**唯一**判定 |
+| P0-B | 改引用与写记录是两次独立写 → 中间崩溃就没有回滚依据 | `commit_migration_workbuddy` / `commit_qoder_authorization_with_record`：一个 SQLite 事务；回滚同理（`commit_rollback_workbuddy` / `commit_qoder_authorization_rolled_back`） |
+| P0-C | 摘要二次读取、失败可空、只有 8 位 | `write_json_copy` 返回**同一份字节**的完整 SHA-256；读失败即迁移失败；校验兼容旧 8 位指纹但不新写 |
+| P1-D | 历史迁移记录被当成校验依据 → 新授权误报损坏；refresh 换内容漏报 | 记录只在 `(migrated_ref, migrated_version)` 仍匹配时作数；live 记录追加 refresh 摘要比对；`staleRecords` 单独计数 |
+| P1-E | 回滚先删记录、再尽力删文件，失败只剩日志 | v23 `cleanup_pending`：标记与改引用同一事务；删成功才删记录；`verify` 上报、`run` / `rollback` 开头重试 |
+
 
 ### 不做的
 
@@ -738,8 +764,15 @@ SecretTxn（.lock）                 ← 盘点、备份、迁移都在锁内，
 | 核验发现缺 refresh（P1-4） | `verify_flags_a_file_that_lost_its_refresh_slot` |
 | 孤儿只报不删 | `verify_reports_an_unreferenced_file_as_an_orphan` |
 | 范围限定单账号 | `migration_is_scoped_to_one_account_when_asked` |
-| v22 迁移幂等 | `storage::tests::v22_adds_the_credential_migration_table_idempotently` |
-| 面板解析与"可回滚才可点" | `macos/MenuBarApp/Tests/CredentialMigrationModelsTests` |
+| 记录写失败 → 引用不动、无副本、无记录（P0-B） | `a_failed_migration_record_write_rolls_back_the_reference_switch`、`a_failed_qoder_record_write_keeps_the_keychain_reference` |
+| Qoder 老行（`secret_ref = NULL`）原引用补齐且真能回滚（P0-A） | `a_qoder_row_without_a_secret_ref_migrates_with_a_real_original_reference` |
+| 库里已有的坏记录不显示可回滚（P0-A） | `a_stored_record_without_a_keychain_original_is_never_advertised_as_rollbackable` |
+| 摘要取自同一份字节且是完整长度（P0-C） | `migration_digests_are_taken_from_the_copied_bytes_in_full_length` |
+| 迁移后重新授权 → 不误报损坏（P1-D） | `verify_does_not_report_a_reauthorized_row_as_broken` |
+| refresh 被换 → 报异常（P1-D） | `verify_flags_a_migrated_file_whose_refresh_was_swapped` |
+| 副本删不掉 → 留痕 + 重试（P1-E） | `a_copy_that_cannot_be_deleted_stays_visible_and_is_retried` |
+| v22 / v23 迁移幂等 | `storage::tests::v22_adds_the_credential_migration_table_idempotently` |
+| 面板解析与"可回滚才可点"、待清理不算故障 | `macos/MenuBarApp/Tests/CredentialMigrationModelsTests` |
 
 ## 9. 风险
 

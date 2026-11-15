@@ -111,4 +111,18 @@ final class CredentialMigrationModelsTests: XCTestCase {
     func testVerifyWithoutOkFieldIsRejected() {
         XCTAssertNil(CredentialVerifyReport.parse(["broken": 0]))
     }
+
+    /// 回滚后副本没删掉：要能被看见，但不算"有故障"（记录还在，下次回滚会重试）。
+    func testVerifyReportsPendingCleanupWithoutCallingItBroken() throws {
+        let report = try XCTUnwrap(CredentialVerifyReport.parse([
+            "ok": 2,
+            "broken": 0,
+            "pendingKeychain": 0,
+            "orphans": [],
+            "brokenFiles": 0,
+            "pendingCleanup": [["domain": "workbuddy", "accountId": "a"]],
+        ]))
+        XCTAssertEqual(report.pendingCleanup, 1)
+        XCTAssertFalse(report.hasProblems, "可重试的清理不该让面板标红")
+    }
 }

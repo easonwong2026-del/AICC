@@ -108,8 +108,12 @@ struct CredentialVerifyReport: Equatable {
     var pendingKeychain: Int
     var orphanCount: Int
     var brokenFiles: Int
+    /// 回滚过、但副本文件没删掉的份数。**不是故障**：记录还在，下次回滚会重试。
+    var pendingCleanup: Int
 
     /// 有需要人处理的问题（异常条目 / 孤儿文件 / 坏文件）。
+    ///
+    /// 待清理副本不算：它已经有了可重试的去处，不该让整块面板一直标红。
     var hasProblems: Bool { broken > 0 || orphanCount > 0 || brokenFiles > 0 }
 
     static func parse(_ json: [String: Any]) -> CredentialVerifyReport? {
@@ -119,7 +123,8 @@ struct CredentialVerifyReport: Equatable {
             broken: json["broken"] as? Int ?? 0,
             pendingKeychain: json["pendingKeychain"] as? Int ?? 0,
             orphanCount: (json["orphans"] as? [Any])?.count ?? 0,
-            brokenFiles: json["brokenFiles"] as? Int ?? 0
+            brokenFiles: json["brokenFiles"] as? Int ?? 0,
+            pendingCleanup: (json["pendingCleanup"] as? [Any])?.count ?? 0
         )
     }
 }

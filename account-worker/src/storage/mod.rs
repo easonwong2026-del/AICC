@@ -462,9 +462,17 @@ const MIGRATIONS: &[Migration] = &[
         version: 22,
         steps: &[MigrationStep::Sql(MIGRATION_V22_SQL)],
     },
+    // v23：回滚后的副本清理要留痕（CRED-4 复审 P1-E）。
+    //
+    // 之前回滚是"先删记录、再尽力删文件"：文件删失败只剩一行日志，记录已经没了，
+    // 谁也不知道哪个副本该清、该不该重试。加一列标记，删文件的成败就有地方记。
+    Migration {
+        version: 23,
+        steps: &[MigrationStep::Rust(authz::migrate_v23)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 22;
+pub const LATEST_VERSION: i64 = 23;
 
 pub struct Db {
     conn: Connection,
@@ -1435,6 +1443,7 @@ mod tests {
             migrated_ref: "localjson:v1:abc".to_string(),
             migrated_version: 2,
             created_at: "2026-11-15T00:00:00Z".to_string(),
+            cleanup_pending: false,
         };
         db.upsert_credential_migration(&record).unwrap();
         assert_eq!(
@@ -1457,8 +1466,48 @@ mod tests {
         assert_eq!(db.list_credential_migrations().unwrap().len(), 1);
     }
 
-    /// v21：给授权行补 `auth_version`，老行从 0 起，重复执行不改写。
-    ///
+    /// v23：`cleanup_pending`。老记录默认 0（没有待清理副本），新值能读回，
+    /// 回拨版本号再跑一次是空操作。
+    #[test]
+    fn v23_adds_cleanup_pending_defaulting_to_zero() {
+        let (mut db, _dir) = temp_db();
+        let mut record = crate::storage::authz::CredentialMigrationRecord {
+            id: "workbuddy:acc:own".to_string(),
+            domain: "workbuddy".to_string(),
+            account_id: "acc".to_string(),
+            source: "own".to_string(),
+            original_ref: "keychain:workbuddy/acc/own/access".to_string(),
+            original_fingerprint: Some("fp".to_string()),
+            original_refresh_fingerprint: None,
+            migrated_ref: "localjson:v1:abc".to_string(),
+            migrated_version: 2,
+            created_at: "2026-11-15T00:00:00Z".to_string(),
+            cleanup_pending: false,
+        };
+        db.upsert_credential_migration(&record).unwrap();
+        assert!(
+            !db.find_credential_migration(&record.id)
+                .unwrap()
+                .unwrap()
+                .cleanup_pending
+        );
+
+        record.cleanup_pending = true;
+        db.upsert_credential_migration(&record).unwrap();
+        assert_eq!(db.pending_cleanup_migrations().unwrap().len(), 1);
+
+        // 回拨到 v22 再跑：加列幂等，数据不动。
+        db.conn.pragma_update(None, "user_version", 22).unwrap();
+        assert_eq!(db.migrate().unwrap(), LATEST_VERSION);
+        assert!(
+            db.find_credential_migration(&record.id)
+                .unwrap()
+                .unwrap()
+                .cleanup_pending
+        );
+    }
+
+    /// v21：给授权行补 `auth_version`，老行从 0 起，重复执行不改写。    ///
     /// 旧库的真实形状是"没有这一列"，所以先把列删掉再回拨版本号 —— 只清空值
     /// 会把"加列"这一步测不到。
     #[test]

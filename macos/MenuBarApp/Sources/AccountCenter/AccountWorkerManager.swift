@@ -246,12 +246,10 @@ final class AccountWorkerManager: ObservableObject {
             let migrated = result["migrated"] as? Int ?? 0
             let skipped = result["skipped"] as? Int ?? 0
             let failed = result["failed"] as? Int ?? 0
-            let noRollback = result["migratedWithoutRollback"] as? Int ?? 0
             let backup = result["backup"] as? String
             var text = "已迁移 \(migrated) 条"
             if skipped > 0 { text += "，跳过 \(skipped) 条（期间已被重新授权）" }
             if failed > 0 { text += "，失败 \(failed) 条（可重新核验）" }
-            if noRollback > 0 { text += "，其中 \(noRollback) 条暂时无法回滚" }
             if let backup { text += "。备份：\(backup)" }
             return text
         }
@@ -264,9 +262,13 @@ final class AccountWorkerManager: ObservableObject {
             successPrefix: "已回滚"
         ) { result in
             let done = result["rolledBack"] as? Int ?? 0
+            let pendingCleanup = result["cleanupPending"] as? Int ?? 0
             let skipped = result["skipped"] as? Int ?? 0
             let failed = result["failed"] as? Int ?? 0
             var text = "已回滚 \(done) 条"
+            if pendingCleanup > 0 {
+                text += "，\(pendingCleanup) 份副本没删掉（下次回滚会重试）"
+            }
             if skipped > 0 { text += "，跳过 \(skipped) 条（已被重新授权）" }
             if failed > 0 { text += "，失败 \(failed) 条" }
             return text
@@ -291,6 +293,9 @@ final class AccountWorkerManager: ObservableObject {
             if report.pendingKeychain > 0 { text += "，\(report.pendingKeychain) 条仍在钥匙串" }
             if report.broken > 0 { text += "，\(report.broken) 条异常" }
             if report.orphanCount > 0 { text += "，\(report.orphanCount) 个未引用文件" }
+            if report.pendingCleanup > 0 {
+                text += "，\(report.pendingCleanup) 份副本待清理（下次回滚会重试）"
+            }
             if report.brokenFiles > 0 { text += "，\(report.brokenFiles) 个文件读不出来" }
             credentialMigrationNotice = text
         } catch {

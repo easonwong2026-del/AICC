@@ -50,13 +50,13 @@ struct PlaintextCredentialSheet: View {
                     )
                     point(
                         icon: "clock.arrow.circlepath",
-                        title: "只影响之后新建的授权",
-                        detail: "已经登录的账号（含 Qoder）保持原来的存储方式，不会因为打开这个开关而自动迁移；把旧账号搬到本地文件是后续版本里的显式操作。"
+                        title: "之后新建的授权默认写 JSON",
+                        detail: "打开之后，新的 WorkBuddy / Qoder 自有授权直接落成本机文件，也允许把旧账号从钥匙串迁过来（在「设置 → 旧凭据迁移」里显式操作）。两件事共用这一个开关，不另设第二个。"
                     )
                     point(
                         icon: "arrow.uturn.backward",
                         title: "随时可以改回去",
-                        detail: "在「设置 → 凭据存储」里关闭后，之后新建的授权重新使用钥匙串；已经写成 JSON 的授权不会因此失效。"
+                        detail: "在「设置 → 凭据存储」里关闭后，之后新建的授权重新使用钥匙串；已经写成 JSON 的授权不会因此失效，仍可在「旧凭据迁移」里回滚。"
                     )
                     point(
                         icon: "key",

@@ -30,6 +30,19 @@
 //! 重新授权，就会出现"行指向新文件、文件里是旧令牌"。所以**盘点、备份、
 //! 迁移、回滚全部**和 `persist` / `remove` / `delete` 用同一把锁
 //! （`qoder_secret::begin`）。
+//!
+//! ## 三条落库不变式（第六轮复审）
+//!
+//! 进程锁挡不住"进程被杀"，所以真正的一致性靠 SQLite 事务：
+//!
+//! | 不变式 | 做法 | 违反的后果 |
+//! | --- | --- | --- |
+//! | 换引用 ⇔ 写回滚依据 | 同一个事务（`commit_migration_*`） | 行指向新文件、却没有回滚依据 |
+//! | 回滚改引用 ⇔ 标记副本待清理 | 同一个事务（`commit_rollback_*`） | 记录先删、文件没删，谁也不知道该清哪个 |
+//! | 原引用必须是钥匙串键 | 写记录前 `validate_migration` 拒绝空/异构引用 | 显示"可回滚"但回滚必然失败 |
+//!
+//! 摘要一律用完整 SHA-256（[`crate::securestore::digest`]），而且**与写进副本的
+//! 是同一份字节**：少一个 refresh 摘要，回滚就少一道"还是那一份吗"的校验。
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -180,14 +193,12 @@ fn collect(app: &App) -> RpcResult<Vec<Entry>> {
         ))
     })?;
 
-    let record_of = |domain: &str, account_id: &str, source: &str| {
-        migrations
-            .iter()
-            .find(|item| {
+    let record_of =
+        |domain: &str, account_id: &str, source: &str| -> Option<&CredentialMigrationRecord> {
+            migrations.iter().find(|item| {
                 item.domain == domain && item.account_id == account_id && item.source == source
             })
-            .cloned()
-    };
+        };
 
     let mut out = Vec::new();
     for row in rows {
@@ -219,11 +230,13 @@ fn collect(app: &App) -> RpcResult<Vec<Entry>> {
         } else {
             None
         };
-        // 只有"记录还在 + 行仍指着我迁过去的那个文件 + 版本没动过"才算可回滚。
-        let rollbackable =
-            record_of(DOMAIN_WORKBUDDY, &row.account_id, &row.kind).is_some_and(|record| {
-                row.access_ref == record.migrated_ref && row.version == record.migrated_version
-            });
+        // 只有"记录还在 + 行仍指着我迁过去的那个文件 + 版本没动过 + 原引用是钥匙串键"
+        // 才算可回滚。判定只有一个来源（`rollback_basis`），绝不在这里另写一套。
+        let rollbackable = rollback_basis(
+            record_of(DOMAIN_WORKBUDDY, &row.account_id, &row.kind),
+            &row.access_ref,
+            row.version,
+        );
         out.push(Entry {
             domain: DOMAIN_WORKBUDDY,
             platform: account.platform.clone(),
@@ -281,11 +294,11 @@ fn collect(app: &App) -> RpcResult<Vec<Entry>> {
         } else {
             None
         };
-        let rollbackable =
-            record_of(DOMAIN_QODER, &row.account_id, &row.source).is_some_and(|record| {
-                row.secret_ref.as_deref() == Some(record.migrated_ref.as_str())
-                    && row.auth_version == record.migrated_version
-            });
+        let rollbackable = rollback_basis(
+            record_of(DOMAIN_QODER, &row.account_id, &row.source),
+            row.secret_ref.as_deref().unwrap_or_default(),
+            row.auth_version,
+        );
         out.push(Entry {
             domain: DOMAIN_QODER,
             platform: platform_name(&account.edition),
@@ -293,7 +306,12 @@ fn collect(app: &App) -> RpcResult<Vec<Entry>> {
             nickname: account.nickname.clone(),
             source: row.source.clone(),
             storage,
-            reference: row.secret_ref.clone(),
+            // 老行的 `secret_ref` 是 NULL，凭据其实在钥匙串、键名由账号派生。
+            // 显示成"没有引用"会让人以为这条授权坏了（复审 P0-A）。
+            reference: row
+                .secret_ref
+                .clone()
+                .or_else(|| Some(qoder_secret::keychain_reference(&account.id, &row.source))),
             fingerprint: row.fingerprint.clone(),
             blocked,
             rollbackable,
@@ -319,6 +337,40 @@ fn platform_name(edition: &str) -> String {
     QoderEdition::parse(edition)
         .map(|edition| qoder_secret::platform_of(edition).to_string())
         .unwrap_or_else(|| edition.to_string())
+}
+
+/// 迁移记录是不是"仍然描述当前这一行"。
+///
+/// 四个条件缺一不可，其中前两条是复审 P0-A 的补丁：原引用为空 / 不是钥匙串键
+/// 的记录**看着存在**，但回滚时根本无处可去。这种记录既不能显示成"可回滚"，
+/// 也不能当成校验摘要的依据。
+fn rollback_basis(
+    record: Option<&CredentialMigrationRecord>,
+    current_ref: &str,
+    current_version: i64,
+) -> bool {
+    let Some(record) = record else {
+        return false;
+    };
+    if !record.original_ref.starts_with(reference::KEYCHAIN_PREFIX) {
+        return false;
+    }
+    if record.migrated_ref.is_empty() || record.migrated_ref != current_ref {
+        return false;
+    }
+    record.migrated_version == current_version
+}
+
+/// 摘要比对：新记录是完整 SHA-256（64 位），早期构建写的是 8 位短指纹。
+///
+/// 两种都认，是为了让"已经用旧构建跑过一次迁移"的库仍然能回滚；**只写新的**，
+/// 因为严格一致性才是这次要的（复审 P0-C）。
+fn digest_matches(stored: &str, bytes: &[u8]) -> bool {
+    if stored.len() == 64 {
+        crate::securestore::digest(bytes) == stored
+    } else {
+        crate::securestore::fingerprint(bytes) == stored
+    }
 }
 
 /// 引用前缀 → 存储种类。**不做猜测**：未知前缀单独一类。
@@ -385,11 +437,7 @@ pub fn inventory(app: &App) -> RpcResult<Value> {
 // ---------------------------------------------------------------------------
 
 enum Outcome {
-    Migrated {
-        reference: String,
-        /// 迁移记录写成功 = 以后可以回滚。
-        rollbackable: bool,
-    },
+    Migrated { reference: String },
     Skipped(&'static str),
     Failed(String),
 }
@@ -416,6 +464,9 @@ pub(crate) fn run_with(
 
     // **盘点与备份都在锁内**：计划与备份必须是同一个受保护时点。
     let _txn = qoder_secret::begin(app)?;
+    // 上一次回滚留下的"副本待清理"先收拾掉：这里的每一步都是幂等的，
+    // 清不掉也不影响本次迁移（P1-E 的重试入口）。
+    drain_pending_cleanup(app);
     let entries = collect(app)?;
     let targets: Vec<&Entry> = entries
         .iter()
@@ -432,26 +483,20 @@ pub(crate) fn run_with(
 
     let mut items = Vec::new();
     let mut migrated = 0usize;
-    let mut migrated_unrollbackable = 0usize;
     let mut skipped = 0usize;
     let mut failed = 0usize;
     for entry in targets {
         match migrate_one(app, entry) {
-            Outcome::Migrated {
-                reference,
-                rollbackable,
-            } => {
+            Outcome::Migrated { reference } => {
                 migrated += 1;
-                if !rollbackable {
-                    migrated_unrollbackable += 1;
-                }
                 items.push(json!({
                     "domain": entry.domain,
                     "accountId": entry.account_id,
                     "source": entry.source,
                     "outcome": "migrated",
                     "reference": reference,
-                    "rollbackable": rollbackable,
+                    // 记录与引用同一个事务写：成功就一定能回滚。
+                    "rollbackable": true,
                 }));
             }
             Outcome::Skipped(reason) => {
@@ -482,7 +527,6 @@ pub(crate) fn run_with(
         "scope": scope.to_json(),
         "backup": backup.map(|path| path.to_string_lossy().to_string()),
         "migrated": migrated,
-        "migratedWithoutRollback": migrated_unrollbackable,
         "skipped": skipped,
         "failed": failed,
         "items": items,
@@ -504,6 +548,40 @@ fn migrate_one(app: &App, entry: &Entry) -> Outcome {
 enum MigrateError {
     Skipped(&'static str),
     Failed(String),
+}
+
+// 测试注入：让"写迁移记录"这一步必定失败。
+//
+// 用途只有一个——证明引用切换与记录写入**同生共死**（复审 P0-B）：注入之后
+// 仍然必须满足"行还指着钥匙串、盘上没有副本"。
+//
+// 生产构建里这个开关恒为关闭：`cfg(not(test))` 版本什么都不做。
+#[cfg(test)]
+thread_local! {
+    /// 还剩几次"写记录必定失败"的注入。线程局部，测试并行跑不会互相干扰。
+    static RECORD_WRITE_FAULTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn maybe_fault_record(record: &mut CredentialMigrationRecord) {
+    let hit = RECORD_WRITE_FAULTS.with(|cell| {
+        let left = cell.get();
+        cell.set(left.saturating_sub(1));
+        left > 0
+    });
+    if hit {
+        // 存储层会拒绝这条记录（原引用不是钥匙串键）→ 整个事务回滚。
+        record.original_ref.clear();
+    }
+}
+
+#[cfg(not(test))]
+fn maybe_fault_record(_record: &mut CredentialMigrationRecord) {}
+
+/// 让下一次（`times` 次）迁移的记录写入必定失败。**仅测试可用**。
+#[cfg(test)]
+fn arm_record_write_fault(times: u32) {
+    RECORD_WRITE_FAULTS.with(|cell| cell.set(times));
 }
 
 /// 新建的副本：**没被 keep 就一定会被清理**。
@@ -611,10 +689,11 @@ fn migrate_workbuddy(app: &App, plan: &AuthorizationRecord) -> Result<Outcome, M
         None => None,
     };
 
-    let access_digest = crate::securestore::fingerprint(access.as_bytes());
+    // 摘要来自**刚读到的这份字节**，不是再读一次（复审 P0-C）。
+    let access_digest = crate::securestore::digest(access.as_bytes());
     let refresh_digest = refresh
         .as_deref()
-        .map(|token| crate::securestore::fingerprint(token.as_bytes()));
+        .map(|token| crate::securestore::digest(token.as_bytes()));
 
     let expires = current
         .token_expires_at
@@ -642,8 +721,29 @@ fn migrate_workbuddy(app: &App, plan: &AuthorizationRecord) -> Result<Outcome, M
     // 旧键还要读（G4 的 key_migration_state 语义）。
     next.key_migration_state = KEY_STATE_READY.to_string();
 
+    // 回滚依据：原引用就是当前那行**验过归属**的钥匙串引用，绝不写空。
+    let mut migration = CredentialMigrationRecord {
+        id: CredentialMigrationRecord::id_of(DOMAIN_WORKBUDDY, &account.id, &current.kind),
+        domain: DOMAIN_WORKBUDDY.to_string(),
+        account_id: account.id.clone(),
+        source: current.kind.clone(),
+        original_ref: current.access_ref.clone(),
+        original_fingerprint: Some(access_digest),
+        original_refresh_fingerprint: refresh_digest,
+        migrated_ref: new_ref.clone(),
+        // CAS 成功后版本必然 +1：对着这一行算，不靠"读回来看看"。
+        migrated_version: current.version + 1,
+        created_at: crate::clock::now_rfc3339(),
+        cleanup_pending: false,
+    };
+    maybe_fault_record(&mut migration);
+
+    // **换引用 + 写记录是一个事务**（复审 P0-B）：记录不合格或写入失败时，
+    // 引用也不会被改成一个没有回滚依据的新位置。
     let committed = app
-        .with_db(|db| db.replace_authorization_cas(&next, current.version, &current.access_ref))
+        .with_db(|db| {
+            db.commit_migration_workbuddy(&next, current.version, &current.access_ref, &migration)
+        })
         .map_err(|err| MigrateError::Failed(err.message.clone()))?;
     if !committed {
         return Err(MigrateError::Skipped("authorization_changed"));
@@ -655,31 +755,7 @@ fn migrate_workbuddy(app: &App, plan: &AuthorizationRecord) -> Result<Outcome, M
         crate::handlers::log_note(&format!("迁移后同步账号镜像失败：{}", err.message));
     }
 
-    // 迁移记录：没有它就不许回滚。写失败只影响"能不能回滚"，不影响迁移本身。
-    let recorded = app
-        .with_db(|db| {
-            db.upsert_credential_migration(&CredentialMigrationRecord {
-                id: CredentialMigrationRecord::id_of(DOMAIN_WORKBUDDY, &account.id, &current.kind),
-                domain: DOMAIN_WORKBUDDY.to_string(),
-                account_id: account.id.clone(),
-                source: current.kind.clone(),
-                original_ref: current.access_ref.clone(),
-                original_fingerprint: Some(access_digest),
-                original_refresh_fingerprint: refresh_digest,
-                migrated_ref: new_ref.clone(),
-                migrated_version: current.version + 1,
-                created_at: crate::clock::now_rfc3339(),
-            })
-        })
-        .is_ok();
-    if !recorded {
-        crate::handlers::log_note("迁移记录写入失败：这条授权迁移成功但暂时无法回滚");
-    }
-
-    Ok(Outcome::Migrated {
-        reference: new_ref,
-        rollbackable: recorded,
-    })
+    Ok(Outcome::Migrated { reference: new_ref })
 }
 
 fn migrate_qoder(
@@ -705,9 +781,21 @@ fn migrate_qoder(
         return Err(MigrateError::Skipped("account_gone"));
     }
 
-    let write = qoder_secret::write_json_copy(app, &account, &current)
+    // 原引用**只能由账号 + 来源派生**：老行的 `secret_ref` 是 NULL（键名一直是由
+    // account_id 推出来的），照抄 `secret_ref` 会写出空串 —— 记录看着存在，
+    // 回滚必然失败（复审 P0-A）。行里写了引用就必须正好是这一条，否则拒绝。
+    let original_ref = qoder_secret::keychain_reference(&account.id, &plan.source);
+    if let Some(recorded) = plan.secret_ref.as_deref() {
+        if recorded != original_ref {
+            return Err(MigrateError::Failed(
+                "钥匙串引用不是这条来源的主键，拒绝迁移".to_string(),
+            ));
+        }
+    }
+
+    let copy = qoder_secret::write_json_copy(app, &account, &current)
         .map_err(|err| MigrateError::Failed(err.message.clone()))?;
-    let reference = write.reference().to_string();
+    let reference = copy.write.reference().to_string();
     let secret_id = reference
         .strip_prefix(reference::LOCAL_JSON_PREFIX)
         .unwrap_or_default()
@@ -721,57 +809,46 @@ fn migrate_qoder(
         lifecycle: plan_lifecycle.clone(),
         auth_version: plan.auth_version,
     };
-    let committed = qoder_secret::commit(
+    let mut migration = CredentialMigrationRecord {
+        id: CredentialMigrationRecord::id_of(DOMAIN_QODER, &account.id, &plan.source),
+        domain: DOMAIN_QODER.to_string(),
+        account_id: account.id.clone(),
+        source: plan.source.clone(),
+        original_ref,
+        // 摘要在 `write_json_copy` 里与副本**同源**算出：不读第二遍。
+        original_fingerprint: Some(copy.access_digest.clone()),
+        original_refresh_fingerprint: copy.refresh_digest.clone(),
+        migrated_ref: reference.clone(),
+        // 这次提交必然把 auth_version 推进一格，照着计划快照算。
+        migrated_version: plan.auth_version + 1,
+        created_at: crate::clock::now_rfc3339(),
+        cleanup_pending: false,
+    };
+    maybe_fault_record(&mut migration);
+
+    // 换引用 + 写记录同一个事务（复审 P0-B）。
+    let committed = qoder_secret::commit_with_record(
         app,
         &account.id,
         &plan.source,
-        &write,
+        &copy.write,
         &plan.auth_status,
         plan.token_expires_at.as_deref(),
         plan.fingerprint.as_deref(),
         &expectation,
+        &migration,
     )
     .map_err(|err| MigrateError::Failed(err.message.clone()))?;
     let Some(record) = committed else {
         return Err(MigrateError::Skipped("authorization_changed"));
     };
     pending.keep();
-
-    // 指纹在**迁移时**从原钥匙串取：它证明"回滚要回到的就是这一份"。
-    let keys = qoder_secret::keychain_keys(&account.id, &plan.source);
-    let access_digest = keys
-        .first()
-        .and_then(|key| app.secure.get(key).ok())
-        .map(|bytes| crate::securestore::fingerprint(&bytes));
-    let refresh_digest = keys
-        .get(1)
-        .and_then(|key| app.secure.get(key).ok())
-        .map(|bytes| crate::securestore::fingerprint(&bytes));
-
-    let recorded = app
-        .with_db(|db| {
-            db.upsert_credential_migration(&CredentialMigrationRecord {
-                id: CredentialMigrationRecord::id_of(DOMAIN_QODER, &account.id, &plan.source),
-                domain: DOMAIN_QODER.to_string(),
-                account_id: account.id.clone(),
-                source: plan.source.clone(),
-                original_ref: plan.secret_ref.clone().unwrap_or_default(),
-                original_fingerprint: access_digest,
-                original_refresh_fingerprint: refresh_digest,
-                migrated_ref: reference.clone(),
-                migrated_version: record.auth_version,
-                created_at: crate::clock::now_rfc3339(),
-            })
-        })
-        .is_ok();
-    if !recorded {
-        crate::handlers::log_note("迁移记录写入失败：这条授权迁移成功但暂时无法回滚");
+    if record.auth_version != migration.migrated_version {
+        // 记录里的版本对不上行，回滚会把它判成"迁移后被重新授权过"而拒绝。
+        crate::handlers::log_note("Qoder 迁移后版本号与记录不一致：该条回滚可能被判成已重新授权");
     }
 
-    Ok(Outcome::Migrated {
-        reference,
-        rollbackable: recorded,
-    })
+    Ok(Outcome::Migrated { reference })
 }
 
 /// 读一个钥匙串键，并按错误分类决定是"跳过"还是"失败"。
@@ -811,6 +888,9 @@ fn keychain_error(err: crate::securestore::SecretError, slot: Option<&str>) -> M
 pub fn rollback(app: &App, params: &Value) -> RpcResult<Value> {
     let scope = Scope::parse(params)?;
     let _txn = qoder_secret::begin(app)?;
+    // 上一轮没清干净的副本先重试一次（P1-E）：回滚本身就是"清理"动作，
+    // 顺手把欠账收掉比让用户自己去猜更靠谱。
+    drain_pending_cleanup(app);
     let entries = collect(app)?;
 
     // **只回滚"有迁移记录且仍是那次迁移产物"的行**：按"当前是 localjson"筛会把
@@ -822,17 +902,23 @@ pub fn rollback(app: &App, params: &Value) -> RpcResult<Value> {
 
     let mut items = Vec::new();
     let mut rolled_back = 0usize;
+    let mut cleanup_pending = 0usize;
     let mut skipped = 0usize;
     let mut failed = 0usize;
     for entry in targets {
         match rollback_one(app, entry) {
-            Ok(()) => {
+            Ok(pending) => {
                 rolled_back += 1;
+                if pending {
+                    cleanup_pending += 1;
+                }
                 items.push(json!({
                     "domain": entry.domain,
                     "accountId": entry.account_id,
                     "source": entry.source,
                     "outcome": "rolled_back",
+                    // true = 引用已切回钥匙串，但副本文件没删掉；记录留着等重试。
+                    "cleanupPending": pending,
                 }));
             }
             Err(RollbackError::Skipped(reason)) => {
@@ -862,6 +948,7 @@ pub fn rollback(app: &App, params: &Value) -> RpcResult<Value> {
         "completedAt": crate::clock::now_rfc3339(),
         "scope": scope.to_json(),
         "rolledBack": rolled_back,
+        "cleanupPending": cleanup_pending,
         "skipped": skipped,
         "failed": failed,
         "items": items,
@@ -873,7 +960,8 @@ enum RollbackError {
     Failed(String),
 }
 
-fn rollback_one(app: &App, entry: &Entry) -> Result<(), RollbackError> {
+/// 回滚一条。`Ok(bool)` 里的 bool = 副本还没删掉（需要重试）。
+fn rollback_one(app: &App, entry: &Entry) -> Result<bool, RollbackError> {
     let record = load_record(app, entry).ok_or(RollbackError::Skipped("not_migrated"))?;
     match &entry.row {
         Row::Workbuddy(row) => rollback_workbuddy(app, row, &record),
@@ -892,7 +980,7 @@ fn rollback_workbuddy(
     app: &App,
     row: &AuthorizationRecord,
     record: &CredentialMigrationRecord,
-) -> Result<(), RollbackError> {
+) -> Result<bool, RollbackError> {
     // 1. 行必须仍是那次迁移的结果（引用没换、版本没动）。
     if row.access_ref != record.migrated_ref {
         return Err(RollbackError::Skipped("row_moved_since_migration"));
@@ -900,8 +988,12 @@ fn rollback_workbuddy(
     if row.version != record.migrated_version {
         return Err(RollbackError::Skipped("row_reauthorized_since_migration"));
     }
+    // 2. 记录本身必须能指回钥匙串（复审 P0-A：空原引用等于没有回滚依据）。
+    if !record.original_ref.starts_with(reference::KEYCHAIN_PREFIX) {
+        return Err(RollbackError::Skipped("record_unusable"));
+    }
 
-    // 2. 原钥匙串整组必须还在，而且**还是迁移时那一份**（指纹相等）。
+    // 3. 原钥匙串整组必须还在，而且**还是迁移时那一份**（摘要相等）。
     let access_key = record
         .original_ref
         .strip_prefix(reference::KEYCHAIN_PREFIX)
@@ -923,12 +1015,12 @@ fn rollback_workbuddy(
         )?;
     }
 
-    // 3. CAS 改回原引用。
+    // 4. CAS 改回原引用 + 标记副本待清理，**同一个事务**（复审 P0-B / P1-E）。
     let mut next = row.clone();
     next.access_ref = record.original_ref.clone();
     next.refresh_ref = has_refresh.then(|| ids::keychain_ref(&refresh_key));
     let committed = app
-        .with_db(|db| db.replace_authorization_cas(&next, row.version, &row.access_ref))
+        .with_db(|db| db.commit_rollback_workbuddy(&next, row.version, &row.access_ref, &record.id))
         .map_err(|err| RollbackError::Failed(err.message.clone()))?;
     if !committed {
         return Err(RollbackError::Skipped("authorization_changed"));
@@ -937,8 +1029,7 @@ fn rollback_workbuddy(
         crate::handlers::log_note(&format!("回滚后同步账号镜像失败：{}", err.message));
     }
 
-    finish_rollback(app, record, &row.id);
-    Ok(())
+    Ok(finish_rollback(app, record))
 }
 
 fn rollback_qoder(
@@ -946,12 +1037,15 @@ fn rollback_qoder(
     row: &QoderAuthRecord,
     lifecycle: &QoderLifecycle,
     record: &CredentialMigrationRecord,
-) -> Result<(), RollbackError> {
+) -> Result<bool, RollbackError> {
     if row.secret_ref.as_deref() != Some(record.migrated_ref.as_str()) {
         return Err(RollbackError::Skipped("row_moved_since_migration"));
     }
     if row.auth_version != record.migrated_version {
         return Err(RollbackError::Skipped("row_reauthorized_since_migration"));
+    }
+    if !record.original_ref.starts_with(reference::KEYCHAIN_PREFIX) {
+        return Err(RollbackError::Skipped("record_unusable"));
     }
 
     let access_key = record
@@ -977,7 +1071,8 @@ fn rollback_qoder(
         lifecycle: lifecycle.clone(),
         auth_version: row.auth_version,
     };
-    let committed = qoder_secret::commit_reference(
+    // 改回引用 + 标记待清理，同一个事务（复审 P0-B / P1-E）。
+    let committed = qoder_secret::commit_reference_rolled_back(
         app,
         &row.account_id,
         &row.source,
@@ -986,21 +1081,47 @@ fn rollback_qoder(
         row.token_expires_at.as_deref(),
         row.fingerprint.as_deref(),
         &expectation,
+        &record.id,
     )
     .map_err(|err| RollbackError::Failed(err.message.clone()))?;
     if committed.is_none() {
         return Err(RollbackError::Skipped("authorization_changed"));
     }
 
-    finish_rollback(app, record, &row.id);
-    Ok(())
+    Ok(finish_rollback(app, record))
 }
 
-/// 回滚收尾：删记录 + 尽力删除副本（**先核对全局引用与归属**）。
-fn finish_rollback(app: &App, record: &CredentialMigrationRecord, authorization_id: &str) {
+/// 回滚收尾：尽力删掉副本，**删成功才删记录**。
+///
+/// 返回 true = 副本还留着（记录已带 `cleanup_pending`，`verify` 会报出来，
+/// 下一次 `run` / `rollback` 会重试）。
+///
+/// 之前的顺序是"先删记录、再尽力删文件"：文件删失败就只剩一行日志，记录没了，
+/// 谁也不知道那个明文令牌文件该不该清（复审 P1-E）。
+fn finish_rollback(app: &App, record: &CredentialMigrationRecord) -> bool {
+    if let Err(reason) = cleanup_copy(app, record) {
+        crate::handlers::log_note(&format!(
+            "回滚后副本未清理（{}）：{}，已留待重试",
+            record.id, reason
+        ));
+        return true;
+    }
     if let Err(err) = app.with_db(|db| db.delete_credential_migration(&record.id)) {
         crate::handlers::log_note(&format!("回滚后删除迁移记录失败：{}", err.message));
+        return true;
     }
+    false
+}
+
+/// 删掉回滚后不再被引用的副本文件。`Ok(())` = 该删的都删了（或本来就不该删）。
+fn cleanup_copy(app: &App, record: &CredentialMigrationRecord) -> Result<(), String> {
+    let Some(secret_id) = record
+        .migrated_ref
+        .strip_prefix(reference::LOCAL_JSON_PREFIX)
+    else {
+        return Err("副本引用形状异常".to_string());
+    };
+    // 仍被任何行引用 → 那是别人的凭据，保留文件（记录可以删）。
     let wb = app
         .with_db(|db| db.count_authorizations_referencing(&record.migrated_ref))
         .unwrap_or(1);
@@ -1008,47 +1129,73 @@ fn finish_rollback(app: &App, record: &CredentialMigrationRecord, authorization_
         .with_db(|db| db.qoder_authorizations_referencing(&record.migrated_ref))
         .unwrap_or(1);
     if wb != 0 || qoder != 0 {
-        crate::handlers::log_note("回滚后副本仍被引用：保留，交给一致性检查");
-        return;
+        return Ok(());
     }
-    let Some(secret_id) = record
-        .migrated_ref
-        .strip_prefix(reference::LOCAL_JSON_PREFIX)
-    else {
-        crate::handlers::log_note("回滚后副本引用形状异常：保留，交给一致性检查");
-        return;
-    };
     let store = LocalJsonStore::for_paths(&app.paths);
     match store.load(secret_id) {
-        // 归属核对：只删"确实是这份授权"的文件，删之前再看一眼。
-        Ok(secret) if secret.authorization_id == authorization_id => {
-            if let Err(err) = store.delete(secret_id) {
-                crate::handlers::log_note(&format!(
-                    "回滚后副本未删除（{}）：可由一致性检查清理",
-                    err.kind.as_str()
-                ));
-            }
+        // 归属核对：只删"确实是这份授权"的文件。
+        Ok(secret) if secret.authorization_id == copy_owner(record) => {
+            store.delete(secret_id).map(|_| ()).map_err(|err| {
+                format!(
+                    "删除失败（{}）：{}",
+                    err.kind.as_str(),
+                    crate::rpc::sanitize(&err.message)
+                )
+            })
         }
-        Ok(_) => crate::handlers::log_note("回滚后副本归属不符：保留，不做删除"),
-        Err(err) => crate::handlers::log_note(&format!(
-            "回滚后读不到副本（{}）：不删除",
-            err.kind.as_str()
-        )),
+        Ok(_) => Err("副本归属不符，不做删除".to_string()),
+        // 文件已经不在了 = 目标达成。
+        Err(err) if err.kind == crate::credentials::CredentialErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("读不到副本（{}）", err.kind.as_str())),
     }
 }
 
-/// 原钥匙串条目必须还在，且（能比对时）与迁移时的指纹一致。
+/// 副本里的 `authorizationId` 应该是谁。由记录本身推导，不依赖调用方多传一个值。
+fn copy_owner(record: &CredentialMigrationRecord) -> String {
+    if record.domain == DOMAIN_QODER {
+        qoder_secret::authorization_id(&record.account_id, &record.source)
+    } else {
+        ids::auth_id(&record.account_id, &record.source)
+    }
+}
+
+/// 重试所有"回滚后副本待清理"的记录（P1-E 的重试入口）。
+///
+/// 幂等：清掉的删记录，清不掉的留着下次再试，绝不会因为一次失败就丢掉线索。
+fn drain_pending_cleanup(app: &App) {
+    let Ok(records) = app.with_db(|db| db.pending_cleanup_migrations()) else {
+        return;
+    };
+    for record in records {
+        match cleanup_copy(app, &record) {
+            Ok(()) => {
+                if let Err(err) = app.with_db(|db| db.delete_credential_migration(&record.id)) {
+                    crate::handlers::log_note(&format!(
+                        "清理待删副本后删除迁移记录失败：{}",
+                        err.message
+                    ));
+                }
+            }
+            Err(reason) => crate::handlers::log_note(&format!(
+                "回滚副本仍未清理（{}）：{}，下次再试",
+                record.id, reason
+            )),
+        }
+    }
+}
+
+/// 原钥匙串条目必须还在，且（能比对时）与迁移时的摘要一致。
 fn verify_original(
     app: &App,
     key: &str,
-    expected_fingerprint: Option<&str>,
+    expected_digest: Option<&str>,
     slot: &str,
 ) -> Result<(), RollbackError> {
     let bytes = app.secure.get(key).map_err(|err| {
         RollbackError::Failed(format!("原 {slot} 已不可用（{}），不能回滚", err.message))
     })?;
-    if let Some(expected) = expected_fingerprint {
-        if crate::securestore::fingerprint(&bytes) != expected {
+    if let Some(expected) = expected_digest {
+        if !digest_matches(expected, &bytes) {
             return Err(RollbackError::Failed(format!(
                 "原 {slot} 已经不是迁移时那一份，不能回滚"
             )));
@@ -1065,6 +1212,7 @@ fn verify_original(
 pub fn verify(app: &App) -> RpcResult<Value> {
     let entries = collect(app)?;
     let store = LocalJsonStore::for_paths(&app.paths);
+    let migrations = app.with_db(|db| db.list_credential_migrations())?;
 
     let mut items = Vec::new();
     let mut ok = 0usize;
@@ -1072,8 +1220,13 @@ pub fn verify(app: &App) -> RpcResult<Value> {
     let mut pending = 0usize;
 
     for entry in &entries {
+        let record = migrations.iter().find(|record| {
+            record.domain == entry.domain
+                && record.account_id == entry.account_id
+                && record.source == entry.source
+        });
         match entry.storage {
-            STORAGE_LOCALJSON => match verify_one(app, entry, &store) {
+            STORAGE_LOCALJSON => match verify_one(app, entry, &store, record) {
                 Ok(()) => {
                     ok += 1;
                     items.push(json!({
@@ -1107,7 +1260,35 @@ pub fn verify(app: &App) -> RpcResult<Value> {
         }
     }
 
+    // 迁移记录只在"仍然描述当前那一行"时才算依据。之后重新授权过，它就是历史：
+    // 拿它比对只会把正常的新授权报成损坏（复审 P1-D）。这里单独计数，不当作故障。
+    let stale_records = migrations
+        .iter()
+        .filter(|record| {
+            entries
+                .iter()
+                .find(|entry| {
+                    entry.domain == record.domain
+                        && entry.account_id == record.account_id
+                        && entry.source == record.source
+                })
+                .is_none_or(|entry| {
+                    !rollback_basis(
+                        Some(record),
+                        entry.reference.as_deref().unwrap_or_default(),
+                        entry_version(entry),
+                    )
+                })
+        })
+        .count();
+
     let referenced = referenced_refs(app)?;
+    // 待清理的副本已经单独上报了，别再算成孤儿：那是"有主的欠账"，不是异常文件。
+    let awaiting_cleanup: Vec<&str> = migrations
+        .iter()
+        .filter(|record| record.cleanup_pending)
+        .map(|record| record.migrated_ref.as_str())
+        .collect();
     let mut orphans = Vec::new();
     let report = store
         .scan()
@@ -1115,6 +1296,9 @@ pub fn verify(app: &App) -> RpcResult<Value> {
     for secret in &report.secrets {
         let reference = reference::local_json_ref(&secret.secret_id)
             .map_err(|err| RpcError::internal(err.message))?;
+        if awaiting_cleanup.iter().any(|item| item == &reference) {
+            continue;
+        }
         if !referenced.iter().any(|item| item == &reference) {
             orphans.push(json!({
                 "secretId": secret.secret_id,
@@ -1132,19 +1316,48 @@ pub fn verify(app: &App) -> RpcResult<Value> {
         }
     }
 
+    // 回滚过、但副本文件没删掉的记录：留在这里等下一次 run / rollback 重试（P1-E）。
+    let cleanup_pending: Vec<Value> = migrations
+        .iter()
+        .filter(|record| record.cleanup_pending)
+        .map(|record| {
+            json!({
+                "domain": record.domain,
+                "accountId": record.account_id,
+                "source": record.source,
+                "reference": record.migrated_ref,
+            })
+        })
+        .collect();
+
     Ok(json!({
         "checkedAt": crate::clock::now_rfc3339(),
         "ok": ok,
         "broken": broken,
         "pendingKeychain": pending,
         "rollbackable": entries.iter().filter(|entry| entry.rollbackable).count(),
+        "staleRecords": stale_records,
+        "pendingCleanup": cleanup_pending,
         "orphans": orphans,
         "brokenFiles": report.broken.len(),
         "items": items,
     }))
 }
 
-fn verify_one(app: &App, entry: &Entry, store: &LocalJsonStore) -> Result<(), String> {
+/// 行版本。WorkBuddy 用 `version`，Qoder 用 `auth_version`。
+fn entry_version(entry: &Entry) -> i64 {
+    match &entry.row {
+        Row::Workbuddy(row) => row.version,
+        Row::Qoder { row, .. } => row.auth_version,
+    }
+}
+
+fn verify_one(
+    app: &App,
+    entry: &Entry,
+    store: &LocalJsonStore,
+    record: Option<&CredentialMigrationRecord>,
+) -> Result<(), String> {
     let reference_value = entry
         .reference
         .as_deref()
@@ -1183,16 +1396,17 @@ fn verify_one(app: &App, entry: &Entry, store: &LocalJsonStore) -> Result<(), St
         return Err("凭据文件里的令牌为空".to_string());
     }
 
+    // 记录只在"行还是那次迁移的产物"时作数；否则它是历史，不能拿来判定。
+    let live =
+        record.filter(|record| rollback_basis(Some(record), reference_value, entry_version(entry)));
+
     // **refresh 槽也要验**：只核 access 会出现"核验全 OK 但刷新失效"。
     //
     // Qoder 的 refresh 只有服务端下发时才有，而且只有迁移记录能证明"当时有"：
     // 按 kind 一刀切会把"本来就没有 refresh"的授权误报成 broken。
-    let record = load_record(app, entry);
     let wants_refresh = match &entry.row {
         Row::Workbuddy(row) => row.refresh_ref.is_some(),
-        Row::Qoder { .. } => record
-            .as_ref()
-            .is_some_and(|item| item.original_refresh_fingerprint.is_some()),
+        Row::Qoder { .. } => record.is_some_and(|item| item.original_refresh_fingerprint.is_some()),
     };
     if wants_refresh {
         match secret.token(reference::CredentialSlot::Refresh) {
@@ -1202,14 +1416,21 @@ fn verify_one(app: &App, entry: &Entry, store: &LocalJsonStore) -> Result<(), St
         }
     }
 
-    // 迁移过的行：用迁移记录里的指纹比对（WorkBuddy 行本身没有 fingerprint 列）。
-    if let Some(record) = record {
-        if record.migrated_ref != reference_value {
-            return Err("这行有迁移记录，但引用不是那次迁移的产物".to_string());
-        }
+    // 迁移过的行：用记录里的摘要比对（WorkBuddy 行本身没有 fingerprint 列）。
+    if let Some(record) = live {
         if let Some(expected) = record.original_fingerprint.as_deref() {
-            if expected != crate::securestore::fingerprint(access.as_bytes()) {
-                return Err("迁移记录里的指纹与文件里的令牌不一致".to_string());
+            if !digest_matches(expected, access.as_bytes()) {
+                return Err("迁移记录里的摘要与文件里的令牌不一致".to_string());
+            }
+        }
+        // refresh 也要比对内容，不能只看槽位在不在：被换成另一串 token、
+        // 或者迁移时漏写了，都只有摘要能发现（复审 P1-D）。
+        if let Some(expected) = record.original_refresh_fingerprint.as_deref() {
+            let token = secret
+                .token(reference::CredentialSlot::Refresh)
+                .map_err(|err| err.message.clone())?;
+            if !digest_matches(expected, token.as_bytes()) {
+                return Err("迁移记录里的 refresh 摘要与文件里的令牌不一致".to_string());
             }
         }
     } else if let Some(expected) = entry.fingerprint.clone() {
@@ -1448,7 +1669,6 @@ mod tests {
 
         let value = run(&app, &json!({})).unwrap();
         assert_eq!(value["migrated"], 1, "{value}");
-        assert_eq!(value["migratedWithoutRollback"], 0);
         assert!(value["backup"].as_str().is_some());
 
         let row = row_of(&app, &acc);
@@ -2003,5 +2223,318 @@ mod tests {
             "赢家的令牌不许被盖回旧值"
         );
         assert_eq!(row.auth_status, "valid");
+    }
+
+    /// 复审 P0-B：记录写不进去，引用就必须原封不动。
+    ///
+    /// 注入的失败发生在"换引用之后、提交之前"：只要两条语句不在同一个事务里，
+    /// 这里就会看到"行指向新文件、却没有回滚依据"。
+    #[test]
+    fn a_failed_migration_record_write_rolls_back_the_reference_switch() {
+        let (app, _dir) = json_app();
+        let acc = account(&app, "uid-atomic");
+        keychain_row(&app, &acc);
+
+        arm_record_write_fault(1);
+        let value = run(&app, &json!({})).unwrap();
+        assert_eq!(value["migrated"], 0, "{value}");
+        assert_eq!(value["failed"], 1, "{value}");
+        assert_eq!(
+            row_of(&app, &acc).access_ref,
+            ids::keychain_ref(&ids::access_key(&acc.id, ids::KIND_OWN)),
+            "记录没写成，引用不许动"
+        );
+        assert!(no_secret_files(&app), "事务回滚后副本必须清掉");
+        assert!(app
+            .with_db(|db| db.list_credential_migrations())
+            .unwrap()
+            .is_empty());
+    }
+
+    /// 复审 P0-B（Qoder 侧）：同一个不变式。
+    #[test]
+    fn a_failed_qoder_record_write_keeps_the_keychain_reference() {
+        let (app, _dir) = app_with(SecureStore::memory());
+        let saved =
+            crate::providers::qoder_auth::persist(&app, QoderEdition::Cn, &token("u-atomic", "Q"))
+                .unwrap();
+        crate::auth::consent::set_json_storage(&app, true).unwrap();
+
+        arm_record_write_fault(1);
+        let value = run(&app, &json!({ "domain": "qoder" })).unwrap();
+        assert_eq!(value["migrated"], 0, "{value}");
+        assert_eq!(value["failed"], 1, "{value}");
+
+        let row = app
+            .with_db(|db| db.get_qoder_authorization(&saved.account_id, "own_browser"))
+            .unwrap()
+            .unwrap();
+        assert!(
+            row.secret_ref.as_deref().unwrap().starts_with("keychain:"),
+            "记录没写成，引用不许动：{row:?}"
+        );
+        assert!(no_secret_files(&app));
+        assert!(app
+            .with_db(|db| db.list_credential_migrations())
+            .unwrap()
+            .is_empty());
+    }
+
+    /// 复审 P0-A：老 Qoder 行的 `secret_ref` 是 NULL，记录里的原引用必须补成
+    /// 真实的钥匙串键 —— 空串会让"可回滚"变成一句谎话。
+    #[test]
+    fn a_qoder_row_without_a_secret_ref_migrates_with_a_real_original_reference() {
+        let (app, _dir) = app_with(SecureStore::memory());
+        crate::auth::consent::set_json_storage(&app, true).unwrap();
+        let acc = app
+            .with_db(|db| db.upsert_qoder_account("qoder_cn", "u-null", Some("老行"), None))
+            .unwrap();
+        let access_key = crate::providers::qoder_auth::access_key(&acc.id);
+        app.secure.set(&access_key, b"Q-OLD").unwrap();
+        // v16 之前的老行：有授权、没有 secret_ref（键名由账号派生）。
+        app.with_db(|db| {
+            db.upsert_qoder_authorization(&acc.id, "own_browser", None, None, "valid", None, None)
+        })
+        .unwrap();
+
+        let value = run(&app, &json!({ "domain": "qoder" })).unwrap();
+        assert_eq!(value["migrated"], 1, "{value}");
+
+        let record = app
+            .with_db(|db| {
+                db.find_credential_migration(&CredentialMigrationRecord::id_of(
+                    DOMAIN_QODER,
+                    &acc.id,
+                    "own_browser",
+                ))
+            })
+            .unwrap()
+            .expect("必须有迁移记录");
+        assert_eq!(
+            record.original_ref,
+            qoder_secret::keychain_reference(&acc.id, "own_browser"),
+            "原引用必须补成真实钥匙串键，不能是空串"
+        );
+        assert!(record.original_fingerprint.as_deref().unwrap().len() == 64);
+
+        // "显示可回滚"与"回滚真的能跑"必须一致。
+        assert_eq!(inventory(&app).unwrap()["summary"]["rollbackable"], 1);
+        let value = rollback(&app, &json!({ "domain": "qoder" })).unwrap();
+        assert_eq!(value["rolledBack"], 1, "{value}");
+        let row = app
+            .with_db(|db| db.get_qoder_authorization(&acc.id, "own_browser"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.secret_ref.as_deref(),
+            Some(qoder_secret::keychain_reference(&acc.id, "own_browser").as_str())
+        );
+    }
+
+    /// 复审 P0-A：早期构建可能已经写下了空原引用的记录 —— 那种记录既不能显示
+    /// 成"可回滚"，也不能被回滚流程当成目标。
+    #[test]
+    fn a_stored_record_without_a_keychain_original_is_never_advertised_as_rollbackable() {
+        let (app, _dir) = json_app();
+        let acc = account(&app, "uid-badrecord");
+        keychain_row(&app, &acc);
+        run(&app, &json!({})).unwrap();
+        let row = row_of(&app, &acc);
+
+        // 直接改库，模拟旧版本写下的坏记录（现在的写入路径会拒绝它）。
+        app.with_db(|db| {
+            db.exec_raw(&format!(
+                "UPDATE credential_migrations SET original_ref = '' WHERE id = '{}';",
+                CredentialMigrationRecord::id_of(DOMAIN_WORKBUDDY, &acc.id, ids::KIND_OWN)
+            ))
+        })
+        .unwrap();
+
+        assert_eq!(
+            inventory(&app).unwrap()["summary"]["rollbackable"],
+            0,
+            "原引用为空的记录不算回滚依据"
+        );
+        let value = rollback(&app, &json!({})).unwrap();
+        assert_eq!(value["rolledBack"], 0, "{value}");
+        assert_eq!(
+            row_of(&app, &acc).access_ref,
+            row.access_ref,
+            "一个字节都不许动"
+        );
+    }
+
+    /// 复审 P1-D：记录只在"仍然描述当前行"时才算依据。之后重新授权过，
+    /// 拿旧记录比对只会把正常的新授权报成损坏。
+    #[test]
+    fn verify_does_not_report_a_reauthorized_row_as_broken() {
+        let (app, _dir) = json_app();
+        let acc = account(&app, "uid-stale");
+        keychain_row(&app, &acc);
+        run(&app, &json!({})).unwrap();
+        let migrated = row_of(&app, &acc);
+
+        // 模拟迁移后重新登录：新文件、新令牌、版本 +1。
+        let store = LocalJsonStore::for_paths(&app.paths);
+        let fresh = store
+            .create(SecretDraft::oauth(
+                ids::auth_id(&acc.id, ids::KIND_OWN),
+                "workbuddy",
+                "BRAND-NEW",
+            ))
+            .unwrap();
+        let fresh_ref = reference::local_json_ref(&fresh.secret_id).unwrap();
+        let mut next = migrated.clone();
+        next.access_ref = fresh_ref.clone();
+        next.refresh_ref = None;
+        assert!(app
+            .with_db(|db| {
+                db.replace_authorization_cas(&next, migrated.version, &migrated.access_ref)
+            })
+            .unwrap());
+
+        let report = verify(&app).unwrap();
+        assert_eq!(report["broken"], 0, "新授权不许被旧记录报成损坏：{report}");
+        assert_eq!(report["ok"], 1, "{report}");
+        assert_eq!(report["staleRecords"], 1, "{report}");
+        assert_eq!(report["rollbackable"], 0);
+        // 老副本现在没人引用：报成孤儿（只报不删），不报损坏。
+        assert_eq!(report["orphans"].as_array().unwrap().len(), 1, "{report}");
+    }
+
+    /// 复审 P1-D：refresh 只验"槽位在不在"会漏掉被换过的内容。
+    #[test]
+    fn verify_flags_a_migrated_file_whose_refresh_was_swapped() {
+        let (app, _dir) = json_app();
+        let acc = account(&app, "uid-swapped");
+        keychain_row(&app, &acc);
+        run(&app, &json!({})).unwrap();
+        let row = row_of(&app, &acc);
+        let secret_id = row
+            .access_ref
+            .strip_prefix("localjson:v1:")
+            .unwrap()
+            .to_string();
+        let store = LocalJsonStore::for_paths(&app.paths);
+        let path = store.root().join(format!("{secret_id}.json"));
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("WB-REFRESH"), "{text}");
+        std::fs::write(&path, text.replace("WB-REFRESH", "SWAPPED-REFRESH")).unwrap();
+
+        let report = verify(&app).unwrap();
+        assert_eq!(report["broken"], 1, "{report}");
+        assert!(
+            report["items"][0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("refresh"),
+            "{report}"
+        );
+    }
+
+    /// 复审 P1-E：副本删不掉时，回滚本身仍然成功，但线索必须留下来（可定位、
+    /// 可重试），而不是只剩一行日志。
+    ///
+    /// 用 `chflags uchg` 让 unlink 必定 EPERM：目录权限会被存储层自己"治好"
+    /// （`ensure_root` 每次都把 `0700` 写回去），只有文件级的不可变标记挡得住。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_copy_that_cannot_be_deleted_stays_visible_and_is_retried() {
+        use std::process::Command;
+
+        let chflags = |flag: &str, path: &std::path::Path| {
+            let status = Command::new("chflags")
+                .arg(flag)
+                .arg(path)
+                .status()
+                .expect("chflags");
+            assert!(status.success(), "chflags {flag} {}", path.display());
+        };
+
+        let (app, _dir) = json_app();
+        let acc = account(&app, "uid-cleanup");
+        keychain_row(&app, &acc);
+        run(&app, &json!({})).unwrap();
+        let migrated = row_of(&app, &acc);
+        let secret_id = migrated
+            .access_ref
+            .strip_prefix("localjson:v1:")
+            .unwrap()
+            .to_string();
+        let store = LocalJsonStore::for_paths(&app.paths);
+        let path = store.root().join(format!("{secret_id}.json"));
+
+        chflags("uchg", &path);
+        let value = rollback(&app, &json!({})).unwrap();
+        assert_eq!(value["rolledBack"], 1, "{value}");
+        assert_eq!(value["cleanupPending"], 1, "{value}");
+        assert!(
+            row_of(&app, &acc).access_ref.starts_with("keychain:"),
+            "回滚本身要成功"
+        );
+        assert!(path.exists(), "删不掉就留着，不能假装删了");
+        let report = verify(&app).unwrap();
+        assert_eq!(
+            report["pendingCleanup"].as_array().unwrap().len(),
+            1,
+            "{report}"
+        );
+        assert_eq!(
+            report["orphans"].as_array().unwrap().len(),
+            0,
+            "待清理的副本不该重复算成孤儿：{report}"
+        );
+        assert_eq!(
+            app.with_db(|db| db.pending_cleanup_migrations())
+                .unwrap()
+                .len(),
+            1,
+            "记录要留着，才有重试的依据"
+        );
+
+        // 恢复可删之后，下一次回滚调用会先把欠账收掉。
+        chflags("nouchg", &path);
+        rollback(&app, &json!({})).unwrap();
+        assert!(!path.exists(), "重试必须把副本删掉");
+        assert!(app
+            .with_db(|db| db.list_credential_migrations())
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            verify(&app).unwrap()["pendingCleanup"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    /// 复审 P0-C：摘要来自**写进副本的那一份字节**，而且是完整 SHA-256。
+    #[test]
+    fn migration_digests_are_taken_from_the_copied_bytes_in_full_length() {
+        let (app, _dir) = json_app();
+        let acc = account(&app, "uid-digest");
+        keychain_row(&app, &acc);
+        run(&app, &json!({})).unwrap();
+
+        let record = app
+            .with_db(|db| {
+                db.find_credential_migration(&CredentialMigrationRecord::id_of(
+                    DOMAIN_WORKBUDDY,
+                    &acc.id,
+                    ids::KIND_OWN,
+                ))
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            record.original_fingerprint.as_deref(),
+            Some(crate::securestore::digest(b"WB-TOKEN").as_str())
+        );
+        assert_eq!(
+            record.original_refresh_fingerprint.as_deref(),
+            Some(crate::securestore::digest(b"WB-REFRESH").as_str())
+        );
     }
 }

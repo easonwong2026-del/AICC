@@ -29,6 +29,20 @@ use sha2::{Digest, Sha256};
 
 use crate::clock::now_rfc3339;
 use crate::rpc::{RpcError, RpcResult};
+use crate::storage::authz::CredentialMigrationRecord;
+
+/// 条件提交时要不要顺带写迁移记录（CRED-4）。
+///
+/// 三种需求必须共用同一个事务，否则"改引用"和"留下回滚依据（或待清理标记）"
+/// 之间会留下一次崩溃就能撞上的空档。
+enum MigrationWrite<'a> {
+    /// 正常授权 / 重新登录：与迁移无关。
+    None,
+    /// 迁移：同事务写回滚依据。
+    Record(&'a CredentialMigrationRecord),
+    /// 回滚：同事务把记录标记为"副本待清理"。
+    MarkCleanup(&'a str),
+}
 
 pub const SOURCE_MAGPIE: &str = "magpie";
 pub const SOURCE_OWN_BROWSER: &str = "own_browser";
@@ -541,6 +555,85 @@ impl crate::storage::Db {
         fingerprint: Option<&str>,
         expectation: &QoderAuthExpectation,
     ) -> RpcResult<Option<QoderAuthRecord>> {
+        self.commit_qoder_authorization_with(
+            account_id,
+            source,
+            secret_ref,
+            auth_status,
+            token_expires_at,
+            fingerprint,
+            expectation,
+            MigrationWrite::None,
+        )
+    }
+
+    /// CRED-4 迁移用：换 `secret_ref` 与写迁移记录**同一个事务**（复审 P0-B）。
+    ///
+    /// 记录不合格时连事务都不开：宁可迁移失败，也不能把引用改到一个没有回滚
+    /// 依据的位置上。
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_qoder_authorization_with_record(
+        &mut self,
+        account_id: &str,
+        source: &str,
+        secret_ref: Option<&str>,
+        auth_status: &str,
+        token_expires_at: Option<&str>,
+        fingerprint: Option<&str>,
+        expectation: &QoderAuthExpectation,
+        migration: &CredentialMigrationRecord,
+    ) -> RpcResult<Option<QoderAuthRecord>> {
+        super::authz::validate_migration(migration)?;
+        self.commit_qoder_authorization_with(
+            account_id,
+            source,
+            secret_ref,
+            auth_status,
+            token_expires_at,
+            fingerprint,
+            expectation,
+            MigrationWrite::Record(migration),
+        )
+    }
+
+    /// CRED-4 回滚用：把引用改回钥匙串 + 把迁移记录标记为"待清理副本"，
+    /// **同一个事务**（复审 P1-E）。标记失败（记录已不在）则整体回滚。
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_qoder_authorization_rolled_back(
+        &mut self,
+        account_id: &str,
+        source: &str,
+        secret_ref: Option<&str>,
+        auth_status: &str,
+        token_expires_at: Option<&str>,
+        fingerprint: Option<&str>,
+        expectation: &QoderAuthExpectation,
+        migration_id: &str,
+    ) -> RpcResult<Option<QoderAuthRecord>> {
+        self.commit_qoder_authorization_with(
+            account_id,
+            source,
+            secret_ref,
+            auth_status,
+            token_expires_at,
+            fingerprint,
+            expectation,
+            MigrationWrite::MarkCleanup(migration_id),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_qoder_authorization_with(
+        &mut self,
+        account_id: &str,
+        source: &str,
+        secret_ref: Option<&str>,
+        auth_status: &str,
+        token_expires_at: Option<&str>,
+        fingerprint: Option<&str>,
+        expectation: &QoderAuthExpectation,
+        write: MigrationWrite<'_>,
+    ) -> RpcResult<Option<QoderAuthRecord>> {
         if !SOURCES.contains(&source) {
             return Err(RpcError::invalid_params(format!(
                 "source 只支持 magpie / own_browser / own_pat，收到 {source}"
@@ -638,6 +731,25 @@ impl crate::storage::Db {
             "UPDATE qoder_accounts SET auth_epoch = auth_epoch + 1, updated_at = ?1 WHERE id = ?2",
             params![now, account_id],
         )?;
+        // 迁移记录与引用切换**同一个事务**：这两件事分开做，中间崩一次就会留下
+        // "行指着一份文件、却没有回滚依据"或者"记录说有副本、行却从没搬过"。
+        match write {
+            MigrationWrite::None => {}
+            MigrationWrite::Record(migration) => {
+                super::authz::write_migration(&tx, migration)?;
+            }
+            MigrationWrite::MarkCleanup(migration_id) => {
+                let marked = tx.execute(
+                    "UPDATE credential_migrations SET cleanup_pending = 1 WHERE id = ?1",
+                    params![migration_id],
+                )?;
+                if marked == 0 {
+                    return Err(RpcError::storage(
+                        "迁移记录在回滚过程中消失，已撤销本次回滚（副本没有主人，不能删）",
+                    ));
+                }
+            }
+        }
         tx.commit()?;
         self.get_qoder_authorization(account_id, source)
     }

@@ -110,6 +110,12 @@ pub struct CredentialMigrationRecord {
     /// 迁移后的行版本：行被重新授权过就不能回滚。
     pub migrated_version: i64,
     pub created_at: String,
+    /// 回滚已经切回引用、但副本文件还没删掉（v23）。
+    ///
+    /// 记录**不能先删**：删了文件却删不掉时，就没有任何地方记得"哪个文件该清、
+    /// 清不掉"。所以回滚先把这一位置 1（与改引用同一个事务），文件删成功后才删
+    /// 整条记录；失败就留着，由 `verify` 上报、下一次 `run` / `rollback` 重试。
+    pub cleanup_pending: bool,
 }
 
 impl CredentialMigrationRecord {
@@ -120,7 +126,7 @@ impl CredentialMigrationRecord {
 
 const MIGRATION_COLUMNS: &str = "id, domain, account_id, source, original_ref,
     original_fingerprint, original_refresh_fingerprint, migrated_ref, migrated_version,
-    created_at";
+    created_at, cleanup_pending";
 
 fn map_credential_migration(
     row: &rusqlite::Row<'_>,
@@ -136,6 +142,7 @@ fn map_credential_migration(
         migrated_ref: row.get(7)?,
         migrated_version: row.get(8)?,
         created_at: row.get(9)?,
+        cleanup_pending: row.get::<_, i64>(10)? != 0,
     })
 }
 
@@ -190,34 +197,18 @@ impl super::Db {
         Ok(out)
     }
 
-    /// 写下（或覆盖）一条迁移记录。同一条授权再次迁移时旧记录被替换：
-    /// 只保留"最近一次迁移"作为回滚依据。
-    pub fn upsert_credential_migration(&self, record: &CredentialMigrationRecord) -> RpcResult<()> {
-        self.conn.execute(
-            "INSERT INTO credential_migrations (
-                 id, domain, account_id, source, original_ref, original_fingerprint,
-                 original_refresh_fingerprint, migrated_ref, migrated_version, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-             ON CONFLICT (id) DO UPDATE SET
-                 original_ref = excluded.original_ref,
-                 original_fingerprint = excluded.original_fingerprint,
-                 original_refresh_fingerprint = excluded.original_refresh_fingerprint,
-                 migrated_ref = excluded.migrated_ref,
-                 migrated_version = excluded.migrated_version,
-                 created_at = excluded.created_at",
-            params![
-                record.id,
-                record.domain,
-                record.account_id,
-                record.source,
-                record.original_ref,
-                record.original_fingerprint,
-                record.original_refresh_fingerprint,
-                record.migrated_ref,
-                record.migrated_version,
-                record.created_at
-            ],
-        )?;
+    /// 单独写一条迁移记录。**仅供测试**：生产路径必须走
+    /// [`Self::commit_migration_workbuddy`] / `commit_qoder_authorization_with_record`，
+    /// 否则就回到"引用与记录分两次写"的老问题（复审 P0-B）。
+    #[cfg(test)]
+    pub fn upsert_credential_migration(
+        &mut self,
+        record: &CredentialMigrationRecord,
+    ) -> RpcResult<()> {
+        validate_migration(record)?;
+        let tx = self.conn.transaction()?;
+        write_migration(&tx, record)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -475,41 +466,93 @@ impl super::Db {
                 record.kind
             )));
         }
-        let now = now_rfc3339();
-        let changed = self.conn.execute(
-            "UPDATE account_authorizations
-                SET access_ref = ?1,
-                    refresh_ref = ?2,
-                    auth_domain = ?3,
-                    token_expires_at = ?4,
-                    status = ?5,
-                    version = version + 1,
-                    key_migration_state = ?6,
-                    storage_kind = ?7,
-                    source_key = ?8,
-                    last_used_at = COALESCE(?9, last_used_at),
-                    last_error = ?10,
-                    ref_updated_at = CASE WHEN ?14 <> ?1 THEN ?11 ELSE ref_updated_at END,
-                    updated_at = ?11
-              WHERE id = ?12 AND version = ?13 AND access_ref = ?14",
-            params![
-                record.access_ref,
-                record.refresh_ref,
-                record.auth_domain,
-                record.token_expires_at,
-                record.status,
-                record.key_migration_state,
-                storage_kind_of(&record.access_ref),
-                record.source_key,
-                record.last_used_at,
-                record.last_error,
-                now,
-                record.id,
-                expected_version,
-                expected_access_ref
-            ],
-        )?;
+        let changed = cas_authorization(&self.conn, record, expected_version, expected_access_ref)?;
         Ok(changed > 0)
+    }
+
+    /// **迁移的唯一落库入口**：换引用 + 写迁移记录，同一个 SQLite 事务。
+    ///
+    /// 复审 P0-B：之前是两条独立语句。`UPDATE` 成功、`INSERT` 失败（库被锁满、
+    /// 磁盘满、进程被杀）就会留下"行指向新文件、却没有任何回滚依据"的状态——
+    /// 用户以为还能回滚，实际再也回不去了。
+    ///
+    /// 返回 `Ok(false)` = 版本 / 引用对不上，这一行在迁移期间被别人改过：
+    /// 引用与记录**都没有**写。记录不合格时同样一个字节都不写（先校验后开事务）。
+    pub fn commit_migration_workbuddy(
+        &mut self,
+        next: &AuthorizationRecord,
+        expected_version: i64,
+        expected_access_ref: &str,
+        migration: &CredentialMigrationRecord,
+    ) -> RpcResult<bool> {
+        if !ids::is_known_kind(&next.kind) {
+            return Err(RpcError::invalid_params(format!(
+                "授权类型非法：{}",
+                next.kind
+            )));
+        }
+        validate_migration(migration)?;
+        let tx = self.conn.transaction()?;
+        if cas_authorization(&tx, next, expected_version, expected_access_ref)? == 0 {
+            // `tx` 在这里 Drop → 回滚，什么都没写。
+            return Ok(false);
+        }
+        write_migration(&tx, migration)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// **回滚的唯一落库入口**：把引用改回去 + 把迁移记录标记为"待清理副本"，
+    /// 同一个事务（复审 P1-E）。
+    ///
+    /// 之前的顺序是"删记录 → 尽力删文件"，文件删失败就只剩一行日志：记录已经
+    /// 没了，谁也说不清哪个副本该清。现在标记与改引用一起落库，文件清理失败时
+    /// 记录还在，`verify` 能报出来、下一次迁移/回滚会再试一次。
+    ///
+    /// 记录在事务里消失（被别人删了）→ 返回错误并整体回滚：没有记录就无从知道
+    /// 该删哪个副本，宁可这一步失败也不能留下无主文件。
+    pub fn commit_rollback_workbuddy(
+        &mut self,
+        next: &AuthorizationRecord,
+        expected_version: i64,
+        expected_access_ref: &str,
+        migration_id: &str,
+    ) -> RpcResult<bool> {
+        if !ids::is_known_kind(&next.kind) {
+            return Err(RpcError::invalid_params(format!(
+                "授权类型非法：{}",
+                next.kind
+            )));
+        }
+        let tx = self.conn.transaction()?;
+        if cas_authorization(&tx, next, expected_version, expected_access_ref)? == 0 {
+            return Ok(false);
+        }
+        let marked = tx.execute(
+            "UPDATE credential_migrations SET cleanup_pending = 1 WHERE id = ?1",
+            params![migration_id],
+        )?;
+        if marked == 0 {
+            return Err(RpcError::storage(
+                "迁移记录在回滚过程中消失，已撤销本次回滚（引用的副本没有主人，不能删）",
+            ));
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// 回滚已经切回引用、但副本还没删掉的记录（P1-E 的重试入口）。
+    pub fn pending_cleanup_migrations(&self) -> RpcResult<Vec<CredentialMigrationRecord>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {MIGRATION_COLUMNS} FROM credential_migrations
+              WHERE cleanup_pending = 1 ORDER BY created_at ASC"
+        ))?;
+        let rows = stmt.query_map([], map_credential_migration)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     /// 有多少条授权行引用着这个凭据引用（`access_ref` 或 `refresh_ref`）。
@@ -704,6 +747,120 @@ impl super::Db {
     }
 }
 
+/// 带版本的整份覆盖写，**在调用方给的事务里执行**。
+///
+/// 抽出来是因为"换引用"不止一个入口：单独改（重新关联、回滚、迁移）与
+/// "换引用 + 写迁移记录"必须共用同一段 SQL，否则两个入口的 CAS 条件迟早会漂移。
+fn cas_authorization(
+    conn: &rusqlite::Connection,
+    record: &AuthorizationRecord,
+    expected_version: i64,
+    expected_access_ref: &str,
+) -> RpcResult<usize> {
+    let now = now_rfc3339();
+    let changed = conn.execute(
+        "UPDATE account_authorizations
+            SET access_ref = ?1,
+                refresh_ref = ?2,
+                auth_domain = ?3,
+                token_expires_at = ?4,
+                status = ?5,
+                version = version + 1,
+                key_migration_state = ?6,
+                storage_kind = ?7,
+                source_key = ?8,
+                last_used_at = COALESCE(?9, last_used_at),
+                last_error = ?10,
+                ref_updated_at = CASE WHEN ?14 <> ?1 THEN ?11 ELSE ref_updated_at END,
+                updated_at = ?11
+          WHERE id = ?12 AND version = ?13 AND access_ref = ?14",
+        params![
+            record.access_ref,
+            record.refresh_ref,
+            record.auth_domain,
+            record.token_expires_at,
+            record.status,
+            record.key_migration_state,
+            storage_kind_of(&record.access_ref),
+            record.source_key,
+            record.last_used_at,
+            record.last_error,
+            now,
+            record.id,
+            expected_version,
+            expected_access_ref
+        ],
+    )?;
+    Ok(changed)
+}
+
+/// 迁移记录自洽性校验。**记录不合格就不许改引用**。
+///
+/// 复审 P0-A 的根因就是这里没人把关：Qoder 老行的 `secret_ref` 是 NULL，
+/// 迁移时把"原引用"写成了空串，记录看着存在、回滚却必然失败。
+///
+/// 放在事务之前调用：拒绝时连事务都不开，行与记录都保持原样。
+pub(super) fn validate_migration(record: &CredentialMigrationRecord) -> RpcResult<()> {
+    use crate::credentials::reference::{KEYCHAIN_PREFIX, LOCAL_JSON_PREFIX};
+    let bad = |what: &str| {
+        RpcError::storage(format!("迁移记录不合格，已拒绝迁移：{what}"))
+            .with_data(serde_json::json!({ "kind": "migration_record_invalid", "field": what }))
+    };
+    if record.id.trim().is_empty() {
+        return Err(bad("id"));
+    }
+    if record.account_id.trim().is_empty() || record.source.trim().is_empty() {
+        return Err(bad("accountId/source"));
+    }
+    if !record.original_ref.starts_with(KEYCHAIN_PREFIX) {
+        // 回滚只能回到钥匙串：原引用不是钥匙串键，这条记录就不是回滚依据。
+        return Err(bad("originalRef"));
+    }
+    if !record.migrated_ref.starts_with(LOCAL_JSON_PREFIX) {
+        return Err(bad("migratedRef"));
+    }
+    if record.migrated_version < 1 {
+        return Err(bad("migratedVersion"));
+    }
+    Ok(())
+}
+
+/// 写迁移记录，**在调用方给的事务里执行**。
+pub(super) fn write_migration(
+    conn: &rusqlite::Connection,
+    record: &CredentialMigrationRecord,
+) -> RpcResult<()> {
+    conn.execute(
+        "INSERT INTO credential_migrations (
+             id, domain, account_id, source, original_ref, original_fingerprint,
+             original_refresh_fingerprint, migrated_ref, migrated_version, created_at,
+             cleanup_pending
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT (id) DO UPDATE SET
+             original_ref = excluded.original_ref,
+             original_fingerprint = excluded.original_fingerprint,
+             original_refresh_fingerprint = excluded.original_refresh_fingerprint,
+             migrated_ref = excluded.migrated_ref,
+             migrated_version = excluded.migrated_version,
+             created_at = excluded.created_at,
+             cleanup_pending = excluded.cleanup_pending",
+        params![
+            record.id,
+            record.domain,
+            record.account_id,
+            record.source,
+            record.original_ref,
+            record.original_fingerprint,
+            record.original_refresh_fingerprint,
+            record.migrated_ref,
+            record.migrated_version,
+            record.created_at,
+            i64::from(record.cleanup_pending),
+        ],
+    )?;
+    Ok(())
+}
+
 fn put_authorization(
     db: &super::Db,
     record: &AuthorizationRecord,
@@ -755,6 +912,29 @@ fn put_authorization(
             i64::from(bump_version),
         ],
     )?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// v23：回滚后的副本清理留痕
+// ---------------------------------------------------------------------------
+
+/// v23 的 Rust 部分：给 `credential_migrations` 加 `cleanup_pending`。
+///
+/// 幂等：先查列在不在，人工回拨 `user_version` 再跑一次不会炸在 `duplicate
+/// column name` 上。默认 0 = 没有待清理的副本，旧记录语义不变。
+pub(super) fn migrate_v23(tx: &rusqlite::Transaction<'_>) -> RpcResult<()> {
+    let has_column: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('credential_migrations') WHERE name = 'cleanup_pending'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_column == 0 {
+        tx.execute_batch(
+            "ALTER TABLE credential_migrations
+                 ADD COLUMN cleanup_pending INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
     Ok(())
 }
 
