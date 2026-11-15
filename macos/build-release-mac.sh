@@ -12,7 +12,8 @@ NOTARY_PROFILE="${AICC_NOTARY_PROFILE:-}"
 
 if [[ -z "$SIGNING_IDENTITY" || -z "$NOTARY_PROFILE" ]]; then
   echo "=== Building ad-hoc test artifact (not notarized) ==="
-  AICC_SIGNING_IDENTITY=- bash "$ROOT/macos/build-dmg.sh"
+  echo "WARNING: ad-hoc 签名会让钥匙串在每次重建后重新要求授权，且不能用于分发。"
+  AICC_ALLOW_ADHOC=1 AICC_SIGNING_IDENTITY=- bash "$ROOT/macos/build-dmg.sh"
   hdiutil verify "$DMG"
   echo "NOT_AVAILABLE: Developer ID signing or notarization credentials were not provided."
   exit 0

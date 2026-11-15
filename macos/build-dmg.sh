@@ -11,6 +11,8 @@ RELEASE_DIR="${RELEASE_DIR:-$ROOT/dist}"
 DMG_PATH="$RELEASE_DIR/$DMG_NAME"
 TEMP_DMG="$ROOT/dist/$DMG_NAME.tmp.dmg"
 
+# 透传签名策略：调用方给了 AICC_ALLOW_ADHOC / AICC_SIGNING_IDENTITY 就照做，
+# 否则由 build-aicc-swiftui.sh 决定（默认要求本机固定证书）。
 BUNDLE_SERVER=1 "$ROOT/macos/build-aicc-swiftui.sh" >/dev/null
 
 rm -rf "$STAGING_DIR" "$TEMP_DMG" "$DMG_PATH"

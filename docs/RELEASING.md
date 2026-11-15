@@ -64,7 +64,7 @@ cd ~/WorkBuddy/aicc/AICC
 echo 2.13.0 > VERSION
 $EDITOR docs/releases/2.13.0.md          # 按 docs/releases/2.11.0.md 的六节结构写
 
-# 2) 构建产物（ad-hoc 签名，未公证）
+# 2) 构建产物（默认用本机固定证书签名，未公证）
 bash macos/build-release-mac.sh          # 产出 dist/AICC-2.13.0.dmg
 
 # 3) 提交并打 tag（构建号在 macos/MenuBarApp/Info.plist 里手动 +1）
@@ -91,7 +91,41 @@ bash scripts/release-publish.sh              # 建 release、传 dmg + sha256、
 | GitHub 连接器报 `code=10103 github token endpoint rate limited` | WorkBuddy 后端换 token 被限流 | 等冷却；连接器只支持读 release，建 release 仍要用本脚本 |
 | CI 红 | — | 修完推上去，tag 需要重新指：`git push -f origin vX.Y.Z`（release 已发布则先删 Release 再重指） |
 
+## 3.5 本机固定签名身份（为什么必须）
+
+`macos/build-aicc-swiftui.sh` 现在**默认要求**一张固定的代码签名证书，找不到就报错，不再静默退回 ad-hoc。
+
+原因：ad-hoc 签名的 designated requirement 是**这一次构建的 cdhash**。钥匙串条目的 ACL 记的是
+「哪个程序可以读这条凭据」，所以每重建一次，系统就把新构建当成陌生程序，要用户重新输入登录密码。
+固定证书的 DR 是：
+
+```
+designated => identifier "aicc-account-worker" and certificate root = H"4a60b0dd..."
+```
+
+它只绑定证书根，与某次构建无关 —— 这才是「授权一次、之后不再问」的前提。
+
+| 场景 | 怎么构建 |
+| --- | --- |
+| 本机日常开发 / 验收 | 直接 `bash macos/build-aicc-swiftui.sh`（自动用 `AICC Local Code Signing`） |
+| 换一张本机证书 | `AICC_LOCAL_IDENTITY="<证书名>"` 或 `AICC_SIGNING_IDENTITY="<证书名>"` |
+| CI / 测速 / 临时验证 | `AICC_ALLOW_ADHOC=1`（会打印警告；产物**不可**用于安装验收） |
+| 正式分发 | `AICC_SIGNING_IDENTITY="Developer ID Application: ..."` + 公证（只有这种身份才加 `--timestamp`） |
+
+证书怎么来的：钥匙串访问 → 证书助理 → 创建证书 → 类型「代码签名」→ 名字 `AICC Local Code Signing`。
+本机自签证书通常**没有**「信任设置」，所以 `security find-identity -p codesigning` 会显示
+`0 valid identities`，但 `codesign` 依然可用（DR 只要求证书根）。构建脚本据此只看证书是否存在。
+
+签名身份变更（换证书、或从 ad-hoc 切到证书）后，旧钥匙串条目里记的还是老身份，
+**第一次**读凭据会再问一次密码，点「始终允许」即可；此后同一证书的构建不再询问。
+
+Qoder 的原生条目（`Qoder CN App Safe Storage` / `Qoder App Safe Storage`）是第三方 ACL，
+只信任 Qoder 客户端自己的签名（`teamid:B6U242QL73`），与 AICC 用什么证书无关 ——
+这类授权继续按需在用户主动导入时触发，不纳入「AICC 自有凭据不弹窗」的验收标准。
+
 ## 4. 需要人眼确认的部分
 
-- 装完新版本要**重新添加桌面小组件**：ad-hoc 签名每次构建 cdhash 都变，系统把旧实例当另一个 App 丢掉。额度小组件的配置不受影响。
+- 装完新版本通常**不需要**重新添加桌面小组件：构建默认用固定证书签名，签名身份跨重建不变。
+  只有显式 `AICC_ALLOW_ADHOC=1` 构建时，ad-hoc 的 cdhash 每次都变，系统会把旧实例当成另一个 App 丢掉，
+  那种情况下要重新添加一次（额度小组件配置本身不受影响）。
 - `hdiutil verify dist/AICC-X.Y.Z.dmg` 必须 VALID；`swift test` 在本机跑不了（CLT 无 XCTest），只靠 CI。
