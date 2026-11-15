@@ -192,8 +192,9 @@ jobs:
           exit "$failed"
 
       - name: Build macOS app
+        # CI 没有本机固定签名证书；显式接受 ad-hoc（只用于构建校验，不作为安装包）。
         run: |
-          BUNDLE_SERVER=1 bash macos/build-aicc-swiftui.sh
+          AICC_ALLOW_ADHOC=1 BUNDLE_SERVER=1 bash macos/build-aicc-swiftui.sh
 
       - name: Validate account worker bundle
         run: |
@@ -215,7 +216,8 @@ jobs:
           bash scripts/smoke-test-bundled-server.sh "dist/mac/AICC.app/Contents/Resources/Server"
 
       - name: Build macOS DMG
-        run: bash macos/build-dmg.sh
+        # 同上：CI 无证书，显式 ad-hoc。
+        run: AICC_ALLOW_ADHOC=1 bash macos/build-dmg.sh
 
       - name: Validate DMG artifact exists
         run: |
