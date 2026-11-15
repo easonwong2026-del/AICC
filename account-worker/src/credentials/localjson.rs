@@ -437,33 +437,74 @@ impl LocalJsonStore {
         &self.root
     }
 
-    /// 建目录并收紧权限到 `0700`。祖先目录（数据根）不归这里管，不动它的权限。
-    pub fn ensure_root(&self) -> Result<(), CredentialError> {
+    /// 参与凭据读写的目录，由外到内：`<data>/secrets` 与 `<data>/secrets/v1`。
+    ///
+    /// `data_dir` 本身不在这一层：它是应用配置的数据根（与 `accounts.sqlite` 同级，
+    /// 可用环境变量覆盖），不属于本模块的信任边界。凭据相关的两级目录必须逐个校验。
+    fn dir_chain(&self) -> Vec<&Path> {
+        let mut chain = Vec::new();
         if let Some(parent) = self.root.parent() {
             if parent
                 .file_name()
-                .map(|n| n == SECRETS_DIR)
+                .map(|name| name == SECRETS_DIR)
                 .unwrap_or(false)
             {
-                fs::create_dir_all(parent)
-                    .map_err(|e| CredentialError::io(&e, "创建 secrets 目录失败"))?;
-                set_mode(parent, SECRETS_MODE)
-                    .map_err(|e| CredentialError::io(&e, "设置 secrets 目录权限失败"))?;
+                chain.push(parent);
             }
         }
-        fs::create_dir_all(&self.root).map_err(|e| CredentialError::io(&e, "创建凭据目录失败"))?;
+        chain.push(self.root.as_path());
+        chain
+    }
 
-        let meta = fs::symlink_metadata(&self.root)
-            .map_err(|e| CredentialError::io(&e, "读取凭据目录信息失败"))?;
-        if meta.file_type().is_symlink() || !meta.is_dir() {
-            return Err(CredentialError::new(
-                CredentialErrorKind::Unsafe,
-                "凭据目录不是普通目录（可能是符号链接）",
-            ));
+    /// 只校验、不创建：读路径在**任何 IO 之前**调用。
+    ///
+    /// 目录不存在返回 `NotFound`（读不到就是读不到）；是符号链接、不是目录、
+    /// 属主不是当前用户、允许组 / 其他用户写入，一律 `Unsafe`。
+    fn validate_dirs(&self) -> Result<(), CredentialError> {
+        for dir in self.dir_chain() {
+            match fs::symlink_metadata(dir) {
+                Ok(meta) => {
+                    inspect_owned_dir(&meta, dir)?;
+                    check_dir_mode(&meta, dir)?;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(CredentialError::new(
+                        CredentialErrorKind::NotFound,
+                        format!("凭据目录不存在：{}", dir.display()),
+                    ))
+                }
+                Err(err) => return Err(CredentialError::io(&err, "读取凭据目录信息失败")),
+            }
         }
-        // 已经存在但权限更宽的目录，直接收紧；这是我们自己的目录。
-        set_mode(&self.root, SECRETS_MODE)
-            .map_err(|e| CredentialError::io(&e, "设置凭据目录权限失败"))?;
+        Ok(())
+    }
+
+    /// 建目录并收紧权限到 `0700`。
+    ///
+    /// 顺序是硬要求：**先看类型与属主，再 chmod**。反过来就等于"跟随软链改外部目录权限"。
+    /// 目录已存在但权限更宽时会被收紧；但收紧的对象必须是校验通过的普通目录。
+    pub fn ensure_root(&self) -> Result<(), CredentialError> {
+        for dir in self.dir_chain() {
+            match fs::symlink_metadata(dir) {
+                Ok(meta) => inspect_owned_dir(&meta, dir)?,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    fs::create_dir_all(dir)
+                        .map_err(|e| CredentialError::io(&e, "创建凭据目录失败"))?;
+                    // 建完再验一次：创建与校验之间被换成软链的话，这里要拦住。
+                    let meta = fs::symlink_metadata(dir)
+                        .map_err(|e| CredentialError::io(&e, "读取凭据目录信息失败"))?;
+                    inspect_owned_dir(&meta, dir)?;
+                }
+                Err(err) => return Err(CredentialError::io(&err, "读取凭据目录信息失败")),
+            }
+            set_mode(dir, SECRETS_MODE)
+                .map_err(|e| CredentialError::io(&e, "设置凭据目录权限失败"))?;
+            // chmod 之后复查：确认收紧真的生效，也确认这期间目录没被换成软链。
+            let meta = fs::symlink_metadata(dir)
+                .map_err(|e| CredentialError::io(&e, "读取凭据目录信息失败"))?;
+            inspect_owned_dir(&meta, dir)?;
+            check_dir_mode(&meta, dir)?;
+        }
         Ok(())
     }
 
@@ -509,6 +550,8 @@ impl LocalJsonStore {
         expected_revision: Option<u64>,
     ) -> Result<StoredSecret, CredentialError> {
         let path = self.secret_path(secret_id)?;
+        // 读路径也要验目录：只验文件的话，`v1` 是软链时仍会读到数据根之外的 JSON。
+        self.validate_dirs()?;
         let bytes = self.read_checked(&path, secret_id)?;
         let record = decode(secret_id, &bytes)?;
         if let Some(expected) = expected_revision {
@@ -526,6 +569,11 @@ impl LocalJsonStore {
 
     /// 整份覆盖写：`expected_revision` 必须等于盘上的当前值，否则一字节都不写。
     /// 成功返回 `revision + 1` 的新记录。
+    ///
+    /// **授权归属不可变**：`authorizationId` / `platform` / `source` / `credentialKind`
+    /// 必须与盘上一致。`revision` 只能证明"我看到的是最新版本"，不能证明"我还是同一个
+    /// 授权" —— 少了这道比较，同一个 revision 就能把授权 A 的文件写成授权 B。
+    /// 换归属只能 `create` 新凭据再删旧的，每一步各自有独立的文件与引用。
     pub fn write(
         &self,
         record: &StoredSecret,
@@ -540,6 +588,7 @@ impl LocalJsonStore {
                 current.revision,
             ));
         }
+        ensure_same_identity(&current, record)?;
         let mut next = record.clone();
         next.schema_version = SCHEMA_VERSION;
         next.secret_id = current.secret_id;
@@ -675,21 +724,14 @@ impl LocalJsonStore {
 
     fn load_unlocked(&self, secret_id: &str) -> Result<StoredSecret, CredentialError> {
         let path = self.secret_path(secret_id)?;
+        self.validate_dirs()?;
         let bytes = self.read_checked(&path, secret_id)?;
         decode(secret_id, &bytes)
     }
 
     fn lock(&self) -> Result<FileLock, CredentialError> {
         self.ensure_root()?;
-        let path = self.root.join(LOCK_FILE);
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|e| CredentialError::io(&e, "打开凭据锁文件失败"))?;
-        let _ = set_mode(&path, SECRET_MODE);
+        let file = self.open_lock_file()?;
 
         let deadline = Instant::now() + self.lock_timeout;
         loop {
@@ -710,6 +752,85 @@ impl LocalJsonStore {
                 }
             }
         }
+    }
+
+    /// 打开锁文件：no-follow、必须是当前用户拥有的普通文件、fd 与路径指向同一个
+    /// inode，权限用 `fchmod` 收紧到 `0600`（改的是 fd 的 inode，不是路径）。
+    ///
+    /// 任何一步不满足都返回 `unsafe` / `denied`，绝不"静默继续"——锁落错地方的
+    /// 后果是两个进程都以为自己持锁。
+    fn open_lock_file(&self) -> Result<File, CredentialError> {
+        let path = self.root.join(LOCK_FILE);
+        let mut opts = OpenOptions::new();
+        opts.create(true).read(true).write(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // O_NOFOLLOW：路径是软链时 open 直接 ELOOP，不会跟过去。
+            opts.custom_flags(O_NOFOLLOW);
+        }
+        let file = opts.open(&path).map_err(|err| {
+            // ELOOP（macOS / Linux 均为 62）：路径是符号链接。
+            if err.raw_os_error() == Some(62) {
+                CredentialError::new(
+                    CredentialErrorKind::Unsafe,
+                    "凭据锁文件是符号链接（已拒绝）",
+                )
+            } else {
+                CredentialError::io(&err, "打开凭据锁文件失败")
+            }
+        })?;
+
+        let meta = file
+            .metadata()
+            .map_err(|e| CredentialError::io(&e, "读取凭据锁文件信息失败"))?;
+        if !meta.is_file() {
+            return Err(CredentialError::new(
+                CredentialErrorKind::Unsafe,
+                "凭据锁文件不是普通文件",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            if meta.uid() != current_uid() {
+                return Err(CredentialError::new(
+                    CredentialErrorKind::Unsafe,
+                    "凭据锁文件属主不是当前用户",
+                ));
+            }
+            // fd 与路径必须是同一个 inode：open 之后被换成软链 / 另一个文件要拦住。
+            let on_path = fs::symlink_metadata(&path)
+                .map_err(|e| CredentialError::io(&e, "读取凭据锁文件信息失败"))?;
+            if on_path.file_type().is_symlink() {
+                return Err(CredentialError::new(
+                    CredentialErrorKind::Unsafe,
+                    "凭据锁文件是符号链接（已拒绝）",
+                ));
+            }
+            if on_path.dev() != meta.dev() || on_path.ino() != meta.ino() {
+                return Err(CredentialError::new(
+                    CredentialErrorKind::Unsafe,
+                    "凭据锁文件在打开后被替换",
+                ));
+            }
+            // 只收紧 fd 自己的 inode；失败要报错，不能像之前那样 `let _ =` 忽略。
+            file.set_permissions(fs::Permissions::from_mode(SECRET_MODE))
+                .map_err(|e| CredentialError::io(&e, "设置凭据锁文件权限失败"))?;
+            let mode = file
+                .metadata()
+                .map_err(|e| CredentialError::io(&e, "读取凭据锁文件信息失败"))?
+                .permissions()
+                .mode()
+                & 0o777;
+            if mode & 0o077 != 0 {
+                return Err(CredentialError::new(
+                    CredentialErrorKind::Unsafe,
+                    format!("凭据锁文件权限过宽（{mode:o}）"),
+                ));
+            }
+        }
+        Ok(file)
     }
 
     /// 读文件：先看路径上的元数据（挡符号链接），再按 `O_NOFOLLOW` 打开，
@@ -825,6 +946,31 @@ fn conflict(secret_id: &str, expected: u64, actual: u64) -> CredentialError {
     )
 }
 
+/// 归属字段一旦落盘就是不可变的。变了只能是"另一个授权"，不能原地改写。
+fn ensure_same_identity(
+    current: &StoredSecret,
+    next: &StoredSecret,
+) -> Result<(), CredentialError> {
+    let changed = if current.authorization_id != next.authorization_id {
+        Some("授权 ID")
+    } else if current.platform != next.platform {
+        Some("平台")
+    } else if current.source != next.source {
+        Some("来源")
+    } else if current.credential_kind != next.credential_kind {
+        Some("凭据类型")
+    } else {
+        None
+    };
+    match changed {
+        None => Ok(()),
+        Some(field) => Err(CredentialError::new(
+            CredentialErrorKind::Conflict,
+            format!("凭据归属不可变（{field} 不一致）：请新建凭据而不是改写"),
+        )),
+    }
+}
+
 fn decode(secret_id: &str, bytes: &[u8]) -> Result<StoredSecret, CredentialError> {
     // 不带 serde 的原始错误：它的 `invalid type: string "..."` 会把令牌抄进消息里。
     // 只保留行列号，足够定位，不带内容。
@@ -891,7 +1037,13 @@ fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
 
 #[cfg(unix)]
 fn check_file_mode(meta: &fs::Metadata, secret_id: &str) -> Result<(), CredentialError> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if meta.uid() != current_uid() {
+        return Err(CredentialError::new(
+            CredentialErrorKind::Unsafe,
+            format!("凭据文件属主不是当前用户：{secret_id}"),
+        ));
+    }
     let mode = meta.permissions().mode() & 0o777;
     if mode & 0o077 != 0 {
         return Err(CredentialError::new(
@@ -911,6 +1063,66 @@ fn check_file_mode(meta: &fs::Metadata, secret_id: &str) -> Result<(), Credentia
 #[cfg(not(unix))]
 fn check_file_mode(_meta: &fs::Metadata, _secret_id: &str) -> Result<(), CredentialError> {
     Ok(())
+}
+
+/// 目录必须是：普通目录、属主是当前用户、不跟随软链、组 / 其他用户不可写。
+///
+/// 参数是 `symlink_metadata` 的结果（不是 `metadata`）—— 用 `metadata` 会直接跟随
+/// 软链，等于把"是不是软链"这条判据提前丢掉了。
+fn inspect_owned_dir(meta: &fs::Metadata, dir: &Path) -> Result<(), CredentialError> {
+    if meta.file_type().is_symlink() {
+        return Err(CredentialError::new(
+            CredentialErrorKind::Unsafe,
+            format!("凭据目录是符号链接（已拒绝）：{}", dir.display()),
+        ));
+    }
+    if !meta.is_dir() {
+        return Err(CredentialError::new(
+            CredentialErrorKind::Unsafe,
+            format!("凭据目录不是普通目录：{}", dir.display()),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.uid() != current_uid() {
+            return Err(CredentialError::new(
+                CredentialErrorKind::Unsafe,
+                format!("凭据目录属主不是当前用户：{}", dir.display()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 目录的第二道判据：组 / 其他用户不可写。别人可写 = 可以往目录里塞文件或整体替换。
+fn check_dir_mode(meta: &fs::Metadata, dir: &Path) -> Result<(), CredentialError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o022 != 0 {
+            return Err(CredentialError::new(
+                CredentialErrorKind::Unsafe,
+                format!(
+                    "凭据目录允许组 / 其他用户写入（{mode:o}）：{}",
+                    dir.display()
+                ),
+            ));
+        }
+    }
+    let _ = dir;
+    Ok(())
+}
+
+/// 当前有效用户 ID。直接用 POSIX `geteuid()`，不引入 libc 依赖。
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    // SAFETY: geteuid 无参数、不失败、不触碰内存。
+    unsafe { geteuid() }
 }
 
 #[cfg(unix)]
@@ -1191,8 +1403,12 @@ mod tests {
         assert_eq!(err.kind, CredentialErrorKind::Conflict);
     }
 
+    /// 同一进程内的四个实例（各自独立的 fd 与文件锁）。
+    ///
+    /// 这**不是**跨进程验证：真正的多进程竞争见
+    /// `concurrent_writers_across_processes_let_exactly_one_win`。
     #[test]
-    fn concurrent_writers_let_exactly_one_win() {
+    fn concurrent_writer_instances_let_exactly_one_win() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
         let created = store.create(draft()).expect("create");
@@ -1472,6 +1688,198 @@ mod tests {
         store.ensure_root().expect("ensure");
         #[cfg(unix)]
         assert_eq!(mode_of(&root), 0o700);
+    }
+
+    // -- 目录链与锁文件的边界（P0） --------------------------------------
+
+    #[test]
+    fn secrets_dir_symlink_is_refused_and_the_target_is_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside-secrets");
+        fs::create_dir_all(&outside).unwrap();
+        #[cfg(unix)]
+        chmod(&outside, 0o755);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, dir.path().join("secrets")).unwrap();
+
+        let store = store(&dir);
+        let err = store.create(draft()).unwrap_err();
+        assert_eq!(err.kind, CredentialErrorKind::Unsafe, "{err}");
+
+        #[cfg(unix)]
+        assert_eq!(
+            mode_of(&outside),
+            0o755,
+            "绝不能跟随软链把外部目录 chmod 成 0700"
+        );
+        assert_eq!(
+            fs::read_dir(&outside).unwrap().count(),
+            0,
+            "外部目录不能被写入凭据"
+        );
+
+        // 读路径同样要拦：否则 `v1` 是软链时仍会读到数据根之外。
+        let err = store.load("0123456789ab").unwrap_err();
+        assert_eq!(err.kind, CredentialErrorKind::Unsafe, "{err}");
+    }
+
+    #[test]
+    fn schema_dir_symlink_is_refused_even_on_a_direct_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside-v1");
+        fs::create_dir_all(&outside).unwrap();
+        let outside_store = LocalJsonStore::new(&outside);
+        let planted = outside_store.create(draft()).expect("plant");
+
+        fs::create_dir_all(dir.path().join("secrets")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, dir.path().join("secrets").join("v1")).unwrap();
+
+        let store = store(&dir);
+        let err = store.load(&planted.secret_id).unwrap_err();
+        assert_eq!(
+            err.kind,
+            CredentialErrorKind::Unsafe,
+            "v1 是软链时，直接 load 也必须拒读：{err}"
+        );
+        // 外部那份仍然完好，说明我们既没读也没改。
+        assert_eq!(outside_store.load(&planted.secret_id).unwrap(), planted);
+    }
+
+    #[test]
+    fn lock_file_symlink_is_refused_and_the_target_is_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        store.ensure_root().expect("ensure");
+
+        let outside = dir.path().join("outside-lock");
+        fs::write(&outside, b"keep-me").unwrap();
+        #[cfg(unix)]
+        chmod(&outside, 0o644);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, store.root().join(LOCK_FILE)).unwrap();
+
+        let err = store.create(draft()).unwrap_err();
+        assert_eq!(err.kind, CredentialErrorKind::Unsafe, "{err}");
+        assert_eq!(fs::read(&outside).unwrap(), b"keep-me");
+        #[cfg(unix)]
+        assert_eq!(
+            mode_of(&outside),
+            0o644,
+            "绝不能跟随软链把外部文件 chmod 成 0600"
+        );
+    }
+
+    // -- 授权归属不可变（P1） -------------------------------------------
+
+    #[test]
+    fn write_cannot_change_the_authorization_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let created = store.create(draft()).expect("create");
+
+        let mutations: [(&str, fn(&mut StoredSecret)); 3] = [
+            ("授权 ID", |record| {
+                record.authorization_id = "auth-2".to_string()
+            }),
+            ("平台", |record| record.platform = "qoder".to_string()),
+            ("凭据类型", |record| {
+                record.credential_kind = CredentialKind::Pat
+            }),
+        ];
+        for (label, mutate) in mutations {
+            let mut forged = created.clone();
+            mutate(&mut forged);
+            let err = store.write(&forged, 0).unwrap_err();
+            assert_eq!(err.kind, CredentialErrorKind::Conflict, "{label}");
+            assert!(
+                err.message.contains("归属不可变"),
+                "{label} 的错误要说明原因：{err}"
+            );
+            assert_eq!(
+                store.load(&created.secret_id).unwrap(),
+                created,
+                "{label} 变了就不许落盘"
+            );
+        }
+
+        // 同一归属的正常覆盖写仍然可用。
+        let mut fine = created.clone();
+        fine.credentials = Credentials::access_only("ACCESS-2");
+        assert_eq!(store.write(&fine, 0).unwrap().revision, 1);
+    }
+
+    // -- 真实跨进程竞争（P1） -------------------------------------------
+
+    fn child_writer_command(
+        store: &LocalJsonStore,
+        secret_id: &str,
+        token: &str,
+    ) -> std::process::Command {
+        let exe = std::env::current_exe().expect("current_exe");
+        let mut command = std::process::Command::new(exe);
+        command
+            .args([
+                "--exact",
+                "credentials::localjson::tests::child_process_writer",
+                "--nocapture",
+            ])
+            .env("AICC_TEST_CHILD_WRITE_ROOT", store.root())
+            .env("AICC_TEST_CHILD_WRITE_SECRET", secret_id)
+            .env("AICC_TEST_CHILD_WRITE_TOKEN", token)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        command
+    }
+
+    /// 子进程侧的动作。父进程用环境变量唤醒；本进程正常跑测试时它是一次空跑。
+    #[test]
+    fn child_process_writer() {
+        let Ok(root) = std::env::var("AICC_TEST_CHILD_WRITE_ROOT") else {
+            return;
+        };
+        let secret_id = std::env::var("AICC_TEST_CHILD_WRITE_SECRET").expect("secret id");
+        let token = std::env::var("AICC_TEST_CHILD_WRITE_TOKEN").expect("token");
+        let store = LocalJsonStore::new(root);
+        match store.replace_credentials(&secret_id, 0, Credentials::access_only(token), None) {
+            Ok(_) => println!("CHILD-RESULT=ok"),
+            Err(err) => println!("CHILD-RESULT={}", err.kind.as_str()),
+        }
+    }
+
+    #[test]
+    fn concurrent_writers_across_processes_let_exactly_one_win() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let created = store.create(draft()).expect("create");
+
+        let children: Vec<_> = (0..4)
+            .map(|index| {
+                child_writer_command(&store, &created.secret_id, &format!("CHILD-{index}"))
+                    .spawn()
+                    .expect("spawn child")
+            })
+            .collect();
+
+        let mut wins = 0;
+        let mut conflicts = 0;
+        for child in children {
+            let output = child.wait_with_output().expect("wait child");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains("CHILD-RESULT=ok") {
+                wins += 1;
+            } else if stdout.contains("CHILD-RESULT=conflict") {
+                conflicts += 1;
+            } else {
+                panic!(
+                    "子进程没有给出预期结果：stdout={stdout} stderr={}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+        assert_eq!(wins, 1, "跨进程并发刷新必须只有一个成功");
+        assert_eq!(conflicts, 3);
+        assert_eq!(store.load(&created.secret_id).unwrap().revision, 1);
     }
 
     // -- 删除与扫描 -----------------------------------------------------

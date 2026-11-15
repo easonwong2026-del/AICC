@@ -1,6 +1,7 @@
 # 凭据存储 v3：本地 JSON + 动态 Magpie
 
-> 状态：**PR-CRED-1 已交付底层**（`LocalJsonStore` + 引用解析 + 故障注入测试）。
+> 状态：**PR-CRED-1 已交付底层**（`LocalJsonStore` + 引用解析 + 故障注入测试；
+> 含 #82 复审后的文件系统边界加固：目录链、锁文件、归属不可变）。
 > CRED-2/3/4/5 尚未开始，生产路径仍走旧钥匙串 —— 本文件随每个 PR 更新。
 >
 > 基线：`main` @ `d846339`（#79 / #80 / #81 已合并），数据库 Schema **v19**。
@@ -98,16 +99,23 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 | 保证 | 实现 |
 | --- | --- |
 | 权限 | 目录 `0700`（每次操作顺带收紧），文件 `0600`（显式 chmod，防 umask） |
+| 目录不可被替换 | `secrets` 与 `v1` 两级目录逐个 `symlink_metadata` 校验：软链 / 非目录 / 属主不是当前用户 / 组或其他可写 一律拒绝，**且先校验再 chmod** |
 | 无半截文件 | 同目录 `.tmp-*` 写完 → `fsync` → `rename` 原子替换 → 目录 `fsync` |
-| 并发不互相盖 | `secrets/v1/.lock` advisory 锁，等锁有上限（默认 2s），超时报 `lock_timeout` |
+| 并发不互相盖 | `secrets/v1/.lock` advisory 锁：`O_NOFOLLOW` 打开、校验属主与 fd↔路径同一 inode、`fchmod` 收紧到 `0600`；等锁有上限（默认 2s），超时报 `lock_timeout` |
 | 旧快照不覆盖新令牌 | `revision` 检查：对不上返回 `conflict`，一个字节都不写 |
+| 归属不可变 | `write()` 额外比对 `authorizationId` / `platform` / `source` / `credentialKind`，不一致返回 `conflict`；换归属只能新建凭据 |
 | 崩溃可恢复 | 残留 `.tmp-*` 由 `sweep_orphans` 清理；目标文件永远是"旧内容或新内容" |
 | access + refresh 成组 | `replace_credentials` 在锁内一次性换两值 |
 | 不误判"没有凭据" | `Denied` / `Unsafe` / `Corrupt` 与 `NotFound` 分开上报 |
 
+> 残余窗口：目录与锁文件的校验是"lstat → chmod/open"，理论上仍有极短的
+> TOCTOU 窗口。这里没有做 `openat` 全链路（std 不提供），因为前提是攻击者已经能在
+> 该用户的 `0700` 目录里改名——那已经等价于同一用户权限下的完全控制。
+
 ## 6. 读路径的硬规定
 
-* 符号链接、非普通文件、权限过宽（组 / 其他可访问）一律 `unsafe`，拒绝读。
+* 读之前先验 `secrets` / `v1` 两级目录：目录是软链直接 `unsafe`，**不读**目录之外的 JSON。
+* 符号链接、非普通文件、属主不是当前用户、权限过宽（组 / 其他可访问）一律 `unsafe`，拒绝读。
 * 文件内 `secretId` 与文件名不一致 → `corrupt`。
 * 更高的 `schemaVersion` → `unsupported`，不猜字段。
 * JSON 解析失败只报行列号：`serde` 的原始消息会把字段值抄进错误里，那可能是令牌。
@@ -116,8 +124,18 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 ## 7. 本 PR 的范围
 
 **做了**：`src/credentials/reference.rs`（引用解析）、`src/credentials/localjson.rs`
-（存储）、26 个新增测试（并发写、revision 冲突、锁超时、注入写失败、rename 前中断、
+（存储）、35 个测试（并发写、revision 冲突、锁超时、注入写失败、rename 前中断、
 文件损坏、权限过宽、符号链接、目录穿越、Token 不泄漏等）。
+
+其中文件系统边界部分是 #82 复审后补的（两个 P0 + 一个 P1）：
+
+| 问题 | 修法 | 回归测试 |
+| --- | --- | --- |
+| `secrets` 父目录未校验，且先 chmod 再验 | 目录链逐个 lstat，先拒软链 / 非目录 / 非本人属主，再 chmod，chmod 后复查 | `secrets_dir_symlink_is_refused_and_the_target_is_untouched` |
+| `v1` 是软链时 `load()` 仍能读到外部 JSON | 读路径也走 `validate_dirs()` | `schema_dir_symlink_is_refused_even_on_a_direct_load` |
+| `.lock` 未 no-follow，还会 chmod 目标 | `O_NOFOLLOW` + 属主校验 + fd↔路径 inode 比对 + `fchmod` | `lock_file_symlink_is_refused_and_the_target_is_untouched` |
+| `write()` 可改写授权归属 | 归属字段不可变，不一致返回 `conflict` | `write_cannot_change_the_authorization_identity` |
+| 并发测试只是线程 | 保留线程用例并改名，新增真实 4 进程竞争 | `concurrent_writers_across_processes_let_exactly_one_win` |
 
 **没做**（后续 PR）：任何真实账号迁移、SQLite v20、Broker 接入、登录路径改造、
 旧 Keychain 迁移 UI、Worker 免弹窗收口。本 PR 不改变生产默认行为，也不创建
