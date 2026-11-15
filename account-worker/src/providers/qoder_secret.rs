@@ -114,6 +114,23 @@ pub fn keychain_reference(account_id: &str, source: &str) -> String {
     crate::providers::qoder_auth::keychain_ref(&keychain_primary_key(account_id, source))
 }
 
+/// 钥匙串操作的跨进程排他锁。
+///
+/// macOS 的钥匙串**没有原子 compare-and-delete**：`get` 与 `delete` 是两次调用。
+/// 中间没有锁，就可能"比对的是旧令牌 A、删掉的却是刚写进来的新令牌 B"。
+/// 所以钥匙串的写入、读-比-删、以及回滚都必须持同一把锁 —— 这里直接复用凭据目录的
+/// `.lock`，JSON 写入与钥匙串写入因此在同一把锁上排队。
+struct KeychainLock {
+    _lock: crate::credentials::localjson::FileLock,
+}
+
+fn keychain_lock(app: &App) -> Result<KeychainLock, CredentialError> {
+    let store = LocalJsonStore::for_paths(&app.paths);
+    Ok(KeychainLock {
+        _lock: store.lock_exclusive()?,
+    })
+}
+
 /// 这一行现在把凭据放在哪里。
 ///
 /// `secret_ref = None` 视为钥匙串：那是 CRED-3b 之前写下的老行，凭据确实在钥匙串里。
@@ -311,7 +328,18 @@ impl QoderWrite {
     pub fn restore(&self, app: &App) -> bool {
         let store = LocalJsonStore::for_paths(&app.paths);
         match &self.undo {
-            Undo::Keychain(snapshot) => snapshot.restore(app),
+            // 回滚也是"写钥匙串"：必须与删除/比对在同一把锁下排队，否则回滚可能盖掉
+            // 别人刚写进来的新令牌（复审要求：写入、比较、删除、回滚统一协调）。
+            Undo::Keychain(snapshot) => match keychain_lock(app) {
+                Ok(_lock) => snapshot.restore(app),
+                Err(err) => {
+                    crate::handlers::log_note(&format!(
+                        "Qoder 凭据回滚拿不到锁（{}）：未回滚，请重新授权",
+                        err.kind.as_str()
+                    ));
+                    false
+                }
+            },
             Undo::Created { secret_id } => match store.delete(secret_id) {
                 Ok(_) => true,
                 Err(err) => {
@@ -523,6 +551,9 @@ fn write_keychain(
     access: &str,
     refresh: Option<&str>,
 ) -> RpcResult<Snapshot> {
+    // 整个"拍快照 → 写 access → 写 refresh"必须在同一把锁里完成：它和
+    // `delete_guarded` 的"读-比-删"共用这把锁，才谈得上原子。
+    let _lock = keychain_lock(app).map_err(|err| to_rpc(err, "qoder/lock"))?;
     let keys = keychain_keys(account_id, source);
     let snapshot = Snapshot::capture(app, &keys)?;
     let primary = keychain_primary_key(account_id, source);
@@ -564,12 +595,21 @@ fn rpc_secret_error(err: crate::securestore::SecretError, stage: &str) -> RpcErr
 /// 刚刚保存的那一份，而授权行还显示 `valid`。
 ///
 /// JSON 有 `revision`，可以和写入做真正的 CAS；钥匙串条目没有版本号，退而记录
-/// 读到的那串字节，删除前逐字节比对（同样能挡住"期间被换成新令牌"）。
+/// **整组键**的取值，删除前在同一把锁里逐键比对（见 [`delete_guarded`]）。
 ///
 /// **刻意不实现 `Debug`**：`Keychain` 分支里装的是令牌原文。
 pub enum DeleteGuard {
-    Json { secret_id: String, revision: u64 },
-    Keychain { bytes: Vec<u8> },
+    Json {
+        secret_id: String,
+        revision: u64,
+    },
+    /// **整组键**的取值快照（`None` = 观察时该键不存在）。
+    ///
+    /// 设备授权是 access + refresh 两份值，必须当成同一份凭据一起比对、一起删：
+    /// 只看 access 的话，refresh 被单独更新过也会被一并删掉。
+    Keychain {
+        values: Vec<(String, Option<Vec<u8>>)>,
+    },
 }
 
 /// 读一次凭据，验归属，并记下版本。`Ok(None)` = 本来就不在（删除幂等）。
@@ -593,12 +633,22 @@ pub fn observe_for_delete(
         }
         Storage::Keychain => {
             verify_keychain_ref(row, &account.id)?;
-            let key = keychain_primary_key(&account.id, &row.source);
-            match app.secure.get(&key) {
-                Ok(bytes) => Ok(Some(DeleteGuard::Keychain { bytes })),
-                Err(err) if err.kind == crate::securestore::SecretErrorKind::NotFound => Ok(None),
-                Err(err) => Err(secure_read_error(err)),
+            // 整组键都要读：access 与 refresh 是同一份凭据的两半。
+            let mut values = Vec::new();
+            for key in keychain_keys(&account.id, &row.source) {
+                match app.secure.get(&key) {
+                    Ok(bytes) => values.push((key, Some(bytes))),
+                    Err(err) if err.kind == crate::securestore::SecretErrorKind::NotFound => {
+                        values.push((key, None))
+                    }
+                    Err(err) => return Err(secure_read_error(err)),
+                }
             }
+            // 所有键都不在 = 本来就没有（删除幂等）。
+            if values.iter().all(|(_, value)| value.is_none()) {
+                return Ok(None);
+            }
+            Ok(Some(DeleteGuard::Keychain { values }))
         }
     }
 }
@@ -627,20 +677,30 @@ pub fn delete_guarded(
             }
             LocalJsonStore::for_paths(&app.paths).delete_at_revision(secret_id, *revision)
         }
-        DeleteGuard::Keychain { bytes } => {
+        DeleteGuard::Keychain { values } => {
             verify_keychain_ref(row, &account.id)?;
-            let primary = keychain_primary_key(&account.id, &row.source);
-            match app.secure.get(&primary) {
-                Ok(current) if current == *bytes => {}
-                Ok(_) => return Err(mismatch("凭据在这期间被重新写过")),
-                Err(err) if err.kind == crate::securestore::SecretErrorKind::NotFound => {
-                    return Ok(false)
+            // **比对与删除必须在同一把跨进程锁里**：钥匙串没有原子 compare-and-delete，
+            // 中间放开锁就可能把刚写进来的新令牌删掉。
+            let _lock = keychain_lock(app)?;
+            for (key, expected) in values {
+                match (app.secure.get(key), expected) {
+                    (Ok(current), Some(expected)) if current == *expected => {}
+                    // 观察时不在、现在出现了：有人刚写过，同样算变化。
+                    (Ok(_), _) => return Err(mismatch("凭据在这期间被重新写过")),
+                    (Err(err), None)
+                        if err.kind == crate::securestore::SecretErrorKind::NotFound => {}
+                    (Err(err), _) if err.kind == crate::securestore::SecretErrorKind::NotFound => {
+                        return Err(mismatch("凭据在这期间被删掉了"))
+                    }
+                    (Err(err), _) => return Err(secure_read_error(err)),
                 }
-                Err(err) => return Err(secure_read_error(err)),
             }
             let mut removed = false;
-            for key in keychain_keys(&account.id, &row.source) {
-                match app.secure.delete(&key) {
+            for (key, expected) in values {
+                if expected.is_none() {
+                    continue;
+                }
+                match app.secure.delete(key) {
                     Ok(true) => removed = true,
                     Ok(false) => {}
                     Err(err) if err.kind == crate::securestore::SecretErrorKind::NotFound => {}
@@ -652,26 +712,42 @@ pub fn delete_guarded(
     }
 }
 
-/// 按"计划时读到的值"删一个钥匙串键：值变了就拒绝，一个字节都不删。
+/// 按"观察到的值"删**一组**钥匙串键：整组比对 + 整组删除在同一把锁里完成。
 ///
-/// 给"删账号兜底三条固定键"用：那三条键没有授权行可依，拿不到引用，但一样会
-/// 被同一来源的重新登录覆盖。用值比对做与 `delete_at_revision` 等价的守卫。
-pub fn delete_keychain_guarded(
+/// 用途：删账号时兜底清"没有任何授权行"的旧安装（`qoder/<id>/own/access|refresh`
+/// 与 `qoder/<id>/pat/token`）。这些键没有引用可依，但一样会被同一来源的重新登录
+/// 覆盖，所以同样需要版本守卫 —— 而一组键（access + refresh）必须一起判、一起删。
+///
+/// 返回真正删掉的键数；任何一键的值与观察不符就返回 `conflict`，一个字节都不删。
+pub fn delete_keychain_group(
     app: &App,
-    key: &str,
-    expected: &[u8],
-) -> Result<bool, CredentialError> {
-    match app.secure.get(key) {
-        Ok(current) if current == expected => {}
-        Ok(_) => return Err(mismatch("钥匙串凭据在这期间被重新写过")),
-        Err(err) if err.kind == crate::securestore::SecretErrorKind::NotFound => return Ok(false),
-        Err(err) => return Err(secure_read_error(err)),
+    values: &[(String, Vec<u8>)],
+) -> Result<usize, CredentialError> {
+    if values.is_empty() {
+        return Ok(0);
     }
-    match app.secure.delete(key) {
-        Ok(deleted) => Ok(deleted),
-        Err(err) if err.kind == crate::securestore::SecretErrorKind::NotFound => Ok(false),
-        Err(err) => Err(secure_delete_error(err)),
+    // 与 `delete_guarded` 同一把锁：比对和删除不能被"写新令牌"插队。
+    let _lock = keychain_lock(app)?;
+    for (key, expected) in values {
+        match app.secure.get(key) {
+            Ok(current) if current == *expected => {}
+            Ok(_) => return Err(mismatch("钥匙串凭据在这期间被重新写过")),
+            Err(err) if err.kind == crate::securestore::SecretErrorKind::NotFound => {
+                return Err(mismatch("钥匙串凭据在这期间被删掉了"))
+            }
+            Err(err) => return Err(secure_read_error(err)),
+        }
     }
+    let mut removed = 0;
+    for (key, _) in values {
+        match app.secure.delete(key) {
+            Ok(true) => removed += 1,
+            Ok(false) => {}
+            Err(err) if err.kind == crate::securestore::SecretErrorKind::NotFound => {}
+            Err(err) => return Err(secure_delete_error(err)),
+        }
+    }
+    Ok(removed)
 }
 
 fn secure_read_error(err: crate::securestore::SecretError) -> CredentialError {
@@ -1178,6 +1254,122 @@ mod tests {
         let row = row(&app, &other.id, SOURCE_OWN_BROWSER);
         assert!(row.secret_ref.unwrap().starts_with("keychain:"));
         assert_eq!(secret_files(&app), 1, "关闭后不再新建明文文件");
+    }
+
+    // -- 钥匙串：比对与删除必须原子（复审 P0） ---------------------------
+
+    /// 比对之后、删除之前另一个进程写入新令牌：旧 guard 必须被拒绝，新令牌完好。
+    #[test]
+    fn a_keychain_secret_rewritten_after_the_guard_is_refused() {
+        let (app, _dir) = app_with(SecureStore::memory());
+        let saved = crate::providers::qoder_auth::persist(
+            &app,
+            QoderEdition::Cn,
+            &token("u-kc", "A-TOKEN"),
+        )
+        .unwrap();
+        let account = account_of(&app, &saved.account_id);
+        let row = row(&app, &saved.account_id, SOURCE_OWN_BROWSER);
+        let guard = observe_for_delete(&app, &account, &row, CredentialKind::Oauth)
+            .unwrap()
+            .expect("钥匙串里有凭据");
+
+        // 另一个进程对同一来源重新授权（钥匙串键名固定，引用不变）。
+        crate::providers::qoder_auth::persist(&app, QoderEdition::Cn, &token("u-kc", "B-TOKEN"))
+            .unwrap();
+
+        let err = delete_guarded(&app, &account, &row, CredentialKind::Oauth, &guard)
+            .expect_err("值变了必须拒绝");
+        assert_eq!(err.kind, CredentialErrorKind::Conflict);
+        assert_eq!(
+            app.secure
+                .get(&crate::providers::qoder_auth::access_key(&saved.account_id))
+                .unwrap(),
+            b"B-TOKEN",
+            "新令牌必须完整保留"
+        );
+    }
+
+    /// access 没变、只有 refresh 被更新：同样算变化，**两把键都不许删**。
+    ///
+    /// 旧实现只比对主键（access），然后连 refresh 一起删 —— 会删掉没纳入快照的新值。
+    #[test]
+    fn a_refresh_only_update_also_blocks_the_delete() {
+        let (app, _dir) = app_with(SecureStore::memory());
+        let saved = crate::providers::qoder_auth::persist(
+            &app,
+            QoderEdition::Cn,
+            &token("u-rf", "A-TOKEN"),
+        )
+        .unwrap();
+        let account = account_of(&app, &saved.account_id);
+        let row = row(&app, &saved.account_id, SOURCE_OWN_BROWSER);
+        let guard = observe_for_delete(&app, &account, &row, CredentialKind::Oauth)
+            .unwrap()
+            .expect("钥匙串里有凭据");
+
+        // 只动 refresh。
+        app.secure
+            .set(
+                &crate::providers::qoder_auth::refresh_key(&saved.account_id),
+                b"R-NEW",
+            )
+            .unwrap();
+
+        let err = delete_guarded(&app, &account, &row, CredentialKind::Oauth, &guard)
+            .expect_err("整组值变了必须拒绝");
+        assert_eq!(err.kind, CredentialErrorKind::Conflict);
+        assert_eq!(
+            app.secure
+                .get(&crate::providers::qoder_auth::access_key(&saved.account_id))
+                .unwrap(),
+            b"A-TOKEN"
+        );
+        assert_eq!(
+            app.secure
+                .get(&crate::providers::qoder_auth::refresh_key(
+                    &saved.account_id
+                ))
+                .unwrap(),
+            b"R-NEW",
+            "新 refresh 不许被误删"
+        );
+    }
+
+    /// 删除操作**必须真的持有跨进程锁**：锁被占着时它只能报 `lock_timeout`，
+    /// 不能"没锁也照着比对照着删"。
+    #[test]
+    fn the_keychain_delete_actually_waits_for_the_cross_process_lock() {
+        let (app, _dir) = app_with(SecureStore::memory());
+        let saved = crate::providers::qoder_auth::persist(
+            &app,
+            QoderEdition::Cn,
+            &token("u-lk", "A-TOKEN"),
+        )
+        .unwrap();
+        let account = account_of(&app, &saved.account_id);
+        let row = row(&app, &saved.account_id, SOURCE_OWN_BROWSER);
+        let guard = observe_for_delete(&app, &account, &row, CredentialKind::Oauth)
+            .unwrap()
+            .expect("钥匙串里有凭据");
+
+        // 模拟另一个进程正握着锁（默认 2 秒超时）。
+        let held = LocalJsonStore::for_paths(&app.paths)
+            .lock_exclusive()
+            .expect("拿到锁");
+        let err = delete_guarded(&app, &account, &row, CredentialKind::Oauth, &guard)
+            .expect_err("拿不到锁就不能继续");
+        assert_eq!(err.kind, CredentialErrorKind::LockTimeout, "{err}");
+        assert_eq!(
+            app.secure
+                .get(&crate::providers::qoder_auth::access_key(&saved.account_id))
+                .unwrap(),
+            b"A-TOKEN",
+            "没拿到锁时一个字节都不许动"
+        );
+
+        drop(held);
+        assert!(delete_guarded(&app, &account, &row, CredentialKind::Oauth, &guard).unwrap());
     }
 
     // -- 竞争失败的收尾 -------------------------------------------------

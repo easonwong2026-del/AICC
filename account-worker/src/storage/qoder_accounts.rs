@@ -643,16 +643,23 @@ impl crate::storage::Db {
         Ok(changed > 0)
     }
 
-    /// 只按 `generation` + `secret_ref` 核验的状态更新。
+    /// 只按"账号这一代 + 这一份凭据"核验的状态更新。
     ///
-    /// 用在"删号中途被打断、需要把已经清掉凭据的行标成 `missing`"这种收尾上：
+    /// 用在"删号中途被打断、需要把已经清掉凭据的行标成 `missing`"这种收尾上。
+    /// 三个条件缺一不可：
     ///
-    /// - 不比 `auth_epoch`：它已经被我们自己推进过、也可能被并发的授权写入再推一次，
-    ///   拿旧 epoch 做条件永远不成立；
-    /// - 比 `secret_ref`：如果这一行在我们删完之后又被**同一来源重新授权**过
-    ///   （哪怕引用没换、只是覆盖写了文件），它就不是我们删掉的那一份了，不能标脏。
+    /// - `generation`：同一个 UID 删了又建时，不能动新账号；
+    /// - `secret_ref`：`localjson` 的重新授权会换文件，引用能直接区分；
+    /// - `fingerprint`：**同一来源的重新授权往往复用同一个引用**（钥匙串固定键名、
+    ///   JSON 原地覆盖都不换 `secret_ref`），只有令牌指纹能区分"这是不是我还删掉的
+    ///   那一份"。没有这一条，删号失败后的收尾会把别人刚保存成功的新授权标成
+    ///   `missing`（复审 P1）。
     ///
-    /// 返回 `false` 表示"已经不是那一行、或已经不是那一代账号"，什么都没写。
+    /// **刻意不用 `auth_epoch`**：它是账号级的，别的来源新增一次授权也会推进它，
+    /// 那样会把"确实被我删掉、且没人重登"的行也一并放过不标。
+    ///
+    /// 返回 `false` 表示"已经不是我删掉的那一份了"，什么都没写。
+    #[allow(clippy::too_many_arguments)]
     pub fn set_qoder_auth_status_if_generation(
         &mut self,
         account_id: &str,
@@ -660,6 +667,7 @@ impl crate::storage::Db {
         auth_status: &str,
         generation: &str,
         secret_ref: Option<&str>,
+        fingerprint: Option<&str>,
     ) -> RpcResult<bool> {
         if !AUTH_STATUSES.contains(&auth_status) {
             return Err(RpcError::invalid_params(format!(
@@ -668,15 +676,17 @@ impl crate::storage::Db {
         }
         let changed = self.conn.execute(
             "UPDATE qoder_authorizations SET auth_status = ?1, updated_at = ?2
-             WHERE account_id = ?3 AND source = ?4 AND secret_ref IS ?5
+             WHERE account_id = ?3 AND source = ?4
+               AND secret_ref IS ?5 AND fingerprint IS ?6
                AND EXISTS (SELECT 1 FROM qoder_accounts
-                           WHERE id = ?3 AND generation = ?6)",
+                           WHERE id = ?3 AND generation = ?7)",
             params![
                 auth_status,
                 now_rfc3339(),
                 account_id,
                 source,
                 secret_ref,
+                fingerprint,
                 generation
             ],
         )?;

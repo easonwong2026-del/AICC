@@ -766,6 +766,14 @@ impl LocalJsonStore {
         decode(secret_id, &bytes)
     }
 
+    /// 拿一次排他锁，供**不属于本存储**的操作（钥匙串读-比-删）与 JSON 写入互斥。
+    ///
+    /// 同一进程内**不可重入**：拿到锁之后不要再调用本存储的写/删方法（会自己再拿一次，
+    /// 在同一把 flock 上等到超时）。
+    pub fn lock_exclusive(&self) -> Result<FileLock, CredentialError> {
+        self.lock()
+    }
+
     fn lock(&self) -> Result<FileLock, CredentialError> {
         self.ensure_root()?;
         let file = self.open_lock_file()?;
@@ -974,7 +982,12 @@ impl std::fmt::Debug for LocalJsonStore {
 }
 
 /// 持锁期间有效。`File` 一关（Drop）锁就释放，所以只需要把 fd 留住。
-struct FileLock {
+/// 跨进程排他锁的持有凭证：drop 时解锁。
+///
+/// 公开它是因为**钥匙串路径也要用同一把锁**：钥匙串没有原子的
+/// compare-and-delete，读与删之间必须互斥，而"写新令牌"与"删旧令牌"必须在
+/// 同一把锁下排队（PR-CRED-3b 复审）。
+pub struct FileLock {
     file: File,
 }
 

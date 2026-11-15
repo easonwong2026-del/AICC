@@ -506,10 +506,28 @@ Qoder 有**两条**自有授权来源，各占 `qoder_authorizations` 的一行�
 
 `secretsDeleted` 的计数含义随之明确为**按来源计的凭据份数**（设备授权的 access + refresh 算一份）。
 
+### 第四轮复审修复（钥匙串原子性）
+
+JSON 的读-比-删天然原子（`delete_at_revision` 在跨进程锁内比对 `revision`）。
+**钥匙串没有原子的 compare-and-delete**：`get` 与 `delete` 是两次 API 调用，
+上一版靠"删之前再读一次"，读与删之间仍可被写入插队。本轮统一到一把锁上：
+
+| 问题 | 修法 |
+| --- | --- |
+| 钥匙串"读 → 比 → 删"之间没有互斥，可能删掉刚写进来的新令牌 | 复用凭据目录的 `.lock`（`LocalJsonStore::lock_exclusive`）：**写入**（`write_keychain`：拍快照 + 写 access + 写 refresh）、**回滚**（`QoderWrite::restore`）、**读-比-删**（`delete_guarded`）与**旧安装兜底**（`delete_keychain_group`）全部持同一把锁。拿不到锁就 `lock_timeout`，一个字节都不动 |
+| 设备授权只比主键 access，随后连 refresh 一起删 | `DeleteGuard::Keychain` 改为**整组键的取值快照**（`Vec<(key, Option<bytes>)>`）：任一键不符（含"计划时不存在、现在出现"）即 `conflict`；一致才整组删除 |
+| 同一来源重新授权复用同一个 `secret_ref`，`missing` 会标脏新授权 | 标记条件从「`generation` + `secret_ref`」改为「`generation` + `secret_ref` + **`fingerprint`**」。`fingerprint` 是每份凭据的令牌指纹，重新授权必换；不用 `auth_epoch`——它是账号级的，别的来源新增授权也会推进它 |
+| 旧安装（无授权行）的三条键按"键"计数 | `plan.legacy` 按**份**分组（`own/access` + `own/refresh` 为一份，`pat/token` 为一份），整组比对 + 整组删除在同一把锁里；`secretsDeleted` 与有授权行的账号同口径 |
+
 ### 验证
 
 | 项 | 手段 |
 | --- | --- |
+| 钥匙串读-比-删真的持锁 | `qoder_secret::tests::the_keychain_delete_actually_waits_for_the_cross_process_lock`（外部持锁 → `lock_timeout` 且一个字节未动） |
+| 比对后写入新令牌 | `..._a_keychain_secret_rewritten_after_the_guard_is_refused`（新令牌完整保留） |
+| 只更新 refresh | `..._a_refresh_only_update_also_blocks_the_delete`（两把键都不删） |
+| 删凭据后、删号前重登 | `qoder_admin::tests::a_relogin_after_the_credential_was_deleted_keeps_the_new_row_usable`（新授权保持 `valid`、Credits 可读） |
+| 旧安装按份计数 | `qoder_admin::tests::a_legacy_keychain_only_account_counts_two_credentials`（三条键 → 两份） |
 | 同来源重登（设备授权） | `qoder_admin::tests::a_same_source_relogin_during_delete_keeps_the_new_token`（`rev 0` 计划 → 重登写 `rev 1` → 停手；新令牌可读、`revision == 1`、行仍 valid、重试删净） |
 | 同来源重登（PAT） | `..._a_same_source_pat_relogin_during_delete_keeps_the_new_pat`（设备授权已删并标 `missing`，新 PAT 保持 `valid` 且可读） |
 | P0-A 假成功 | `qoder_pat::tests::a_rewritten_secret_leaves_a_retryable_record_and_never_reports_success`（行以 `missing` 回来、Credits 拒绝使用、重试收尾） |
