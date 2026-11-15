@@ -267,8 +267,15 @@ fn mismatch(what: &str) -> CredentialError {
 
 /// 一次写入要记住的"怎么撤回"。三种形态对应三条落点。
 enum Undo {
-    /// 钥匙串：按快照恢复（键名是确定的，不存在孤儿文件）。
-    Keychain(Snapshot),
+    /// 钥匙串：按快照恢复，**但只在盘上还是我写进去的那一版时才恢复**。
+    ///
+    /// 只加锁是不够的：A 写完等数据库提交，B 随后写入并提交成功，A 的提交失败 ——
+    /// A 拿到锁后无条件写回快照，就把 B 的成功授权覆盖成了旧值（复审 P0-B）。
+    /// `written` 是这次写入后的值，回滚前逐键比对，对不上就放弃回滚。
+    Keychain {
+        snapshot: Snapshot,
+        written: Vec<(String, Vec<u8>)>,
+    },
     /// 新建的 JSON 文件：撤回 = 删掉它。
     Created { secret_id: String },
     /// 覆盖已有 JSON 文件：撤回 = 把旧令牌写回去（带 revision 校验）。
@@ -324,14 +331,51 @@ impl QoderWrite {
         }
     }
 
-    /// 回滚这次写入。返回 false = 没恢复干净，调用方必须留痕。
+    /// 回滚这次写入。返回 false = 没恢复干净（或**故意没恢复**），调用方必须留痕。
+    ///
+    /// 三种情况都会拒绝回滚，而不是硬写：
+    ///
+    /// - 拿不到锁（另一个进程正在写）；
+    /// - 盘上已经不是这次写入的值：别人在我之后写入并提交成功了，把它的令牌
+    ///   覆盖回旧值等于毁掉一份有效授权（复审 P0-B）；
+    /// - 回滚本身失败。
     pub fn restore(&self, app: &App) -> bool {
         let store = LocalJsonStore::for_paths(&app.paths);
         match &self.undo {
             // 回滚也是"写钥匙串"：必须与删除/比对在同一把锁下排队，否则回滚可能盖掉
             // 别人刚写进来的新令牌（复审要求：写入、比较、删除、回滚统一协调）。
-            Undo::Keychain(snapshot) => match keychain_lock(app) {
-                Ok(_lock) => snapshot.restore(app),
+            Undo::Keychain { snapshot, written } => match keychain_lock(app) {
+                Ok(_lock) => {
+                    // 锁内再看一眼：盘上还是不是我写进去的那一版？
+                    for (key, mine) in written {
+                        match app.secure.get(key) {
+                            Ok(current) if current == *mine => {}
+                            Ok(_) => {
+                                crate::handlers::log_note(
+                                    "Qoder 凭据已被另一个进程更新：本次不回滚，以免覆盖对方刚保存的令牌",
+                                );
+                                return false;
+                            }
+                            Err(err)
+                                if err.kind == crate::securestore::SecretErrorKind::NotFound =>
+                            {
+                                // 有人把它删了：旧值也没有恢复的意义，保持删除状态。
+                                crate::handlers::log_note(
+                                    "Qoder 凭据已被另一个进程删除：本次不回滚，不复活旧令牌",
+                                );
+                                return false;
+                            }
+                            Err(err) => {
+                                crate::handlers::log_note(&format!(
+                                    "Qoder 凭据回滚前读不到当前值（{:?}）：未回滚，请重新授权",
+                                    err.kind
+                                ));
+                                return false;
+                            }
+                        }
+                    }
+                    snapshot.restore(app)
+                }
                 Err(err) => {
                     crate::handlers::log_note(&format!(
                         "Qoder 凭据回滚拿不到锁（{}）：未回滚，请重新授权",
@@ -340,17 +384,33 @@ impl QoderWrite {
                     false
                 }
             },
-            Undo::Created { secret_id } => match store.delete(secret_id) {
-                Ok(_) => true,
-                Err(err) => {
-                    crate::handlers::log_note(&format!(
-                        "Qoder 新凭据文件删不掉（{}）：{}",
-                        err.kind.as_str(),
-                        crate::rpc::sanitize(&err.message)
-                    ));
-                    false
+            Undo::Created { secret_id } => {
+                // 新建的文件按说没人知道它的 id；但万一提交其实成功了（或另一个
+                // 进程恰好引用了它），删掉就是毁一份有效凭据。删前确认没人引用。
+                if let Ok(reference) = reference::local_json_ref(secret_id) {
+                    if app
+                        .with_db(|db| db.qoder_authorizations_referencing(&reference))
+                        .unwrap_or(1)
+                        > 0
+                    {
+                        crate::handlers::log_note(
+                            "Qoder 新凭据文件已被授权行引用：本次不回滚，保留它",
+                        );
+                        return false;
+                    }
                 }
-            },
+                match store.delete(secret_id) {
+                    Ok(_) => true,
+                    Err(err) => {
+                        crate::handlers::log_note(&format!(
+                            "Qoder 新凭据文件删不掉（{}）：{}",
+                            err.kind.as_str(),
+                            crate::rpc::sanitize(&err.message)
+                        ));
+                        false
+                    }
+                }
+            }
             Undo::Replaced {
                 secret_id,
                 revision,
@@ -434,14 +494,15 @@ pub fn write(
             // 老行继续写钥匙串：不隐式迁移，避免迁移中的账号出现半新半旧的状态。
             Storage::Keychain => {
                 verify_keychain_ref(row, &account.id).map_err(|err| to_rpc(err, "qoder/ref"))?;
-                let snapshot = write_keychain(app, &account.id, source, access, refresh)?;
+                let (snapshot, written) =
+                    write_keychain(app, &account.id, source, access, refresh)?;
                 Ok(QoderWrite {
                     reference: row
                         .secret_ref
                         .clone()
                         .unwrap_or_else(|| keychain_reference(&account.id, source)),
                     storage: Storage::Keychain,
-                    undo: Undo::Keychain(snapshot),
+                    undo: Undo::Keychain { snapshot, written },
                 })
             }
             Storage::Json => write_json_in_place(app, account, row, access, refresh, expires_at),
@@ -451,11 +512,11 @@ pub fn write(
     // 还没有这一行 = 这是"第一次把这份令牌交给 AICC"。
     // 用户没确认过明文风险之前继续走钥匙串（与 #84/#86 的行为一致）。
     if !json_storage_enabled(app) {
-        let snapshot = write_keychain(app, &account.id, source, access, refresh)?;
+        let (snapshot, written) = write_keychain(app, &account.id, source, access, refresh)?;
         return Ok(QoderWrite {
             reference: keychain_reference(&account.id, source),
             storage: Storage::Keychain,
-            undo: Undo::Keychain(snapshot),
+            undo: Undo::Keychain { snapshot, written },
         });
     }
 
@@ -516,7 +577,16 @@ fn write_json_in_place(
     let kind = kind_of(&row.source);
     let secret_id = json_secret_id(row).map_err(|err| to_rpc(err, "qoder/json"))?;
     // 覆盖写等于"改写这份文件"：先验归属，否则一次错误的引用会覆盖别人的令牌。
-    let current = load_json(app, account, row, kind).map_err(|err| to_rpc(err, "qoder/json"))?;
+    let current = match load_json(app, account, row, kind) {
+        Ok(secret) => secret,
+        // 文件已经不在，但行还在引用它 —— 上一次删除删掉了文件、没删掉行
+        // （删号被并发打断就是这种状态）。这时按"新建一份"处理，否则用户
+        // 重新授权会永远失败在"凭据不存在"，等于把重新登录功能弄坏了。
+        Err(err) if err.kind == CredentialErrorKind::NotFound => {
+            return write_json_new(app, account, &row.source, access, refresh, expires_at);
+        }
+        Err(err) => return Err(to_rpc(err, "qoder/json")),
+    };
 
     let credentials = match (kind, refresh) {
         (CredentialKind::Pat, _) => Credentials::access_only(access),
@@ -544,13 +614,15 @@ fn write_json_in_place(
     })
 }
 
+type KeychainWrite = (Snapshot, Vec<(String, Vec<u8>)>);
+
 fn write_keychain(
     app: &App,
     account_id: &str,
     source: &str,
     access: &str,
     refresh: Option<&str>,
-) -> RpcResult<Snapshot> {
+) -> RpcResult<KeychainWrite> {
     // 整个"拍快照 → 写 access → 写 refresh"必须在同一把锁里完成：它和
     // `delete_guarded` 的"读-比-删"共用这把锁，才谈得上原子。
     let _lock = keychain_lock(app).map_err(|err| to_rpc(err, "qoder/lock"))?;
@@ -561,14 +633,17 @@ fn write_keychain(
         snapshot.restore(app);
         return Err(rpc_secret_error(err, "qoder/access"));
     }
+    // 写进去的值要记住：提交失败回滚时用它判断"盘上还是不是我这一版"。
+    let mut written = vec![(primary, access.as_bytes().to_vec())];
     // refresh 只属于浏览器授权；PAT 没有这个槽位。
     if let (Some(token), Some(refresh_key)) = (refresh, keys.get(1)) {
         if let Err(err) = app.secure.set(refresh_key, token.as_bytes()) {
             snapshot.restore(app);
             return Err(rpc_secret_error(err, "qoder/refresh"));
         }
+        written.push((refresh_key.clone(), token.as_bytes().to_vec()));
     }
-    Ok(snapshot)
+    Ok((snapshot, written))
 }
 
 /// 钥匙串错误 → RPC 错误。**带上"凭据"字样与阶段**：界面与验收都靠它区分
@@ -695,19 +770,25 @@ pub fn delete_guarded(
                     (Err(err), _) => return Err(secure_read_error(err)),
                 }
             }
-            let mut removed = false;
+            let mut removed = 0usize;
             for (key, expected) in values {
                 if expected.is_none() {
                     continue;
                 }
                 match app.secure.delete(key) {
-                    Ok(true) => removed = true,
+                    Ok(true) => removed += 1,
                     Ok(false) => {}
                     Err(err) if err.kind == crate::securestore::SecretErrorKind::NotFound => {}
-                    Err(err) => return Err(secure_delete_error(err)),
+                    Err(err) => {
+                        // **已经删掉一部分**：剩下半份凭据（例如没有 access 的 refresh）
+                        // 发不出请求。调用方必须把行标成不可用，否则界面显示 `valid`、
+                        // 而 Credits 永远失败（复审 P1-D）。
+                        let out = secure_delete_error(err);
+                        return Err(if removed > 0 { out.with_partial() } else { out });
+                    }
                 }
             }
-            Ok(removed)
+            Ok(removed > 0)
         }
     }
 }
@@ -721,30 +802,41 @@ pub fn delete_guarded(
 /// 返回真正删掉的键数；任何一键的值与观察不符就返回 `conflict`，一个字节都不删。
 pub fn delete_keychain_group(
     app: &App,
-    values: &[(String, Vec<u8>)],
+    values: &[(String, Option<Vec<u8>>)],
 ) -> Result<usize, CredentialError> {
     if values.is_empty() {
         return Ok(0);
     }
     // 与 `delete_guarded` 同一把锁：比对和删除不能被"写新令牌"插队。
     let _lock = keychain_lock(app)?;
+    // **在不在也要比对**（复审 P0-A）：旧安装原来可能只有 access，重新登录补上了
+    // refresh；如果计划只记"当时存在的键"，就会把这次新增整组忽略掉，照样删掉
+    // 新授权正在用的 access。
     for (key, expected) in values {
-        match app.secure.get(key) {
-            Ok(current) if current == *expected => {}
-            Ok(_) => return Err(mismatch("钥匙串凭据在这期间被重新写过")),
-            Err(err) if err.kind == crate::securestore::SecretErrorKind::NotFound => {
+        match (app.secure.get(key), expected) {
+            (Ok(current), Some(expected)) if current == *expected => {}
+            (Ok(_), None) => return Err(mismatch("钥匙串这期间新增了这一份凭据的一部分")),
+            (Ok(_), Some(_)) => return Err(mismatch("钥匙串凭据在这期间被重新写过")),
+            (Err(err), None) if err.kind == crate::securestore::SecretErrorKind::NotFound => {}
+            (Err(err), _) if err.kind == crate::securestore::SecretErrorKind::NotFound => {
                 return Err(mismatch("钥匙串凭据在这期间被删掉了"))
             }
-            Err(err) => return Err(secure_read_error(err)),
+            (Err(err), _) => return Err(secure_read_error(err)),
         }
     }
-    let mut removed = 0;
-    for (key, _) in values {
+    let mut removed = 0usize;
+    for (key, expected) in values {
+        if expected.is_none() {
+            continue;
+        }
         match app.secure.delete(key) {
             Ok(true) => removed += 1,
             Ok(false) => {}
             Err(err) if err.kind == crate::securestore::SecretErrorKind::NotFound => {}
-            Err(err) => return Err(secure_delete_error(err)),
+            Err(err) => {
+                let out = secure_delete_error(err);
+                return Err(if removed > 0 { out.with_partial() } else { out });
+            }
         }
     }
     Ok(removed)
@@ -829,6 +921,7 @@ pub fn expectation_of(observed: &Observation) -> QoderAuthExpectation {
         Some(row) => QoderAuthExpectation::Present {
             secret_ref: row.secret_ref.clone(),
             lifecycle: observed.lifecycle.clone(),
+            auth_version: row.auth_version,
         },
         // 首次授权也要带上生命周期：删号重建后 epoch 归零，只有 generation 挡得住。
         None => QoderAuthExpectation::Absent {
@@ -1003,6 +1096,7 @@ mod tests {
             fingerprint: None,
             created_at: String::new(),
             updated_at: String::new(),
+            auth_version: 1,
         };
         assert_eq!(storage_of(&row).unwrap(), Storage::Keychain);
 
@@ -1042,6 +1136,7 @@ mod tests {
             fingerprint: None,
             created_at: String::new(),
             updated_at: String::new(),
+            auth_version: 1,
         };
         assert_eq!(
             verify_keychain_ref(&row, &account.id).unwrap_err().kind,
@@ -1372,6 +1467,109 @@ mod tests {
         assert!(delete_guarded(&app, &account, &row, CredentialKind::Oauth, &guard).unwrap());
     }
 
+    // -- 回滚的条件（复审 P0-B） -----------------------------------------
+
+    /// A 写完、提交失败，期间 B 已经写入并**提交成功**：A 的回滚必须放弃。
+    ///
+    /// 只加锁不够 —— 锁保护的是"同一时刻只有一个在写"，不是"盘上还是我那一版"。
+    /// 无条件写回快照会把 B 刚保存的有效令牌覆盖成旧值，而 B 的授权行还是 `valid`。
+    #[test]
+    fn a_late_rollback_never_overwrites_a_newer_write() {
+        let (app, _dir) = app_with(SecureStore::memory());
+        let account = account(&app, "qoder_cn", "u-rb");
+
+        // A：观察（Absent）→ 写进去。
+        let observed = observation(&app, &account.id, SOURCE_OWN_BROWSER);
+        let mine = write(
+            &app,
+            &account,
+            SOURCE_OWN_BROWSER,
+            "A-TOKEN",
+            Some("A-REFRESH"),
+            None,
+            &observed,
+        )
+        .unwrap();
+
+        // B：完整的保存流程（写 + 提交）成功。
+        crate::providers::qoder_auth::persist(&app, QoderEdition::Cn, &token("u-rb", "B-TOKEN"))
+            .unwrap();
+
+        // A 的提交落空（那一行已经存在），随后尝试回滚。
+        let lost = commit(
+            &app,
+            &account.id,
+            SOURCE_OWN_BROWSER,
+            &mine,
+            "valid",
+            None,
+            None,
+            &expectation_of(&observed),
+        )
+        .unwrap();
+        assert!(lost.is_none(), "Absent 撞上已存在的行必须落空");
+
+        assert!(!mine.restore(&app), "盘上已经是 B 的那一版，回滚必须放弃");
+        assert_eq!(
+            app.secure
+                .get(&crate::providers::qoder_auth::access_key(&account.id))
+                .unwrap(),
+            b"B-TOKEN",
+            "赢家的 access 不许被旧快照覆盖"
+        );
+        assert_eq!(
+            app.secure
+                .get(&crate::providers::qoder_auth::refresh_key(&account.id))
+                .unwrap(),
+            b"rt-1",
+            "赢家的 refresh 同样不许被覆盖"
+        );
+        let row = row(&app, &account.id, SOURCE_OWN_BROWSER);
+        assert_eq!(row.auth_status, "valid");
+        assert_eq!(
+            read(
+                &app,
+                &account_of(&app, &account.id),
+                &row,
+                CredentialKind::Oauth
+            )
+            .unwrap(),
+            "B-TOKEN"
+        );
+    }
+
+    /// 反过来：盘上还是我写进去的那一版，回滚必须真的发生。
+    ///
+    /// 没有这条，"拒绝回滚"可能变成"永远不回滚"，而调用方是靠返回值判断的。
+    #[test]
+    fn a_rollback_still_restores_when_the_token_is_still_mine() {
+        let (app, _dir) = app_with(SecureStore::memory());
+        let account = account(&app, "qoder_cn", "u-rb2");
+        // 先有一份旧令牌，才能观察"回滚到旧值"。
+        crate::providers::qoder_auth::persist(&app, QoderEdition::Cn, &token("u-rb2", "OLD"))
+            .unwrap();
+
+        let observed = observation(&app, &account.id, SOURCE_OWN_BROWSER);
+        let mine = write(
+            &app,
+            &account,
+            SOURCE_OWN_BROWSER,
+            "NEW-TOKEN",
+            Some("NEW-REFRESH"),
+            None,
+            &observed,
+        )
+        .unwrap();
+        assert!(mine.restore(&app), "还是我那一版，必须回滚");
+        assert_eq!(
+            app.secure
+                .get(&crate::providers::qoder_auth::access_key(&account.id))
+                .unwrap(),
+            b"OLD",
+            "旧令牌必须回来"
+        );
+    }
+
     // -- 竞争失败的收尾 -------------------------------------------------
 
     /// 提交落空时：**新建**的文件删掉（没人引用）。
@@ -1455,6 +1653,7 @@ mod tests {
             &QoderAuthExpectation::Present {
                 secret_ref: Some("localjson:v1:moved".to_string()),
                 lifecycle: lifecycle(&app, &account.id),
+                auth_version: 1,
             },
         )
         .unwrap();

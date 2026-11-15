@@ -432,7 +432,8 @@ pub(crate) fn remove_with(
             account_id,
             SOURCE_OWN_PAT,
             row.secret_ref.as_deref(),
-            &observed.lifecycle,
+            row.auth_version,
+            &observed.lifecycle.generation,
         )
     })?;
     if !removed {

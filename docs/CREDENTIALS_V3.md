@@ -7,7 +7,7 @@
 > **CRED-3b 已交付待验收**（Qoder 设备授权 / PAT 的存储分派、读取与删除，见 §8quinquies）。
 > CRED-4（旧 Keychain 迁移）/ CRED-5（免弹窗收口）尚未开始。
 >
-> 基线：`main` @ `8da2e80`（#86 已合并），数据库 Schema **v20**（CRED-3b 未新增列）。
+> 基线：`main` @ `8da2e80`（#86 已合并），数据库 Schema **v21**（CRED-3b 复审为 `qoder_authorizations` 增加 `auth_version`）。
 > 范围：只动凭据的**存取方式**，不动账号模型、签到 / 成长 / 旅行 / Credits 业务。
 
 ## 1. 为什么要换掉钥匙串
@@ -519,10 +519,28 @@ JSON 的读-比-删天然原子（`delete_at_revision` 在跨进程锁内比对 
 | 同一来源重新授权复用同一个 `secret_ref`，`missing` 会标脏新授权 | 标记条件从「`generation` + `secret_ref`」改为「`generation` + `secret_ref` + **`fingerprint`**」。`fingerprint` 是每份凭据的令牌指纹，重新授权必换；不用 `auth_epoch`——它是账号级的，别的来源新增授权也会推进它 |
 | 旧安装（无授权行）的三条键按"键"计数 | `plan.legacy` 按**份**分组（`own/access` + `own/refresh` 为一份，`pat/token` 为一份），整组比对 + 整组删除在同一把锁里；`secretsDeleted` 与有授权行的账号同口径 |
 
+### 第五轮复审修复（版本号、回滚条件、部分删除、旧键存在性）
+
+| 编号 | 问题 | 修法 |
+| --- | --- | --- |
+| **P0-A** | 旧安装（无授权行）的计划只记录**当时存在**的键。旧账号本来只有 access，重新登录补上了 refresh —— 计划看不到这个新键，比对仍然只比 access，于是删掉新授权正在用的 access | `PlannedLegacy` 改成 `Vec<(String, Option<Vec<u8>>)>`：不存在的键也入计划（值 `None`）。`delete_keychain_group` 在同一把锁里**连存在性一起比对**：观察时没有、现在有了 → `conflict`，整组一个字节都不删 |
+| **P0-B** | `QoderWrite::restore` 拿到锁后**无条件**写回旧快照。A 写完等提交期间 B 写入并提交成功，A 的提交报错 → A 的回滚把 B 的令牌覆盖成旧值 | 回滚前（锁内）逐键比对"盘上还是不是我这次写进去的值"：不同 → **放弃回滚**并留痕；新建文件的回滚也先确认没有任何授权行引用它 |
+| **P1-C** | `fingerprint` 不是版本号：它是令牌的 SHA-256 前 8 位。重新保存**同一串** PAT / access 时摘要不变，删号失败后的收尾会把这份新授权标成 `missing`（令牌还在、Credits 却不用了） | 数据库 **v21** 给 `qoder_authorizations` 加 `auth_version`（每次提交 +1，首插为 1）。`missing` 的守卫改成「`generation` + `auth_version`」；`delete_qoder_authorization_if_current` 也从 `auth_epoch` 改为 `auth_version`（更精确：别的来源写入不再阻止本来源删除） |
+| **P1-D** | 钥匙串整组删除中途失败时，已删的键没上报。access 删掉、refresh 失败后，行还是 `valid`，而 Credits 已经读不到 access | `CredentialError` 增加 `partial`：整组删除在已经删掉一部分后失败 → 带 `partial` 返回。删号流程据此把这一份也计入"已删来源"，行被标 `missing`（Credits 不再使用），并可重试 |
+
+顺带修了一个被 P1-C 的测试暴露出来的可用性缺陷：JSON 授权行还在、文件已经被删（删号被并发打断后就是这种状态）时，
+`write_json_in_place` 过去直接报"凭据不存在"，用户重新授权永远失败。现在这种情形按"新建一份"处理 ——
+否则并发保护等于把重新登录功能关掉了。
+
 ### 验证
 
 | 项 | 手段 |
 | --- | --- |
+| 旧账号补 refresh 后停手（P0-A） | `qoder_admin::tests::a_relogin_that_adds_a_refresh_key_blocks_the_legacy_delete`（`deleted == 0`、access 与 refresh 都在） |
+| 迟到回滚不覆盖赢家（P0-B） | `qoder_secret::tests::a_late_rollback_never_overwrites_a_newer_write`（回滚返回 false、盘上是 `B-TOKEN`）；反向 `a_rollback_still_restores_when_the_token_is_still_mine` |
+| 同一串令牌重登（P1-C） | `qoder_admin::tests::a_relogin_with_the_same_token_keeps_the_new_row_valid`（断言指纹不变、`auth_version` 前进、行仍 `valid`、Credits 可读） |
+| 半删凭据不许 `valid`（P1-D） | `qoder_admin::tests::a_half_deleted_keychain_credential_is_not_left_valid`（`faulty` 只让 refresh 删除失败 → 行标 `missing`、重试删净） |
+| v21 迁移 | `storage::tests::v21_adds_an_authorization_version_without_touching_existing_rows`（老行从 0 起、回拨重跑是空操作） |
 | 钥匙串读-比-删真的持锁 | `qoder_secret::tests::the_keychain_delete_actually_waits_for_the_cross_process_lock`（外部持锁 → `lock_timeout` 且一个字节未动） |
 | 比对后写入新令牌 | `..._a_keychain_secret_rewritten_after_the_guard_is_refused`（新令牌完整保留） |
 | 只更新 refresh | `..._a_refresh_only_update_also_blocks_the_delete`（两把键都不删） |

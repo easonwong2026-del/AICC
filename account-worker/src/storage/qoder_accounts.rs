@@ -129,6 +129,25 @@ pub(super) fn migrate_v19(tx: &rusqlite::Transaction<'_>) -> RpcResult<()> {
     Ok(())
 }
 
+/// v21：给授权行加**授权版本号**。
+///
+/// 与 `auth_epoch` 的区别：epoch 是**账号级**的（任何一份来源写入都会前进），
+/// 而 `auth_version` 是**这一行**的授权次数。判断"我删掉的还是不是这一份凭据"
+/// 必须看后者 —— 指纹在重新保存同一串令牌时不变，`secret_ref` 在原地覆盖时也不变。
+pub(super) fn migrate_v21(tx: &rusqlite::Transaction<'_>) -> RpcResult<()> {
+    let has_version: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('qoder_authorizations') WHERE name = 'auth_version'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_version == 0 {
+        tx.execute_batch(
+            "ALTER TABLE qoder_authorizations ADD COLUMN auth_version INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    Ok(())
+}
+
 /// 一次**账号生命周期**的标识：`generation` + `auth_epoch`。
 ///
 /// 两者必须一起核验，缺一不可：
@@ -179,10 +198,14 @@ impl QoderLifecycle {
 pub enum QoderAuthExpectation {
     /// 写凭据时这一行还不存在：只允许 `INSERT`，且账号必须还是写凭据时那一个。
     Absent { lifecycle: QoderLifecycle },
-    /// 写凭据时看到的是这一行：`UPDATE` 必须命中同一引用与同一生命周期。
+    /// 写凭据时看到的是这一行：`UPDATE` 必须命中同一引用、同一版本、同一生命周期。
+    ///
+    /// `auth_version` 是额外的双保险：即使 `secret_ref` 与生命周期都没变，
+    /// 另一个进程刚刚提交过这一行也必须落空。
     Present {
         secret_ref: Option<String>,
         lifecycle: QoderLifecycle,
+        auth_version: i64,
     },
 }
 
@@ -236,6 +259,9 @@ pub struct QoderAuthRecord {
     pub fingerprint: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// 这一行被提交过多少次（v21）。**唯一可靠的授权版本标识**：
+    /// 重新保存同一串令牌（指纹不变）、原地覆盖（`secret_ref` 不变）都会让它前进。
+    pub auth_version: i64,
 }
 
 impl QoderAuthRecord {
@@ -296,7 +322,7 @@ pub(crate) const ACCOUNT_COLUMNS: &str =
     "id, edition, uid, nickname, email, created_at, updated_at, auth_epoch, generation";
 
 const AUTH_COLUMNS: &str = "id, account_id, source, source_key, secret_ref, auth_status, \
-     token_expires_at, fingerprint, created_at, updated_at";
+     token_expires_at, fingerprint, created_at, updated_at, auth_version";
 
 pub(crate) fn map_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<QoderAccountRecord> {
     Ok(QoderAccountRecord {
@@ -324,6 +350,7 @@ fn map_auth(row: &rusqlite::Row<'_>) -> rusqlite::Result<QoderAuthRecord> {
         fingerprint: row.get(7)?,
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
+        auth_version: row.get(10)?,
     })
 }
 
@@ -472,6 +499,9 @@ impl crate::storage::Db {
                  auth_status = excluded.auth_status,
                  token_expires_at = COALESCE(excluded.token_expires_at, qoder_authorizations.token_expires_at),
                  fingerprint = COALESCE(excluded.fingerprint, qoder_authorizations.fingerprint),
+                 -- 每次写入都算一次新的授权（v21）：版本号必须单调前进，
+                 -- 否则「同一串令牌重新保存」会被后面的核验当成没变过。
+                 auth_version = qoder_authorizations.auth_version + 1,
                  updated_at = excluded.updated_at",
             params![
                 id,
@@ -540,9 +570,9 @@ impl crate::storage::Db {
             QoderAuthExpectation::Absent { lifecycle } => match tx.execute(
                 "INSERT INTO qoder_authorizations (
                      id, account_id, source, source_key, secret_ref, auth_status,
-                     token_expires_at, fingerprint, created_at, updated_at
+                     token_expires_at, fingerprint, created_at, updated_at, auth_version
                  )
-                 SELECT ?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?8
+                 SELECT ?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?8, 1
                   WHERE EXISTS (SELECT 1 FROM qoder_accounts
                                 WHERE id = ?2 AND generation = ?9 AND auth_epoch = ?10)",
                 params![
@@ -568,14 +598,16 @@ impl crate::storage::Db {
             QoderAuthExpectation::Present {
                 secret_ref: expected,
                 lifecycle,
+                auth_version,
             } => tx.execute(
                 "UPDATE qoder_authorizations
                     SET secret_ref = ?1, auth_status = ?2, token_expires_at = ?3,
-                        fingerprint = ?4, updated_at = ?5
+                        fingerprint = ?4, updated_at = ?5,
+                        auth_version = auth_version + 1
                   WHERE account_id = ?6 AND source = ?7
-                    AND secret_ref IS ?8
+                    AND secret_ref IS ?8 AND auth_version = ?9
                     AND EXISTS (SELECT 1 FROM qoder_accounts
-                                WHERE id = ?6 AND generation = ?9 AND auth_epoch = ?10)",
+                                WHERE id = ?6 AND generation = ?10 AND auth_epoch = ?11)",
                 params![
                     secret_ref,
                     auth_status,
@@ -585,6 +617,7 @@ impl crate::storage::Db {
                     account_id,
                     source,
                     expected,
+                    auth_version,
                     lifecycle.generation,
                     lifecycle.auth_epoch
                 ],
@@ -643,31 +676,28 @@ impl crate::storage::Db {
         Ok(changed > 0)
     }
 
-    /// 只按"账号这一代 + 这一份凭据"核验的状态更新。
+    /// 只按"账号这一代 + 这一份凭据的授权版本"核验的状态更新。
     ///
     /// 用在"删号中途被打断、需要把已经清掉凭据的行标成 `missing`"这种收尾上。
-    /// 三个条件缺一不可：
+    /// 两个条件缺一不可：
     ///
     /// - `generation`：同一个 UID 删了又建时，不能动新账号；
-    /// - `secret_ref`：`localjson` 的重新授权会换文件，引用能直接区分；
-    /// - `fingerprint`：**同一来源的重新授权往往复用同一个引用**（钥匙串固定键名、
-    ///   JSON 原地覆盖都不换 `secret_ref`），只有令牌指纹能区分"这是不是我还删掉的
-    ///   那一份"。没有这一条，删号失败后的收尾会把别人刚保存成功的新授权标成
-    ///   `missing`（复审 P1）。
+    /// - `auth_version`：**同一来源的重新授权往往复用同一个引用**（钥匙串固定键名、
+    ///   JSON 原地覆盖都不换 `secret_ref`），重新保存**同一串**令牌连指纹都不变；
+    ///   只有每次提交都前进的版本号能区分"这是不是我还删掉的那一份"（复审 P1-C）。
     ///
     /// **刻意不用 `auth_epoch`**：它是账号级的，别的来源新增一次授权也会推进它，
     /// 那样会把"确实被我删掉、且没人重登"的行也一并放过不标。
     ///
     /// 返回 `false` 表示"已经不是我删掉的那一份了"，什么都没写。
     #[allow(clippy::too_many_arguments)]
-    pub fn set_qoder_auth_status_if_generation(
+    pub fn set_qoder_auth_status_if_version(
         &mut self,
         account_id: &str,
         source: &str,
         auth_status: &str,
         generation: &str,
-        secret_ref: Option<&str>,
-        fingerprint: Option<&str>,
+        auth_version: i64,
     ) -> RpcResult<bool> {
         if !AUTH_STATUSES.contains(&auth_status) {
             return Err(RpcError::invalid_params(format!(
@@ -676,17 +706,15 @@ impl crate::storage::Db {
         }
         let changed = self.conn.execute(
             "UPDATE qoder_authorizations SET auth_status = ?1, updated_at = ?2
-             WHERE account_id = ?3 AND source = ?4
-               AND secret_ref IS ?5 AND fingerprint IS ?6
+             WHERE account_id = ?3 AND source = ?4 AND auth_version = ?5
                AND EXISTS (SELECT 1 FROM qoder_accounts
-                           WHERE id = ?3 AND generation = ?7)",
+                           WHERE id = ?3 AND generation = ?6)",
             params![
                 auth_status,
                 now_rfc3339(),
                 account_id,
                 source,
-                secret_ref,
-                fingerprint,
+                auth_version,
                 generation
             ],
         )?;
@@ -800,22 +828,17 @@ impl crate::storage::Db {
         account_id: &str,
         source: &str,
         secret_ref: Option<&str>,
-        lifecycle: &QoderLifecycle,
+        auth_version: i64,
+        generation: &str,
     ) -> RpcResult<bool> {
         let tx = self.conn.transaction()?;
         let changed = tx.execute(
             "DELETE FROM qoder_authorizations
               WHERE account_id = ?1 AND source = ?2
-                AND secret_ref IS ?3
+                AND secret_ref IS ?3 AND auth_version = ?4
                 AND EXISTS (SELECT 1 FROM qoder_accounts
-                            WHERE id = ?1 AND generation = ?4 AND auth_epoch = ?5)",
-            params![
-                account_id,
-                source,
-                secret_ref,
-                lifecycle.generation,
-                lifecycle.auth_epoch
-            ],
+                            WHERE id = ?1 AND generation = ?5)",
+            params![account_id, source, secret_ref, auth_version, generation],
         )?;
         if changed > 0 {
             tx.execute(
@@ -859,9 +882,9 @@ impl crate::storage::Db {
         let changed = self.conn.execute(
             "INSERT INTO qoder_authorizations (
                  id, account_id, source, source_key, secret_ref, auth_status,
-                 token_expires_at, fingerprint, created_at, updated_at
+                 token_expires_at, fingerprint, created_at, updated_at, auth_version
              )
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?12
               WHERE EXISTS (SELECT 1 FROM qoder_accounts
                             WHERE id = ?2 AND generation = ?11)
                AND NOT EXISTS (SELECT 1 FROM qoder_authorizations
@@ -877,7 +900,8 @@ impl crate::storage::Db {
                 row.fingerprint,
                 row.created_at,
                 now_rfc3339(),
-                observed.generation
+                observed.generation,
+                row.auth_version
             ],
         )?;
         Ok(changed > 0)
@@ -1199,6 +1223,7 @@ mod tests {
         let expected = QoderAuthExpectation::Present {
             secret_ref: Some("localjson:v1:old".to_string()),
             lifecycle: lifecycle_of(&db, &account.id),
+            auth_version: 1,
         };
 
         // 引用被迁到别的文件之后，迟到的写入必须落空。
@@ -1212,6 +1237,7 @@ mod tests {
             &QoderAuthExpectation::Present {
                 secret_ref: Some("localjson:v1:old".to_string()),
                 lifecycle: expected_lifecycle(&expected),
+                auth_version: expected_version(&expected),
             },
         )
         .unwrap();
@@ -1241,6 +1267,13 @@ mod tests {
     fn expected_lifecycle(expectation: &QoderAuthExpectation) -> QoderLifecycle {
         match expectation {
             QoderAuthExpectation::Present { lifecycle, .. } => lifecycle.clone(),
+            QoderAuthExpectation::Absent { .. } => panic!("必须是 Present"),
+        }
+    }
+
+    fn expected_version(expectation: &QoderAuthExpectation) -> i64 {
+        match expectation {
+            QoderAuthExpectation::Present { auth_version, .. } => *auth_version,
             QoderAuthExpectation::Absent { .. } => panic!("必须是 Present"),
         }
     }
@@ -1284,6 +1317,7 @@ mod tests {
                 &QoderAuthExpectation::Present {
                     secret_ref: Some("localjson:v1:old".to_string()),
                     lifecycle: old_lifecycle,
+                    auth_version: 1,
                 },
             )
             .unwrap();
@@ -1414,6 +1448,7 @@ mod tests {
             &QoderAuthExpectation::Present {
                 secret_ref: Some("localjson:v1:old".to_string()),
                 lifecycle: stale.clone(),
+                auth_version: 1,
             },
         )
         .unwrap();
@@ -1423,7 +1458,8 @@ mod tests {
                 &account.id,
                 SOURCE_OWN_PAT,
                 Some("localjson:v1:old"),
-                &stale,
+                1,
+                &stale.generation,
             )
             .unwrap(),
             "旧快照的删除必须落空"
@@ -1442,7 +1478,8 @@ mod tests {
                 &account.id,
                 SOURCE_OWN_PAT,
                 Some("localjson:v1:new"),
-                &current,
+                2,
+                &current.generation,
             )
             .unwrap());
         assert!(db

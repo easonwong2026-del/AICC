@@ -241,6 +241,7 @@ fn read_keychain_access(
                     kind: CredentialErrorKind::Corrupt,
                     message: "凭据不是 UTF-8".to_string(),
                     os_status: None,
+                    partial: false,
                 })?;
                 if token.trim().is_empty() {
                     last = Some(crate::securestore::SecretError {
@@ -265,6 +266,7 @@ fn read_keychain_access(
                     },
                     message: err.message,
                     os_status: err.os_status,
+                    partial: false,
                 })
             }
         }
@@ -274,6 +276,7 @@ fn read_keychain_access(
             kind: CredentialErrorKind::NotFound,
             message: err.message,
             os_status: err.os_status,
+            partial: false,
         },
         None => CredentialError::new(CredentialErrorKind::NotFound, "凭据不存在"),
     })
