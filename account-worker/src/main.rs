@@ -8,6 +8,10 @@ mod app;
 mod auth;
 mod checkin;
 mod clock;
+// PR-CRED-1 只铺地基：本地 JSON 存储与引用解析尚未接入生产路径（CRED-2/3 才接），
+// 所以这里显式放行 dead_code —— 别在接入之前删掉"没人调用"的接口。
+#[allow(dead_code)]
+mod credentials;
 mod credits;
 mod growth;
 mod handlers;
