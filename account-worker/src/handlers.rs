@@ -81,6 +81,8 @@ pub const METHODS: &[&str] = &[
     "credentials.migration.run",
     "credentials.migration.rollback",
     "credentials.migration.verify",
+    // CRED-5：借用授权只改引用、不搬令牌，因此不要求明文同意。
+    "credentials.migration.relink",
     // ---- Qoder 每日 Credits（PR #75）----
     "qoder.credits.status",
     "qoder.credits.claim",
@@ -647,6 +649,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
         "credentials.migration.run" => cred_migrate::run(app, &params),
         "credentials.migration.rollback" => cred_migrate::rollback(app, &params),
         "credentials.migration.verify" => cred_migrate::verify(app),
+        "credentials.migration.relink" => cred_migrate::relink(app, &params),
 
         // ---- Qoder 每日 Credits（PR #75）----
         //
@@ -3394,6 +3397,139 @@ mod tests {
         assert_eq!(again["relinked"], json!(0), "{again}");
         assert_eq!(again["pending"], json!(0), "{again}");
         magpie::test_set_logins(None);
+    }
+
+    /// CRED-5：迁移面板上的"重新关联"就是 `credentials.migration.relink`。
+    ///
+    /// 它必须做到三件事：把引用换成动态关联、**不产生任何明文文件**、
+    /// 旧钥匙串条目原样保留（回滚依据）。
+    #[test]
+    fn migration_relink_repoints_a_borrowed_row_without_copying_any_token() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-2222-0001-0002-00000000001f";
+        magpie::test_set_logins(Some(vec![magpie_login(uid, "borrowed")]));
+        import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
+        let acc = account(&app, uid);
+
+        // 退回 v19 的形状：引用指着钥匙串，里面躺着当年复制进去的令牌。
+        let key = ids::access_key(&acc.id, ids::KIND_MAGPIE);
+        app.secure.set(&key, b"legacy-token").unwrap();
+        app.with_db(|db| {
+            db.exec_raw(&format!(
+                "UPDATE account_authorizations
+                    SET access_ref = 'keychain:{key}', source_key = NULL, ref_updated_at = NULL
+                  WHERE account_id = '{}' AND kind = 'magpie'",
+                acc.id
+            ))
+        })
+        .expect("rewind to v19");
+
+        // 盘点：单独一档，且给界面明确的下一步。
+        let before = crate::providers::cred_migrate::inventory(&app).expect("inventory");
+        assert_eq!(before["summary"]["needsRelink"], json!(1), "{before}");
+        assert_eq!(before["summary"]["magpie"], json!(0), "{before}");
+        assert_eq!(before["items"][0]["action"], json!("relink"), "{before}");
+
+        let out = crate::providers::cred_migrate::relink(&app, &json!({})).expect("relink");
+        assert_eq!(out["relinked"], json!(1), "{out}");
+        assert_eq!(out["legacyKeysKept"], json!(true), "{out}");
+        assert_eq!(out["summary"]["needsRelink"], json!(0), "{out}");
+        assert_eq!(out["summary"]["magpie"], json!(1), "{out}");
+
+        let after = app
+            .with_db(|db| db.find_authorization(&acc.id, ids::KIND_MAGPIE))
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.access_ref, format!("magpie:v1:workbuddy#{uid}"));
+        assert_eq!(
+            read_key(&app, &key).as_deref(),
+            Some("legacy-token"),
+            "旧钥匙串条目必须保留"
+        );
+
+        // 一个明文文件都不许产生：重新关联只改引用。
+        let secrets = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths)
+            .scan()
+            .map(|report| report.secrets.len())
+            .unwrap_or(0);
+        assert_eq!(secrets, 0, "重新关联不得落任何 secrets 文件");
+        magpie::test_set_logins(None);
+    }
+
+    /// CRED-5：启用本地 JSON 之后，没有授权行的账号**不再**去读旧别名钥匙串。
+    ///
+    /// 回退会在后台任务里弹一次授权框并阻塞 RPC 队列 —— 那正是本轮要消灭的东西。
+    #[test]
+    fn read_access_stops_falling_back_to_the_legacy_alias_once_json_storage_is_on() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-2222-0001-0002-000000000020";
+        let account_id = crate::storage::account_id("workbuddy", uid);
+        let (legacy_access, _) = ids::legacy_keys(&uid);
+        app.secure.set(&legacy_access, b"ALIAS-TOKEN").unwrap();
+
+        let acc = crate::storage::AccountRecord {
+            id: account_id,
+            platform: "workbuddy".into(),
+            provider: "workbuddy".into(),
+            uid: uid.into(),
+            nickname: String::new(),
+            email: None,
+            group_id: None,
+            auth_status: "valid".into(),
+            checkin_enabled: false,
+            last_checkin_at: None,
+            last_result: None,
+            updated_at: String::new(),
+            token_expires_at: None,
+            auth_domain: None,
+            auth_source: "own".into(),
+            travel_enabled: false,
+            auth_epoch: 0,
+            auth_mirror_auth_id: None,
+        };
+
+        let read = service::read_access(&app, &acc, ids::KIND_OWN).expect("read");
+        assert_eq!(read, None, "不许回退到旧别名键");
+        assert_eq!(
+            read_key(&app, &legacy_access).as_deref(),
+            Some("ALIAS-TOKEN"),
+            "只是不读，不许删"
+        );
+    }
+
+    /// 兼容口径：**还没**进入 v3 的库（没同意明文、也没有任何新引用）仍走老回退，
+    /// 否则极老安装会突然读不到令牌。
+    #[test]
+    fn read_access_keeps_the_legacy_alias_fallback_for_a_pure_v2_database() {
+        let (app, _dir) = test_app_without_consent(SecureStore::memory());
+        let uid = "6f1c2d94-2222-0001-0002-000000000021";
+        let account_id = crate::storage::account_id("workbuddy", uid);
+        let (legacy_access, _) = ids::legacy_keys(&uid);
+        app.secure.set(&legacy_access, b"ALIAS-TOKEN").unwrap();
+
+        let acc = crate::storage::AccountRecord {
+            id: account_id,
+            platform: "workbuddy".into(),
+            provider: "workbuddy".into(),
+            uid: uid.into(),
+            nickname: String::new(),
+            email: None,
+            group_id: None,
+            auth_status: "valid".into(),
+            checkin_enabled: false,
+            last_checkin_at: None,
+            last_result: None,
+            updated_at: String::new(),
+            token_expires_at: None,
+            auth_domain: None,
+            auth_source: "own".into(),
+            travel_enabled: false,
+            auth_epoch: 0,
+            auth_mirror_auth_id: None,
+        };
+
+        let read = service::read_access(&app, &acc, ids::KIND_OWN).expect("read");
+        assert_eq!(read.as_deref(), Some("ALIAS-TOKEN"));
     }
 
     #[test]

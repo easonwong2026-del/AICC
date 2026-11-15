@@ -729,7 +729,15 @@ fn rollback(app: &App, snapshot: &Snapshot, cause: RpcError) -> RpcError {
 pub fn read_access(app: &App, account: &AccountRecord, kind: &str) -> RpcResult<Option<String>> {
     let row = app.with_db(|db| db.find_authorization(&account.id, kind))?;
     let Some(row) = row else {
-        // 无授权行：只可能是旧库，读一次旧别名。
+        // CRED-5：无授权行时**不再无条件**读旧别名键。
+        //
+        // 旧别名是 G4 之前的钥匙串键，读它一样会弹系统授权框、阻塞 RPC 队列。
+        // 只有当这台机器**还没有进入 v3 存储时代**（用户没同意过明文、库里也没有
+        // 任何 `localjson:` / `magpie:` 引用）时才回退，覆盖极老的安装；
+        // 一旦出现过新引用，回退只会把"已收口"的链路重新拽回钥匙串。
+        if !legacy_alias_allowed(app) {
+            return Ok(None);
+        }
         let (legacy_access, _) = ids::legacy_keys(&account.uid);
         return match app.secure.get(&legacy_access) {
             Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).to_string())),
@@ -744,6 +752,19 @@ pub fn read_access(app: &App, account: &AccountRecord, kind: &str) -> RpcResult<
         Err(err) if err.kind == crate::credentials::CredentialErrorKind::NotFound => Ok(None),
         Err(err) => Err(err.into()),
     }
+}
+
+/// 是否还允许"无授权行 → 读旧别名钥匙串"这条老回退。
+///
+/// 两个条件同时成立才允许：用户没启用本地 JSON，库里也没有任何新引用。
+/// 读库失败时**不回退**（`unwrap_or(true)` 表示"按已进入新时代处理"）——
+/// 宁可让界面提示重新登录，也不要在后台偷偷弹一次授权框。
+fn legacy_alias_allowed(app: &App) -> bool {
+    if crate::auth::consent::json_storage_enabled(app) {
+        return false;
+    }
+    !app.with_db(|db| db.has_non_keychain_authorizations())
+        .unwrap_or(true)
 }
 
 /// 读自有授权的 refresh。**没有 magpie 分支**：借来的授权不刷新。

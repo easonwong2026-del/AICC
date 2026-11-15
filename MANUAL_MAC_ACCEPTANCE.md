@@ -110,3 +110,20 @@ evidence.
 
 Automated window/cache checks: `scripts/smoke-test-widget.sh`,
 `scripts/smoke-test-display-snapshot.sh`, and `python3 -m unittest discover -s tests -p test_google_quota.py`.
+
+### Credential storage (CRED-5)
+
+Preconditions: a normally signed `AICC.app` (not ad-hoc), at least one account whose
+authorization still points at the Keychain, and Magpie logged in.
+
+- [ ] `设置 → 旧凭据迁移` shows separate counters: 仍在钥匙串 / 已是本地 JSON / 已迁移 / 由 Magpie 管理 / 借用授权仍指向钥匙串 / 引用异常 / 可回滚.
+- [ ] Clicking **重新关联到 Magpie** reports "已重新关联 N 条", copies no token, and leaves the Keychain entries untouched.
+- [ ] After relinking, the borrowed rows read `magpie:v1:` and no authorization box appears during check-in / growth / travel runs.
+- [ ] `核验` separates 待重新关联 from 待迁移; neither is reported as a failure.
+- [ ] Relaunching the app after the change asks for no authorization; a rebuilt bundle does not ask again.
+- [ ] Accounts that were never migrated keep reading from the Keychain exactly as before (no silent switch to JSON).
+- [ ] Nothing in the panel, the logs, or `health` prints a token; `secrets/v1/*.json` stays `0600` and its directory `0700`.
+
+Automated cover: `cargo test --manifest-path account-worker/Cargo.toml`,
+`CredentialsMigrationModelsTests`, and
+`credentials.migration.{inventory,verify,relink}` driven over stdio against a **copy** of a real database.

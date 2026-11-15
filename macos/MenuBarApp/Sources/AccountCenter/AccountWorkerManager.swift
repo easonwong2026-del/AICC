@@ -33,6 +33,8 @@ final class AccountWorkerManager: ObservableObject {
     @Published private(set) var credentialStorage: CredentialStoragePolicy?
     /// CRED-4：旧钥匙串凭据的盘点结果。`nil` = 还没查过。
     @Published private(set) var credentialMigration: CredentialMigrationState?
+    /// 最近一次**核验**的结果。面板常态显示异常 / 待清理份数，而不是只留一句提示。
+    @Published private(set) var credentialVerifyReport: CredentialVerifyReport?
     /// 最近一次迁移 / 核验 / 回滚的结论。界面直接显示这句，不自己组织措辞。
     @Published private(set) var credentialMigrationNotice: String?
     @Published private(set) var credentialMigrationBusy = false
@@ -289,7 +291,10 @@ final class AccountWorkerManager: ObservableObject {
                 credentialMigrationNotice = "核验返回的数据不完整"
                 return
             }
+            // 面板要能常态显示"异常几份"，不能只在点完按钮的那条文案里存在。
+            credentialVerifyReport = report
             var text = "核验：\(report.ok) 条正常"
+            if report.needsRelink > 0 { text += "，\(report.needsRelink) 条借用授权待重新关联" }
             if report.pendingKeychain > 0 { text += "，\(report.pendingKeychain) 条仍在钥匙串" }
             if report.broken > 0 { text += "，\(report.broken) 条异常" }
             if report.orphanCount > 0 { text += "，\(report.orphanCount) 个未引用文件" }
@@ -298,6 +303,35 @@ final class AccountWorkerManager: ObservableObject {
             }
             if report.brokenFiles > 0 { text += "，\(report.brokenFiles) 个文件读不出来" }
             credentialMigrationNotice = text
+        } catch {
+            credentialMigrationNotice = Self.describe(error)
+        }
+    }
+
+    /// CRED-5：把仍指向钥匙串的**借用授权**改成 Magpie 动态关联。
+    ///
+    /// 与迁移完全不同：一个令牌都不搬、不产生明文文件、不删旧钥匙串条目，
+    /// 所以不需要明文同意。这一步做完，"读 Magpie 授权"才真的不再碰钥匙串。
+    func relinkBorrowedCredentials() async {
+        guard let client, client.isRunning else {
+            credentialMigrationNotice = "助手未运行，重新关联没有执行"
+            return
+        }
+        credentialMigrationBusy = true
+        defer { credentialMigrationBusy = false }
+        do {
+            let result = try await client.call("credentials.migration.relink", timeout: 60)
+            let relinked = result["relinked"] as? Int ?? 0
+            let pending = result["pending"] as? Int ?? 0
+            let skipped = result["skipped"] as? [[String: Any]] ?? []
+            var text = "已重新关联 \(relinked) 条"
+            if pending > 0 { text += "，\(pending) 条还没关联上" }
+            if let first = skipped.first,
+               let reason = first["reason"] as? String {
+                text += "（首个原因：\(reason)）。请确认 Magpie 已登录，并在主控制台重新关联"
+            }
+            credentialMigrationNotice = text
+            await refreshCredentialMigration(keepNotice: true)
         } catch {
             credentialMigrationNotice = Self.describe(error)
         }

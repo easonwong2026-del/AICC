@@ -5,10 +5,10 @@
 > **CRED-3a 已合并**（WorkBuddy 自有授权 JSON 化，**默认关闭**，见 §8ter）；
 > **CRED-3-UI 已合并**（明文的告知 / 确认与开关，见 §8quater）；
 > **CRED-3b 已合并**（#87：Qoder 设备授权 / PAT 的存储分派、读取与删除，见 §8quinquies）；
-> **CRED-4 本 PR**（旧 Keychain 显式迁移：盘点 / 备份 / 迁移 / 核验 / 回滚，见 §8sexies）。
-> CRED-5（免弹窗收口）尚未开始。
+> **CRED-4 已合并**（#88：旧 Keychain 显式迁移：盘点 / 备份 / 迁移 / 核验 / 回滚，见 §8sexies）；
+> **CRED-5 本 PR**（免弹窗收口 + 借用授权重新关联 + 面板状态，见 §8septies）。
 >
-> 基线：`main` @ `08ba783`（#87 已合并），数据库 Schema **v22**（CRED-4 增加 `credential_migrations` 记录表）。
+> 基线：`main` @ `1da6c91`（#88 已合并），数据库 Schema **v23**（CRED-4 增加 `credential_migrations` 记录表）。
 > 范围：只动凭据的**存取方式**，不动账号模型、签到 / 成长 / 旅行 / Credits 业务。
 
 ## 1. 为什么要换掉钥匙串
@@ -159,8 +159,8 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 | CRED-3a | WorkBuddy 自有授权 JSON 化 | 已合并（#85） |
 | CRED-3-UI | 明文的告知 / 确认与开关 | 已合并（#86） |
 | CRED-3b | Qoder CN / International 设备授权 + PAT + Credits 读取 | 已合并（#87） |
-| CRED-4 | 旧 Keychain 显式迁移（备份 / 核对 / 回滚） | **本 PR**（见 §8sexies） |
-| CRED-5 | Worker 免弹窗收口 + 端到端验收 | 待开始 |
+| CRED-4 | 旧 Keychain 显式迁移（备份 / 核对 / 回滚） | 已合并（#88） |
+| CRED-5 | 免弹窗收口 + 借用授权重新关联 + 端到端验收 | **本 PR**（见 §8septies） |
 
 ## 8bis. CRED-2：Magpie 动态关联
 
@@ -193,8 +193,9 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 
 - 自有授权（浏览器 / 扫码 / PAT）仍在钥匙串 —— CRED-3 换成 `localjson:v1:`。
 - 旧 Keychain 批量迁移与 UI —— CRED-4。
-- Worker 全链路的免弹窗收口与端到端验收 —— CRED-5。
-- `auth.magpie.relink` 还没有界面入口；当前由 RPC 显式调用。
+- ~~Worker 全链路的免弹窗收口与端到端验收~~ —— 已在 CRED-5 完成（§8septies）。
+- ~~`auth.magpie.relink` 还没有界面入口~~ —— CRED-5 起由「旧凭据迁移」面板的
+  「重新关联到 Magpie」调用 `credentials.migration.relink`（内部复用同一套 CAS 逻辑）。
 
 **复审后补的边界（#84 第二轮）**
 
@@ -264,7 +265,7 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 
 - Qoder 的浏览器 / 设备授权、PAT（`credits` 读取路径）—— CRED-3b。
 - 旧 Keychain 批量迁移与 UI —— CRED-4。
-- Worker 全链路免弹窗收口与端到端验收 —— CRED-5。
+- ~~Worker 全链路免弹窗收口与端到端验收~~ —— 已在 CRED-5 完成（§8septies）。
 
 **已知限制**
 
@@ -760,7 +761,8 @@ SecretTxn（.lock）                 ← 盘点、备份、迁移都在锁内，
 
 * 没有任何授权行的旧钥匙串条目（G4 之前的极老安装）：没有引用可依，不盘点也不迁移。
   要覆盖需要先有一个"认领"流程（把旧键绑定到某个账号），属于另一个 PR。
-* 不删任何 Keychain 条目 —— CRED-5 的显式动作。
+* 不删任何 Keychain 条目。CRED-5 明确保留了这条：面板只显示"原始钥匙串条目不会删除"，
+  没有自动清理，也没有批量清理按钮（理由见 §8septies 末段）。
 * 不改 Qoder 客户端自身认证文件、不改 Credits 规则。
 
 ### 验证
@@ -801,6 +803,85 @@ SecretTxn（.lock）                 ← 盘点、备份、迁移都在锁内，
 | WorkBuddy 令牌写入也在门后（P0-2） | `credentials::gate::tests::a_workbuddy_token_write_waits_for_the_same_gate` |
 | v22 / v23 迁移幂等 | `storage::tests::v22_adds_the_credential_migration_table_idempotently` |
 | 面板解析与"可回滚才可点"、待清理不算故障 | `macos/MenuBarApp/Tests/CredentialMigrationModelsTests` |
+
+## 8septies. CRED-5：免弹窗收口
+
+### 审计：凭据读取链路逐条对照
+
+审计对象是**生产路径**（scheduler / RPC 实际会走到的分支），不是"有没有这个函数"。
+
+| # | 路径 | 读凭据的入口 | 实际落点 | 会碰钥匙串吗 | 可能弹窗 | 失败是否阻塞其他任务 | 有隐式回退吗 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | WorkBuddy CN / AI 登录、授权检查 | `auth::service::write_own` / `broker::access_for` | 按该行 `access_ref` 分派 | 仅该行是 `keychain:` | 是（老行） | 否：单账号失败只写该行 `last_error` | **修前有**：无授权行时无条件读旧别名键（见下）|
+| 2 | 每日签到 | `checkin::manager` → `broker::resolve` | 同上 | 仅 `keychain:` 行 | 是（老行） | 否：签到逐账号独立，失败的账号进冷却 | 无 |
+| 3 | 成长中心自动管理 | `growth::scheduler` → `broker::resolve` | 同上 | 仅 `keychain:` 行 | 是（老行） | 否 | 无 |
+| 4 | Buddy 旅行 / 领奖 | `travel::scheduler::AppTokens` → `broker::resolve` | 同上 | 仅 `keychain:` 行 | 是（老行） | 否：`TRAVEL_BUSY` 只挡重复旅行 tick | 无 |
+| 5 | Qoder 浏览器授权 / PAT | `qoder_secret::persist` / `read` | 按 `secret_ref` 分派（v21 起带授权版本） | 仅 `keychain:` 引用 | 是（老行） | 否 | 无（未知前缀直接报错）|
+| 6 | Qoder Credits 查询 / 领取 | `credits::resolve_token` → `qoder_secret::read` | 同上 | 仅 `keychain:` 引用 | 是（老行） | 否 | 无 |
+| 7 | Magpie 动态关联 | `magpie_link::access_for` | 现读 `~/.config/magpie/plugin-auth.json` | **修前会**：`magpie` kind 但引用仍是 `keychain:` 的行走 `read_keychain_access` | 是 | 是（这条最致命：默认首选 magpie，弹窗直接卡住 RPC 队列）| 无（`link_mismatch` 不兜底）|
+| 8 | 账号删除 / 重新授权 / 迁移回滚 | `auth::service::delete`、`cred_migrate::rollback` | 按引用逐行清理 / 六道门校验 | 只清 `keychain:` 行 | 可能（删旧键） | 否 | 无 |
+
+**审计结论（本轮实际修掉的两个真问题）**
+
+1. **`magpie` 行还指着钥匙串。（P0，路径 7）**
+   `kind = magpie` 的行有两种历史形状：v20 之后挂上 `magpie:v1:<source_key>` 的，和 v20 之前把
+   access 复制进钥匙串、`access_ref` 仍是 `keychain:<key>` 的。CRED-4 的盘点把后一种也标成
+   `magpie_managed`（"由 Magpie 管理，不迁移"）—— 用户看到这句话就以为已经好了，但
+   `broker` 默认首选 magpie、按引用读，于是**每次签到 / 成长 / 旅行都去敲一次钥匙串**。
+   这就是"迁移做完了还是在弹窗"的根因：弹窗源头不在自有授权上。
+
+   修法：盘点把这类行单独归为 `needs_relink`（附 `action: "relink"`），并提供
+   `credentials.migration.relink` —— **只把引用换成 `magpie:v1:`，一个令牌都不读、不写、不复制**，
+   所以不要求明文同意、不产生 `secrets/v1/*.json`、旧钥匙串条目原样保留。
+   把它当"可迁移"是错的（违反 §2 借用授权不持久化），当"已管理"也是错的（它还在弹窗）。
+
+2. **无授权行时无条件回退旧别名键。（P0，路径 1）**
+   `read_access` 在找不到授权行时直接读 `legacy_keys(uid)`。那是 G4 之前的钥匙串键，
+   读它一样弹框 + 阻塞队列。现在收紧为：只有**这台机器还没进入 v3 存储时代**
+   （用户没同意明文，且库里没有任何 `localjson:` / `magpie:` 引用）才回退；
+   否则返回 `None`，让界面提示重新登录。判据落 `auth::service::legacy_alias_allowed`，
+   读库失败时按"已进入新时代"处理 —— 宁可让用户重登，也不在后台偷偷弹一次框。
+
+### 免弹窗的前提条件（逐条对应验收项）
+
+| 验收项 | 前提 | 实现位置 |
+| --- | --- | --- |
+| 启动不读旧钥匙串 | `health` 不做钥匙串探针 | `AccountWorkerManager.refresh` 只调 `health`；探针是显式按钮 |
+| 签到不弹窗 | 该账号的授权行不是 `keychain:` | `checkin::manager` → `broker::resolve` |
+| Qoder Credits 不弹窗 | `qoder_authorizations.secret_ref` 是 `localjson:` | `credits::resolve_token` |
+| 成长 / 旅行不被弹窗阻塞 | 同上 | `growth::scheduler`、`travel::scheduler` |
+| 重装后仍可读 | JSON 读写不依赖签名 ACL | `credentials/localjson.rs` |
+| 多来源不互相覆盖 | 一次授权一个文件 + 归属四校验 + revision CAS | `auth/owned.rs`、`localjson.rs` |
+
+**仍然会弹窗、且刻意不绕过的情况**：Qoder 客户端自己的 `Qoder App Safe Storage`
+（第三方条目，用户主动导入时才读）。这是 macOS 权限机制，不是 AICC 能"优化"掉的。
+
+### 旧钥匙串条目的处理
+
+本轮**不实现自动删除**，也不提供批量清理按钮：`keychain:` 条目是回滚与排查的唯一依据，
+而且删错一次就无法恢复。面板明确显示"原始钥匙串条目不会删除"。
+未来若加清理，必须先满足：用户单独触发 + 二次确认 + 迁移已核验 + 当前无引用 + 摘要校验 + 逐条结果。
+
+### 面板补齐的状态
+
+`设置 → 旧凭据迁移` 现在常态显示：仍在钥匙串 / 已是本地 JSON / **已迁移（有迁移记录）** /
+由 Magpie 管理 / **借用授权仍指向钥匙串（可重新关联）** / 引用异常 / 可回滚 / **最近核验**
+（正常·异常·待重新关联·待迁移·孤儿文件·坏文件·待清理）。"已迁移"只认 `credential_migrations` 记录数，
+不能拿"本地 JSON 条数"代替 —— 那里面还有 CRED-3 之后原生新建的授权。
+
+核验（`credentials.migration.verify`）的计数也拆开了：`keychain:` 引用分三种 ——
+待迁移（自有授权）、待重新关联（借用授权）、由 Magpie 管理（Qoder 只有借用关联）。
+修前统统算 `pendingKeychain`，用户看到的是"还有 N 条在钥匙串"，其实只有一部分需要动手。
+
+### 验证
+
+| 项 | 手段 |
+| --- | --- |
+| 借用授权单独归档、不算可迁移/已管理、不给令牌 | `a_legacy_magpie_row_is_needs_relink_not_migratable_nor_managed` |
+| 重新关联只改引用、不产生明文文件、旧键保留 | `migration_relink_repoints_a_borrowed_row_without_copying_any_token` |
+| 启用 JSON 后不再回退旧别名键 | `read_access_stops_falling_back_to_the_legacy_alias_once_json_storage_is_on` |
+| 纯 v2 老库仍能回退（兼容） | `read_access_keeps_the_legacy_alias_fallback_for_a_pure_v2_database` |
+| 面板解析 `needs_relink` / `migratedRecords` | `CredentialMigrationModelsTests.testNeedsRelinkIsItsOwnStateWithAnAction` |
 
 ## 9. 风险
 

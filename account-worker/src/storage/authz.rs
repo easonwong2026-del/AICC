@@ -643,6 +643,34 @@ impl super::Db {
         Ok(out)
     }
 
+    /// 有迁移记录的条数（含之后被重新授权、记录已不再描述当前行的）。
+    ///
+    /// 这是界面上"已迁移 N 条"的**唯一**来源：不能拿"本地 JSON 条数"代替，
+    /// 那里面还有 CRED-3 之后原生新建的授权，本来就不是迁移来的。
+    pub fn credential_migration_record_count(&self) -> RpcResult<i64> {
+        let count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM credential_migrations", [], |row| {
+                    row.get(0)
+                })?;
+        Ok(count)
+    }
+
+    /// 库里是否已经存在**非钥匙串**引用（v20 之后的 JSON / 动态关联）。
+    ///
+    /// 这是"这台机器是否已经进入 v3 存储时代"的判据。只要出现过一条，
+    /// 无授权行的账号就**不再**回退读旧别名键 —— 那种回退会让后台任务在
+    /// 用户以为已经免弹窗的情况下再去敲钥匙串。
+    pub fn has_non_keychain_authorizations(&self) -> RpcResult<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM account_authorizations
+              WHERE access_ref LIKE 'localjson:v1:%' OR access_ref LIKE 'magpie:v1:%'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     /// 还没走 Magpie 动态关联的借用授权（v20 重新关联的输入）。
     pub fn authorizations_pending_magpie_relink(&self) -> RpcResult<Vec<AuthorizationRecord>> {
         // 判据是**引用**，不是列：列可能因为人工 SQL / 旧版本写入而漂移。

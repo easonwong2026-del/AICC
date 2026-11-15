@@ -112,6 +112,61 @@ final class CredentialMigrationModelsTests: XCTestCase {
         XCTAssertNil(CredentialVerifyReport.parse(["broken": 0]))
     }
 
+    /// CRED-5：借用授权还指着钥匙串时，后端给 `needs_relink` + `action: relink`。
+    ///
+    /// 面板必须把它当成"可修复"，既不能显示成"由 Magpie 管理"（会让用户以为已经好了），
+    /// 也不能算进"可迁移"（那会把 Magpie 的令牌复制成明文文件）。
+    func testNeedsRelinkIsItsOwnStateWithAnAction() throws {
+        let state = try XCTUnwrap(CredentialMigrationState.parse([
+            "summary": [
+                "migratable": 0,
+                "alreadyJson": 0,
+                "magpie": 0,
+                "needsRelink": 2,
+                "blocked": 0,
+                "rollbackable": 0,
+                "total": 2,
+            ],
+            "migratedRecords": 3,
+            "items": [
+                [
+                    "domain": "workbuddy",
+                    "accountId": "acc-1",
+                    "source": "magpie",
+                    "storage": "keychain",
+                    "migratable": false,
+                    "blocked": "needs_relink",
+                    "action": "relink",
+                ]
+            ],
+        ]))
+
+        XCTAssertEqual(state.summary.needsRelink, 2)
+        XCTAssertEqual(state.migratedRecords, 3)
+        XCTAssertTrue(state.summary.needsAttention, "需要重新关联时面板必须提示")
+        XCTAssertEqual(state.items[0].action, "relink")
+        XCTAssertEqual(state.items[0].blockedText, "借用授权仍指向钥匙串，需重新关联")
+        XCTAssertFalse(state.items[0].migratable)
+    }
+
+    /// 已迁移条数与"本地 JSON 条数"不是一个数：前者只认迁移记录。
+    func testMissingNeedsRelinkDefaultsToZeroForOlderWorkers() throws {
+        let state = try XCTUnwrap(CredentialMigrationState.parse([
+            "summary": [
+                "migratable": 1,
+                "alreadyJson": 0,
+                "magpie": 0,
+                "blocked": 0,
+                "rollbackable": 0,
+                "total": 1,
+            ],
+            "items": [],
+        ]))
+        XCTAssertEqual(state.summary.needsRelink, 0, "老助手不返回这个字段")
+        XCTAssertEqual(state.migratedRecords, 0)
+        XCTAssertEqual(state.items.count, 0)
+    }
+
     /// 回滚后副本没删掉：要能被看见，但不算"有故障"（记录还在，下次回滚会重试）。
     func testVerifyReportsPendingCleanupWithoutCallingItBroken() throws {
         let report = try XCTUnwrap(CredentialVerifyReport.parse([
@@ -124,5 +179,23 @@ final class CredentialMigrationModelsTests: XCTestCase {
         ]))
         XCTAssertEqual(report.pendingCleanup, 1)
         XCTAssertFalse(report.hasProblems, "可重试的清理不该让面板标红")
+    }
+
+    /// CRED-5：核验也把"待重新关联"和"待迁移"分开计数。
+    ///
+    /// 混在一起会让用户看到"还有 7 条在钥匙串"，其实只有一部分需要迁移，
+    /// 另一部分是借用授权（只该重新关联）。
+    func testVerifySeparatesNeedsRelinkFromPendingMigration() throws {
+        let report = try XCTUnwrap(CredentialVerifyReport.parse([
+            "ok": 3,
+            "broken": 0,
+            "pendingKeychain": 1,
+            "needsRelink": 4,
+            "orphans": [],
+            "brokenFiles": 0,
+        ]))
+        XCTAssertEqual(report.needsRelink, 4)
+        XCTAssertEqual(report.pendingKeychain, 1)
+        XCTAssertFalse(report.hasProblems, "待关联不是故障")
     }
 }
