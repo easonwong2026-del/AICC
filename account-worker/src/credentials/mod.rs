@@ -17,6 +17,7 @@
 //! 挡不住同一个 macOS 用户权限下的恶意程序。建议开启 FileVault，并且不要把
 //! `secrets/` 放进云同步或未加密备份。
 
+pub mod gate;
 pub mod localjson;
 pub mod reference;
 

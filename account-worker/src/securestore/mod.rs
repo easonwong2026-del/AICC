@@ -451,6 +451,23 @@ pub fn fingerprint(secret: &[u8]) -> String {
         .collect()
 }
 
+/// 完整摘要（SHA-256，64 位十六进制）：用来判定"还是不是**那一份**令牌"。
+///
+/// 与 [`fingerprint`] 的区别是用途，不是口味：
+///
+/// * `fingerprint` 只回答"这两份是同一条吗"，8 位十六进制够用，还短；
+/// * 回滚依据要回答"这份凭据有没有被换过"，错了的代价是把一句已经失效的旧令牌
+///   当成有效令牌写回授权行。这种判定必须用全部 256 位（CRED-4 复审 P0-C）。
+pub fn digest(secret: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(secret);
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 #[cfg(target_os = "macos")]
 mod platform {
     use super::{SecretError, SecretErrorKind};

@@ -121,14 +121,17 @@ pub fn keychain_reference(account_id: &str, source: &str) -> String {
 /// 所以钥匙串的写入、读-比-删、以及回滚都必须持同一把锁 —— 这里直接复用凭据目录的
 /// `.lock`，JSON 写入与钥匙串写入因此在同一把锁上排队。
 struct KeychainLock {
-    _lock: crate::credentials::localjson::FileLock,
+    _gate: crate::credentials::gate::CredentialGate,
 }
 
+/// 钥匙串操作也走**同一道门**（进程内互斥 + 跨进程 flock）。
+///
+/// 之前这里只取文件锁：单进程内它与 `auth_write_guard` 是两把锁，WorkBuddy 的
+/// 登录/刷新可以在这段"读-比-删"中间写进整组新令牌（第七轮复审 P0-2）。
 fn keychain_lock(app: &App) -> Result<KeychainLock, CredentialError> {
-    let store = LocalJsonStore::for_paths(&app.paths);
-    Ok(KeychainLock {
-        _lock: store.lock_exclusive()?,
-    })
+    crate::credentials::gate::begin(app)
+        .map(|gate| KeychainLock { _gate: gate })
+        .map_err(|err| CredentialError::new(CredentialErrorKind::LockTimeout, err.message))
 }
 
 /// 一次**凭据事务**：同一来源的「读观察 → 写凭据 → 数据库条件提交 → 失败清理」
@@ -155,23 +158,19 @@ fn keychain_lock(app: &App) -> Result<KeychainLock, CredentialError> {
 /// 只允许 `.lock` → SQLite。持锁期间**不做**任何会反向取锁的事；`LocalJsonStore`
 /// 的每个方法会重入同一把锁（`FileLock` 支持同线程重入），不会自我阻塞。
 ///
-/// ## 读路径为什么不进来
-///
-/// `credits::resolve_token` 只读令牌、不写任何状态，而写入顺序永远是
-/// "先写凭据、后提交行"，所以它读到的最坏情况是**上一版令牌**，不会读到半份
-/// （钥匙串的 access/refresh 是两份值，但请求只需要 access）。让它也排队只会
-/// 把一次网络请求压到凭据写入后面，没有收益。
+/// 第七轮复审 P0-2 之后，这把锁不再只是 Qoder 的：它由
+/// [`crate::credentials::gate`] 统一提供（进程内互斥 + 跨进程 flock，顺序固定），
+/// WorkBuddy 的登录 / 刷新 / 删除 / 迁移走同一道门 —— 否则"迁移读到 access 之后、
+/// 读到 refresh 之前，另一个进程写进整组新令牌"会造出一份 access/refresh 混搭的副本。
 pub struct SecretTxn {
-    _lock: crate::credentials::localjson::FileLock,
+    _gate: crate::credentials::gate::CredentialGate,
 }
 
 /// 开始一次凭据事务。**调用方必须把它持有到提交/回滚都结束。**
 pub fn begin(app: &App) -> RpcResult<SecretTxn> {
-    let store = LocalJsonStore::for_paths(&app.paths);
-    let lock = store
-        .lock_exclusive()
-        .map_err(|err| to_rpc(err, "qoder/lock"))?;
-    Ok(SecretTxn { _lock: lock })
+    Ok(SecretTxn {
+        _gate: crate::credentials::gate::begin(app)?,
+    })
 }
 
 /// 这一行现在把凭据放在哪里。
@@ -564,6 +563,84 @@ pub fn write(
     }
 
     write_json_new(app, account, source, access, refresh, expires_at)
+}
+
+/// 迁移复制的结果：副本本身 + **同一份字节**的完整摘要。
+///
+/// 复审 P0-C 的根因是摘要来自"第二次读钥匙串"，而且读失败会被当成 `None`：
+///
+/// * 两次读之间令牌被刷新过 → 摘要描述的是另一份令牌，回滚校验从此失效；
+/// * 读失败吞成 `None` → 一条**没有**指纹的迁移记录，回滚直接跳过一致性校验。
+///
+/// 所以摘要必须与写进文件的值同源，而且失败就是失败。
+pub struct KeychainCopy {
+    pub write: QoderWrite,
+    pub access_digest: String,
+    pub refresh_digest: Option<String>,
+}
+
+/// 迁移专用（CRED-4）：把钥匙串里的**整组值复制**成一份本地 JSON，不碰数据库。
+///
+/// 与 `write` 的区别只有一个：`write` 按"这一行现在是什么"分流（老行继续写钥匙串），
+/// 而迁移是**显式**要求换存储。除此之外的归属校验、失败回滚全部相同。
+///
+/// 调用方拿到返回值后必须走一次 `commit_with_record`，把 `secret_ref` 换到新文件
+/// **并**在同一事务里写下回滚依据；提交失败要 `discard_unreferenced`。
+pub fn write_json_copy(
+    app: &App,
+    account: &QoderAccountRecord,
+    row: &QoderAuthRecord,
+) -> RpcResult<KeychainCopy> {
+    verify_keychain_ref(row, &account.id).map_err(|err| to_rpc(err, "qoder/ref"))?;
+    let keys = keychain_keys(&account.id, &row.source);
+    let primary = keys
+        .first()
+        .ok_or_else(|| RpcError::internal("这条来源没有钥匙串键"))?;
+    let bytes = app.secure.get(primary).map_err(secure_read_error)?;
+    let access_digest = crate::securestore::digest(&bytes);
+    let access = String::from_utf8(bytes).map_err(|_| {
+        CredentialError::new(CredentialErrorKind::Corrupt, "钥匙串里的令牌不是合法 UTF-8")
+    })?;
+    if access.trim().is_empty() {
+        return Err(to_rpc(
+            CredentialError::new(CredentialErrorKind::NotFound, "钥匙串里的令牌为空"),
+            "qoder/migrate",
+        ));
+    }
+    // refresh 是**可选**槽位：不存在 = 服务端没下发（合法）；但拒绝访问、IO 错误、
+    // 内容不是 UTF-8 都不能当成"没有 refresh"——那会让迁移报告成功、令牌却失去
+    // 刷新能力（审计 P0-3）。
+    let mut refresh_digest = None;
+    let refresh = match keys.get(1) {
+        None => None,
+        Some(key) => match app.secure.get(key) {
+            Ok(bytes) => {
+                refresh_digest = Some(crate::securestore::digest(&bytes));
+                Some(String::from_utf8(bytes).map_err(|_| {
+                    CredentialError::new(CredentialErrorKind::Corrupt, "refresh 不是合法 UTF-8")
+                })?)
+            }
+            Err(err) if err.kind == crate::securestore::SecretErrorKind::NotFound => None,
+            Err(err) => return Err(to_rpc(secure_read_error(err), "qoder/migrate")),
+        },
+    };
+    let expires = row
+        .token_expires_at
+        .as_deref()
+        .and_then(crate::auth::service::parse_rfc3339);
+    let write = write_json_new(
+        app,
+        account,
+        &row.source,
+        &access,
+        refresh.as_deref(),
+        expires,
+    )?;
+    Ok(KeychainCopy {
+        write,
+        access_digest,
+        refresh_digest,
+    })
 }
 
 fn write_json_new(
@@ -987,8 +1064,58 @@ pub fn commit(
     fingerprint: Option<&str>,
     expectation: &QoderAuthExpectation,
 ) -> RpcResult<Option<QoderAuthRecord>> {
+    commit_reference(
+        app,
+        account_id,
+        source,
+        write.reference(),
+        auth_status,
+        token_expires_at,
+        fingerprint,
+        expectation,
+    )
+}
+
+/// 同 [`commit`]，但直接给引用。回滚（把引用改回钥匙串）走这条：
+/// 那次操作没有"写凭据"这一步，自然也没有 `QoderWrite`。
+pub fn commit_reference(
+    app: &App,
+    account_id: &str,
+    source: &str,
+    reference: &str,
+    auth_status: &str,
+    token_expires_at: Option<&str>,
+    fingerprint: Option<&str>,
+    expectation: &QoderAuthExpectation,
+) -> RpcResult<Option<QoderAuthRecord>> {
     app.with_db(|db| {
         db.commit_qoder_authorization(
+            account_id,
+            source,
+            Some(reference),
+            auth_status,
+            token_expires_at,
+            fingerprint,
+            expectation,
+        )
+    })
+}
+
+/// CRED-4 迁移：换 `secret_ref` 与写迁移记录**同一个事务**（复审 P0-B）。
+#[allow(clippy::too_many_arguments)]
+pub fn commit_with_record(
+    app: &App,
+    account_id: &str,
+    source: &str,
+    write: &QoderWrite,
+    auth_status: &str,
+    token_expires_at: Option<&str>,
+    fingerprint: Option<&str>,
+    expectation: &QoderAuthExpectation,
+    migration: &crate::storage::authz::CredentialMigrationRecord,
+) -> RpcResult<Option<QoderAuthRecord>> {
+    app.with_db(|db| {
+        db.commit_qoder_authorization_with_record(
             account_id,
             source,
             Some(write.reference()),
@@ -996,6 +1123,35 @@ pub fn commit(
             token_expires_at,
             fingerprint,
             expectation,
+            migration,
+        )
+    })
+}
+
+/// CRED-4 回滚：把引用改回钥匙串 + 把迁移记录标记为"副本待清理"，**同一个事务**
+/// （复审 P1-E）。标记不成功就整体回滚：没有记录就不知道该删哪个副本。
+#[allow(clippy::too_many_arguments)]
+pub fn commit_reference_rolled_back(
+    app: &App,
+    account_id: &str,
+    source: &str,
+    reference: &str,
+    auth_status: &str,
+    token_expires_at: Option<&str>,
+    fingerprint: Option<&str>,
+    expectation: &QoderAuthExpectation,
+    migration_id: &str,
+) -> RpcResult<Option<QoderAuthRecord>> {
+    app.with_db(|db| {
+        db.commit_qoder_authorization_rolled_back(
+            account_id,
+            source,
+            Some(reference),
+            auth_status,
+            token_expires_at,
+            fingerprint,
+            expectation,
+            migration_id,
         )
     })
 }

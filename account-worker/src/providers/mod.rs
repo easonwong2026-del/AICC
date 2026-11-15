@@ -10,6 +10,7 @@
 //! 二者共用 `qoder_crypto`（算法）与 `qoder_identity`（身份字段提取），
 //! 但**不共用**密钥、路径与钥匙串条目。
 
+pub mod cred_migrate;
 pub mod magpie;
 pub mod qoder;
 pub mod qoder_admin;

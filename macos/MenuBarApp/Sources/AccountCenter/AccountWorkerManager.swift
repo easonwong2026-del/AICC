@@ -31,6 +31,11 @@ final class AccountWorkerManager: ObservableObject {
     /// 凭据存储现状：是否已同意明文 JSON，以及各来源各几条。
     /// 只有 `health` 会更新它 —— 那是助手自己的判断，界面不另算一份。
     @Published private(set) var credentialStorage: CredentialStoragePolicy?
+    /// CRED-4：旧钥匙串凭据的盘点结果。`nil` = 还没查过。
+    @Published private(set) var credentialMigration: CredentialMigrationState?
+    /// 最近一次迁移 / 核验 / 回滚的结论。界面直接显示这句，不自己组织措辞。
+    @Published private(set) var credentialMigrationNotice: String?
+    @Published private(set) var credentialMigrationBusy = false
 
     private var client: AccountWorkerClient?
     private var restartCount = 0
@@ -203,6 +208,124 @@ final class AccountWorkerManager: ObservableObject {
             authSettingsError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             return false
         }
+    }
+
+    // MARK: - 旧 Keychain 凭据迁移（CRED-4）
+
+    /// 刷新盘点。**只读**：不会读钥匙串里的令牌，只列引用与摘要。
+    ///
+    /// `keepNotice` 用于"操作之后顺带刷新"：那时用户要看的是刚拿到的结果，
+    /// 不能被"没有需要迁移的凭据"这类状态文案盖掉。
+    func refreshCredentialMigration(keepNotice: Bool = false) async {
+        guard let client, client.isRunning else {
+            if !keepNotice { credentialMigrationNotice = "助手未运行，无法读取凭据状态" }
+            return
+        }
+        do {
+            let result = try await client.call("credentials.migration.inventory", timeout: 10)
+            credentialMigration = CredentialMigrationState.parse(result)
+            if !keepNotice, let state = credentialMigration {
+                credentialMigrationNotice = state.summary.needsAttention
+                    ? nil
+                    : "没有需要迁移的凭据"
+            }
+        } catch {
+            if !keepNotice { credentialMigrationNotice = Self.describe(error) }
+        }
+    }
+
+    /// 迁移全部可迁移的旧钥匙串凭据。
+    ///
+    /// 助手会先做备份（库快照 + 清单，**不含令牌**），再逐条搬；原始钥匙串条目
+    /// 一个都不删，所以随时可以回滚。返回值不参与界面判断，结论看 notice。
+    func migrateCredentials() async {
+        await performMigrationAction(
+            method: "credentials.migration.run",
+            successPrefix: "已迁移"
+        ) { result in
+            let migrated = result["migrated"] as? Int ?? 0
+            let skipped = result["skipped"] as? Int ?? 0
+            let failed = result["failed"] as? Int ?? 0
+            let backup = result["backup"] as? String
+            var text = "已迁移 \(migrated) 条"
+            if skipped > 0 { text += "，跳过 \(skipped) 条（期间已被重新授权）" }
+            if failed > 0 { text += "，失败 \(failed) 条（可重新核验）" }
+            if let backup { text += "。备份：\(backup)" }
+            return text
+        }
+    }
+
+    /// 回滚：把引用改回钥匙串，并删掉本次迁移产生的副本。
+    func rollbackCredentialMigration() async {
+        await performMigrationAction(
+            method: "credentials.migration.rollback",
+            successPrefix: "已回滚"
+        ) { result in
+            let done = result["rolledBack"] as? Int ?? 0
+            let pendingCleanup = result["cleanupPending"] as? Int ?? 0
+            let skipped = result["skipped"] as? Int ?? 0
+            let failed = result["failed"] as? Int ?? 0
+            var text = "已回滚 \(done) 条"
+            if pendingCleanup > 0 {
+                text += "，\(pendingCleanup) 份副本没删掉（下次回滚会重试）"
+            }
+            if skipped > 0 { text += "，跳过 \(skipped) 条（已被重新授权）" }
+            if failed > 0 { text += "，失败 \(failed) 条" }
+            return text
+        }
+    }
+
+    /// 核验：逐条读回本地 JSON 并比对归属与指纹，同时扫描没有行引用的文件。
+    func verifyCredentials() async {
+        guard let client, client.isRunning else {
+            credentialMigrationNotice = "助手未运行，无法核验"
+            return
+        }
+        credentialMigrationBusy = true
+        defer { credentialMigrationBusy = false }
+        do {
+            let result = try await client.call("credentials.migration.verify", timeout: 30)
+            guard let report = CredentialVerifyReport.parse(result) else {
+                credentialMigrationNotice = "核验返回的数据不完整"
+                return
+            }
+            var text = "核验：\(report.ok) 条正常"
+            if report.pendingKeychain > 0 { text += "，\(report.pendingKeychain) 条仍在钥匙串" }
+            if report.broken > 0 { text += "，\(report.broken) 条异常" }
+            if report.orphanCount > 0 { text += "，\(report.orphanCount) 个未引用文件" }
+            if report.pendingCleanup > 0 {
+                text += "，\(report.pendingCleanup) 份副本待清理（下次回滚会重试）"
+            }
+            if report.brokenFiles > 0 { text += "，\(report.brokenFiles) 个文件读不出来" }
+            credentialMigrationNotice = text
+        } catch {
+            credentialMigrationNotice = Self.describe(error)
+        }
+    }
+
+    private func performMigrationAction(
+        method: String,
+        successPrefix: String,
+        summarize: ([String: Any]) -> String
+    ) async {
+        guard let client, client.isRunning else {
+            credentialMigrationNotice = "助手未运行，\(successPrefix)操作没有执行"
+            return
+        }
+        credentialMigrationBusy = true
+        defer { credentialMigrationBusy = false }
+        do {
+            let result = try await client.call(method, timeout: 60)
+            credentialMigrationNotice = summarize(result)
+            // 刷新只是更新计数，不能把刚拿到的结果盖掉。
+            await refreshCredentialMigration(keepNotice: true)
+        } catch {
+            credentialMigrationNotice = Self.describe(error)
+        }
+    }
+
+    private static func describe(_ error: Error) -> String {
+        (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
 
     /// PR2a 只读账号列表。真实数据由 Rust SQLite 返回，不修改账号或客户端凭据。

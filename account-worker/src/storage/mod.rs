@@ -297,6 +297,37 @@ CREATE TABLE IF NOT EXISTS quota_snapshots (\
 );\
 CREATE INDEX IF NOT EXISTS idx_quota_snapshots_account ON quota_snapshots (account_id, captured_at);";
 
+/// v22：CRED-4 迁移记录。
+///
+/// 它回答一个 SQL 表本身回答不了的问题：**这一行是我迁过来的，还是它本来就是
+/// JSON？** 没有这张表，"回滚"只能按"当前是 localjson"筛选，会把 CRED-3a/3b
+/// 正常登录得到的有效授权一起切回可能已经失效的旧钥匙串条目。
+///
+/// 记录里**只有引用与指纹**，没有令牌：
+///
+/// | 列 | 用途 |
+/// | --- | --- |
+/// | `original_ref` | 迁移前的钥匙串引用，回滚要回到它 |
+/// | `original_fingerprint` | 迁移时读到的 access 指纹：回滚前核对"还是那一份" |
+/// | `original_refresh_fingerprint` | 同上，refresh 槽 |
+/// | `migrated_ref` | 迁移后应该仍在用的本地文件 |
+/// | `migrated_version` | 迁移后的行版本：行被重新授权过就不能回滚 |
+const MIGRATION_V22_SQL: &str = "\
+CREATE TABLE IF NOT EXISTS credential_migrations (\
+    id                         TEXT PRIMARY KEY,\
+    domain                     TEXT NOT NULL,\
+    account_id                 TEXT NOT NULL,\
+    source                     TEXT NOT NULL,\
+    original_ref               TEXT NOT NULL,\
+    original_fingerprint       TEXT,\
+    original_refresh_fingerprint TEXT,\
+    migrated_ref               TEXT NOT NULL,\
+    migrated_version           INTEGER NOT NULL,\
+    created_at                 TEXT NOT NULL\
+);\
+CREATE INDEX IF NOT EXISTS idx_cred_migrations_account \
+    ON credential_migrations (domain, account_id);";
+
 /// 一次迁移里的一步：纯 SQL，或者需要 Rust 参与的数据迁移。
 ///
 /// v16 起的 Qoder 迁移都是 Rust 步骤：它们要先检测现状再动手，重复执行必须是
@@ -426,9 +457,22 @@ const MIGRATIONS: &[Migration] = &[
         version: 21,
         steps: &[MigrationStep::Rust(qoder_accounts::migrate_v21)],
     },
+    // v22：CRED-4 的迁移记录表（只建新表，无数据迁移）。
+    Migration {
+        version: 22,
+        steps: &[MigrationStep::Sql(MIGRATION_V22_SQL)],
+    },
+    // v23：回滚后的副本清理要留痕（CRED-4 复审 P1-E）。
+    //
+    // 之前回滚是"先删记录、再尽力删文件"：文件删失败只剩一行日志，记录已经没了，
+    // 谁也不知道哪个副本该清、该不该重试。加一列标记，删文件的成败就有地方记。
+    Migration {
+        version: 23,
+        steps: &[MigrationStep::Rust(authz::migrate_v23)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 21;
+pub const LATEST_VERSION: i64 = 23;
 
 pub struct Db {
     conn: Connection,
@@ -562,6 +606,45 @@ impl Db {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// 把当前库完整复制到 `path`（`VACUUM INTO`）。
+    ///
+    /// 用它而不是直接拷 `accounts.sqlite`：WAL 模式下还有内容没 checkpoint，
+    /// 裸拷贝会漏掉最近的事务。`VACUUM INTO` 在线进行、产出单文件、不留 WAL。
+    /// 目标必须不存在（SQLite 的硬要求，也顺便防覆盖旧备份）。
+    pub fn backup_to(&self, path: &Path) -> RpcResult<()> {
+        if path.exists() {
+            return Err(RpcError::invalid_params(format!(
+                "备份目标已存在：{}",
+                path.display()
+            )));
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        self.conn
+            .execute("VACUUM INTO ?1", params![path.to_string_lossy()])?;
+        // 备份里有授权引用与账号信息，按凭据文件的规矩收权限。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    }
+
+    /// 只读检查一个库文件（备份快照）：能打开、`integrity_check` 通过。
+    ///
+    /// 备份之后一定要跑一次：`VACUUM INTO` 失败或磁盘满时可能留下一个**能打开
+    /// 但内容不全**的文件，"有备份"和"备份可用"是两件事。
+    pub fn snapshot_is_sound(path: &Path) -> RpcResult<bool> {
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let result: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        Ok(result == "ok")
     }
 
     pub fn migrate(&mut self) -> RpcResult<i64> {
@@ -1345,8 +1428,86 @@ mod tests {
         assert_eq!(db.get_qoder_account(&a.id).unwrap().unwrap().generation, ga);
     }
 
-    /// v21：给授权行补 `auth_version`，老行从 0 起，重复执行不改写。
-    ///
+    /// v22：迁移记录表。只建表，重复执行是空操作。
+    #[test]
+    fn v22_adds_the_credential_migration_table_idempotently() {
+        let (mut db, _dir) = temp_db();
+        let record = crate::storage::authz::CredentialMigrationRecord {
+            id: "workbuddy:acc:own".to_string(),
+            domain: "workbuddy".to_string(),
+            account_id: "acc".to_string(),
+            source: "own".to_string(),
+            original_ref: "keychain:workbuddy/acc/own/access".to_string(),
+            original_fingerprint: Some("fp".to_string()),
+            original_refresh_fingerprint: None,
+            migrated_ref: "localjson:v1:abc".to_string(),
+            migrated_version: 2,
+            created_at: "2026-11-15T00:00:00Z".to_string(),
+            cleanup_pending: false,
+        };
+        db.upsert_credential_migration(&record).unwrap();
+        assert_eq!(
+            db.find_credential_migration(&record.id).unwrap(),
+            Some(record.clone())
+        );
+
+        // 退回 v21 的形状：没有这张表。
+        db.exec_raw("DROP TABLE credential_migrations;").unwrap();
+        db.conn.pragma_update(None, "user_version", 21).unwrap();
+        assert_eq!(db.migrate().unwrap(), LATEST_VERSION);
+        // 表回来了，且是空的（旧库本来就没有迁移记录）。
+        assert!(db.list_credential_migrations().unwrap().is_empty());
+        db.upsert_credential_migration(&record).unwrap();
+        assert_eq!(db.list_credential_migrations().unwrap().len(), 1);
+
+        // 回拨重跑：空操作，不报错、不清数据。
+        db.conn.pragma_update(None, "user_version", 21).unwrap();
+        db.migrate().unwrap();
+        assert_eq!(db.list_credential_migrations().unwrap().len(), 1);
+    }
+
+    /// v23：`cleanup_pending`。老记录默认 0（没有待清理副本），新值能读回，
+    /// 回拨版本号再跑一次是空操作。
+    #[test]
+    fn v23_adds_cleanup_pending_defaulting_to_zero() {
+        let (mut db, _dir) = temp_db();
+        let mut record = crate::storage::authz::CredentialMigrationRecord {
+            id: "workbuddy:acc:own".to_string(),
+            domain: "workbuddy".to_string(),
+            account_id: "acc".to_string(),
+            source: "own".to_string(),
+            original_ref: "keychain:workbuddy/acc/own/access".to_string(),
+            original_fingerprint: Some("fp".to_string()),
+            original_refresh_fingerprint: None,
+            migrated_ref: "localjson:v1:abc".to_string(),
+            migrated_version: 2,
+            created_at: "2026-11-15T00:00:00Z".to_string(),
+            cleanup_pending: false,
+        };
+        db.upsert_credential_migration(&record).unwrap();
+        assert!(
+            !db.find_credential_migration(&record.id)
+                .unwrap()
+                .unwrap()
+                .cleanup_pending
+        );
+
+        record.cleanup_pending = true;
+        db.upsert_credential_migration(&record).unwrap();
+        assert_eq!(db.pending_cleanup_migrations().unwrap().len(), 1);
+
+        // 回拨到 v22 再跑：加列幂等，数据不动。
+        db.conn.pragma_update(None, "user_version", 22).unwrap();
+        assert_eq!(db.migrate().unwrap(), LATEST_VERSION);
+        assert!(
+            db.find_credential_migration(&record.id)
+                .unwrap()
+                .unwrap()
+                .cleanup_pending
+        );
+    }
+
+    /// v21：给授权行补 `auth_version`，老行从 0 起，重复执行不改写。    ///
     /// 旧库的真实形状是"没有这一列"，所以先把列删掉再回拨版本号 —— 只清空值
     /// 会把"加列"这一步测不到。
     #[test]
