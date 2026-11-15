@@ -643,18 +643,23 @@ impl crate::storage::Db {
         Ok(changed > 0)
     }
 
-    /// 只按 `generation` 核验的状态更新。
+    /// 只按 `generation` + `secret_ref` 核验的状态更新。
     ///
     /// 用在"删号中途被打断、需要把已经清掉凭据的行标成 `missing`"这种收尾上：
-    /// 那时 `auth_epoch` 已经被我们自己推进过、也可能被并发的授权写入再推一次，
-    /// 拿 epoch 做条件永远不成立；而 `generation` 仍然能区分"还是这个账号"与
-    /// "同一个 UID 删了又建"。返回 `false` 表示账号已经不是那一代，什么都没写。
+    ///
+    /// - 不比 `auth_epoch`：它已经被我们自己推进过、也可能被并发的授权写入再推一次，
+    ///   拿旧 epoch 做条件永远不成立；
+    /// - 比 `secret_ref`：如果这一行在我们删完之后又被**同一来源重新授权**过
+    ///   （哪怕引用没换、只是覆盖写了文件），它就不是我们删掉的那一份了，不能标脏。
+    ///
+    /// 返回 `false` 表示"已经不是那一行、或已经不是那一代账号"，什么都没写。
     pub fn set_qoder_auth_status_if_generation(
         &mut self,
         account_id: &str,
         source: &str,
         auth_status: &str,
         generation: &str,
+        secret_ref: Option<&str>,
     ) -> RpcResult<bool> {
         if !AUTH_STATUSES.contains(&auth_status) {
             return Err(RpcError::invalid_params(format!(
@@ -663,10 +668,17 @@ impl crate::storage::Db {
         }
         let changed = self.conn.execute(
             "UPDATE qoder_authorizations SET auth_status = ?1, updated_at = ?2
-             WHERE account_id = ?3 AND source = ?4
+             WHERE account_id = ?3 AND source = ?4 AND secret_ref IS ?5
                AND EXISTS (SELECT 1 FROM qoder_accounts
-                           WHERE id = ?3 AND generation = ?5)",
-            params![auth_status, now_rfc3339(), account_id, source, generation],
+                           WHERE id = ?3 AND generation = ?6)",
+            params![
+                auth_status,
+                now_rfc3339(),
+                account_id,
+                source,
+                secret_ref,
+                generation
+            ],
         )?;
         Ok(changed > 0)
     }

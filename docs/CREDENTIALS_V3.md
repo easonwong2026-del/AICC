@@ -498,10 +498,20 @@ Qoder 有**两条**自有授权来源，各占 `qoder_authorizations` 的一行�
 | P1-C | `missing` 只是文案，`credits::resolve_token` 仍会选它 → 失败的删除会"生效一半" | `usable` 排除 `missing`；只有 `missing` 行时给出"上次删除没完成、已停用"的明确提示 | 手动/自动领取都不会发请求（测试断言 `claimed_ids` 为空） |
 | P1-D | 补偿性恢复只查外键，可能把旧引用写进"同 UID 删号重建"的新账号 | `restore_qoder_authorization` 增加生命周期参数，`INSERT ... WHERE EXISTS(generation)`；只比 `generation`（删行本身就会推进 epoch，比 epoch 永远不成立）；唯一键存在时直接放弃 | 身份已变化时不恢复、只留痕；绝不覆盖更新的授权 |
 
+### 第三轮复审修复（删除计划带版本）
+
+| 问题 | 修法 |
+| --- | --- |
+| 整账号删除的计划只记 `(row, kind)`，执行时用**无条件删除**。若另一进程在"读计划之后、删文件之前"对**同一来源**重新授权（覆盖写同一文件 → `revision + 1`），新令牌会被删掉；删账号行的 CAS 之后才发现 epoch 变了，令牌已经回不来 | 计划阶段就通过 `observe_for_delete` 记下每份凭据的版本（JSON `revision` / 钥匙串字节）；执行时一律走 `delete_guarded` / `delete_keychain_guarded`，版本不符（`conflict`）→ **立即停手**，返回 `credential_changed_during_delete`。`missing` 只标"这次确实删掉、且行仍指着旧引用"的来源（`set_qoder_auth_status_if_generation` 同时核验 `generation` 与 `secret_ref`） |
+
+`secretsDeleted` 的计数含义随之明确为**按来源计的凭据份数**（设备授权的 access + refresh 算一份）。
+
 ### 验证
 
 | 项 | 手段 |
 | --- | --- |
+| 同来源重登（设备授权） | `qoder_admin::tests::a_same_source_relogin_during_delete_keeps_the_new_token`（`rev 0` 计划 → 重登写 `rev 1` → 停手；新令牌可读、`revision == 1`、行仍 valid、重试删净） |
+| 同来源重登（PAT） | `..._a_same_source_pat_relogin_during_delete_keeps_the_new_pat`（设备授权已删并标 `missing`，新 PAT 保持 `valid` 且可读） |
 | P0-A 假成功 | `qoder_pat::tests::a_rewritten_secret_leaves_a_retryable_record_and_never_reports_success`（行以 `missing` 回来、Credits 拒绝使用、重试收尾） |
 | P0-B 删号竞争 | `qoder_admin::tests::a_new_authorization_during_delete_aborts_without_orphaning_it`（拒绝删除；磁盘上每份文件都有行引用；重试删净） |
 | P1-C missing | `credits::tests::a_missing_authorization_is_never_used_by_credits`（`resolve_token` 拒绝 + 领取零请求） |

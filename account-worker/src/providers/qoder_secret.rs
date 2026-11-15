@@ -652,6 +652,28 @@ pub fn delete_guarded(
     }
 }
 
+/// 按"计划时读到的值"删一个钥匙串键：值变了就拒绝，一个字节都不删。
+///
+/// 给"删账号兜底三条固定键"用：那三条键没有授权行可依，拿不到引用，但一样会
+/// 被同一来源的重新登录覆盖。用值比对做与 `delete_at_revision` 等价的守卫。
+pub fn delete_keychain_guarded(
+    app: &App,
+    key: &str,
+    expected: &[u8],
+) -> Result<bool, CredentialError> {
+    match app.secure.get(key) {
+        Ok(current) if current == expected => {}
+        Ok(_) => return Err(mismatch("钥匙串凭据在这期间被重新写过")),
+        Err(err) if err.kind == crate::securestore::SecretErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(secure_read_error(err)),
+    }
+    match app.secure.delete(key) {
+        Ok(deleted) => Ok(deleted),
+        Err(err) if err.kind == crate::securestore::SecretErrorKind::NotFound => Ok(false),
+        Err(err) => Err(secure_delete_error(err)),
+    }
+}
+
 fn secure_read_error(err: crate::securestore::SecretError) -> CredentialError {
     let kind = match err.kind {
         crate::securestore::SecretErrorKind::NotFound => CredentialErrorKind::NotFound,
@@ -676,6 +698,10 @@ fn secure_delete_error(err: crate::securestore::SecretError) -> CredentialError 
 ///
 /// 返回 `true` 表示确实删掉了一份；`false` 表示本来就没有（删除是幂等的，
 /// 重试要能收敛）。归属不符一律 `conflict`，一个字节都不删。
+///
+/// **生产路径一律走 [`delete_guarded`]**：无条件删会在"同一来源刚被重新授权"
+/// 时删掉新令牌（复审第三轮 P0）。这里保留给"已经确认没人会写"的场景与测试。
+#[allow(dead_code)]
 pub fn delete(
     app: &App,
     account: &QoderAccountRecord,

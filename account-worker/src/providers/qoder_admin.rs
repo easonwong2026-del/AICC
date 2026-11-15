@@ -62,7 +62,7 @@ pub fn secret_keys(account_id: &str) -> Vec<String> {
 pub struct Deleted {
     pub account_id: String,
     pub edition: &'static str,
-    /// 真的删掉的凭据条数（文件 + 钥匙串键）。
+    /// 真的删掉的凭据**份数**（按来源算：设备授权的 access + refresh 算一份）。
     pub secrets_deleted: usize,
     /// 本来就不存在的条数（重试时正常）。
     pub secrets_missing: usize,
@@ -89,30 +89,57 @@ impl Deleted {
     }
 }
 
-/// 清理计划：哪些文件要删、哪些钥匙串键要删、哪些来源不动。
+/// 计划里的一条自有凭据：删哪儿，以及**计划时它是什么版本**。
+///
+/// 版本必须在这里就记下来：删账号要跑"读计划 → 推进 epoch → 逐份删凭据"，
+/// 中间另一进程可能对**同一个来源**重新授权（覆盖写同一份文件，`revision + 1`）。
+/// 只有拿计划时的版本做比对，才不会把刚保存成功的新令牌删掉（复审第三轮 P0）。
+struct PlannedSecret {
+    row: QoderAuthRecord,
+    kind: CredentialKind,
+    /// 来自 JSON 文件（计数用）。
+    json: bool,
+    /// `None` = 计划时凭据就不在（幂等重试，直接算已删）。
+    guard: Option<qoder_secret::DeleteGuard>,
+}
+
+/// 一条授权行都没有的旧安装：按确定性键名兜底，并记下计划时读到的值。
+struct PlannedLegacy {
+    key: String,
+    bytes: Vec<u8>,
+}
+
+/// 清理计划：哪些凭据要删、哪些来源不动。
 ///
 /// 计划在**动手之前**就要完整算好并验完：删除是不可逆的，一旦"先删掉第一份
 /// 合法凭据、再发现第二份串号"，那次拒绝已经造成了永久损失。
 struct CleanupPlan {
-    json: Vec<(QoderAuthRecord, CredentialKind)>,
-    keychain: Vec<String>,
+    secrets: Vec<PlannedSecret>,
+    legacy: Vec<PlannedLegacy>,
     magpie_kept: usize,
 }
 
-/// 读授权快照，按引用制定计划，并**逐份预验证归属**。拒绝时一个字节都不动。
+impl CleanupPlan {
+    fn is_empty(&self) -> bool {
+        self.secrets.is_empty() && self.legacy.is_empty()
+    }
+}
+
+/// 读授权快照，按引用制定计划，并**逐份预验证归属与版本**。拒绝时一个字节都不动。
 ///
-/// 预验证的三件事：
+/// 预验证的四件事：
 ///
 /// 1. 引用能解析（magpie / 未知前缀 → 拒绝）；
 /// 2. 钥匙串引用正好指向该来源的键（指向别的账号 → 拒绝）；
-/// 3. JSON 文件能读出来、且四个归属字段与这一行一致（串号 → 拒绝）。
+/// 3. JSON 文件能读出来、且四个归属字段与这一行一致（串号 → 拒绝）；
+/// 4. 记下这一份凭据**当时**的版本（JSON `revision` / 钥匙串字节），删除时用它比对。
 ///
 /// 文件**本来就不在**不算错误：那是上一次删除留下的半途状态，删号要能收敛。
 fn plan_cleanup(app: &App, account: &QoderAccountRecord) -> RpcResult<CleanupPlan> {
     let rows = app.with_db(|db| db.list_qoder_authorizations(&account.id))?;
     let mut plan = CleanupPlan {
-        json: Vec::new(),
-        keychain: Vec::new(),
+        secrets: Vec::new(),
+        legacy: Vec::new(),
         magpie_kept: 0,
     };
 
@@ -122,45 +149,29 @@ fn plan_cleanup(app: &App, account: &QoderAccountRecord) -> RpcResult<CleanupPla
             plan.magpie_kept += 1;
             continue;
         }
-        match qoder_secret::storage_of(&row) {
-            Ok(Storage::Json) => {
-                let kind = qoder_secret::kind_of(&row.source);
-                // 预验证：读不出来 / 不是这条授权的文件 → 整次拒绝。
-                match qoder_secret::load_json(app, account, &row, kind) {
-                    Ok(_) => plan.json.push((row, kind)),
-                    Err(err) if err.kind == CredentialErrorKind::NotFound => {
-                        // 幂等重试：文件已经不在了，行照样要删。
-                        plan.json.push((row, kind));
-                    }
-                    Err(err) => {
-                        return Err(refuse(
-                            &row,
-                            &err,
-                            "凭据文件归属校验未通过，拒绝删除（已核对的凭据一份都没动）",
-                        ))
-                    }
-                }
-            }
-            Ok(Storage::Keychain) => {
-                // 引用必须正好指向这一来源的键，否则可能是别人的令牌。
-                qoder_secret::verify_keychain_ref(&row, &account.id).map_err(|err| {
-                    refuse(
-                        &row,
-                        &err,
-                        "钥匙串引用指向别的键，拒绝删除（可能删到另一个账号的令牌）",
-                    )
-                })?;
-                plan.keychain
-                    .extend(qoder_secret::keychain_keys(&account.id, &row.source));
-            }
-            Err(err) => {
-                return Err(refuse(
-                    &row,
-                    &err,
-                    "凭据引用不可用，拒绝删除（无法确认这些令牌属于这个账号）",
-                ))
-            }
-        }
+        let kind = qoder_secret::kind_of(&row.source);
+        let storage = qoder_secret::storage_of(&row).map_err(|err| {
+            refuse(
+                &row,
+                &err,
+                "凭据引用不可用，拒绝删除（无法确认这些令牌属于这个账号）",
+            )
+        })?;
+        // `observe_for_delete` 同时做三件事：验归属、读内容、记版本。
+        // 读不出来（拒绝访问 / 文件坏）一律整次拒绝 —— 没有版本就没法安全地删。
+        let guard = qoder_secret::observe_for_delete(app, account, &row, kind).map_err(|err| {
+            let what = match storage {
+                Storage::Json => "凭据文件归属校验未通过，拒绝删除（已核对的凭据一份都没动）",
+                Storage::Keychain => "钥匙串引用不可用，拒绝删除（可能删到另一个账号的令牌）",
+            };
+            refuse(&row, &err, what)
+        })?;
+        plan.secrets.push(PlannedSecret {
+            row,
+            kind,
+            json: storage == Storage::Json,
+            guard,
+        });
     }
 
     // 只有**一条授权行都没有**的账号才回退到老的确定性键名：那是本功能之前
@@ -169,9 +180,28 @@ fn plan_cleanup(app: &App, account: &QoderAccountRecord) -> RpcResult<CleanupPla
     // Magpie-only 账号同样"没有自有授权"，但它有 Magpie 行 —— 凭据归 Magpie，
     // 删除它**不能**碰钥匙串（那会平白触发一次系统授权框）。所以判据是
     // "整张表一行都没有"，不是"自有行为空"。
-    let no_rows_at_all = plan.json.is_empty() && plan.keychain.is_empty() && plan.magpie_kept == 0;
-    if no_rows_at_all {
-        plan.keychain = secret_keys(&account.id);
+    if plan.is_empty() && plan.magpie_kept == 0 {
+        for key in secret_keys(&account.id) {
+            // 读得到才进计划：这条键同样可能被"同一来源重新登录"覆盖，
+            // 删除前要拿它当时的值比对。
+            match app.secure.get(&key) {
+                Ok(bytes) => plan.legacy.push(PlannedLegacy { key, bytes }),
+                Err(err) if err.kind == SecretErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(RpcError::new(
+                        crate::rpc::E_SECURESTORE,
+                        format!(
+                            "读取旧版钥匙串凭据失败（{}）：账号未做任何改动，可重试",
+                            err.message
+                        ),
+                    )
+                    .with_data(json!({
+                        "kind": "keychain_read_failed",
+                        "stage": "qoder_accounts.delete",
+                    })))
+                }
+            }
+        }
     }
     Ok(plan)
 }
@@ -190,14 +220,18 @@ fn refuse(
 }
 
 pub fn delete(app: &App, account_id: &str) -> RpcResult<Deleted> {
-    delete_with(app, account_id, || {})
+    delete_with(app, account_id, || {}, || {})
 }
 
-/// `before_account_delete` 是测试用的确定性交错点：它在"凭据已经按计划清完"
-/// 之后、"删账号行"之前执行，用来把另一个流程的新增授权固定进这个窗口。
+/// 两个确定性交错点（测试用）：
+///
+/// * `before_secret_delete`：计划已生成、epoch 已推进，凭据还没动 —— 用来把
+///   "同一来源重新授权"固定进这个窗口；
+/// * `before_account_delete`：凭据清完、账号行未删 —— 用来把"新增另一份来源"固定进来。
 pub(crate) fn delete_with(
     app: &App,
     account_id: &str,
+    before_secret_delete: impl FnOnce(),
     before_account_delete: impl FnOnce(),
 ) -> RpcResult<Deleted> {
     let account = app
@@ -228,67 +262,116 @@ pub(crate) fn delete_with(
         });
     };
 
+    before_secret_delete();
+
     let mut secrets_deleted = 0usize;
     let mut secrets_missing = 0usize;
     let mut json_secrets = 0usize;
     let mut keychain_secrets = 0usize;
+    // 只有**这次真的删掉**凭据、且行仍指着那份旧引用的来源才允许被标成 missing。
+    let mut removed_sources: Vec<(String, Option<String>)> = Vec::new();
 
-    // ②a JSON 文件：先验归属再删；文件不在算已删。
-    for (row, kind) in &plan.json {
-        match qoder_secret::delete(app, &account, row, *kind) {
+    // 中断收尾：还原自动开关、把"凭据已删"的行标 missing、返回可重试的错误。
+    let abort = |kind: &'static str,
+                 message: String,
+                 reason: Option<&'static str>,
+                 deleted: usize,
+                 missing: usize,
+                 removed: &[(String, Option<String>)]|
+     -> RpcError {
+        app.with_db(|db| db.set_qoder_credits_auto(account_id, previous_auto))
+            .ok();
+        mark_sources_missing(app, account_id, removed, &claimed.generation);
+        RpcError::new(crate::rpc::E_SECURESTORE, message).with_data(json!({
+            "kind": kind,
+            "reason": reason,
+            "stage": "qoder_accounts.delete",
+            "deleted": deleted,
+            "missing": missing,
+        }))
+    };
+
+    // ② 逐份删凭据，**每一份都带计划时的版本**。
+    //
+    // 这是"同一来源重新授权"的防线：对方会把同一个文件覆盖成 `revision + 1`，
+    // 拿旧版本去删会被拒绝，于是这里立刻停手 —— 新令牌一个字节都不动。
+    for planned in &plan.secrets {
+        let Some(guard) = planned.guard.as_ref() else {
+            // 计划时就不在：幂等重试。
+            secrets_missing += 1;
+            continue;
+        };
+        match qoder_secret::delete_guarded(app, &account, &planned.row, planned.kind, guard) {
             Ok(true) => {
                 secrets_deleted += 1;
-                json_secrets += 1;
+                if planned.json {
+                    json_secrets += 1;
+                } else {
+                    keychain_secrets += 1;
+                }
+                removed_sources.push((planned.row.source.clone(), planned.row.secret_ref.clone()));
             }
             Ok(false) => secrets_missing += 1,
-            Err(err) => {
-                app.with_db(|db| db.set_qoder_credits_auto(account_id, previous_auto))
-                    .ok();
-                return Err(RpcError::new(
-                    crate::rpc::E_SECURESTORE,
+            // 版本变了：这份凭据在计划之后被重新写过（同一来源重新授权）。
+            // **停止删除**，不要动这份新令牌。
+            Err(err) if err.kind == CredentialErrorKind::Conflict => {
+                return Err(abort(
+                    "credential_changed_during_delete",
                     format!(
-                        "删除本地凭据文件失败：{}。账号与授权记录已保留，可重试",
+                        "账号删除期间「{}」的凭据被重新授权，已停止删除以免删掉新令牌；请重试",
+                        planned.row.source
+                    ),
+                    Some(err.kind.as_str()),
+                    secrets_deleted,
+                    secrets_missing,
+                    &removed_sources,
+                ));
+            }
+            Err(err) => {
+                return Err(abort(
+                    "secret_delete_failed",
+                    format!(
+                        "删除凭据失败（{}）：账号与授权记录已保留，可重试",
                         crate::rpc::sanitize(&err.message)
                     ),
-                )
-                .with_data(json!({
-                    "kind": "secret_delete_failed",
-                    "reason": err.kind.as_str(),
-                    "stage": "qoder_accounts.delete",
-                    "deleted": secrets_deleted,
-                    "remaining": plan.json.len() - (secrets_deleted + secrets_missing),
-                })));
+                    Some(err.kind.as_str()),
+                    secrets_deleted,
+                    secrets_missing,
+                    &removed_sources,
+                ));
             }
         }
     }
 
-    // ②b 钥匙串键。任何一条删失败都要停手并保留行，否则凭据无主。
-    for key in &plan.keychain {
-        match app.secure.delete(key) {
+    for legacy in &plan.legacy {
+        match qoder_secret::delete_keychain_guarded(app, &legacy.key, &legacy.bytes) {
             Ok(true) => {
                 secrets_deleted += 1;
                 keychain_secrets += 1;
             }
             Ok(false) => secrets_missing += 1,
-            Err(err) if err.kind == SecretErrorKind::NotFound => secrets_missing += 1,
+            Err(err) if err.kind == CredentialErrorKind::Conflict => {
+                return Err(abort(
+                    "credential_changed_during_delete",
+                    "账号删除期间旧版钥匙串凭据被重新写入，已停止删除；请重试".to_string(),
+                    Some(err.kind.as_str()),
+                    secrets_deleted,
+                    secrets_missing,
+                    &removed_sources,
+                ));
+            }
             Err(err) => {
-                // 只还原自动开关；`auth_epoch` 不回滚（它只让旧请求作废）。
-                app.with_db(|db| db.set_qoder_credits_auto(account_id, previous_auto))
-                    .ok();
-                return Err(RpcError::new(
-                    crate::rpc::E_SECURESTORE,
+                return Err(abort(
+                    "secret_delete_failed",
                     format!(
                         "删除钥匙串凭据失败（{}）：账号与授权记录已保留，可重试",
-                        err.message
+                        crate::rpc::sanitize(&err.message)
                     ),
-                )
-                .with_data(json!({
-                    "kind": "secret_delete_failed",
-                    "stage": "qoder_accounts.delete",
-                    "key": key,
-                    "deleted": secrets_deleted,
-                    "remaining": plan.keychain.len(),
-                })));
+                    Some(err.kind.as_str()),
+                    secrets_deleted,
+                    secrets_missing,
+                    &removed_sources,
+                ));
             }
         }
     }
@@ -321,7 +404,9 @@ pub(crate) fn delete_with(
         }
         // 删号期间出现了新的授权：**拒绝删除**，保留可重试的记录。
         Ok(false) => {
-            mark_planned_missing(app, &account.id, &plan, &claimed.generation);
+            app.with_db(|db| db.set_qoder_credits_auto(account_id, previous_auto))
+                .ok();
+            mark_sources_missing(app, account_id, &removed_sources, &claimed.generation);
             Err(RpcError::new(
                 crate::rpc::E_SECURESTORE,
                 "删除期间这个账号又写入了一份新授权，已停止删除以保证那份凭据不被孤立；请重试",
@@ -334,27 +419,39 @@ pub(crate) fn delete_with(
             })))
         }
         Err(err) => {
-            mark_planned_missing(app, &account.id, &plan, &claimed.generation);
+            app.with_db(|db| db.set_qoder_credits_auto(account_id, previous_auto))
+                .ok();
+            mark_sources_missing(app, account_id, &removed_sources, &claimed.generation);
             Err(err)
         }
     }
 }
 
-/// 凭据已经没了但行还在：把**计划里**的来源标成 `missing`。
+/// 把**本次确实删掉凭据**的来源标成 `missing`，按 `generation` 核验。
 ///
-/// 只动计划内的行：期间新增的那份授权不在计划里，绝不能因为一次失败的删除
-/// 被顺手标脏。`missing` 同时让 `credits::resolve_token` 不再使用它。
-fn mark_planned_missing(app: &App, account_id: &str, plan: &CleanupPlan, generation: &str) {
-    let sources: Vec<String> = plan
-        .json
-        .iter()
-        .map(|(row, _)| row.source.clone())
-        .collect();
+/// 三个约束，缺一不可：
+///
+/// 1. 只标这次删掉的来源 —— 期间新写入的授权不在列表里，绝不能标脏；
+/// 2. 只标"还是这个账号"的行 —— 同一个 UID 删了又建时不能动新账号；
+/// 3. `missing` 同时让 `credits::resolve_token` 不再使用它。
+fn mark_sources_missing(
+    app: &App,
+    account_id: &str,
+    sources: &[(String, Option<String>)],
+    generation: &str,
+) {
+    if sources.is_empty() {
+        return;
+    }
     app.with_db(|db| {
-        for source in sources {
-            // 按 `generation` 核验：同一个 UID 删了又建时，这里**不能**把新账号的
-            // 行标脏（复审 P1-D 的同一类问题）。
-            db.set_qoder_auth_status_if_generation(account_id, &source, "missing", generation)?;
+        for (source, secret_ref) in sources {
+            db.set_qoder_auth_status_if_generation(
+                account_id,
+                source,
+                "missing",
+                generation,
+                secret_ref.as_deref(),
+            )?;
         }
         Ok(())
     })
@@ -529,11 +626,12 @@ mod tests {
         assert_eq!(secrets_left(&app, &id), 3);
 
         let deleted = delete(&app, &id).unwrap();
-        assert_eq!(deleted.secrets_deleted, 3);
+        // 按**来源**计数：设备授权（access + refresh 两条键）算一份，PAT 算一份。
+        assert_eq!(deleted.secrets_deleted, 2);
         assert_eq!(deleted.secrets_missing, 0);
-        assert_eq!(deleted.keychain_secrets, 3);
+        assert_eq!(deleted.keychain_secrets, 2);
         assert_eq!(deleted.json_secrets, 0);
-        assert_eq!(secrets_left(&app, &id), 0, "三条凭据都要清掉");
+        assert_eq!(secrets_left(&app, &id), 0, "三条钥匙串键都要清掉");
 
         assert!(app
             .with_db(|db| db.get_qoder_account(&id))
@@ -633,7 +731,9 @@ mod tests {
             .expect("预置删除");
 
         let deleted = delete(&app, &id).unwrap();
-        assert_eq!(deleted.secrets_deleted + deleted.secrets_missing, 3);
+        // 少了 refresh 键不影响这一份授权被删掉：仍按来源算一份。
+        assert_eq!(deleted.secrets_deleted, 2);
+        assert_eq!(secrets_left(&app, &id), 0);
         assert!(app
             .with_db(|db| db.get_qoder_account(&id))
             .unwrap()
@@ -799,20 +899,25 @@ mod tests {
         assert_eq!(json_files(&app), 1);
 
         let pat = "qp_abcdefghijklmnopqrstuvwxyz012345";
-        let err = delete_with(&app, &id, || {
-            // 另一个窗口在这个窗口期保存了 PAT：读到推进后的生命周期，合法提交。
-            crate::providers::qoder_pat::persist(
-                &app,
-                QoderEdition::Cn,
-                pat,
-                &Identity {
-                    uid: "u-late".into(),
-                    name: None,
-                    email: None,
-                },
-            )
-            .expect("新 PAT 必须保存成功");
-        })
+        let err = delete_with(
+            &app,
+            &id,
+            || {},
+            || {
+                // 另一个窗口在这个窗口期保存了 PAT：读到推进后的生命周期，合法提交。
+                crate::providers::qoder_pat::persist(
+                    &app,
+                    QoderEdition::Cn,
+                    pat,
+                    &Identity {
+                        uid: "u-late".into(),
+                        name: None,
+                        email: None,
+                    },
+                )
+                .expect("新 PAT 必须保存成功");
+            },
+        )
         .err()
         .expect("删号期间出现新授权必须拒绝删除");
 
@@ -875,6 +980,205 @@ mod tests {
             .unwrap()
             .is_none());
         assert_eq!(json_files(&app), 0, "重试后不留文件");
+    }
+
+    /// **复审第三轮 P0 的确定性交错**：删除计划读到 `rev 0` 之后、真正删文件之前，
+    /// 另一个进程对**同一个来源**重新授权（覆盖写同一份文件 → `rev 1`）。
+    ///
+    /// 旧实现用无条件删除，会把刚保存成功的新令牌永久删掉，然后才在删账号行时
+    /// 发现 epoch 变了。现在按计划时的 `revision` 删除，版本一变就停手。
+    #[test]
+    fn a_same_source_relogin_during_delete_keeps_the_new_token() {
+        let (app, _dir) = json_only_app();
+        let saved = crate::providers::qoder_auth::persist(
+            &app,
+            QoderEdition::Cn,
+            &token("u-relogin", "dt-old"),
+        )
+        .unwrap();
+        let id = saved.account_id.clone();
+        let row = app
+            .with_db(|db| db.get_qoder_authorization(&id, SOURCE_OWN_BROWSER))
+            .unwrap()
+            .expect("设备授权行");
+        let secret_id = row
+            .secret_ref
+            .as_deref()
+            .unwrap()
+            .trim_start_matches("localjson:v1:")
+            .to_string();
+        let store = LocalJsonStore::for_paths(&app.paths);
+        assert_eq!(store.load(&secret_id).unwrap().revision, 0);
+
+        let err = delete_with(
+            &app,
+            &id,
+            || {
+                // 同一来源重新授权：覆盖写同一个文件（rev 0 → 1），并推进 epoch。
+                crate::providers::qoder_auth::persist(
+                    &app,
+                    QoderEdition::Cn,
+                    &token("u-relogin", "dt-new"),
+                )
+                .expect("重新授权必须成功");
+            },
+            || {},
+        )
+        .err()
+        .expect("凭据在删除期间被重写，必须停手");
+
+        assert_eq!(
+            err.data
+                .as_ref()
+                .and_then(|d| d.get("kind"))
+                .and_then(Value::as_str),
+            Some("credential_changed_during_delete"),
+            "{}",
+            err.message
+        );
+        assert_eq!(
+            err.data
+                .as_ref()
+                .and_then(|d| d.get("deleted"))
+                .and_then(Value::as_u64),
+            Some(0),
+            "停手时一份凭据都没删"
+        );
+
+        // 新令牌原样保留，revision 就是它写进去的那一版。
+        let after = store.load(&secret_id).expect("文件必须还在");
+        assert_eq!(after.revision, 1);
+        assert_eq!(
+            after
+                .token(crate::credentials::reference::CredentialSlot::Access)
+                .unwrap(),
+            "dt-new"
+        );
+
+        // 行仍然 valid、仍指向这份文件；读路径拿到的就是新令牌。
+        let row = app
+            .with_db(|db| db.get_qoder_authorization(&id, SOURCE_OWN_BROWSER))
+            .unwrap()
+            .expect("行必须还在");
+        assert_eq!(row.auth_status, "valid");
+        let account = app
+            .with_db(|db| db.get_qoder_account(&id))
+            .unwrap()
+            .expect("账号必须还在");
+        assert_eq!(
+            qoder_secret::read(&app, &account, &row, CredentialKind::Oauth).unwrap(),
+            "dt-new"
+        );
+
+        // 重试一次就能删干净。
+        let deleted = delete(&app, &id).unwrap();
+        assert_eq!(deleted.json_secrets, 1);
+        assert_eq!(json_files(&app), 0);
+        assert!(app
+            .with_db(|db| db.get_qoder_account(&id))
+            .unwrap()
+            .is_none());
+    }
+
+    /// 同一交错的 PAT 版本：设备授权先被删掉（它没被改），PAT 被重新保存后停手。
+    ///
+    /// 断言三件事：新 PAT 原样可读、**没有被标成 missing**、已删掉的那份才是 missing。
+    #[test]
+    fn a_same_source_pat_relogin_during_delete_keeps_the_new_pat() {
+        let (app, _dir) = json_only_app();
+        let saved = crate::providers::qoder_auth::persist(
+            &app,
+            QoderEdition::Cn,
+            &token("u-pat-race", "dt-1"),
+        )
+        .unwrap();
+        let id = saved.account_id.clone();
+        let new_pat = "qp_newnewnewnewnewnewnewnewnewnew02";
+        crate::providers::qoder_pat::persist(
+            &app,
+            QoderEdition::Cn,
+            "qp_oldoldoldoldoldoldoldoldoldold01",
+            &Identity {
+                uid: "u-pat-race".into(),
+                name: None,
+                email: None,
+            },
+        )
+        .unwrap();
+
+        let pat_row = app
+            .with_db(|db| db.get_qoder_authorization(&id, SOURCE_OWN_PAT))
+            .unwrap()
+            .expect("PAT 行");
+        let pat_secret = pat_row
+            .secret_ref
+            .as_deref()
+            .unwrap()
+            .trim_start_matches("localjson:v1:")
+            .to_string();
+
+        let err = delete_with(
+            &app,
+            &id,
+            || {
+                crate::providers::qoder_pat::persist(
+                    &app,
+                    QoderEdition::Cn,
+                    new_pat,
+                    &Identity {
+                        uid: "u-pat-race".into(),
+                        name: None,
+                        email: None,
+                    },
+                )
+                .expect("重新保存 PAT 必须成功");
+            },
+            || {},
+        )
+        .err()
+        .expect("PAT 在删除期间被重写，必须停手");
+
+        assert_eq!(
+            err.data
+                .as_ref()
+                .and_then(|d| d.get("kind"))
+                .and_then(Value::as_str),
+            Some("credential_changed_during_delete"),
+            "{}",
+            err.message
+        );
+
+        let store = LocalJsonStore::for_paths(&app.paths);
+        let secret = store.load(&pat_secret).expect("新 PAT 的文件必须还在");
+        assert_eq!(
+            secret
+                .token(crate::credentials::reference::CredentialSlot::Access)
+                .unwrap(),
+            new_pat
+        );
+
+        let rows = app.with_db(|db| db.list_qoder_authorizations(&id)).unwrap();
+        let pat = rows
+            .iter()
+            .find(|row| row.source == SOURCE_OWN_PAT)
+            .expect("PAT 行");
+        assert_eq!(pat.auth_status, "valid", "赢家的行不许被标脏");
+        let account = app
+            .with_db(|db| db.get_qoder_account(&id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            crate::providers::qoder_pat::read_secret(&app, &account, pat).unwrap(),
+            new_pat
+        );
+
+        // 设备授权那份确实被删掉了，所以它才是 missing（不会被 Credits 使用）。
+        let browser = rows
+            .iter()
+            .find(|row| row.source == SOURCE_OWN_BROWSER)
+            .expect("设备授权行");
+        assert_eq!(browser.auth_status, "missing");
+        assert_eq!(json_files(&app), 1, "只剩新 PAT 那一份");
     }
 
     /// 引用指向别的账号的键：**拒绝删除**，账号与凭据都留着。
