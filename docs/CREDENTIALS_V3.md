@@ -474,11 +474,30 @@ Qoder 有**两条**自有授权来源，各占 `qoder_authorizations` 的一行�
 3. **PAT 不刷新**：401 只能提示用户重新生成；AICC 没有轮换它的能力。
 4. **一个账号一份凭据一个文件**：不接受"一份文件装多平台"，换账号必须新建。
 
+### 复审修复（P0-1 ~ P0-4）
+
+首轮验收提出四项并发 / 删除缺陷，均已在本期修复，**没有新增 SQLite 列**。
+
+| 编号 | 问题 | 修法 | 错误时的副作用 |
+| --- | --- | --- | --- |
+| P0-1 | 登录写凭据时**重读**授权行，两次观察可能不同：输家把赢家的文件当成"自己的"覆盖写，随后提交撞唯一键报冲突 —— 赢家行还 `valid`，令牌已被改写 | `qoder_secret::Observation`：登录流程只调用一次 `observe()`，"写哪里"与"怎么提交"来自同一份快照；`write()` 不再自己查库 | 输家只可能**新建**一个文件；提交失败后仅在"没有任何行引用"时删掉它，赢家的文件与 `revision` 一字未动 |
+| P0-2 | `Absent` 预期不带生命周期：账号删号重建后 `account_id` 相同、`generation` 变了，旧登录仍能 INSERT | `Absent { lifecycle }` + `INSERT ... SELECT ... WHERE EXISTS(generation, auth_epoch)`；`Ok(0)` 一律当竞争失败（**不能**把 `Ok(_)` 当成功，SQLite 的 `WHERE` 不成立只插 0 行） | 旧登录被拒，新账号里不会出现旧会话的授权，`auth_epoch` 也不会被推进 |
+| P0-3 | 删号计划只在 scheme 层判断，串号要等逐份删除时才发现；Magpie-only 账号还会走"三条固定键"兜底去碰钥匙串 | 计划阶段就 `load_json` 逐份校验四个归属字段（`NotFound` 视为可重试）；兜底条件收紧为"授权表**一行都没有**" | 任一份校验失败 → 整次拒绝：合法凭据内容与 `revision` 不变、自动领取开关与生命周期不变、账号与行都在 |
+| P0-4 | 单独移除 PAT 先删凭据、再无核验删行：并发保存新 PAT 后，旧移除会删掉新令牌 / 新行 | 顺序改为「① 观察一次 → ② 带核验删行（`secret_ref` + `generation` + `auth_epoch`）→ ③ 按版本删凭据（`delete_at_revision` / 钥匙串字节比对）→ ④ 失败时把行以 `missing` 放回」；界面拿到 `authorizationChanged` | 交错的移除**什么都不删**：新 PAT 原样可读、行还在；删凭据失败则行以 `missing` 恢复，可重试且幂等 |
+
+删除顺序的代价写在 `qoder_pat::remove` 的文档里：② 与 ③ 之间进程被强杀会留下一个
+没有行引用的文件。这是**有意**选的——宁可留一份 `0600` 的孤儿文件（可被后续核对扫到），
+也不能删掉用户刚保存的新令牌。
+
 ### 验证
 
 | 项 | 手段 |
 | --- | --- |
-| 存储分派与归属 | `providers::qoder_secret::tests`（18 条，含全拒钥匙串后端） |
+| P0-1 确定性交错 | `qoder_secret::tests::a_stale_absent_observation_never_overwrites_the_winner`（赢家令牌与 `revision` 原样可读） |
+| P0-2 生命周期 | `storage::qoder_accounts::tests::an_absent_commit_from_a_deleted_account_is_rejected`、`..._after_another_source_moved_the_epoch` |
+| P0-3 先验后删 | `qoder_admin::tests::a_foreign_secret_aborts_the_whole_delete_before_anything_is_removed`、`a_magpie_link_is_counted_but_never_deleted`（钥匙串删除全失败的后端下仍成功） |
+| P0-4 并发移除 | `qoder_pat::tests::a_remove_racing_a_new_pat_keeps_the_new_one`（钥匙串）、`..._new_json_pat_keeps_the_new_file_contents`、`removing_after_a_half_finished_delete_still_converges`、`storage::…::a_guarded_delete_refuses_a_newer_authorization` |
+| 存储分派与归属 | `providers::qoder_secret::tests`（19 条，含全拒钥匙串后端） |
 | 条件提交 | `storage::qoder_accounts::tests`（4 条，含删号重建） |
 | 读取与降级 | `credits::tests`（JSON 设备授权 / JSON PAT / 文件缺失不换来源 / 归属错配） |
 | 删除 | `providers::qoder_admin::tests`（含 JSON-only、混合、拒绝删除、失败可重试） |

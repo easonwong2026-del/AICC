@@ -348,10 +348,40 @@ impl QoderWrite {
     }
 }
 
+/// 写凭据之前的**那一次**观察：授权行 + 账号生命周期。
+///
+/// 只读一次、只信这一份，是 CRED-3b 复审 P0-1 的修法。之前的实现让 `write()`
+/// 自己再查一次授权行来决定"写哪里"，于是两次观察可以不同：
+///
+/// ```text
+/// A: 看到 own_browser 不存在 → 准备新建（Absent）
+/// B: 建好文件 F、插入 own_browser 行
+/// A: write() 重查 → 看到 Present(F) → 直接覆盖 F     ← 赢家的令牌被悄悄改写
+/// A: commit(Absent) 撞唯一键 → 报冲突                 ← 但 F 已经毁了
+/// ```
+///
+/// 现在"写哪里"和"怎么提交"来自同一次观察，落点与提交预期不可能错位。
+pub struct Observation {
+    pub row: Option<QoderAuthRecord>,
+    pub lifecycle: QoderLifecycle,
+}
+
+/// 读一次观察。行与生命周期在同一次数据库调用里取，调用方之后必须只信它。
+pub fn observe(app: &App, account_id: &str, source: &str) -> RpcResult<Observation> {
+    app.with_db(|db| {
+        let lifecycle = db
+            .qoder_lifecycle(account_id)?
+            .ok_or_else(|| RpcError::internal("账号不存在，读不到生命周期"))?;
+        let row = db.get_qoder_authorization(account_id, source)?;
+        Ok(Observation { row, lifecycle })
+    })
+}
+
 /// 写一份自有凭据（**不碰数据库**）。
 ///
-/// 调用方随后必须用 [`QoderWrite::reference`] 走一次条件提交；提交失败时按
-/// [`QoderWrite::restore`] / [`QoderWrite::discard_unreferenced`] 收尾。
+/// 落点只看 `observed`：调用方之后必须用 [`QoderWrite::reference`] 和同一份观察
+/// 走一次条件提交；提交失败时按 [`QoderWrite::restore`] /
+/// [`QoderWrite::discard_unreferenced`] 收尾。
 #[allow(clippy::too_many_arguments)]
 pub fn write(
     app: &App,
@@ -360,6 +390,7 @@ pub fn write(
     access: &str,
     refresh: Option<&str>,
     expires_at: Option<DateTime<Utc>>,
+    observed: &Observation,
 ) -> RpcResult<QoderWrite> {
     let kind = kind_of(source);
     if kind == CredentialKind::Pat && refresh.is_some() {
@@ -370,9 +401,7 @@ pub fn write(
         return Err(RpcError::invalid_params("凭据不能为空"));
     }
 
-    let existing = app.with_db(|db| db.get_qoder_authorization(&account.id, source))?;
-
-    if let Some(row) = existing.as_ref() {
+    if let Some(row) = observed.row.as_ref() {
         return match storage_of(row).map_err(|err| to_rpc(err, "qoder/ref"))? {
             // 老行继续写钥匙串：不隐式迁移，避免迁移中的账号出现半新半旧的状态。
             Storage::Keychain => {
@@ -528,6 +557,121 @@ fn rpc_secret_error(err: crate::securestore::SecretError, stage: &str) -> RpcErr
 // 删
 // ---------------------------------------------------------------------------
 
+/// 删除前的观察：**这一份凭据现在到底是什么版本**。
+///
+/// 单独删一份授权（例如移除 PAT）与"重新保存同一来源"可以重叠。先读、再删、
+/// 最后按行删，中间那段窗口里新令牌可能已经落盘 —— 不加这道校验就会删掉
+/// 刚刚保存的那一份，而授权行还显示 `valid`。
+///
+/// JSON 有 `revision`，可以和写入做真正的 CAS；钥匙串条目没有版本号，退而记录
+/// 读到的那串字节，删除前逐字节比对（同样能挡住"期间被换成新令牌"）。
+///
+/// **刻意不实现 `Debug`**：`Keychain` 分支里装的是令牌原文。
+pub enum DeleteGuard {
+    Json { secret_id: String, revision: u64 },
+    Keychain { bytes: Vec<u8> },
+}
+
+/// 读一次凭据，验归属，并记下版本。`Ok(None)` = 本来就不在（删除幂等）。
+pub fn observe_for_delete(
+    app: &App,
+    account: &QoderAccountRecord,
+    row: &QoderAuthRecord,
+    kind: CredentialKind,
+) -> Result<Option<DeleteGuard>, CredentialError> {
+    match storage_of(row)? {
+        Storage::Json => {
+            let secret = match load_json(app, account, row, kind) {
+                Ok(secret) => secret,
+                Err(err) if err.kind == CredentialErrorKind::NotFound => return Ok(None),
+                Err(err) => return Err(err),
+            };
+            Ok(Some(DeleteGuard::Json {
+                secret_id: secret.secret_id,
+                revision: secret.revision,
+            }))
+        }
+        Storage::Keychain => {
+            verify_keychain_ref(row, &account.id)?;
+            let key = keychain_primary_key(&account.id, &row.source);
+            match app.secure.get(&key) {
+                Ok(bytes) => Ok(Some(DeleteGuard::Keychain { bytes })),
+                Err(err) if err.kind == crate::securestore::SecretErrorKind::NotFound => Ok(None),
+                Err(err) => Err(secure_read_error(err)),
+            }
+        }
+    }
+}
+
+/// 只有"还是观察到的那一份"才删。版本对不上返回 `conflict`，**一个字节都不删**。
+pub fn delete_guarded(
+    app: &App,
+    account: &QoderAccountRecord,
+    row: &QoderAuthRecord,
+    kind: CredentialKind,
+    guard: &DeleteGuard,
+) -> Result<bool, CredentialError> {
+    match guard {
+        DeleteGuard::Json {
+            secret_id,
+            revision,
+        } => {
+            // 删除前再验一次归属：引用没变也可能被别人改成了另一条授权。
+            let secret = match load_json(app, account, row, kind) {
+                Ok(secret) => secret,
+                Err(err) if err.kind == CredentialErrorKind::NotFound => return Ok(false),
+                Err(err) => return Err(err),
+            };
+            if secret.secret_id != *secret_id || secret.revision != *revision {
+                return Err(mismatch("凭据在这期间被重新写过"));
+            }
+            LocalJsonStore::for_paths(&app.paths).delete_at_revision(secret_id, *revision)
+        }
+        DeleteGuard::Keychain { bytes } => {
+            verify_keychain_ref(row, &account.id)?;
+            let primary = keychain_primary_key(&account.id, &row.source);
+            match app.secure.get(&primary) {
+                Ok(current) if current == *bytes => {}
+                Ok(_) => return Err(mismatch("凭据在这期间被重新写过")),
+                Err(err) if err.kind == crate::securestore::SecretErrorKind::NotFound => {
+                    return Ok(false)
+                }
+                Err(err) => return Err(secure_read_error(err)),
+            }
+            let mut removed = false;
+            for key in keychain_keys(&account.id, &row.source) {
+                match app.secure.delete(&key) {
+                    Ok(true) => removed = true,
+                    Ok(false) => {}
+                    Err(err) if err.kind == crate::securestore::SecretErrorKind::NotFound => {}
+                    Err(err) => return Err(secure_delete_error(err)),
+                }
+            }
+            Ok(removed)
+        }
+    }
+}
+
+fn secure_read_error(err: crate::securestore::SecretError) -> CredentialError {
+    let kind = match err.kind {
+        crate::securestore::SecretErrorKind::NotFound => CredentialErrorKind::NotFound,
+        crate::securestore::SecretErrorKind::Denied => CredentialErrorKind::Denied,
+        _ => CredentialErrorKind::Io,
+    };
+    let mut out = CredentialError::new(kind, format!("读不到钥匙串凭据：{}", err.message));
+    out.os_status = err.os_status;
+    out
+}
+
+fn secure_delete_error(err: crate::securestore::SecretError) -> CredentialError {
+    let mut out = CredentialError::new(
+        CredentialErrorKind::Io,
+        format!("删除钥匙串凭据失败：{}", err.message),
+    );
+    out.os_status = err.os_status;
+    out
+}
+
 /// 删除一份自有凭据，**只在归属校验通过时动手**。
 ///
 /// 返回 `true` 表示确实删掉了一份；`false` 表示本来就没有（删除是幂等的，
@@ -577,17 +721,17 @@ pub fn delete(
 // 条件提交
 // ---------------------------------------------------------------------------
 
-/// 写凭据**之前**那一行是什么样。落库时用它做条件提交。
-pub fn expectation_of(
-    row: Option<&QoderAuthRecord>,
-    lifecycle: &QoderLifecycle,
-) -> QoderAuthExpectation {
-    match row {
+/// 把一次观察翻成条件提交的预期。**必须与 `write` 用的是同一份观察。**
+pub fn expectation_of(observed: &Observation) -> QoderAuthExpectation {
+    match &observed.row {
         Some(row) => QoderAuthExpectation::Present {
             secret_ref: row.secret_ref.clone(),
-            lifecycle: lifecycle.clone(),
+            lifecycle: observed.lifecycle.clone(),
         },
-        None => QoderAuthExpectation::Absent,
+        // 首次授权也要带上生命周期：删号重建后 epoch 归零，只有 generation 挡得住。
+        None => QoderAuthExpectation::Absent {
+            lifecycle: observed.lifecycle.clone(),
+        },
     }
 }
 
@@ -736,6 +880,10 @@ mod tests {
             .expect("生命周期")
     }
 
+    fn observation(app: &App, account_id: &str, source: &str) -> Observation {
+        observe(app, account_id, source).expect("观察")
+    }
+
     // -- 存储形态判定 ---------------------------------------------------
 
     #[test]
@@ -816,6 +964,7 @@ mod tests {
             "dt-1",
             Some("rt-1"),
             None,
+            &observation(&app, &account.id, SOURCE_OWN_BROWSER),
         )
         .unwrap();
         assert_eq!(write.storage(), Storage::Keychain);
@@ -842,6 +991,7 @@ mod tests {
             "dt-1",
             Some("rt-1"),
             None,
+            &observation(&app, &account.id, SOURCE_OWN_BROWSER),
         )
         .unwrap();
         assert_eq!(write.storage(), Storage::Json);
@@ -1013,7 +1163,16 @@ mod tests {
         let account = account(&app, "qoder_cn", "u-1");
 
         // 写文件之后才发现这一行已经被别人建好了。
-        let first = write(&app, &account, SOURCE_OWN_BROWSER, "dt-1", None, None).unwrap();
+        let first = write(
+            &app,
+            &account,
+            SOURCE_OWN_BROWSER,
+            "dt-1",
+            None,
+            None,
+            &observation(&app, &account.id, SOURCE_OWN_BROWSER),
+        )
+        .unwrap();
         assert_eq!(secret_files(&app), 1);
         app.with_db(|db| {
             db.upsert_qoder_authorization(
@@ -1035,7 +1194,9 @@ mod tests {
             "valid",
             None,
             None,
-            &QoderAuthExpectation::Absent,
+            &QoderAuthExpectation::Absent {
+                lifecycle: lifecycle(&app, &account.id),
+            },
         )
         .unwrap();
         assert!(lost.is_none(), "别人先建好了行，本次提交必须落空");
@@ -1053,7 +1214,16 @@ mod tests {
                 .unwrap();
         let account = account_of(&app, &saved.account_id);
         let before = row(&app, &account.id, SOURCE_OWN_BROWSER);
-        let overwritten = write(&app, &account, SOURCE_OWN_BROWSER, "dt-b", None, None).unwrap();
+        let overwritten = write(
+            &app,
+            &account,
+            SOURCE_OWN_BROWSER,
+            "dt-b",
+            None,
+            None,
+            &observation(&app, &account.id, SOURCE_OWN_BROWSER),
+        )
+        .unwrap();
 
         let lost = commit(
             &app,
@@ -1354,13 +1524,40 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1, "同一来源只能有一行授权");
 
-        let scan = LocalJsonStore::for_paths(&app.paths).scan().unwrap();
+        let store = LocalJsonStore::for_paths(&app.paths);
+        let scan = store.scan().unwrap();
         assert_eq!(scan.secrets.len(), 1, "不许留下没有任何行引用的令牌文件");
         assert!(scan.broken.is_empty());
         assert_eq!(
             rows[0].secret_ref.as_deref(),
             Some(format!("localjson:v1:{}", scan.secrets[0].secret_id).as_str()),
             "那一行必须指着留下的这份文件"
+        );
+
+        // 不只是"文件数量对"：文件里的令牌必须真是某个子进程写进去的，
+        // 而且与读路径拿到的一致 —— 否则可能是被交错写坏的半份内容。
+        let account = account_of(&app, &account.id);
+        let token = read(&app, &account, &rows[0], CredentialKind::Oauth).unwrap();
+        assert!(
+            token.starts_with("CHILD-TOKEN-"),
+            "令牌内容必须来自某个子进程：{token}"
+        );
+        let secret = store
+            .load(
+                rows[0]
+                    .secret_ref
+                    .as_deref()
+                    .unwrap()
+                    .trim_start_matches("localjson:v1:"),
+            )
+            .unwrap();
+        // revision 只统计"覆盖写"的次数：赢家是新建（0），后来者若走覆盖写会 +1。
+        // 4 个子进程最多再加 3 次；再多就说明有没必要的重写。
+        assert!(secret.revision <= 3, "revision={}", secret.revision);
+        assert_eq!(
+            secret.token(CredentialSlot::Access).unwrap(),
+            token,
+            "文件里的令牌与读路径必须一致"
         );
     }
 
@@ -1370,21 +1567,94 @@ mod tests {
     fn expectation_tracks_absence_and_the_observed_reference() {
         let (app, _dir) = json_app();
         let account = account(&app, "qoder_cn", "u-1");
-        let lifecycle = lifecycle(&app, &account.id);
+        let absent = observation(&app, &account.id, SOURCE_OWN_BROWSER);
         assert!(matches!(
-            expectation_of(None, &lifecycle),
-            QoderAuthExpectation::Absent
+            expectation_of(&absent),
+            QoderAuthExpectation::Absent { .. }
         ));
+        assert!(expectation_of(&absent).is_absent());
+        // 首次授权的预期也必须带生命周期（复审 P0-2）。
+        assert_eq!(expectation_of(&absent).lifecycle(), &absent.lifecycle);
 
         crate::providers::qoder_auth::persist(&app, QoderEdition::Cn, &token("u-1", "dt-1"))
             .unwrap();
         let row = row(&app, &account.id, SOURCE_OWN_BROWSER);
-        match expectation_of(Some(&row), &lifecycle) {
+        match expectation_of(&observation(&app, &account.id, SOURCE_OWN_BROWSER)) {
             QoderAuthExpectation::Present { secret_ref, .. } => {
                 assert_eq!(secret_ref, row.secret_ref)
             }
             _ => panic!("已有行必须是 Present"),
         }
+    }
+
+    /// **复审 P0-1 的确定性复现**：A 观察到 Absent、B 抢先建好行与文件之后，
+    /// A 的写入必须仍然走"新建"，**不能**被 B 的行带成"覆盖写"。
+    ///
+    /// 旧实现里 `write()` 会自己再查一次行，于是直接覆盖 B 的文件；随后 A 的
+    /// `Absent` 提交撞唯一键报冲突 —— 而 B 的令牌已经被悄悄改写，且行还是 valid。
+    #[test]
+    fn a_stale_absent_observation_never_overwrites_the_winner() {
+        let (app, _dir) = json_app();
+        let account = account(&app, "qoder_cn", "u-race");
+
+        // A：读到"没有这一行"。
+        let stale = observation(&app, &account.id, SOURCE_OWN_BROWSER);
+        assert!(stale.row.is_none());
+
+        // B：完成一次授权，建好文件与行。
+        let winner = crate::providers::qoder_auth::persist(
+            &app,
+            QoderEdition::Cn,
+            &token("u-race", "B-TOKEN"),
+        )
+        .unwrap();
+        let winner_row = row(&app, &winner.account_id, SOURCE_OWN_BROWSER);
+        let winner_ref = winner_row.secret_ref.clone().expect("引用");
+        let store = LocalJsonStore::for_paths(&app.paths);
+        let winner_secret_id = winner_ref.trim_start_matches("localjson:v1:").to_string();
+        let winner_before = store.load(&winner_secret_id).unwrap();
+
+        // A 继续写：**必须**走新建（同一次观察），而不是覆盖 B 的文件。
+        let write = write(
+            &app,
+            &account,
+            SOURCE_OWN_BROWSER,
+            "A-TOKEN",
+            None,
+            None,
+            &stale,
+        )
+        .unwrap();
+        assert_eq!(write.reference().starts_with("localjson:v1:"), true);
+        assert_ne!(write.reference(), winner_ref, "不许写到赢家的文件上");
+
+        // A 的条件提交必须落空（那一行已经存在），并清掉自己的新文件。
+        let lost = commit(
+            &app,
+            &account.id,
+            SOURCE_OWN_BROWSER,
+            &write,
+            "valid",
+            None,
+            None,
+            &expectation_of(&stale),
+        )
+        .unwrap();
+        assert!(lost.is_none(), "首次授权的预期撞上已存在的行");
+        write.discard_unreferenced(&app);
+
+        // 赢家的文件：内容与 revision 一字未动，令牌仍原样可读。
+        let after = store.load(&winner_secret_id).unwrap();
+        assert_eq!(after.revision, winner_before.revision, "revision 不许变");
+        assert_eq!(
+            after.token(CredentialSlot::Access).unwrap(),
+            "B-TOKEN",
+            "赢家令牌必须原样可读"
+        );
+        assert_eq!(secret_files(&app), 1, "只留赢家那一份");
+        let row = row(&app, &winner.account_id, SOURCE_OWN_BROWSER);
+        assert_eq!(row.secret_ref.as_deref(), Some(winner_ref.as_str()));
+        assert_eq!(row.auth_status, "valid");
     }
 
     #[test]
@@ -1398,6 +1668,7 @@ mod tests {
             "qp_abcdefghijklmnopqrstuvwxyz012345",
             Some("rt"),
             None,
+            &observation(&app, &account.id, SOURCE_OWN_PAT),
         )
         .err()
         .expect("PAT 带 refresh 必须报错");
@@ -1421,7 +1692,16 @@ mod tests {
     fn the_json_draft_uses_the_real_edition_and_the_row_id() {
         let (app, _dir) = json_app();
         let account = account(&app, "qoder_global", "u-1");
-        let write = write(&app, &account, SOURCE_OWN_BROWSER, "dt-1", None, None).unwrap();
+        let write = write(
+            &app,
+            &account,
+            SOURCE_OWN_BROWSER,
+            "dt-1",
+            None,
+            None,
+            &observation(&app, &account.id, SOURCE_OWN_BROWSER),
+        )
+        .unwrap();
         let secret_id = write.reference().trim_start_matches("localjson:v1:");
         let secret = LocalJsonStore::for_paths(&app.paths)
             .load(secret_id)

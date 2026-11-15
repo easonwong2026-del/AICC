@@ -32,7 +32,7 @@ use sha2::{Digest, Sha256};
 use crate::app::App;
 use crate::providers::qoder_edition::QoderEdition;
 use crate::providers::qoder_secret;
-use crate::rpc::{RpcError, RpcResult};
+use crate::rpc::RpcResult;
 use crate::securestore::fingerprint;
 use crate::storage::qoder_accounts::SOURCE_OWN_BROWSER;
 
@@ -607,13 +607,13 @@ pub fn persist(app: &App, edition: QoderEdition, token: &DeviceToken) -> RpcResu
         )
     })?;
 
-    // 写凭据**之前**看清这一行与账号生命周期：落库时用它们做条件提交。
-    let existing = app.with_db(|db| db.get_qoder_authorization(&account.id, SOURCE_OWN_BROWSER))?;
-    let lifecycle = match app.with_db(|db| db.qoder_lifecycle(&account.id))? {
-        Some(lifecycle) => lifecycle,
-        None => {
+    // **只观察一次**：写凭据的落点与条件提交的预期都来自这一份快照。
+    // （复审 P0-1：让 write() 自己重查一次，两次观察就会错位，输家可能覆盖赢家的令牌。）
+    let observed = match qoder_secret::observe(app, &account.id, SOURCE_OWN_BROWSER) {
+        Ok(observed) => observed,
+        Err(err) => {
             qoder_secret::cleanup_created_account(app, &account.id, created);
-            return Err(RpcError::internal("账号刚写入却读不到生命周期"));
+            return Err(err);
         }
     };
 
@@ -628,6 +628,7 @@ pub fn persist(app: &App, edition: QoderEdition, token: &DeviceToken) -> RpcResu
         &token.access_token,
         token.refresh_token.as_deref(),
         expires_utc,
+        &observed,
     ) {
         Ok(write) => write,
         Err(err) => {
@@ -637,7 +638,7 @@ pub fn persist(app: &App, edition: QoderEdition, token: &DeviceToken) -> RpcResu
     };
 
     let digest = fingerprint(token.access_token.as_bytes());
-    let expectation = qoder_secret::expectation_of(existing.as_ref(), &lifecycle);
+    let expectation = qoder_secret::expectation_of(&observed);
     let committed = qoder_secret::commit(
         app,
         &account.id,

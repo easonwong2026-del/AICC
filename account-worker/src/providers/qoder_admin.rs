@@ -40,6 +40,7 @@ use serde_json::{json, Value};
 
 use crate::app::App;
 use crate::credentials::localjson::CredentialKind;
+use crate::credentials::CredentialErrorKind;
 use crate::providers::qoder_edition::QoderEdition;
 use crate::providers::qoder_secret::{self, Storage};
 use crate::rpc::{RpcError, RpcResult};
@@ -91,13 +92,24 @@ impl Deleted {
 }
 
 /// 清理计划：哪些文件要删、哪些钥匙串键要删、哪些来源不动。
+///
+/// 计划在**动手之前**就要完整算好并验完：删除是不可逆的，一旦"先删掉第一份
+/// 合法凭据、再发现第二份串号"，那次拒绝已经造成了永久损失。
 struct CleanupPlan {
     json: Vec<(QoderAuthRecord, CredentialKind)>,
     keychain: Vec<String>,
     magpie_kept: usize,
 }
 
-/// 读授权快照，按引用制定计划。**拒绝时一个字节都不动。**
+/// 读授权快照，按引用制定计划，并**逐份预验证归属**。拒绝时一个字节都不动。
+///
+/// 预验证的三件事：
+///
+/// 1. 引用能解析（magpie / 未知前缀 → 拒绝）；
+/// 2. 钥匙串引用正好指向该来源的键（指向别的账号 → 拒绝）；
+/// 3. JSON 文件能读出来、且四个归属字段与这一行一致（串号 → 拒绝）。
+///
+/// 文件**本来就不在**不算错误：那是上一次删除留下的半途状态，删号要能收敛。
 fn plan_cleanup(app: &App, account: &QoderAccountRecord) -> RpcResult<CleanupPlan> {
     let rows = app.with_db(|db| db.list_qoder_authorizations(&account.id))?;
     let mut plan = CleanupPlan {
@@ -115,7 +127,21 @@ fn plan_cleanup(app: &App, account: &QoderAccountRecord) -> RpcResult<CleanupPla
         match qoder_secret::storage_of(&row) {
             Ok(Storage::Json) => {
                 let kind = qoder_secret::kind_of(&row.source);
-                plan.json.push((row, kind));
+                // 预验证：读不出来 / 不是这条授权的文件 → 整次拒绝。
+                match qoder_secret::load_json(app, account, &row, kind) {
+                    Ok(_) => plan.json.push((row, kind)),
+                    Err(err) if err.kind == CredentialErrorKind::NotFound => {
+                        // 幂等重试：文件已经不在了，行照样要删。
+                        plan.json.push((row, kind));
+                    }
+                    Err(err) => {
+                        return Err(refuse(
+                            &row,
+                            &err,
+                            "凭据文件归属校验未通过，拒绝删除（已核对的凭据一份都没动）",
+                        ))
+                    }
+                }
             }
             Ok(Storage::Keychain) => {
                 // 引用必须正好指向这一来源的键，否则可能是别人的令牌。
@@ -139,9 +165,14 @@ fn plan_cleanup(app: &App, account: &QoderAccountRecord) -> RpcResult<CleanupPla
         }
     }
 
-    // 一条自有授权都没有：没有任何引用可依，回退到老的确定性键名。
-    // 有自有授权的账号**不**走这里 —— 那正是"JSON-only 账号删除不碰钥匙串"的前提。
-    if plan.json.is_empty() && plan.keychain.is_empty() {
+    // 只有**一条授权行都没有**的账号才回退到老的确定性键名：那是本功能之前
+    // 装的旧版本，凭据确实在钥匙串里，而库里没有任何引用可依。
+    //
+    // Magpie-only 账号同样"没有自有授权"，但它有 Magpie 行 —— 凭据归 Magpie，
+    // 删除它**不能**碰钥匙串（那会平白触发一次系统授权框）。所以判据是
+    // "整张表一行都没有"，不是"自有行为空"。
+    let no_rows_at_all = plan.json.is_empty() && plan.keychain.is_empty() && plan.magpie_kept == 0;
+    if no_rows_at_all {
         plan.keychain = secret_keys(&account.id);
     }
     Ok(plan)
@@ -557,9 +588,13 @@ mod tests {
     }
 
     /// Magpie 关联：只登记关联，凭据归 Magpie —— 删除时不碰它的文件，也不报 `hasSecret`。
+    ///
+    /// 复审 P0-3：Magpie-only 账号**不是**"没有任何授权行"的旧安装，所以一个钥匙串
+    /// 键都不该碰。这里用"钥匙串删除全部失败"的后端做真证明：真碰了就会报错。
     #[test]
     fn a_magpie_link_is_counted_but_never_deleted() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = app_with(SecureStore::faulty(&[], &["qoder/"]));
+        app.secure.arm();
         let account = app
             .with_db(|db| db.upsert_qoder_account("qoder_cn", "u-mag", None, None))
             .unwrap();
@@ -576,10 +611,108 @@ mod tests {
         })
         .unwrap();
 
-        let deleted = delete(&app, &account.id).unwrap();
+        let deleted = delete(&app, &account.id).expect("Magpie-only 账号必须能删掉");
         assert_eq!(deleted.magpie_kept, 1);
         assert_eq!(deleted.secrets_deleted, 0);
-        assert_eq!(deleted.secrets_missing, 3, "兜底路径按缺失处理");
+        assert_eq!(deleted.secrets_missing, 0, "Magpie-only 不许访问钥匙串");
+        assert_eq!(deleted.keychain_secrets, 0);
+        assert!(app
+            .with_db(|db| db.get_qoder_account(&account.id))
+            .unwrap()
+            .is_none());
+    }
+
+    /// 复审 P0-3：**先完整验归属，再动手**。
+    ///
+    /// 两份 JSON 里第二份串到了别的授权：整次删除必须拒绝，而且第一份（合法的）
+    /// 凭据内容、revision、自动领取开关、生命周期都得原样保留。
+    #[test]
+    fn a_foreign_secret_aborts_the_whole_delete_before_anything_is_removed() {
+        let (app, _dir) = json_only_app();
+        let id = seed_json(&app);
+        assert_eq!(json_files(&app), 2);
+
+        // 把 PAT 那一行指到一份"属于别人"的文件上（authorizationId 不匹配）。
+        let store = LocalJsonStore::for_paths(&app.paths);
+        let foreign = store
+            .create(crate::credentials::localjson::SecretDraft::oauth(
+                "qz_someone_else",
+                "qoder_cn",
+                "FOREIGN",
+            ))
+            .unwrap();
+        let foreign_ref = format!("localjson:v1:{}", foreign.secret_id);
+        app.with_db(|db| {
+            db.upsert_qoder_authorization(
+                &id,
+                SOURCE_OWN_PAT,
+                None,
+                Some(&foreign_ref),
+                "valid",
+                None,
+                None,
+            )
+        })
+        .unwrap();
+
+        // 记录删除前的状态：合法凭据的字节与 revision、自动开关、生命周期。
+        let browser = app
+            .with_db(|db| db.get_qoder_authorization(&id, SOURCE_OWN_BROWSER))
+            .unwrap()
+            .expect("设备授权行");
+        let browser_secret_id = browser
+            .secret_ref
+            .as_deref()
+            .unwrap()
+            .trim_start_matches("localjson:v1:")
+            .to_string();
+        let before = store.load(&browser_secret_id).unwrap();
+        app.with_db(|db| db.set_qoder_credits_auto(&id, true))
+            .unwrap();
+        let lifecycle_before = app.with_db(|db| db.qoder_lifecycle(&id)).unwrap().unwrap();
+
+        let err = delete(&app, &id).err().expect("串号必须让整次删除失败");
+        assert_eq!(
+            err.data
+                .as_ref()
+                .and_then(|d| d.get("kind"))
+                .and_then(Value::as_str),
+            Some("credential_ref_unusable")
+        );
+
+        // 合法凭据一个字节都没动。
+        let after = store.load(&browser_secret_id).expect("第一份凭据必须还在");
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(
+            after
+                .token(crate::credentials::reference::CredentialSlot::Access)
+                .unwrap(),
+            before
+                .token(crate::credentials::reference::CredentialSlot::Access)
+                .unwrap()
+        );
+        assert!(
+            store.load(&foreign.secret_id).is_ok(),
+            "发现的串号文件也不许删"
+        );
+        assert_eq!(json_files(&app), 3, "一份都不许少");
+
+        // 账号、行、开关、生命周期全都保持原样（没有推进 epoch）。
+        assert!(app
+            .with_db(|db| db.get_qoder_account(&id))
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            app.with_db(|db| db.list_qoder_authorizations(&id))
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(app.with_db(|db| db.qoder_credits_auto(&id)).unwrap());
+        assert_eq!(
+            app.with_db(|db| db.qoder_lifecycle(&id)).unwrap().unwrap(),
+            lifecycle_before
+        );
     }
 
     /// 引用指向别的账号的键：**拒绝删除**，账号与凭据都留着。

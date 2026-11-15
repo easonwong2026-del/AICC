@@ -632,7 +632,36 @@ impl LocalJsonStore {
     pub fn delete(&self, secret_id: &str) -> Result<bool, CredentialError> {
         let _lock = self.lock()?;
         let path = self.secret_path(secret_id)?;
-        match fs::symlink_metadata(&path) {
+        self.unlink_unlocked(&path)
+    }
+
+    /// 带 `revision` 校验的删除：**只有盘上还是我看到的那一版才删**。
+    ///
+    /// 为什么需要它：删凭据和"另一个进程刚把新令牌写进同一个文件"可以重叠。
+    /// 不加这道校验就会删掉刚刚保存、并且已经被授权行引用的新令牌 —— 行还显示
+    /// `valid`，文件却没了。校验与删除在同一把跨进程锁里完成，中间没有插队窗口。
+    pub fn delete_at_revision(
+        &self,
+        secret_id: &str,
+        expected_revision: u64,
+    ) -> Result<bool, CredentialError> {
+        let _lock = self.lock()?;
+        let path = self.secret_path(secret_id)?;
+        match self.load_unlocked(secret_id) {
+            Ok(current) if current.revision == expected_revision => {}
+            Ok(current) => {
+                return Err(conflict(secret_id, expected_revision, current.revision));
+            }
+            // 文件已经不在：删除是幂等的，算成功。
+            Err(err) if err.kind == CredentialErrorKind::NotFound => return Ok(false),
+            Err(err) => return Err(err),
+        }
+        self.unlink_unlocked(&path)
+    }
+
+    /// 删文件本体：拒符号链接，删完 fsync 目录。调用方必须已持有锁。
+    fn unlink_unlocked(&self, path: &Path) -> Result<bool, CredentialError> {
+        match fs::symlink_metadata(path) {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(err) => Err(CredentialError::io(&err, "读取凭据文件失败")),
             Ok(meta) => {
@@ -642,7 +671,7 @@ impl LocalJsonStore {
                         "拒绝删除符号链接形式的凭据",
                     ));
                 }
-                fs::remove_file(&path).map_err(|e| CredentialError::io(&e, "删除凭据文件失败"))?;
+                fs::remove_file(path).map_err(|e| CredentialError::io(&e, "删除凭据文件失败"))?;
                 sync_dir(&self.root)?;
                 Ok(true)
             }
@@ -1464,6 +1493,58 @@ mod tests {
             .write(&created, 3)
             .expect_err("整份覆盖写同样要校验版本");
         assert_eq!(err.kind, CredentialErrorKind::Conflict);
+    }
+
+    /// 删除也要校验 `revision`：文件被重新写过之后，拿旧快照来删必须落空。
+    #[test]
+    fn delete_at_revision_refuses_to_remove_a_newer_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let created = store.create(draft()).expect("create");
+        let file = secret_file(&store, &created.secret_id);
+
+        let err = store
+            .delete_at_revision(&created.secret_id, 9)
+            .expect_err("版本对不上必须拒绝删除");
+        assert_eq!(err.kind, CredentialErrorKind::Conflict);
+        assert!(file.exists(), "被拒绝时文件必须还在");
+
+        // 同一份凭据被覆盖写成新令牌：旧 revision 再来删还是不许删。
+        let bumped = store
+            .replace_credentials(
+                &created.secret_id,
+                created.revision,
+                Credentials::access_only("ACCESS-NEW"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(bumped.revision, created.revision + 1);
+        assert_eq!(
+            store
+                .delete_at_revision(&created.secret_id, created.revision)
+                .unwrap_err()
+                .kind,
+            CredentialErrorKind::Conflict
+        );
+        assert_eq!(
+            store
+                .load(&created.secret_id)
+                .unwrap()
+                .token(CredentialSlot::Access)
+                .unwrap(),
+            "ACCESS-NEW",
+            "新令牌必须原样可读"
+        );
+
+        // 拿着最新版本就能删。
+        assert!(store
+            .delete_at_revision(&created.secret_id, bumped.revision)
+            .unwrap());
+        assert!(!file.exists());
+        // 删过之后再删是幂等的。
+        assert!(!store
+            .delete_at_revision(&created.secret_id, bumped.revision)
+            .unwrap());
     }
 
     /// 同一进程内的四个实例（各自独立的 fd 与文件锁）。

@@ -625,6 +625,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
             Ok(json!({
                 "removed": removed.removed,
                 "secretDeleted": removed.secret_deleted,
+                // 期间这条授权被别的流程换过：什么都没删，让界面提示刷新重试。
+                "authorizationChanged": removed.authorization_changed,
             }))
         }
 
