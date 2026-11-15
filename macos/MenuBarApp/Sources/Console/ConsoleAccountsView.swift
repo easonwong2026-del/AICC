@@ -986,8 +986,8 @@ struct ConsoleAccountsView: View {
         busyAccount = account.id
         defer { busyAccount = nil }
         do {
-            _ = try await store.worker.removeQoderPat(accountId: account.id)
-            store.showQoderNotice("已移除 PAT，其余来源保持不变")
+            let removal = try await store.worker.removeQoderPat(accountId: account.id)
+            store.showQoderNotice(removal.message)
         } catch {
             store.showQoderNotice((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
         }

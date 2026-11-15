@@ -59,6 +59,38 @@ final class QoderPatModelsTests: XCTestCase {
         XCTAssertEqual(unknown.message, "PAT 保存失败")
     }
 
+    /// CRED-3b 复审 P0-A：移除的结果有三种，**只有一种**能说"已移除"。
+    func testRemovalNeverReportsAHalfDoneDeleteAsSuccess() {
+        // 删干净
+        XCTAssertEqual(
+            QoderPatRemoval.parse(["removed": true, "secretDeleted": true]),
+            .removed
+        )
+        // 行已摘掉但凭据被并发重写：worker 会把行以 missing 放回并给这个组合。
+        // `removed` 与 `secretDeleted` 都是 false —— 绝不能当成功。
+        let pending = QoderPatRemoval.parse([
+            "removed": false,
+            "secretDeleted": false,
+            "pendingCleanup": true,
+        ])
+        XCTAssertEqual(pending, .pendingCleanup)
+        XCTAssertFalse(pending.message.contains("已移除"))
+        XCTAssertTrue(pending.message.contains("待清理"))
+        // 期间被别的窗口更新：什么都没删。
+        XCTAssertEqual(
+            QoderPatRemoval.parse([
+                "removed": false,
+                "secretDeleted": false,
+                "authorizationChanged": true,
+            ]),
+            .authorizationChanged
+        )
+        // 老助手只给 removed=true：仍然是"删掉了"。
+        XCTAssertEqual(QoderPatRemoval.parse(["removed": true]), .removed)
+        // 什么都不给：不能编一个成功。
+        XCTAssertEqual(QoderPatRemoval.parse([:]), .unknown)
+    }
+
     func testPatPageIsSiteSpecific() throws {
         XCTAssertEqual(
             try XCTUnwrap(QoderEdition.cn.patPageURL).absoluteString,

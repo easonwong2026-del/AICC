@@ -334,14 +334,16 @@ final class AccountWorkerManager: ObservableObject {
         return .failure(QoderPatFailure.parse(result))
     }
 
-    func removeQoderPat(accountId: String) async throws -> Bool {
+    /// 移除 PAT。返回值分成"删干净 / 被更新 / 没删干净"三种，
+    /// 界面不能把后两种当成功（CRED-3b 复审 P0-A）。
+    func removeQoderPat(accountId: String) async throws -> QoderPatRemoval {
         guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
         let result = try await client.call(
             "qoder.auth.pat.remove",
             params: ["accountId": accountId],
             timeout: 15
         )
-        return result["removed"] as? Bool ?? false
+        return QoderPatRemoval.parse(result)
     }
 
     // MARK: - 统一任务汇总（PR #76）

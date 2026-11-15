@@ -35,6 +35,43 @@ struct QoderPatResult: Equatable {
     }
 }
 
+/// `qoder.auth.pat.remove` 的结论（CRED-3b 复审 P0-A）。
+///
+/// **不能只看 `removed`**：worker 在"行已摘掉、凭据被并发重写"时会把行以
+/// `missing` 放回并返回 `removed: false` + `pendingCleanup: true` —— 那是"没删干净、
+/// 待重试"，不是"删掉了"。界面必须按这三种情况分别说话，绝不能一律报成功。
+enum QoderPatRemoval: Equatable {
+    /// 授权行与凭据都清了。
+    case removed
+    /// 期间这份授权被别的窗口更新过：**什么都没删**，刷新后重试。
+    case authorizationChanged
+    /// 凭据没删干净，已保留一条 `missing` 记录等待重试（Credits 不会再使用它）。
+    case pendingCleanup
+    /// 老助手不给这些字段：只能说"请求已提交"。
+    case unknown
+
+    static func parse(_ json: [String: Any]) -> QoderPatRemoval {
+        // 顺序不能反：`pendingCleanup` 与 `authorizationChanged` 都带 `removed == false`。
+        if json["pendingCleanup"] as? Bool == true { return .pendingCleanup }
+        if json["authorizationChanged"] as? Bool == true { return .authorizationChanged }
+        if json["removed"] as? Bool == true { return .removed }
+        return .unknown
+    }
+
+    var message: String {
+        switch self {
+        case .removed:
+            return "已移除 PAT，其余来源保持不变"
+        case .authorizationChanged:
+            return "这份 PAT 在移除期间被另一个窗口更新，未做任何删除；请刷新后重试"
+        case .pendingCleanup:
+            return "凭据没能删干净（已被停用、不会再被后台使用），已保留一条待清理记录；请重试移除"
+        case .unknown:
+            return "已提交移除请求，请刷新确认结果"
+        }
+    }
+}
+
 /// PAT 保存失败的类型。只有这几种，界面按类型给不同下一步。
 ///
 /// 它是 `Error` 但不是"程序出错"：这几种都是服务端的业务结论，
