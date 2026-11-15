@@ -2,7 +2,9 @@
 name = "aicc-account-worker"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+# 1.89 起 `std::fs::File::try_lock` 稳定：凭据目录的跨进程锁用它，
+# 不引入额外依赖（libc / fs2）。CI 用 stable 工具链，满足这个下限。
+rust-version = "1.89"
 description = "AICC 账号与签到辅助进程：JSON-RPC over stdin/stdout，不监听任何端口"
 license = "MIT"
 publish = false
