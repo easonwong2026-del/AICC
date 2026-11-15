@@ -1227,7 +1227,16 @@ mod tests {
 
     // -- 真实跨进程竞争 -------------------------------------------------
 
-    fn child_command(app: &App, uid: &str, token_value: &str) -> std::process::Command {
+    /// 起跑时刻：给所有子进程一个共同的"发令枪"。
+    ///
+    /// 没有它，第一个子进程往往在其余进程还没启动时就跑完了，竞争窗口根本不存在
+    /// —— 测试会一直"通过"，直到 CI 上真的撞上一次。
+    fn child_command(
+        app: &App,
+        uid: &str,
+        token_value: &str,
+        start_at_ms: i64,
+    ) -> std::process::Command {
         let exe = std::env::current_exe().expect("current_exe");
         let mut command = std::process::Command::new(exe);
         command
@@ -1239,9 +1248,27 @@ mod tests {
             .env("AICC_TEST_QODER_ROOT", &app.paths.data_dir)
             .env("AICC_TEST_QODER_UID", uid)
             .env("AICC_TEST_QODER_TOKEN", token_value)
+            .env("AICC_TEST_QODER_START_AT", start_at_ms.to_string())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         command
+    }
+
+    fn now_ms() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+    }
+
+    fn wait_for_go() {
+        let Ok(raw) = std::env::var("AICC_TEST_QODER_START_AT") else {
+            return;
+        };
+        let Ok(at) = raw.parse::<i64>() else { return };
+        while now_ms() < at {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
     }
 
     /// 子进程侧：启动一次设备授权落库。父进程用环境变量唤醒，正常跑测试时是空跑。
@@ -1254,6 +1281,7 @@ mod tests {
         let access = std::env::var("AICC_TEST_QODER_TOKEN").expect("token");
         let app = App::with_secure(paths(std::path::Path::new(&root)), SecureStore::memory());
         // 明文同意写在数据库里，父进程已经设好；子进程只读它。
+        wait_for_go();
         let token = DeviceToken {
             access_token: access,
             refresh_token: None,
@@ -1277,17 +1305,26 @@ mod tests {
         }
     }
 
-    /// 两（四）个进程同时给同一个账号做首次设备授权：**只有一个成功**，
-    /// 而且失败方不许留下"没有任何行引用的有效令牌文件"。
+    /// 四（N）个进程同时给同一个账号做首次设备授权。
+    ///
+    /// 断言的是**最终状态**，不是"几个成功"：后启动的子进程可能看到胜者刚建好的
+    /// 行，于是走"覆盖写"这条正常路径（同一份授权换了新令牌），它也是成功的。
+    /// 真正不许出现的是：
+    ///
+    /// 1. 两行授权（唯一键兜住了）；
+    /// 2. **没有任何行引用的有效令牌文件**（文件里是明文令牌，删不掉就是长期暴露）；
+    /// 3. 行指着一份不存在的文件。
     #[test]
     fn concurrent_first_grants_leave_exactly_one_secret_and_one_row() {
         let (app, _dir) = json_app();
         // 账号先建好，让竞争只发生在授权行上。
         let account = account(&app, "qoder_cn", "u-race");
 
+        // 给子进程 1.5 秒热启动，然后一起放行：竞争窗口必须真的存在。
+        let start_at = now_ms() + 1_500;
         let children: Vec<_> = (0..4)
             .map(|index| {
-                child_command(&app, "u-race", &format!("CHILD-TOKEN-{index}"))
+                child_command(&app, "u-race", &format!("CHILD-TOKEN-{index}"), start_at)
                     .spawn()
                     .expect("spawn child")
             })
@@ -1309,18 +1346,22 @@ mod tests {
                 );
             }
         }
-        assert_eq!(wins, 1, "并发首次授权必须只有一个成功");
-        assert_eq!(failures, 3);
+        assert!(wins >= 1, "至少有一个子进程要成功");
+        assert_eq!(wins + failures, 4, "每个子进程都要给出结论");
 
-        assert_eq!(
-            app.with_db(|db| db.list_qoder_authorizations(&account.id))
-                .unwrap()
-                .len(),
-            1
-        );
+        let rows = app
+            .with_db(|db| db.list_qoder_authorizations(&account.id))
+            .unwrap();
+        assert_eq!(rows.len(), 1, "同一来源只能有一行授权");
+
         let scan = LocalJsonStore::for_paths(&app.paths).scan().unwrap();
-        assert_eq!(scan.secrets.len(), 1, "失败方不许留下孤儿令牌文件");
+        assert_eq!(scan.secrets.len(), 1, "不许留下没有任何行引用的令牌文件");
         assert!(scan.broken.is_empty());
+        assert_eq!(
+            rows[0].secret_ref.as_deref(),
+            Some(format!("localjson:v1:{}", scan.secrets[0].secret_id).as_str()),
+            "那一行必须指着留下的这份文件"
+        );
     }
 
     // -- 辅助结构 -------------------------------------------------------
