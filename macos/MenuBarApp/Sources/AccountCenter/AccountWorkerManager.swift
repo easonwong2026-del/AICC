@@ -28,6 +28,9 @@ final class AccountWorkerManager: ObservableObject {
     @Published var preferredAuthSource = "magpie"
     /// 设置项读写的最近一次错误，界面上不静默。
     @Published private(set) var authSettingsError: String?
+    /// 凭据存储现状：是否已同意明文 JSON，以及各来源各几条。
+    /// 只有 `health` 会更新它 —— 那是助手自己的判断，界面不另算一份。
+    @Published private(set) var credentialStorage: CredentialStoragePolicy?
 
     private var client: AccountWorkerClient?
     private var restartCount = 0
@@ -86,6 +89,7 @@ final class AccountWorkerManager: ObservableObject {
                 return
             }
             state = .running(health)
+            credentialStorage = health.credentialStorage
             lastChecked = Date()
             restartCount = 0
         } catch {
@@ -167,6 +171,37 @@ final class AccountWorkerManager: ObservableObject {
         } catch {
             preferredAuthSource = previous
             authSettingsError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    // MARK: - 明文 JSON 的告知与开关（CRED-3-UI）
+
+    /// 记录用户对"新建授权使用明文 JSON"的选择。
+    ///
+    /// 只写设置、不做迁移：助手侧对既有账号的存储方式没有任何影响
+    /// （`write_own` 只对**还没有自有授权行**的账号生效）。
+    /// 返回是否保存成功，失败原因进 `authSettingsError`。
+    func setJSONCredentialStorage(_ enabled: Bool) async -> Bool {
+        guard let client, client.isRunning else {
+            authSettingsError = "助手未运行，设置没有保存"
+            return false
+        }
+        do {
+            _ = try await client.call(
+                "settings.set",
+                params: [
+                    "key": AccountWorkerProtocol.settingCredentialsJSONConsent,
+                    "value": enabled ? "1" : "0",
+                ],
+                timeout: 8
+            )
+            authSettingsError = nil
+            // 重新拉一次 health：开关状态与各来源条数都由助手给出，界面不自己改本地值。
+            await refresh()
+            return true
+        } catch {
+            authSettingsError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return false
         }
     }
 

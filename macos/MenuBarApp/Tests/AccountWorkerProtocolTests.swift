@@ -81,6 +81,73 @@ final class AccountWorkerProtocolTests: XCTestCase {
         XCTAssertTrue(health.summary.contains("账号 3"), "摘要要能直接放进设置页：\(health.summary)")
     }
 
+    /// 凭据存储现状来自两个字段：`credentials`（开关与告知）和 `authorizations.storage`（条数）。
+    func testHealthParsesCredentialStoragePolicy() throws {
+        let json = """
+        {
+          "status": "ok",
+          "protocol": 1,
+          "worker": {"version": "0.1.0"},
+          "upstream": {"version": "0.1.62", "commit": "x"},
+          "paths": {"dataDir": "/tmp"},
+          "database": {"ok": true, "counts": {"accounts": 2}},
+          "providers": {"workbuddy": {"state": "missing"}, "qoder": {"state": "missing"}},
+          "credentials": {
+            "jsonStorageEnabled": false,
+            "consentRequired": true,
+            "settingKey": "credentials_json_consent",
+            "risk": "本地 JSON 是明文存储"
+          },
+          "authorizations": {
+            "storage": [
+              {"kind": "magpie", "count": 4},
+              {"kind": "keychain", "count": 2},
+              {"kind": "localjson", "count": 0}
+            ]
+          }
+        }
+        """
+        let object = try XCTUnwrap(AccountWorkerJSON.decodeObject(Data(json.utf8)))
+        let health = try XCTUnwrap(AccountWorkerHealth.parse(object))
+        let policy = try XCTUnwrap(health.credentialStorage)
+
+        XCTAssertFalse(policy.jsonEnabled)
+        XCTAssertTrue(policy.consentRequired)
+        XCTAssertEqual(policy.risk, "本地 JSON 是明文存储")
+        XCTAssertEqual(policy.magpieCount, 4)
+        XCTAssertEqual(policy.keychainCount, 2)
+        XCTAssertEqual(policy.localJSONCount, 0, "count 为 0 的项不该出现在摘要里")
+        XCTAssertEqual(policy.headline, "macOS 钥匙串")
+        XCTAssertEqual(policy.summary, "钥匙串 2 · Magpie 4")
+    }
+
+    func testCredentialStorageHeadlineFollowsTheSwitch() {
+        let enabled = CredentialStoragePolicy(
+            jsonEnabled: true,
+            consentRequired: false,
+            risk: "",
+            counts: ["localjson": 3, "magpie": 1]
+        )
+        XCTAssertEqual(enabled.headline, "本地 JSON（明文）")
+        XCTAssertEqual(enabled.summary, "本地 JSON 3 · Magpie 1")
+
+        let empty = CredentialStoragePolicy(jsonEnabled: false, consentRequired: true, risk: "", counts: [:])
+        XCTAssertEqual(empty.summary, "暂无授权", "没有任何授权时不能显示成空白")
+    }
+
+    /// 老助手没有这两个字段：界面必须能区分"未提供"和"未启用"。
+    func testHealthWithoutCredentialStorageReportsNil() throws {
+        let json = """
+        {"status":"ok","protocol":1,
+         "worker":{"version":"0.1.0"},"upstream":{"version":"0.1.62","commit":"x"},
+         "paths":{"dataDir":"/tmp"},"database":{"ok":true,"counts":{"accounts":0}},
+         "providers":{"workbuddy":{"state":"missing"},"qoder":{"state":"missing"}}}
+        """
+        let object = try XCTUnwrap(AccountWorkerJSON.decodeObject(Data(json.utf8)))
+        let health = try XCTUnwrap(AccountWorkerHealth.parse(object))
+        XCTAssertNil(health.credentialStorage)
+    }
+
     func testHealthRejectsIncompatibleProtocol() throws {
         let json = """
         {"status":"ok","protocol":99,

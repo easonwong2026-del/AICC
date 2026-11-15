@@ -13,6 +13,8 @@ struct SettingsView: View {
     @State private var showRevoke = false
     @State private var widgetProviders: [String] = []
     @State private var showSelection = false
+    @State private var showCredentialRisk = false
+    @State private var confirmDisableJSON = false
     // 与主控制台共用同一个助手实例，设置页不再单独起进程。
     @ObservedObject private var accountWorker = AccountWorkerManager.shared
 
@@ -81,12 +83,6 @@ struct SettingsView: View {
                     Text(accountWorkerSummary).foregroundStyle(accountWorkerIsHealthy ? .green : .secondary)
                     Button("检查助手") { Task { await accountWorker.refresh() } }
                 }
-                HStack {
-                    Text("凭据存储")
-                    Spacer()
-                    Text(accountWorker.secureStoreSummary).foregroundStyle(.secondary)
-                    Button("测试钥匙串") { Task { await accountWorker.checkSecureStore() } }
-                }
                 Picker(
                     "首选授权",
                     selection: Binding(
@@ -108,6 +104,48 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Text("账号管理已移到主控制台（AI 账号 / 签到任务）。这里只保留助手与凭据的自检。")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("凭据存储") {
+                HStack {
+                    Text("当前方式")
+                    Spacer()
+                    Text(credentialStorageHeadline)
+                        .foregroundStyle(credentialStorageEnabled ? .orange : .secondary)
+                }
+                Text(credentialStorageSummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if credentialStorage == nil {
+                    // 老助手根本没有本地 JSON：不要显示一个永远点不动的开关。
+                    Text("这个版本的内嵌助手还没有本地 JSON 存储。更新 AICC 之后可以在这里切换。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if credentialStorageEnabled {
+                    Text("新建授权会写入本机 JSON（明文）。已有账号保持原来的存储，不会自动迁移。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("改回钥匙串…") { confirmDisableJSON = true }
+                } else {
+                    Text("新授权默认写入 macOS 钥匙串。启用本地 JSON 后，后台任务不会再因为 App 重新签名而弹出授权框。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("启用本地 JSON…") { showCredentialRisk = true }
+                        .disabled(!accountWorkerIsHealthy)
+                }
+                if credentialStorageNeedsConsent {
+                    Text("尚未确认明文存储的风险：在启用之前，AICC 不会把任何新令牌写成明文文件。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let error = accountWorker.authSettingsError {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                }
+                HStack {
+                    Text("钥匙串自检")
+                    Spacer()
+                    Text(accountWorker.secureStoreSummary).foregroundStyle(.secondary)
+                    Button("测试钥匙串") { Task { await accountWorker.checkSecureStore() } }
+                }
             }
             Section("诊断") {
                 HStack {
@@ -145,6 +183,24 @@ struct SettingsView: View {
         .onChange(of: settings.widgetCards) { _, _ in reloadWidgets() }
         .onChange(of: settings.widgetProvider) { _, _ in reloadWidgets() }
         .onChange(of: settings.widgetSelection) { _, _ in reloadWidgets() }
+        .sheet(isPresented: $showCredentialRisk) {
+            PlaintextCredentialSheet(
+                risk: credentialStorage?.risk ?? "",
+                onConfirm: { await accountWorker.setJSONCredentialStorage(true) },
+                onCancel: {}
+            )
+        }
+        .confirmationDialog(
+            "之后新建的授权会重新使用钥匙串",
+            isPresented: $confirmDisableJSON
+        ) {
+            Button("改回钥匙串") {
+                Task { _ = await accountWorker.setJSONCredentialStorage(false) }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("已经写成 JSON 的授权不受影响，继续可用；不会自动迁移回钥匙串。")
+        }
         .sheet(isPresented: $showSelection) {
             QuotaSelectionView(port: settings.magpiePort, selection: $settings.widgetSelection) { picked in
                 settings.widgetSelection = picked
@@ -167,6 +223,30 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    /// 助手给出的凭据存储现状；老助手没有这个字段时为 nil。
+    private var credentialStorage: CredentialStoragePolicy? {
+        accountWorker.credentialStorage
+    }
+
+    private var credentialStorageEnabled: Bool {
+        credentialStorage?.jsonEnabled ?? false
+    }
+
+    private var credentialStorageNeedsConsent: Bool {
+        credentialStorage?.consentRequired ?? false
+    }
+
+    private var credentialStorageHeadline: String {
+        credentialStorage?.headline ?? "未获取"
+    }
+
+    private var credentialStorageSummary: String {
+        guard let policy = credentialStorage else {
+            return "助手未报告各来源的授权数量。"
+        }
+        return policy.summary
     }
 
     private var selectionSummary: String {
