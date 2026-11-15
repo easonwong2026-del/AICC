@@ -30,8 +30,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::app::App;
-use crate::auth::service::{credential_error, Snapshot};
 use crate::providers::qoder_edition::QoderEdition;
+use crate::providers::qoder_secret;
 use crate::rpc::RpcResult;
 use crate::securestore::fingerprint;
 use crate::storage::qoder_accounts::SOURCE_OWN_BROWSER;
@@ -566,6 +566,8 @@ pub struct Persisted {
     pub token_expires_at: Option<String>,
     pub fingerprint: String,
     pub has_refresh: bool,
+    /// 这次令牌落在哪：`keychain` / `localjson`（CRED-3b）。
+    pub credential_storage: &'static str,
 }
 
 impl Persisted {
@@ -579,15 +581,29 @@ impl Persisted {
             "fingerprint": self.fingerprint,
             "hasRefresh": self.has_refresh,
             "source": SOURCE_OWN_BROWSER,
+            "credentialStorage": self.credential_storage,
         })
     }
 }
 
-/// 令牌进钥匙串、账号与授权进 SQLite。
+/// 令牌落到 `keychain:` 还是 `localjson:v1:`，按**这一行现在是什么**决定
+/// （详见 `qoder_secret` 模块顶部那张表），然后条件提交授权行。
 ///
-/// 顺序：先写钥匙串（唯一需要显式回滚的一步），再写库；库写失败就把旧凭据恢复回去，
-/// 不留"钥匙串里有令牌但没有授权行"的半套状态。
+/// 顺序：账号行 → 凭据 → 授权行。凭据是唯一需要显式回滚的一步，所以它写失败
+/// 或提交失败都要走 [`qoder_secret::QoderWrite::restore`]；提交"被别人抢了"
+/// 则只丢一个没人引用的新文件，**不撤账号行**（那可能是胜者写的）。
 pub fn persist(app: &App, edition: QoderEdition, token: &DeviceToken) -> RpcResult<Persisted> {
+    // 整个"看账号 → 观察 → 写凭据 → 条件提交 → 失败清理"在**同一个凭据事务**里。
+    // 否则另一个进程可以在其中任一步之间插进来：写成功但提交失败时，
+    // 数据库与盘上的令牌会分属两个人（审计 P0-1 / P0-2）。
+    let _txn = qoder_secret::begin(app)?;
+
+    // 现在看这是不是一行新账号：决定失败时要不要连行一起清掉。
+    // 必须在锁内判断，锁外判断会与"别人刚建了同一个账号"冲突。
+    let created = app
+        .with_db(|db| db.find_qoder_account(edition.as_str(), &token.identity.uid))?
+        .is_none();
+
     let account = app.with_db(|db| {
         db.upsert_qoder_account(
             edition.as_str(),
@@ -596,49 +612,76 @@ pub fn persist(app: &App, edition: QoderEdition, token: &DeviceToken) -> RpcResu
             token.identity.email.as_deref(),
         )
     })?;
+    // 只有"本次真的新建"才记下它的 generation：失败清理必须限定在这一代，
+    // 否则同一个 UID 删了又建时会把别人刚建的账号删掉（审计 P1-1）。
+    let created_generation = created.then(|| account.generation.clone());
 
-    let access = access_key(&account.id);
-    let refresh = refresh_key(&account.id);
-    let snapshot = Snapshot::capture(app, &[access.clone(), refresh.clone()])?;
-
-    if let Err(err) = app.secure.set(&access, token.access_token.as_bytes()) {
-        return Err(credential_error(err, "qoder/access"));
-    }
-    if let Some(value) = token.refresh_token.as_deref() {
-        if let Err(err) = app.secure.set(&refresh, value.as_bytes()) {
-            snapshot.restore(app);
-            return Err(credential_error(err, "qoder/refresh"));
+    // **只观察一次**：写凭据的落点与条件提交的预期都来自这一份快照。
+    // （复审 P0-1：让 write() 自己重查一次，两次观察就会错位，输家可能覆盖赢家的令牌。）
+    let observed = match qoder_secret::observe(app, &account.id, SOURCE_OWN_BROWSER) {
+        Ok(observed) => observed,
+        Err(err) => {
+            qoder_secret::cleanup_created_account(app, &account.id, created_generation.as_deref());
+            return Err(err);
         }
-    }
+    };
 
     let expires_at = token.expires_at_ms.and_then(ms_to_rfc3339);
-    let digest = fingerprint(token.access_token.as_bytes());
-    let authorization = app.with_db(|db| {
-        db.upsert_qoder_authorization(
-            &account.id,
-            SOURCE_OWN_BROWSER,
-            None,
-            Some(&keychain_ref(&access)),
-            "valid",
-            expires_at.as_deref(),
-            Some(&digest),
-        )
-    });
-    if let Err(err) = authorization {
-        // 授权行没写成功：钥匙串里不该留一份没人认领的令牌。
-        snapshot.restore(app);
-        return Err(err);
-    }
+    let expires_utc = expires_at
+        .as_deref()
+        .and_then(crate::auth::service::parse_rfc3339);
+    let write = match qoder_secret::write(
+        app,
+        &account,
+        SOURCE_OWN_BROWSER,
+        &token.access_token,
+        token.refresh_token.as_deref(),
+        expires_utc,
+        &observed,
+    ) {
+        Ok(write) => write,
+        Err(err) => {
+            qoder_secret::cleanup_created_account(app, &account.id, created_generation.as_deref());
+            return Err(err);
+        }
+    };
 
-    Ok(Persisted {
-        account_id: account.id,
-        edition: edition.as_str(),
-        nickname: account.nickname,
-        email: account.email,
-        token_expires_at: expires_at,
-        fingerprint: digest,
-        has_refresh: token.refresh_token.is_some(),
-    })
+    let digest = fingerprint(token.access_token.as_bytes());
+    let expectation = qoder_secret::expectation_of(&observed);
+    let committed = qoder_secret::commit(
+        app,
+        &account.id,
+        SOURCE_OWN_BROWSER,
+        &write,
+        "valid",
+        expires_at.as_deref(),
+        Some(&digest),
+        &expectation,
+    );
+
+    match committed {
+        Ok(Some(_)) => Ok(Persisted {
+            account_id: account.id,
+            edition: edition.as_str(),
+            nickname: account.nickname,
+            email: account.email,
+            token_expires_at: expires_at,
+            fingerprint: digest,
+            has_refresh: token.refresh_token.is_some(),
+            credential_storage: write.storage().as_str(),
+        }),
+        // 竞争失败：另一个进程刚改过这条授权。只清掉"这次新建、没人引用"的文件。
+        Ok(None) => {
+            write.discard_unreferenced(app);
+            Err(qoder_secret::conflict_error())
+        }
+        Err(err) => {
+            // 授权行没落下来 = 这次登录没有完成。凭据回滚，新建的账号也撤掉。
+            write.restore(app);
+            qoder_secret::cleanup_created_account(app, &account.id, created_generation.as_deref());
+            Err(err)
+        }
+    }
 }
 
 #[cfg(test)]

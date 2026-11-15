@@ -75,6 +75,10 @@ pub struct CredentialError {
     pub kind: CredentialErrorKind,
     pub message: String,
     pub os_status: Option<i32>,
+    /// 删除是否已经**部分生效**：一组凭据（例如 access + refresh）里有的删掉了、
+    /// 有的失败。调用方据此把授权行标成不可用 —— 剩下半份凭据已经发不出请求，
+    /// 继续显示 `valid` 会让用户看到"授权还在但领取一直失败"。
+    pub partial: bool,
 }
 
 impl CredentialError {
@@ -83,7 +87,14 @@ impl CredentialError {
             kind,
             message: message.into(),
             os_status: None,
+            partial: false,
         }
+    }
+
+    /// 标记"这次删除只生效了一部分"。
+    pub fn with_partial(mut self) -> Self {
+        self.partial = true;
+        self
     }
 
     pub fn with_status(mut self, status: i32) -> Self {

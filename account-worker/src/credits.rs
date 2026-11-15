@@ -21,10 +21,9 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::app::App;
-use crate::providers::qoder_auth::access_key;
 use crate::providers::qoder_credits::{self as api, CreditsError, Snapshot};
 use crate::providers::qoder_edition::QoderEdition;
-use crate::providers::qoder_pat;
+use crate::providers::qoder_secret;
 use crate::rpc::{RpcError, RpcResult};
 use crate::storage::qoder_accounts::{
     QoderAccountRecord, QoderLifecycle, SOURCE_OWN_BROWSER, SOURCE_OWN_PAT,
@@ -100,61 +99,74 @@ fn try_claim_lock(account_id: &str) -> Option<ClaimLock> {
 // 凭据
 // ---------------------------------------------------------------------------
 
-struct Resolved {
-    source: &'static str,
-    token: String,
+pub(crate) struct Resolved {
+    pub(crate) source: &'static str,
+    pub(crate) token: String,
+    /// 这次令牌是从哪读出来的：`keychain` / `localjson`。只用于诊断，不外泄。
+    storage: &'static str,
 }
 
 impl Resolved {
     fn to_json(&self) -> Value {
         json!(self.source)
     }
+
+    /// 令牌这次是从哪读出来的。只给诊断与验收用，不含任何令牌内容。
+    fn storage_json(&self) -> Value {
+        json!(self.storage)
+    }
 }
 
 /// 挑一份能用的凭据：**浏览器授权优先，PAT 兜底**。
 ///
+/// 读哪里由授权行的 `secret_ref` 决定（CRED-3b）：`localjson:v1:` 读 AICC 自己的
+/// JSON 文件、`keychain:` 读对应的钥匙串键。**读失败不换来源、不回落钥匙串** ——
+/// 那既会掩盖串号，也会让"迁移后还偶尔弹窗"重新出现。
+///
 /// 只有 Magpie 关联的账号一个请求都不发：那份令牌归 Magpie，AICC 手里没有凭据，
 /// 说"领取失败"会让人以为是权限问题，其实是"没有东西可发"。
-fn resolve_token(app: &App, account: &QoderAccountRecord) -> Result<Resolved, String> {
+pub(crate) fn resolve_token(app: &App, account: &QoderAccountRecord) -> Result<Resolved, String> {
     let rows = app
         .with_db(|db| db.list_qoder_authorizations(&account.id))
         .map_err(|err| err.message)?;
 
+    // `missing` 必须排除：那是"上一次删除/移除没做完"留下的行。凭据可能还在盘上，
+    // 但它已经被判为不可信（复审 P1-C）——继续用它等于让一次失败的删除静默生效一半。
     let usable = |source: &str| {
         rows.iter().any(|row| {
             row.source == source
-                && row.secret_ref.is_some()
                 && row.auth_status != "invalid"
                 && row.auth_status != "denied"
+                && row.auth_status != "missing"
         })
     };
 
-    if usable(SOURCE_OWN_BROWSER) {
-        let key = access_key(&account.id);
-        if let Ok(bytes) = app.secure.get(&key) {
-            if let Ok(token) = String::from_utf8(bytes) {
-                if !token.trim().is_empty() {
-                    return Ok(Resolved {
-                        source: SOURCE_OWN_BROWSER,
-                        token,
-                    });
-                }
-            }
+    for source in [SOURCE_OWN_BROWSER, SOURCE_OWN_PAT] {
+        if !usable(source) {
+            continue;
         }
-        // 授权行说有凭据、钥匙串里读不到：明确说出来，不要悄悄换 PAT。
-        return Err("浏览器授权的凭据读不到（钥匙串里没有），请重新授权".to_string());
-    }
-
-    if usable(SOURCE_OWN_PAT) {
-        match qoder_pat::read_secret(app, &account.id) {
+        let row = rows
+            .iter()
+            .find(|row| row.source == source)
+            .expect("usable 已经确认这一行存在");
+        let kind = qoder_secret::kind_of(source);
+        match qoder_secret::read(app, account, row, kind) {
             Ok(token) if !token.trim().is_empty() => {
                 return Ok(Resolved {
-                    source: SOURCE_OWN_PAT,
+                    source,
                     token,
+                    storage: qoder_secret::storage_of(row)
+                        .map(|storage| storage.as_str())
+                        .unwrap_or("unknown"),
                 })
             }
-            Ok(_) => return Err("PAT 为空，请重新保存".to_string()),
-            Err(err) => return Err(err.message),
+            Ok(_) => {
+                return Err(credential_detail(
+                    source,
+                    "凭据是空的，请重新授权或重新保存",
+                ))
+            }
+            Err(err) => return Err(describe_credential_failure(source, &err)),
         }
     }
 
@@ -163,7 +175,49 @@ fn resolve_token(app: &App, account: &QoderAccountRecord) -> Result<Resolved, St
             "这个账号只有 Magpie 关联，没有 AICC 自己的凭据；请先浏览器授权或保存 PAT".to_string(),
         );
     }
+    // 有行但全被停用：说清是"没删干净、已停用"，而不是含糊的"没有授权来源"。
+    if rows
+        .iter()
+        .any(|row| qoder_secret::is_own_source(&row.source) && row.auth_status == "missing")
+    {
+        return Err(
+            "这个账号的凭据上次删除没有完成（missing），已停用不会再使用；请重试移除或重新授权"
+                .to_string(),
+        );
+    }
     Err("还没有可用的授权来源".to_string())
+}
+
+fn credential_detail(source: &str, detail: &str) -> String {
+    let label = if source == SOURCE_OWN_PAT {
+        "PAT"
+    } else {
+        "浏览器授权"
+    };
+    format!("{label}：{detail}")
+}
+
+/// 凭据层错误 → 给人看的一句话。**保留分类**（`not_found` / `conflict` / `denied` …），
+/// 用户与日志才能分清"没凭据""串号""没权限"。
+fn describe_credential_failure(source: &str, err: &crate::credentials::CredentialError) -> String {
+    let label = if source == SOURCE_OWN_PAT {
+        "PAT"
+    } else {
+        "浏览器授权"
+    };
+    let hint = match err.kind {
+        crate::credentials::CredentialErrorKind::NotFound => "，请重新授权或重新保存",
+        crate::credentials::CredentialErrorKind::Conflict => "，请重新授权（引用指向了别的凭据）",
+        crate::credentials::CredentialErrorKind::Denied => {
+            "，请在系统提示时允许访问，或改用本地 JSON"
+        }
+        _ => "",
+    };
+    format!(
+        "{label}的凭据不可用（{}）：{}{hint}",
+        err.kind.as_str(),
+        crate::rpc::sanitize(&err.message)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -274,6 +328,7 @@ pub async fn status(app: &Arc<App>, account_id: &str) -> RpcResult<Value> {
                     let mut value = snapshot_json(&account, &snapshot, now);
                     value["supported"] = json!(true);
                     value["authSource"] = resolved.to_json();
+                    value["authStorage"] = resolved.storage_json();
                     value["refreshHint"] = json!(
                         "以服务端活动窗口（windowEnd）为准；参考实现说北京时间每天 10:00 刷新，仅作说明"
                     );
@@ -297,6 +352,7 @@ fn failure_status(account: &QoderAccountRecord, resolved: &Resolved, err: &Credi
         "supported": true,
         "state": if matches!(err, CreditsError::Unauthorized) { "unauthorized" } else { "error" },
         "authSource": resolved.to_json(),
+        "authStorage": resolved.storage_json(),
         "claimable": Value::Null,
         "claimed": Value::Null,
         "today": Value::Null,
@@ -548,6 +604,7 @@ pub async fn claim_with(
                     "state": "failed",
                     "claimed": false,
                     "authSource": resolved.to_json(),
+                "authStorage": resolved.storage_json(),
                     "error": { "kind": err.kind(), "message": err.detail() },
                 }));
             }
@@ -578,6 +635,7 @@ pub async fn claim_with(
                 "state": "failed",
                 "claimed": false,
                 "authSource": resolved.to_json(),
+                "authStorage": resolved.storage_json(),
                 "error": { "kind": err.kind(), "message": err.detail() },
             }));
         }
@@ -609,6 +667,7 @@ pub async fn claim_with(
         let mut value = snapshot_json(&account, &snapshot, now);
         value["claimed"] = json!(false);
         value["authSource"] = resolved.to_json();
+        value["authStorage"] = resolved.storage_json();
         return Ok(value);
     }
 
@@ -796,6 +855,7 @@ pub async fn claim_with(
         "state": if any_success { "done" } else { "failed" },
         "claimed": any_success,
         "authSource": resolved.to_json(),
+        "authStorage": resolved.storage_json(),
         "posted": posted,
         "results": results,
         "after": confirmed,
@@ -1025,14 +1085,20 @@ mod tests {
         )
         .unwrap();
         app.secure
-            .set(&access_key(&account.id), b"device-token")
+            .set(
+                &crate::providers::qoder_auth::access_key(&account.id),
+                b"device-token",
+            )
             .unwrap();
         app.with_db(|db| {
             db.upsert_qoder_authorization(
                 &account.id,
                 SOURCE_OWN_BROWSER,
                 None,
-                Some("keychain:x"),
+                Some(&qoder_secret::keychain_reference(
+                    &account.id,
+                    SOURCE_OWN_BROWSER,
+                )),
                 "valid",
                 None,
                 None,
@@ -1042,6 +1108,7 @@ mod tests {
         let resolved = resolve_token(&app, &account).unwrap();
         assert_eq!(resolved.source, SOURCE_OWN_BROWSER);
         assert_eq!(resolved.token, "device-token");
+        assert_eq!(resolved.storage, "keychain");
     }
 
     #[test]
@@ -1049,14 +1116,20 @@ mod tests {
         let (app, _dir) = test_app();
         let account = seed_account(&app, "qoder_cn");
         app.secure
-            .set(&access_key(&account.id), b"device-token")
+            .set(
+                &crate::providers::qoder_auth::access_key(&account.id),
+                b"device-token",
+            )
             .unwrap();
         app.with_db(|db| {
             db.upsert_qoder_authorization(
                 &account.id,
                 SOURCE_OWN_BROWSER,
                 None,
-                Some("keychain:x"),
+                Some(&qoder_secret::keychain_reference(
+                    &account.id,
+                    SOURCE_OWN_BROWSER,
+                )),
                 "invalid",
                 None,
                 None,
@@ -1064,6 +1137,192 @@ mod tests {
         })
         .unwrap();
         assert!(resolve_token(&app, &account).is_err());
+    }
+
+    // -- CRED-3b：JSON 凭据的读取路径 -----------------------------------
+
+    fn json_only_app() -> (Arc<App>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data = dir.path().to_path_buf();
+        let paths = Paths {
+            db_path: data.join("accounts.sqlite"),
+            backups_dir: data.join("backups"),
+            logs_dir: data.join("logs"),
+            wb_switch_home: data.join("wb-switch-home"),
+            data_dir: data,
+            wb_home_owned: true,
+        };
+        let app = Arc::new(App::with_secure(paths, SecureStore::failing()));
+        crate::auth::consent::set_json_storage(&app, true).unwrap();
+        (app, dir)
+    }
+
+    fn device_token(uid: &str, access: &str) -> crate::providers::qoder_auth::DeviceToken {
+        crate::providers::qoder_auth::DeviceToken {
+            access_token: access.to_string(),
+            refresh_token: Some("rt-1".to_string()),
+            expires_at_ms: None,
+            identity: crate::providers::qoder_auth::Identity {
+                uid: uid.to_string(),
+                name: None,
+                email: None,
+            },
+        }
+    }
+
+    /// JSON 设备授权：Credits 读文件，钥匙串一次都不碰（后端对任何操作都报错）。
+    #[test]
+    fn json_credentials_are_read_through_the_authorization_row() {
+        let (app, _dir) = json_only_app();
+        let account = seed_account(&app, "qoder_cn");
+        crate::providers::qoder_auth::persist(
+            &app,
+            QoderEdition::Cn,
+            &device_token("u-1", "dt-json"),
+        )
+        .unwrap();
+
+        let resolved = resolve_token(&app, &account).unwrap();
+        assert_eq!(resolved.source, SOURCE_OWN_BROWSER);
+        assert_eq!(resolved.token, "dt-json");
+        assert_eq!(resolved.storage, "localjson");
+    }
+
+    #[test]
+    fn a_json_pat_is_the_fallback_when_there_is_no_device_authorization() {
+        let (app, _dir) = json_only_app();
+        let account = seed_account(&app, "qoder_cn");
+        let pat = "qp_abcdefghijklmnopqrstuvwxyz012345";
+        crate::providers::qoder_pat::persist(
+            &app,
+            QoderEdition::Cn,
+            pat,
+            &crate::providers::qoder_auth::Identity {
+                uid: "u-1".into(),
+                name: None,
+                email: None,
+            },
+        )
+        .unwrap();
+
+        let resolved = resolve_token(&app, &account).unwrap();
+        assert_eq!(resolved.source, SOURCE_OWN_PAT);
+        assert_eq!(resolved.token, pat);
+        assert_eq!(resolved.storage, "localjson");
+    }
+
+    /// 浏览器授权的文件没了：**不许**悄悄换成 PAT —— 那样会把"这份授权已经坏了"
+    /// 这件事永远藏起来，而且 Credits 会用另一份凭据的额度去记账。
+    #[test]
+    fn a_broken_browser_secret_does_not_silently_switch_to_the_pat() {
+        let (app, _dir) = test_app();
+        let account = seed_account(&app, "qoder_cn");
+        crate::auth::consent::set_json_storage(&app, true).unwrap();
+        // 先用钥匙串版 PAT 兜底（此时还没同意明文）。
+        crate::auth::consent::set_json_storage(&app, false).unwrap();
+        crate::providers::qoder_pat::persist(
+            &app,
+            QoderEdition::Cn,
+            "qp_abcdefghijklmnopqrstuvwxyz012345",
+            &crate::providers::qoder_auth::Identity {
+                uid: "u-1".into(),
+                name: None,
+                email: None,
+            },
+        )
+        .unwrap();
+        crate::auth::consent::set_json_storage(&app, true).unwrap();
+        crate::providers::qoder_auth::persist(
+            &app,
+            QoderEdition::Cn,
+            &device_token("u-1", "dt-json"),
+        )
+        .unwrap();
+
+        // 把设备授权的文件删掉（模拟"文件没同步过来"）。
+        let row = app
+            .with_db(|db| db.get_qoder_authorization(&account.id, SOURCE_OWN_BROWSER))
+            .unwrap()
+            .unwrap();
+        let secret_id = row
+            .secret_ref
+            .as_deref()
+            .unwrap()
+            .trim_start_matches("localjson:v1:")
+            .to_string();
+        crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths)
+            .delete(&secret_id)
+            .unwrap();
+
+        let err = resolve_token(&app, &account)
+            .err()
+            .expect("设备授权坏了必须报错");
+        assert!(err.contains("浏览器授权"), "{err}");
+        assert!(err.contains("not_found"), "{err}");
+    }
+
+    /// 文件里的授权 ID 与行不一致：显式 `conflict`，且不读令牌、不换来源。
+    #[test]
+    fn a_mismatched_secret_is_refused_with_a_classified_error() {
+        let (app, _dir) = test_app();
+        let account = seed_account(&app, "qoder_cn");
+        let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
+        let secret = store
+            .create(crate::credentials::localjson::SecretDraft::oauth(
+                "qz_someone_else",
+                "qoder_cn",
+                "TOKEN-OF-SOMEONE-ELSE",
+            ))
+            .unwrap();
+        app.with_db(|db| {
+            db.upsert_qoder_authorization(
+                &account.id,
+                SOURCE_OWN_BROWSER,
+                None,
+                Some(&format!("localjson:v1:{}", secret.secret_id)),
+                "valid",
+                None,
+                None,
+            )
+        })
+        .unwrap();
+
+        let err = resolve_token(&app, &account).err().expect("必须报错");
+        assert!(err.contains("conflict"), "{err}");
+        assert!(!err.contains("TOKEN-OF-SOMEONE-ELSE"), "错误消息不许带令牌");
+    }
+
+    // -- 复审 P1-C：missing 不许参与 Credits --------------------------
+
+    /// 删除没做完留下的 `missing` 行：凭据可能还在盘上，但**一个字请求都不该发**。
+    ///
+    /// 这条同时覆盖"手动"与"自动"两个入口 —— 它们都先过 `resolve_token`。
+    #[test]
+    fn a_missing_authorization_is_never_used_by_credits() {
+        let (app, _dir) = test_app();
+        let id = claimable_account(&app, "u-missing");
+        // 半途状态：凭据还在（删除失败），行被标成 missing。
+        app.with_db(|db| db.set_qoder_auth_status(&id, SOURCE_OWN_PAT, "missing"))
+            .unwrap();
+        assert!(
+            app.secure
+                .get(&crate::providers::qoder_pat::pat_key(&id))
+                .is_ok(),
+            "前提：令牌确实还在"
+        );
+
+        let account = account(&app, &id).unwrap();
+        let err = resolve_token(&app, &account)
+            .err()
+            .expect("missing 行不许被当作可用凭据");
+        assert!(err.contains("missing"), "{err}");
+        assert!(err.contains("已停用"), "{err}");
+
+        // 领取路径同样一个 POST 都不发。
+        let fake = FakeTransport::new(vec![], vec![]);
+        let value = run_claim(&app, &id, &fake);
+        assert_eq!(value["state"], json!("no_credential"), "{value}");
+        assert!(fake.claimed_ids().is_empty(), "不许发任何请求");
     }
 
     /// 手动与自动共用一把锁：同一账号同一时刻只能有一次领取在跑。

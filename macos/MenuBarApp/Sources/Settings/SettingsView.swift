@@ -121,7 +121,7 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else if credentialStorageEnabled {
-                    Text("新建授权会写入本机 JSON（明文）。已有账号保持原来的存储，不会自动迁移。")
+                    Text("新建授权（WorkBuddy 与 Qoder 自有授权）会写入本机 JSON（明文）。已有账号保持原来的存储，不会自动迁移。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Button("改回钥匙串…") { confirmDisableJSON = true }

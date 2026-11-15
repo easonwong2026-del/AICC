@@ -3,10 +3,11 @@
 > 状态：**CRED-1 已合并**（`LocalJsonStore` + 引用解析 + 文件系统边界加固）；
 > **CRED-2 已合并**（SQLite v20 + Magpie 动态关联 + 统一 Broker 解析）；
 > **CRED-3a 已合并**（WorkBuddy 自有授权 JSON 化，**默认关闭**，见 §8ter）；
-> **CRED-3-UI 已交付待验收**（明文的告知 / 确认与开关，见 §8quater）。
-> CRED-3b（Qoder 两种授权）/ CRED-4（旧 Keychain 迁移）/ CRED-5（免弹窗收口）尚未开始。
+> **CRED-3-UI 已合并**（明文的告知 / 确认与开关，见 §8quater）；
+> **CRED-3b 已交付待验收**（Qoder 设备授权 / PAT 的存储分派、读取与删除，见 §8quinquies）。
+> CRED-4（旧 Keychain 迁移）/ CRED-5（免弹窗收口）尚未开始。
 >
-> 基线：`main` @ `6adde70`（#84 已合并），数据库 Schema **v20**。
+> 基线：`main` @ `8da2e80`（#86 已合并），数据库 Schema **v21**（CRED-3b 复审为 `qoder_authorizations` 增加 `auth_version`）。
 > 范围：只动凭据的**存取方式**，不动账号模型、签到 / 成长 / 旅行 / Credits 业务。
 
 ## 1. 为什么要换掉钥匙串
@@ -152,10 +153,11 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 
 | PR | 内容 | 状态 |
 | --- | --- | --- |
-| CRED-1 | JSON 存储底层 + 引用解析 | 已合并（#82） |
-| CRED-2 | SQLite v20 + Magpie 动态授权 | **本 PR** |
-| CRED-3a | WorkBuddy 自有授权 JSON 化 | **本 PR** |
-| CRED-3b | Qoder CN / International 浏览器、设备授权、PAT JSON 化 | 待开始（等 3a 合并） |
+| CRED-1 | JSON 存储底层 + 引用解析 | 已合并（#82、#83） |
+| CRED-2 | SQLite v20 + Magpie 动态授权 | 已合并（#84） |
+| CRED-3a | WorkBuddy 自有授权 JSON 化 | 已合并（#85） |
+| CRED-3-UI | 明文的告知 / 确认与开关 | 已合并（#86） |
+| CRED-3b | Qoder CN / International 设备授权 + PAT + Credits 读取 | **本 PR**（见 §8quinquies） |
 | CRED-4 | 旧 Keychain 显式迁移（备份 / 核对 / 回滚） | 待开始（两平台都 JSON 化之后） |
 | CRED-5 | Worker 免弹窗收口 + 端到端验收 | 待开始 |
 
@@ -393,6 +395,221 @@ F 已经不被任何行引用，没人会读到那半秒的新令牌；最终状
 
 > 本机没有 Xcode / XCTest，`swift test` 只能靠 CI；本地用 `swiftc -typecheck` + 离屏渲染
 > 覆盖编译与版式，两者的边界已在上面写清。
+
+## 8quinquies. CRED-3b：Qoder 自有授权 JSON 化
+
+Qoder 有**两条**自有授权来源，各占 `qoder_authorizations` 的一行：设备授权
+（`own_browser`，OAuth）与 PAT（`own_pat`）。本期把两者都接入 `LocalJsonStore`，
+并让 Credits 的读取与账号删除**按引用**工作。**没有**批量迁移旧凭据（那是 CRED-4）。
+
+### 落点规则（只看这一行现在是什么）
+
+| 行的状态 | 新令牌写到哪里 |
+| --- | --- |
+| 还没有这一行，且用户没同意明文 | 钥匙串（与 CRED-3b 之前完全一致） |
+| 还没有这一行，且已同意明文 | 新建 JSON 文件（随机 UUID） |
+| 已是 `localjson:v1:` | 覆盖同一文件（`revision` 校验，归属不可变） |
+| 仍是 `keychain:` | 继续写钥匙串，**不隐式迁移** |
+| 引用是 magpie / 未知前缀 / 指向别的键 | 显式拒绝（`unsupported` / `conflict`），不回退 |
+
+同一账号的设备授权与 PAT 是**两个文件、两个引用**，互不覆盖：删掉 PAT 不影响设备授权，
+反之亦然。
+
+### 文件内容
+
+| 字段 | 设备授权 | PAT |
+| --- | --- | --- |
+| `platform` | 实际 edition：`qoder_cn` / `qoder_global` | 同左 |
+| `source` | `own` | `own` |
+| `credentialKind` | `oauth` | `pat` |
+| `authorizationId` | `qoder_auth_id(account, "own_browser")` | `qoder_auth_id(account, "own_pat")` |
+| `accessToken` | 接口实际返回的 device token | 用户粘贴的 PAT |
+| `refreshToken` | 只在服务端真的返回时保存 | **恒为空**（PAT 不刷新） |
+| `expiresAt` | 以接口响应为准 | 恒为空（失效靠 401 发现） |
+
+### 条件提交：不加列
+
+`qoder_authorizations` 没有 WorkBuddy 那样的 `version` 列。沿用既有字段做守卫，
+**不新增迁移**：
+
+| 场景 | 判定 |
+| --- | --- |
+| 首次授权，两进程同时写 | `INSERT`，唯一键冲突 → `None`（放弃，不覆盖） |
+| 重复授权 / PAT 更新 | `UPDATE ... WHERE secret_ref IS <写凭据前看到的那条>` |
+| 引用被别人迁走 | 同上，`secret_ref` 对不上 → `None` |
+| 删号后同 UID 重建 | `EXISTS(... AND generation = ? AND auth_epoch = ?)`，单看 epoch 挡不住 |
+
+`None` 的收尾分两种：**新建**的文件只在"没有任何行引用它"时删掉（`qoder_authorizations_referencing`）；
+**覆盖写**的那份保持不动（盘上那份本来就属于这条授权，里面是刚拿到的有效令牌）。
+
+### 四条生产路径
+
+| 文件 | 改动 |
+| --- | --- |
+| `providers/qoder_secret.rs`（新） | 落点决策、归属校验（4 个判据）、写入 / 回滚 / 删除、条件提交封装 |
+| `providers/qoder_auth.rs::persist` | 令牌按引用分流；授权行改为条件提交；失败回滚凭据 + 新建账号 |
+| `providers/qoder_pat.rs::persist / read_secret / remove` | 同上；读取按行分派，删除只清这一来源 |
+| `credits.rs::resolve_token` | 按 `secret_ref` 读凭据；读失败**不换来源**，错误保留分类（`not_found` / `conflict` / `denied` …） |
+| `providers/qoder_admin.rs::delete` | 先读授权快照制定清理计划，再删凭据、删行；JSON-only 账号全程不碰钥匙串 |
+
+### 存储前后行为对照
+
+| 行为 | CRED-3b 之前 | CRED-3b 之后 |
+| --- | --- | --- |
+| 新设备授权（同意明文） | 钥匙串 `qoder/<id>/own/access|refresh` | 一个 JSON 文件；钥匙串零访问 |
+| 新 PAT（同意明文） | 钥匙串 `qoder/<id>/pat/token` | 另一个 JSON 文件；不含 refresh |
+| 未同意明文 | 钥匙串 | 钥匙串（不变） |
+| 老账号（已授权） | 钥匙串 | 钥匙串（**不迁移**，CRED-4 显式做） |
+| Credits 读取 | 固定按账号键名读钥匙串 | 按授权行 `secret_ref` 分派 |
+| 引用坏了 | 读不到就报错 | `not_found` / `conflict` 显式分类，仍不回落 |
+| 删号 | 无条件删三条固定钥匙串键 | 按引用清理；引用不可信时**拒绝删除** |
+| JSON-only 账号删号 | 会碰三次钥匙串（可能弹框） | 零次钥匙串访问 |
+| 并发首次授权 | 后写覆盖先写 | 只有一个成功，失败方不留孤儿令牌文件 |
+
+### 已知限制
+
+1. **不做迁移**：CRED-3b 之前登录的账号，凭据仍在钥匙串，读取时仍可能触发一次系统授权。
+2. **服务端不下发 refresh 时保留旧值**（与钥匙串路径一致）：如果服务端换了会话，
+   旧的 refresh 会留在文件里直到下一次真的下发。
+3. **PAT 不刷新**：401 只能提示用户重新生成；AICC 没有轮换它的能力。
+4. **一个账号一份凭据一个文件**：不接受"一份文件装多平台"，换账号必须新建。
+
+### 复审修复（P0-1 ~ P0-4）
+
+首轮验收提出四项并发 / 删除缺陷，均已在本期修复，**没有新增 SQLite 列**。
+
+| 编号 | 问题 | 修法 | 错误时的副作用 |
+| --- | --- | --- | --- |
+| P0-1 | 登录写凭据时**重读**授权行，两次观察可能不同：输家把赢家的文件当成"自己的"覆盖写，随后提交撞唯一键报冲突 —— 赢家行还 `valid`，令牌已被改写 | `qoder_secret::Observation`：登录流程只调用一次 `observe()`，"写哪里"与"怎么提交"来自同一份快照；`write()` 不再自己查库 | 输家只可能**新建**一个文件；提交失败后仅在"没有任何行引用"时删掉它，赢家的文件与 `revision` 一字未动 |
+| P0-2 | `Absent` 预期不带生命周期：账号删号重建后 `account_id` 相同、`generation` 变了，旧登录仍能 INSERT | `Absent { lifecycle }` + `INSERT ... SELECT ... WHERE EXISTS(generation, auth_epoch)`；`Ok(0)` 一律当竞争失败（**不能**把 `Ok(_)` 当成功，SQLite 的 `WHERE` 不成立只插 0 行） | 旧登录被拒，新账号里不会出现旧会话的授权，`auth_epoch` 也不会被推进 |
+| P0-3 | 删号计划只在 scheme 层判断，串号要等逐份删除时才发现；Magpie-only 账号还会走"三条固定键"兜底去碰钥匙串 | 计划阶段就 `load_json` 逐份校验四个归属字段（`NotFound` 视为可重试）；兜底条件收紧为"授权表**一行都没有**" | 任一份校验失败 → 整次拒绝：合法凭据内容与 `revision` 不变、自动领取开关与生命周期不变、账号与行都在 |
+| P0-4 | 单独移除 PAT 先删凭据、再无核验删行：并发保存新 PAT 后，旧移除会删掉新令牌 / 新行 | 顺序改为「① 观察一次 → ② 带核验删行（`secret_ref` + `generation` + `auth_epoch`）→ ③ 按版本删凭据（`delete_at_revision` / 钥匙串字节比对）→ ④ 失败时把行以 `missing` 放回」；界面拿到 `authorizationChanged` | 交错的移除**什么都不删**：新 PAT 原样可读、行还在；删凭据失败则行以 `missing` 恢复，可重试且幂等 |
+
+删除顺序的代价写在 `qoder_pat::remove` 的文档里：② 与 ③ 之间进程被强杀会留下一个
+没有行引用的文件。这是**有意**选的——宁可留一份 `0600` 的孤儿文件（可被后续核对扫到），
+也不能删掉用户刚保存的新令牌。
+
+### 第二轮复审修复（P0-A / P0-B / P1-C / P1-D）
+
+| 编号 | 问题 | 修法 | 错误时的副作用 |
+| --- | --- | --- | --- |
+| P0-A | 移除 PAT 时"行已删、文件才被发现重写"（`revision` 变了），旧实现记一行日志就返回 `removed: true`：盘上留下一份**有效却无任何引用的令牌**，再点一次也找不到它 | 该分支改为把行以 `missing` 放回（可定位、可重试、Credits 不用），返回 `removed: false` + `pending_cleanup: true`；RPC 新增 `pendingCleanup` | 不假报成功；文件仍被一行（停用状态）引用，重试即可收尾 |
+| P0-B | 删号按计划清完凭据后，若另一进程此时新存了一份授权（它读到推进后的 epoch，可合法提交），直接删账号行会让那份文件变成孤儿 | 删账号行改为**带生命周期条件**（`delete_qoder_account_if_current`，`generation` + 我们自己推进后的 `auth_epoch`）。不成立 → 拒绝删除、保留账号与那份新授权，返回 `authorization_changed_during_delete`；计划内的行按 `generation` 标 `missing` | 删除成功时不存在计划外凭据；竞争时态可重试，且每个留在盘上的文件都有行引用 |
+| P1-C | `missing` 只是文案，`credits::resolve_token` 仍会选它 → 失败的删除会"生效一半" | `usable` 排除 `missing`；只有 `missing` 行时给出"上次删除没完成、已停用"的明确提示 | 手动/自动领取都不会发请求（测试断言 `claimed_ids` 为空） |
+| P1-D | 补偿性恢复只查外键，可能把旧引用写进"同 UID 删号重建"的新账号 | `restore_qoder_authorization` 增加生命周期参数，`INSERT ... WHERE EXISTS(generation)`；只比 `generation`（删行本身就会推进 epoch，比 epoch 永远不成立）；唯一键存在时直接放弃 | 身份已变化时不恢复、只留痕；绝不覆盖更新的授权 |
+
+### 第三轮复审修复（删除计划带版本）
+
+| 问题 | 修法 |
+| --- | --- |
+| 整账号删除的计划只记 `(row, kind)`，执行时用**无条件删除**。若另一进程在"读计划之后、删文件之前"对**同一来源**重新授权（覆盖写同一文件 → `revision + 1`），新令牌会被删掉；删账号行的 CAS 之后才发现 epoch 变了，令牌已经回不来 | 计划阶段就通过 `observe_for_delete` 记下每份凭据的版本（JSON `revision` / 钥匙串字节）；执行时一律走 `delete_guarded` / `delete_keychain_guarded`，版本不符（`conflict`）→ **立即停手**，返回 `credential_changed_during_delete`。`missing` 只标"这次确实删掉、且行仍指着旧引用"的来源（`set_qoder_auth_status_if_generation` 同时核验 `generation` 与 `secret_ref`） |
+
+`secretsDeleted` 的计数含义随之明确为**按来源计的凭据份数**（设备授权的 access + refresh 算一份）。
+
+### 第四轮复审修复（钥匙串原子性）
+
+JSON 的读-比-删天然原子（`delete_at_revision` 在跨进程锁内比对 `revision`）。
+**钥匙串没有原子的 compare-and-delete**：`get` 与 `delete` 是两次 API 调用，
+上一版靠"删之前再读一次"，读与删之间仍可被写入插队。本轮统一到一把锁上：
+
+| 问题 | 修法 |
+| --- | --- |
+| 钥匙串"读 → 比 → 删"之间没有互斥，可能删掉刚写进来的新令牌 | 复用凭据目录的 `.lock`（`LocalJsonStore::lock_exclusive`）：**写入**（`write_keychain`：拍快照 + 写 access + 写 refresh）、**回滚**（`QoderWrite::restore`）、**读-比-删**（`delete_guarded`）与**旧安装兜底**（`delete_keychain_group`）全部持同一把锁。拿不到锁就 `lock_timeout`，一个字节都不动 |
+| 设备授权只比主键 access，随后连 refresh 一起删 | `DeleteGuard::Keychain` 改为**整组键的取值快照**（`Vec<(key, Option<bytes>)>`）：任一键不符（含"计划时不存在、现在出现"）即 `conflict`；一致才整组删除 |
+| 同一来源重新授权复用同一个 `secret_ref`，`missing` 会标脏新授权 | 标记条件从「`generation` + `secret_ref`」改为「`generation` + `secret_ref` + **`fingerprint`**」。`fingerprint` 是每份凭据的令牌指纹，重新授权必换；不用 `auth_epoch`——它是账号级的，别的来源新增授权也会推进它 |
+| 旧安装（无授权行）的三条键按"键"计数 | `plan.legacy` 按**份**分组（`own/access` + `own/refresh` 为一份，`pat/token` 为一份），整组比对 + 整组删除在同一把锁里；`secretsDeleted` 与有授权行的账号同口径 |
+
+### 第五轮复审修复（版本号、回滚条件、部分删除、旧键存在性）
+
+| 编号 | 问题 | 修法 |
+| --- | --- | --- |
+| **P0-A** | 旧安装（无授权行）的计划只记录**当时存在**的键。旧账号本来只有 access，重新登录补上了 refresh —— 计划看不到这个新键，比对仍然只比 access，于是删掉新授权正在用的 access | `PlannedLegacy` 改成 `Vec<(String, Option<Vec<u8>>)>`：不存在的键也入计划（值 `None`）。`delete_keychain_group` 在同一把锁里**连存在性一起比对**：观察时没有、现在有了 → `conflict`，整组一个字节都不删 |
+| **P0-B** | `QoderWrite::restore` 拿到锁后**无条件**写回旧快照。A 写完等提交期间 B 写入并提交成功，A 的提交报错 → A 的回滚把 B 的令牌覆盖成旧值 | 回滚前（锁内）逐键比对"盘上还是不是我这次写进去的值"：不同 → **放弃回滚**并留痕；新建文件的回滚也先确认没有任何授权行引用它 |
+| **P1-C** | `fingerprint` 不是版本号：它是令牌的 SHA-256 前 8 位。重新保存**同一串** PAT / access 时摘要不变，删号失败后的收尾会把这份新授权标成 `missing`（令牌还在、Credits 却不用了） | 数据库 **v21** 给 `qoder_authorizations` 加 `auth_version`（每次提交 +1，首插为 1）。`missing` 的守卫改成「`generation` + `auth_version`」；`delete_qoder_authorization_if_current` 也从 `auth_epoch` 改为 `auth_version`（更精确：别的来源写入不再阻止本来源删除） |
+| **P1-D** | 钥匙串整组删除中途失败时，已删的键没上报。access 删掉、refresh 失败后，行还是 `valid`，而 Credits 已经读不到 access | `CredentialError` 增加 `partial`：整组删除在已经删掉一部分后失败 → 带 `partial` 返回。删号流程据此把这一份也计入"已删来源"，行被标 `missing`（Credits 不再使用），并可重试 |
+
+顺带修了一个被 P1-C 的测试暴露出来的可用性缺陷：JSON 授权行还在、文件已经被删（删号被并发打断后就是这种状态）时，
+`write_json_in_place` 过去直接报"凭据不存在"，用户重新授权永远失败。现在这种情形按"新建一份"处理 ——
+否则并发保护等于把重新登录功能关掉了。
+
+### 第六轮复审修复（统一凭据事务协议）
+
+前五轮都是逐条补 guard，这一轮改成**结构性收口**：所有 mutate 路径进入同一个
+锁域，凭据与数据库不再可能各自为政。
+
+#### 锁顺序与状态机
+
+```text
+          ┌─────────────────────── SecretTxn（.lock，跨进程 flock）───────────────────────┐
+persist   │ observe(DB) → write(Keychain|JSON) → commit(DB, CAS) → [失败] restore/cleanup │
+remove    │ observe → observe_for_delete → 删行(CAS) → 确认没被重建 → 删凭据              │
+delete    │ plan(DB+凭据预验证) → 关自动领取 → bump epoch → 逐份删 → 删账号行(CAS)         │
+          └──────────────────────────────────────────────────────────────────────────────┘
+```
+
+- **只允许 `.lock` → SQLite**，不存在反向顺序：持锁期间只调 SQLite 与钥匙串，
+  而 SQLite 事务内部不会再取 `.lock`。
+- `FileLock` 现在**同线程可重入、跨线程互斥、跨进程 flock**。可重入是必需的：
+  `LocalJsonStore` 的每个写方法都会自己取锁，外层一旦持锁，没有重入就会在自己
+  的 flock 上等到超时。
+
+#### 修复点
+
+| 编号 | 问题 | 修法 |
+| --- | --- | --- |
+| **P0-1** | `write_keychain` 只锁"写"，`commit` 在锁外提交：A 写、B 写并提交、A 提交失败 → 行归 B，钥匙串是 A | 四条 mutate 路径整段持 `SecretTxn`，写-提交-回滚不可分割 |
+| **P0-2** | JSON 原地覆盖同理（文件是 B、行记 A） | 同上；`Ok(None)` 现在几乎只可能来自"账号被删"这种真实冲突 |
+| **P0-3** | PAT 移除在"删行后、删凭据前"可被重建插队；Keychain 键名固定、PAT 可能同值，旧 guard 会通过 | 移除整段持锁；**并在删凭据前再读一次行**，发现被重建就停手（`authorization_changed`） |
+| **P0-4** | `auth_version` 首次插入固定为 1，删行重建后复用旧值 → 在途旧操作可能命中新实例 | 初值与补偿恢复都取 `账号 auth_epoch + 1`：epoch 只增不减，版本在账号内严格单调 |
+| **P1-1** | `cleanup_created_account` 只按 `created: bool` + "无授权行"判断，可能删掉并发重建的账号 | 改成单条 `DELETE ... WHERE id=? AND generation=? AND NOT EXISTS(授权行)`，三条判断原子完成 |
+| **P1-2** | 部分删除失败后的收敛路径没有正向验证 | `a_relogin_after_a_half_finished_delete_brings_the_account_back`：missing 之后重新授权必须回到 valid 且 Credits 可用 |
+| **P2** | `authStorage` 在响应里重复写 3 次；两处注释仍描述 `auth_epoch` 守卫 | 去重为每响应一次；注释改述行版本 |
+
+#### 读写一致性
+
+读路径（`credits::resolve_token`）**不进**这把锁：它只读令牌、不写任何状态，
+而写入永远是"先写凭据、后提交行"，所以读到的最坏情况是"上一版令牌"，
+不会是半份。这一点在 `qoder_secret` 的模块注释里写明。
+
+### 验证
+
+| 项 | 手段 |
+| --- | --- |
+| 跨进程覆盖写后行与文件一致（P0-1/P0-2） | `qoder_secret::tests::concurrent_rewrites_keep_the_row_and_the_file_in_sync`：4 进程同时覆盖同一来源，断言 **行的 fingerprint == 盘上令牌的 fingerprint == 读路径拿到的令牌** |
+| 同来源并发首次授权 | `..._concurrent_first_grants_leave_exactly_one_secret_and_one_row`（1 行 / 1 文件 / 行指向该文件） |
+| 锁可重入（结构前提） | `localjson::tests::the_lock_is_reentrant_within_one_thread`；跨线程仍互斥：`lock_contention_surfaces_as_a_bounded_error` |
+| 删除必须真的持锁 | `qoder_secret::tests::the_keychain_delete_actually_waits_for_the_cross_process_lock`（另一线程持锁 → `lock_timeout`，一个字节未动） |
+| PAT 删行后被重建（P0-3） | `qoder_pat::tests::a_rebuilt_pat_row_is_not_deleted_by_the_older_removal`（**同一串** PAT 重建：行仍 valid、PAT 可读、Credits 可用） |
+| 版本不可复用（P0-4） | `storage::qoder_accounts::tests::a_reinserted_row_never_reuses_an_old_auth_version` |
+| 失败清理不误删（P1-1） | `..._cleanup_refuses_a_rebuilt_account_or_one_with_authorizations` |
+| 部分删除后的恢复（P1-2） | `qoder_admin::tests::a_relogin_after_a_half_finished_delete_brings_the_account_back` |
+| v21 迁移 | `storage::tests::v21_adds_an_authorization_version_without_touching_existing_rows` |
+| 旧账号补 refresh 后停手（P0-A） | `qoder_admin::tests::a_relogin_that_adds_a_refresh_key_blocks_the_legacy_delete`（`deleted == 0`、access 与 refresh 都在） |
+| 迟到回滚不覆盖赢家（P0-B） | `qoder_secret::tests::a_late_rollback_never_overwrites_a_newer_write`（回滚返回 false、盘上是 `B-TOKEN`）；反向 `a_rollback_still_restores_when_the_token_is_still_mine` |
+| 同一串令牌重登（P1-C） | `qoder_admin::tests::a_relogin_with_the_same_token_keeps_the_new_row_valid`（断言指纹不变、`auth_version` 前进、行仍 `valid`、Credits 可读） |
+| 半删凭据不许 `valid`（P1-D） | `qoder_admin::tests::a_half_deleted_keychain_credential_is_not_left_valid`（`faulty` 只让 refresh 删除失败 → 行标 `missing`、重试删净） |
+| v21 迁移 | `storage::tests::v21_adds_an_authorization_version_without_touching_existing_rows`（老行从 0 起、回拨重跑是空操作） |
+| 钥匙串读-比-删真的持锁 | `qoder_secret::tests::the_keychain_delete_actually_waits_for_the_cross_process_lock`（外部持锁 → `lock_timeout` 且一个字节未动） |
+| 比对后写入新令牌 | `..._a_keychain_secret_rewritten_after_the_guard_is_refused`（新令牌完整保留） |
+| 只更新 refresh | `..._a_refresh_only_update_also_blocks_the_delete`（两把键都不删） |
+| 删凭据后、删号前重登 | `qoder_admin::tests::a_relogin_after_the_credential_was_deleted_keeps_the_new_row_usable`（新授权保持 `valid`、Credits 可读） |
+| 旧安装按份计数 | `qoder_admin::tests::a_legacy_keychain_only_account_counts_two_credentials`（三条键 → 两份） |
+| 同来源重登（设备授权） | `qoder_admin::tests::a_same_source_relogin_during_delete_keeps_the_new_token`（`rev 0` 计划 → 重登写 `rev 1` → 停手；新令牌可读、`revision == 1`、行仍 valid、重试删净） |
+| 同来源重登（PAT） | `..._a_same_source_pat_relogin_during_delete_keeps_the_new_pat`（设备授权已删并标 `missing`，新 PAT 保持 `valid` 且可读） |
+| P0-A 假成功 | `qoder_pat::tests::a_rewritten_secret_leaves_a_retryable_record_and_never_reports_success`（行以 `missing` 回来、Credits 拒绝使用、重试收尾） |
+| P0-B 删号竞争 | `qoder_admin::tests::a_new_authorization_during_delete_aborts_without_orphaning_it`（拒绝删除；磁盘上每份文件都有行引用；重试删净） |
+| P1-C missing | `credits::tests::a_missing_authorization_is_never_used_by_credits`（`resolve_token` 拒绝 + 领取零请求） |
+| P1-D 补偿 | `storage::qoder_accounts::tests::a_restored_authorization_is_marked_missing_and_retryable`（换 generation 后恢复落空） |
+| P0-1 确定性交错 | `qoder_secret::tests::a_stale_absent_observation_never_overwrites_the_winner`（赢家令牌与 `revision` 原样可读） |
+| P0-2 生命周期 | `storage::qoder_accounts::tests::an_absent_commit_from_a_deleted_account_is_rejected`、`..._after_another_source_moved_the_epoch` |
+| P0-3 先验后删 | `qoder_admin::tests::a_foreign_secret_aborts_the_whole_delete_before_anything_is_removed`、`a_magpie_link_is_counted_but_never_deleted`（钥匙串删除全失败的后端下仍成功） |
+| P0-4 并发移除 | `qoder_pat::tests::a_remove_racing_a_new_pat_keeps_the_new_one`（钥匙串）、`..._new_json_pat_keeps_the_new_file_contents`、`removing_after_a_half_finished_delete_still_converges`、`storage::…::a_guarded_delete_refuses_a_newer_authorization` |
+| 存储分派与归属 | `providers::qoder_secret::tests`（19 条，含全拒钥匙串后端） |
+| 条件提交 | `storage::qoder_accounts::tests`（4 条，含删号重建） |
+| 读取与降级 | `credits::tests`（JSON 设备授权 / JSON PAT / 文件缺失不换来源 / 归属错配） |
+| 删除 | `providers::qoder_admin::tests`（含 JSON-only、混合、拒绝删除、失败可重试） |
+| 真实跨进程竞争 | `concurrent_first_grants_leave_exactly_one_secret_and_one_row`（4 个子进程） |
+| 全量 | `cargo fmt --check` / `cargo check --locked --all-targets` / `cargo test --locked` |
 
 ## 9. 风险
 

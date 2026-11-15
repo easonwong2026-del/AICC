@@ -492,7 +492,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
 
         "qoder.accounts.list" => qoder_accounts_list(app, params),
 
-        // 删号：关自动领取 → 推进授权版本 → 删钥匙串三条键 → 删行（授权/记录级联）。
+        // 删号：读授权快照 → 关自动领取 → 推进授权版本 → 按引用删凭据 → 删行。
         // 顺序写在 `providers/qoder_admin.rs` 顶部，别在这里改。
         "qoder.accounts.delete" => {
             let account_id = require_str(params, "accountId")?;
@@ -571,7 +571,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
         // ---- Qoder PAT 备用授权 ----
         //
         // 三条规则决定了这里的形状：
-        // 1. **令牌只从请求进、只往钥匙串去**：不回显、不进错误信息、不进数据库。
+        // 1. **令牌只从请求进、只往凭据后端去**（钥匙串或本地 JSON，见 `qoder_secret`）：
+        //    不回显、不进错误信息、不进数据库。
         // 2. **落库前必须真打一次 userinfo**：拿不到 uid 就不写。
         // 3. **"身份已验证" ≠ "能领 Credits"**：返回体里分开报，后者恒为 unknown。
         "qoder.auth.pat.save" => {
@@ -624,6 +625,10 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
             Ok(json!({
                 "removed": removed.removed,
                 "secretDeleted": removed.secret_deleted,
+                // 期间这条授权被别的流程换过：什么都没删，让界面提示刷新重试。
+                "authorizationChanged": removed.authorization_changed,
+                // 行已摘掉但凭据没删干净（已以 missing 放回）：**不是**成功，要重试。
+                "pendingCleanup": removed.pending_cleanup,
             }))
         }
 

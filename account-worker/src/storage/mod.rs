@@ -416,9 +416,19 @@ const MIGRATIONS: &[Migration] = &[
         version: 20,
         steps: &[MigrationStep::Rust(authz::migrate_v20)],
     },
+    // v21：授权行加**授权版本号**（PR-CRED-3b 复审 P1-C）。只加一列。
+    //
+    // 之前用 `fingerprint`（令牌的 SHA-256 前 8 位）代替版本：重新保存**同一个**
+    // PAT 或同一串 access 时摘要不变，于是"这一行还是不是我删掉的那一份"判不出来，
+    // 删号失败后的收尾会把别人刚保存成功的新授权标成 `missing`。
+    // 计数器每次提交必然前进，才是"这一份凭据的第几次授权"。
+    Migration {
+        version: 21,
+        steps: &[MigrationStep::Rust(qoder_accounts::migrate_v21)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 20;
+pub const LATEST_VERSION: i64 = 21;
 
 pub struct Db {
     conn: Connection,
@@ -1333,6 +1343,75 @@ mod tests {
         db.conn.pragma_update(None, "user_version", 18).unwrap();
         db.migrate().unwrap();
         assert_eq!(db.get_qoder_account(&a.id).unwrap().unwrap().generation, ga);
+    }
+
+    /// v21：给授权行补 `auth_version`，老行从 0 起，重复执行不改写。
+    ///
+    /// 旧库的真实形状是"没有这一列"，所以先把列删掉再回拨版本号 —— 只清空值
+    /// 会把"加列"这一步测不到。
+    #[test]
+    fn v21_adds_an_authorization_version_without_touching_existing_rows() {
+        let (mut db, _dir) = temp_db();
+        let acc = db
+            .upsert_qoder_account("qoder_cn", "u-v21", Some("甲"), None)
+            .unwrap();
+        let saved = db
+            .commit_qoder_authorization(
+                &acc.id,
+                "own_browser",
+                Some("localjson:v1:abc"),
+                "valid",
+                None,
+                Some("0123456789abcdef"),
+                &crate::storage::qoder_accounts::QoderAuthExpectation::Absent {
+                    lifecycle: db.qoder_lifecycle(&acc.id).unwrap().unwrap(),
+                },
+            )
+            .unwrap()
+            .expect("首次授权");
+        assert_eq!(saved.auth_version, 1, "首次提交就是第 1 版");
+
+        // 一次覆盖写必须让版本前进。
+        let again = db
+            .commit_qoder_authorization(
+                &acc.id,
+                "own_browser",
+                Some("localjson:v1:def"),
+                "valid",
+                None,
+                Some("0123456789abcdef"),
+                &crate::storage::qoder_accounts::QoderAuthExpectation::Present {
+                    secret_ref: Some("localjson:v1:abc".to_string()),
+                    lifecycle: db.qoder_lifecycle(&acc.id).unwrap().unwrap(),
+                    auth_version: 1,
+                },
+            )
+            .unwrap()
+            .expect("覆盖写");
+        assert_eq!(again.auth_version, 2, "重新授权必须前进");
+
+        // 退回 v20 的形状：没有这一列。
+        db.exec_raw("ALTER TABLE qoder_authorizations DROP COLUMN auth_version;")
+            .expect("退回 v20 的形状");
+        db.conn.pragma_update(None, "user_version", 20).unwrap();
+        assert_eq!(db.migrate().unwrap(), LATEST_VERSION);
+        let row = db
+            .get_qoder_authorization(&acc.id, "own_browser")
+            .unwrap()
+            .expect("行还在");
+        assert_eq!(row.auth_version, 0, "老行从 0 起，不是猜出来的版本");
+        assert_eq!(row.secret_ref.as_deref(), Some("localjson:v1:def"));
+
+        // 回拨再跑一次：空操作。
+        db.conn.pragma_update(None, "user_version", 20).unwrap();
+        db.migrate().unwrap();
+        assert_eq!(
+            db.get_qoder_authorization(&acc.id, "own_browser")
+                .unwrap()
+                .unwrap()
+                .auth_version,
+            0
+        );
     }
 
     /// v20：只加列 + 按引用前缀回填，**不改任何 access_ref**。
