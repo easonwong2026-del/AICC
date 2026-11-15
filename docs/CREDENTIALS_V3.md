@@ -294,6 +294,32 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 
 harness 不联网、不使用真实令牌（`SecureStore::memory` + 临时目录），跑一次约 0.1s。
 
+**复审第四轮（#85 第四次提交）**
+
+| 问题 | 修法 |
+| --- | --- |
+| 轮换写完文件后不校验 SQLite 引用是否还在 | `commit_rotated_json` 在文件写完后用 `record_status` 做 `version` CAS：失败就把文件写回旧内容并返回 `superseded`（`fileReverted` / `orphanSecret` 如实上报），绝不报 `valid` |
+| `record_status` 的返回值被 `let _ =` 吞掉 | 三条分支分别处理：`Ok(true)` → valid；`Ok(false)` → superseded + 回滚文件；`Err` → `rotation_not_committed`（文件保留新令牌，因为旧 refresh 已被服务端作废，回滚只会让账号更坏） |
+| 老 keychain 行同样"写完就报成功" | 钥匙串分支也检查 `record_status` 的 CAS 结果 |
+
+**为什么是"写完再撤销"而不是"先查一次"**
+
+文件写和 SQLite 提交跨两个存储，没有事务可用。写前查一次挡不住写后迁移；真正的判据是
+**写完之后这次提交还能不能成立**：
+
+```text
+owned::load（验归属，取 revision R）
+      ↓   ← 另一个进程 CAS 把引用从 F 迁到 G（F 保留）
+写 F（R → R+1）                       ← 这一步无法阻止
+record_status（CAS on version）→ false
+      ↓
+把 F 写回旧内容（R+1 → R+2），返回 superseded
+```
+
+F 已经不被任何行引用，没人会读到那半秒的新令牌；最终状态是"F 里是旧值、G 未被碰过、
+行指向 G、界面收到 superseded"。回归：`rotation_supersedes_when_the_authorization_moves_mid_flight`
+（进程内确定性交错）与 harness 的 `a_rotation_in_another_process_reports_superseded_after_the_reference_moves`（真双进程）。
+
 ### 归属校验为什么必须在业务层
 
 文件 `0600` 只回答"别的用户能不能读"，回答不了"这个文件是不是这条授权的"。引用写错

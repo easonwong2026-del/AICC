@@ -2015,8 +2015,7 @@ fn unverified_rotation(err: &crate::credentials::CredentialError) -> Value {
 /// 这次写入就必须建立在那个版本上。并发刷新时后到的那一方会拿到 `conflict`，
 /// 结果是 `superseded`（不覆盖、不标失效），而不是把人家的新令牌盖掉。
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
-fn commit_rotated_json(
+pub(crate) fn commit_rotated_json(
     app: &App,
     row: &crate::storage::AuthorizationRecord,
     store: &crate::credentials::localjson::LocalJsonStore,
@@ -2039,39 +2038,97 @@ fn commit_rotated_json(
     };
     let expires_at = expires.and_then(crate::auth::service::parse_rfc3339);
 
-    match store.replace_credentials(secret_id, verified.revision, credentials, expires_at) {
-        Ok(updated) => {
-            let _ = crate::auth::service::record_status(app, row, "valid", expires, None);
+    let updated =
+        match store.replace_credentials(secret_id, verified.revision, credentials, expires_at) {
+            Ok(updated) => updated,
+            // 另一个进程已经写过这个文件：我这份结论过时了，不覆盖、也不标记失效
+            // ——盘上那份才是新的，下一次读会拿到它。
+            Err(err) if err.kind == crate::credentials::CredentialErrorKind::Conflict => {
+                return Ok(json!({
+                    "state": "superseded",
+                    "reason": "credential_revision_changed",
+                }))
+            }
+            // 写失败：文件保持旧内容（原子替换保证没有半份），但服务端已经把旧的 refresh
+            // 作废了，这份授权确实不能再用 —— 标 invalid，等用户重新登录。
+            Err(err) => {
+                let _ = crate::auth::service::record_status(
+                    app,
+                    row,
+                    "invalid",
+                    None,
+                    Some("refresh_not_persisted"),
+                );
+                return Ok(json!({
+                    "state": "invalid",
+                    "needsRelogin": true,
+                    "error": {
+                        "kind": "refresh_not_persisted",
+                        "message": crate::rpc::sanitize(&err.message),
+                    },
+                }));
+            }
+        };
+
+    // **提交边界**：文件写完之后必须确认 SQLite 那条授权还指着这份文件、版本也没变。
+    // 否则就是"给一份已经不被引用的旧文件写了新令牌，还向界面报告刷新成功"。
+    match crate::auth::service::record_status(app, row, "valid", expires, None) {
+        Ok(true) => Ok(json!({
+            "state": "valid",
+            "tokenExpiresAt": expires,
+            "secretRevision": updated.revision,
+        })),
+        // 引用/版本在这中间被改掉了（重新导入、迁移、另一个 Worker）：把文件写回旧内容，
+        // 报告 superseded。**绝不**当作刷新成功。
+        Ok(false) => {
+            let reverted = revert_rotation(store, secret_id, &updated, verified);
             Ok(json!({
-                "state": "valid",
-                "tokenExpiresAt": expires,
-                "secretRevision": updated.revision,
+                "state": "superseded",
+                "reason": "authorization_moved",
+                "fileReverted": reverted,
+                // 回滚失败 = 一份没人引用的文件里留着刚拿到的有效令牌，必须让调用方看见。
+                "orphanSecret": !reverted,
             }))
         }
-        // 另一个进程已经写过这个文件：我这份结论过时了，不覆盖、也不标记失效
-        // ——盘上那份才是新的，下一次读会拿到它。
-        Err(err) if err.kind == crate::credentials::CredentialErrorKind::Conflict => Ok(json!({
-            "state": "superseded",
-            "reason": "credential_revision_changed",
+        // 库写不进去：文件里的新令牌是真的、可用的（旧 refresh 已被服务端作废），
+        // 所以**不回滚**，但也不能声称成功。
+        Err(err) => Ok(json!({
+            "state": "invalid",
+            "needsRelogin": false,
+            "fileUpdated": true,
+            "error": {
+                "kind": "rotation_not_committed",
+                "message": crate::rpc::sanitize(&err.message),
+            },
         })),
-        // 写失败：文件保持旧内容（原子替换保证没有半份），但服务端已经把旧的 refresh
-        // 作废了，这份授权确实不能再用 —— 标 invalid，等用户重新登录。
+    }
+}
+
+/// 把文件写回"轮换前"的内容。返回 false = 没写回去，调用方要留痕。
+fn revert_rotation(
+    store: &crate::credentials::localjson::LocalJsonStore,
+    secret_id: &str,
+    updated: &crate::credentials::localjson::StoredSecret,
+    verified: &crate::credentials::localjson::StoredSecret,
+) -> bool {
+    let expires = verified
+        .expires_at
+        .as_deref()
+        .and_then(crate::auth::service::parse_rfc3339);
+    match store.replace_credentials(
+        secret_id,
+        updated.revision,
+        verified.credentials.clone(),
+        expires,
+    ) {
+        Ok(_) => true,
         Err(err) => {
-            let _ = crate::auth::service::record_status(
-                app,
-                row,
-                "invalid",
-                None,
-                Some("refresh_not_persisted"),
-            );
-            Ok(json!({
-                "state": "invalid",
-                "needsRelogin": true,
-                "error": {
-                    "kind": "refresh_not_persisted",
-                    "message": crate::rpc::sanitize(&err.message),
-                },
-            }))
+            crate::handlers::log_note(&format!(
+                "轮换回滚失败（{}）：{}",
+                err.kind.as_str(),
+                crate::rpc::sanitize(&err.message)
+            ));
+            false
         }
     }
 }
@@ -2194,8 +2251,27 @@ fn persist_rotated_tokens(
     };
 
     if access_saved.is_ok() && refresh_saved.is_ok() {
-        let _ = crate::auth::service::record_status(app, &row, "valid", expires, None);
-        return Ok(json!({ "state": "valid", "tokenExpiresAt": expires }));
+        // 老账号（`keychain:` 行）同样不能"写完就报成功"：状态提交的 CAS 失败
+        // 说明这一行已经被别的流程改过，界面不该收到"刷新成功"。
+        return match crate::auth::service::record_status(app, &row, "valid", expires, None) {
+            Ok(true) => Ok(json!({ "state": "valid", "tokenExpiresAt": expires })),
+            Ok(false) => Ok(json!({
+                "state": "superseded",
+                "reason": "authorization_moved",
+                // 钥匙串的键名是按账号确定的，令牌本身仍然可用；
+                // 只是这一行的状态没被这次刷新更新。
+                "fileReverted": true,
+            })),
+            Err(err) => Ok(json!({
+                "state": "invalid",
+                "needsRelogin": false,
+                "fileUpdated": true,
+                "error": {
+                    "kind": "rotation_not_committed",
+                    "message": crate::rpc::sanitize(&err.message),
+                },
+            })),
+        };
     }
 
     // 只有「服务端确实给了新 refresh、而这个新 refresh 没写进去」才说明旧 refresh 已经作废，
@@ -4065,6 +4141,128 @@ mod tests {
         assert_eq!(after.revision, before.revision + 1, "一次替换只该推进一格");
         // 没有留下第二份文件。
         assert_eq!(secret_ids(&app), vec![secret_id]);
+    }
+
+    /// P0 回归：轮换提交时 SQLite 引用已经被迁走 —— 不许写旧文件，更不许报成功。
+    ///
+    /// 确定性交错：`owned::load`（验归属 + 取快照）→ **别的进程把 ref 迁到 G**
+    /// → 迟到的 `commit_rotated_json` 才发现版本对不上。
+    #[test]
+    fn rotation_supersedes_when_the_authorization_moves_mid_flight() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-0000-0001-0002-0000000000g1";
+        persist_login(
+            &app,
+            &payload(uid, "old-access", Some("old-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
+        let acc = account(&app, uid);
+        let row = own_row(&app, &acc.id);
+        let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
+        let f_id = secret_id_of(&app, &acc.id);
+
+        // ① 轮换前那一刻：验过归属的快照（这正是 persist_rotated_json 做的事）。
+        let verified = crate::auth::owned::load(&app, &acc, &row).expect("verified");
+
+        // ② 另一个进程把引用迁到 G，旧文件 F **保留**（迁移/换源之后可能出现这种局面）。
+        let other = store
+            .create(crate::credentials::localjson::SecretDraft::oauth(
+                ids::auth_id(&acc.id, ids::KIND_OWN),
+                "workbuddy",
+                "moved-access",
+            ))
+            .expect("other secret");
+        let other_ref =
+            crate::credentials::reference::local_json_ref(&other.secret_id).expect("ref");
+        let mut moved = row.clone();
+        moved.access_ref = other_ref.clone();
+        moved.refresh_ref = Some(other_ref.clone());
+        assert!(app
+            .with_db(|db| db.replace_authorization_cas(&moved, row.version, &row.access_ref))
+            .expect("cas"));
+        let g_path = store.root().join(format!("{}.json", other.secret_id));
+        let g_before = std::fs::read(&g_path).expect("read g");
+
+        // ③ 迟到的轮换提交：必须 superseded，且不能把新令牌留在 F 里。
+        let out = commit_rotated_json(
+            &app,
+            &row,
+            &store,
+            &f_id,
+            &verified,
+            "late-access",
+            Some("late-refresh"),
+            None,
+        )
+        .expect("superseded 不是错误");
+
+        assert_eq!(out["state"], json!("superseded"), "{out}");
+        assert_eq!(out["reason"], json!("authorization_moved"), "{out}");
+        assert_eq!(out["fileReverted"], json!(true), "{out}");
+        assert_eq!(out["orphanSecret"], json!(false), "{out}");
+
+        let f_after = store.load(&f_id).expect("load f");
+        assert_eq!(
+            f_after.credentials.access_token.as_deref(),
+            Some("old-access"),
+            "旧文件里不能留下新令牌"
+        );
+        assert_eq!(
+            f_after.credentials.refresh_token.as_deref(),
+            Some("old-refresh")
+        );
+        assert_eq!(
+            std::fs::read(&g_path).expect("read g"),
+            g_before,
+            "G 不许被改"
+        );
+        assert_eq!(own_row(&app, &acc.id).access_ref, other_ref, "行必须还是 G");
+        assert_eq!(own_access(&app, &acc.id).as_deref(), Some("moved-access"));
+    }
+
+    /// P0 回归：状态提交失败时**不许**回报 `state=valid`。
+    #[test]
+    fn rotation_never_reports_valid_when_the_status_cannot_be_written() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-0000-0001-0002-0000000000g2";
+        persist_login(
+            &app,
+            &payload(uid, "old-access", Some("old-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
+        let acc = account(&app, uid);
+        app.with_db(|db| {
+            db.exec_raw(
+                "CREATE TRIGGER no_auth_update BEFORE UPDATE ON account_authorizations
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+        })
+        .expect("install trigger");
+
+        let out = persist_rotated_tokens(
+            &app,
+            &acc,
+            acc.auth_epoch,
+            "new-access",
+            Some("new-refresh"),
+            None,
+        )
+        .expect("返回 invalid 而不是抛错");
+
+        assert_eq!(out["state"], json!("invalid"), "{out}");
+        assert_eq!(
+            out["error"]["kind"],
+            json!("rotation_not_committed"),
+            "{out}"
+        );
+        assert_eq!(out["needsRelogin"], json!(false), "{out}");
+        // 新令牌是真的可用（旧 refresh 已被服务端作废），所以保留在文件里。
+        assert_eq!(out["fileUpdated"], json!(true), "{out}");
+        app.with_db(|db| db.exec_raw("DROP TRIGGER no_auth_update;"))
+            .expect("drop trigger");
+        assert_eq!(own_access(&app, &acc.id).as_deref(), Some("new-access"));
     }
 
     /// 并发轮换：后到的一方拿着旧版本，必须 superseded，而不是把人家的新令牌盖掉。

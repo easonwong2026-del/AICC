@@ -20,6 +20,7 @@ mod tests {
     const HARNESS_ENV: &str = "AICC_CRED_HARNESS";
     const FIRST_LOGIN: &str = "first_login";
     const LATE_LOGIN: &str = "late_login";
+    const ROTATION_MOVED: &str = "rotation_moved";
     const WAIT_LIMIT: Duration = Duration::from_secs(20);
 
     fn uid() -> &'static str {
@@ -173,13 +174,43 @@ mod tests {
                     Err(err) => format!("error:{}", err.message),
                 }
             }
+            ROTATION_MOVED => {
+                // 读完行、验完归属，然后等父进程把引用迁走。
+                let account = app
+                    .with_db(|db| db.get_account(&account_id))
+                    .expect("query")
+                    .expect("account");
+                let row = app
+                    .with_db(|db| db.find_authorization(&account_id, "own"))
+                    .expect("query")
+                    .expect("row");
+                let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
+                let secret_id = crate::auth::owned::secret_id_of(&row).expect("secret id");
+                let verified = crate::auth::owned::load(&app, &account, &row).expect("verified");
+                touch(&root.join("rotation-ready"));
+                wait_for(&root.join("rotation-go"));
+
+                match crate::handlers::commit_rotated_json(
+                    &app,
+                    &row,
+                    &store,
+                    &secret_id,
+                    &verified,
+                    "late-access",
+                    Some("late-refresh"),
+                    None,
+                ) {
+                    Ok(value) => value["state"].as_str().unwrap_or("unknown").to_string(),
+                    Err(err) => format!("error:{}", err.message),
+                }
+            }
             other => panic!("未知场景：{other}"),
         };
 
-        let name = if scenario == LATE_LOGIN {
-            "outcome-late".to_string()
-        } else {
-            format!("outcome-{role}")
+        let name = match scenario {
+            LATE_LOGIN => "outcome-late".to_string(),
+            ROTATION_MOVED => "outcome-rotation".to_string(),
+            _ => format!("outcome-{role}"),
         };
         std::fs::write(root.join(name), outcome).expect("outcome");
     }
@@ -273,6 +304,107 @@ mod tests {
             .as_deref(),
             Some(format!("{winner}-access").as_str())
         );
+    }
+
+    /// 轮换提交时引用在另一个进程里被迁走：不许写旧文件，更不许报成功。
+    ///
+    /// 两个真实进程：子进程验完归属、暂停；父进程用 CAS 把引用迁到 G（F 保留）；
+    /// 子进程继续提交，必须 `superseded` 且 F 被写回旧内容。
+    #[test]
+    fn a_rotation_in_another_process_reports_superseded_after_the_reference_moves() {
+        if let Ok(spec) = std::env::var(HARNESS_ENV) {
+            child_run(&spec);
+            return;
+        }
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let app = app_at(root.path());
+        ensure_account(&app);
+        let account_id = account_id();
+
+        let first = service::write_own(
+            &app,
+            &account_id,
+            "workbuddy",
+            "old-access",
+            Some("old-refresh"),
+            None,
+        )
+        .expect("first");
+        service::record_grant(
+            &app,
+            &account_id,
+            uid(),
+            "own",
+            None,
+            Some((first.access_ref(), first.refresh_ref())),
+            first.expectation(),
+        )
+        .expect("grant");
+        let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
+        let f_id = match crate::credentials::reference::CredentialRef::parse(first.access_ref())
+            .expect("ref")
+        {
+            crate::credentials::reference::CredentialRef::LocalJson { secret_id } => secret_id,
+            other => panic!("应当是本地 JSON：{other:?}"),
+        };
+
+        let name = "cred_harness::tests::a_rotation_in_another_process_reports_superseded_after_the_reference_moves";
+        let mut child = spawn_child(
+            root.path(),
+            name,
+            &format!("{ROTATION_MOVED}|a|{}", root.path().display()),
+        );
+        wait_for(&root.path().join("rotation-ready"));
+
+        // 父进程：新文件 G + CAS 把引用挪过去，F 保留。
+        let other = store
+            .create(crate::credentials::localjson::SecretDraft::oauth(
+                crate::auth::ids::auth_id(&account_id, "own"),
+                "workbuddy",
+                "moved-access",
+            ))
+            .expect("other secret");
+        let other_ref =
+            crate::credentials::reference::local_json_ref(&other.secret_id).expect("ref");
+        let row = app
+            .with_db(|db| db.find_authorization(&account_id, "own"))
+            .expect("query")
+            .expect("row");
+        let mut moved = row.clone();
+        moved.access_ref = other_ref.clone();
+        moved.refresh_ref = Some(other_ref.clone());
+        assert!(app
+            .with_db(|db| db.replace_authorization_cas(&moved, row.version, &row.access_ref))
+            .expect("cas"));
+        let g_path = store.root().join(format!("{}.json", other.secret_id));
+        let g_before = std::fs::read(&g_path).expect("read g");
+
+        touch(&root.path().join("rotation-go"));
+        assert!(child.wait().expect("wait").success(), "子进程失败");
+        assert_eq!(
+            read(&root.path().join("outcome-rotation")),
+            "superseded",
+            "迟到的轮换必须报 superseded"
+        );
+
+        let f_after = store.load(&f_id).expect("load f");
+        assert_eq!(
+            f_after.credentials.access_token.as_deref(),
+            Some("old-access"),
+            "F 里不许留下新令牌：{:?}",
+            f_after.credentials.access_token
+        );
+        assert_eq!(
+            std::fs::read(&g_path).expect("read g"),
+            g_before,
+            "G 不许被改"
+        );
+        let after = app
+            .with_db(|db| db.find_authorization(&account_id, "own"))
+            .expect("query")
+            .expect("row");
+        assert_eq!(after.access_ref, other_ref);
     }
 
     /// 迟到的登录（另一个进程）：引用被挪走之后，旧快照不许覆盖，孤儿文件要被清掉。
