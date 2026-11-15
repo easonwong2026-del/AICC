@@ -2,7 +2,8 @@
 
 > 状态：**CRED-1 已合并**（`LocalJsonStore` + 引用解析 + 文件系统边界加固）；
 > **CRED-2 已合并**（SQLite v20 + Magpie 动态关联 + 统一 Broker 解析）；
-> **CRED-3a 已交付待验收**（WorkBuddy 自有授权 JSON 化，**默认关闭**，见 §8ter）。
+> **CRED-3a 已合并**（WorkBuddy 自有授权 JSON 化，**默认关闭**，见 §8ter）；
+> **CRED-3-UI 已交付待验收**（明文的告知 / 确认与开关，见 §8quater）。
 > CRED-3b（Qoder 两种授权）/ CRED-4（旧 Keychain 迁移）/ CRED-5（免弹窗收口）尚未开始。
 >
 > 基线：`main` @ `6adde70`（#84 已合并），数据库 Schema **v20**。
@@ -359,6 +360,39 @@ F 已经不被任何行引用，没人会读到那半秒的新令牌；最终状
 
 这条闸门只管**新建**：已有 JSON 行照旧读写（文件早就落盘了，退回钥匙串不会减少暴露，
 还会让同一份授权分裂成两处）。老 `keychain:` 行不因开关变化而迁移。
+
+## 8quater. CRED-3-UI：明文的告知、确认与开关
+
+助手侧只提供"能不能写明文"的判据，**是否同意由用户在界面上决定**。这一阶段没有改任何
+凭据读写逻辑，只把开关接到人。
+
+| 界面 | 位置 | 行为 |
+| --- | --- | --- |
+| 凭据存储 | 设置 → 凭据存储 | 显示当前方式（钥匙串 / 本地 JSON）、各来源条数、`钥匙串自检` |
+| 启用 | 同上 →「启用本地 JSON…」 | 先弹风险说明；点「我已了解，启用」才 `settings.set credentials_json_consent=1` |
+| 风险说明 | `PlaintextCredentialSheet` | 明文落盘、0600 的边界、FileVault、备份 / 云同步、只影响新建授权、可随时关闭、Qoder 与第三方钥匙串不受影响 |
+| 拒绝 | 同上 →「仍使用钥匙串」 | **什么都不写**：助手默认就是钥匙串，不需要"拒绝"这个状态 |
+| 关闭 | 已启用时的「改回钥匙串…」 | 写 `0`；只影响之后新建的授权，已写成 JSON 的继续可用 |
+
+数据来源只有一处：`health.credentials`（开关与风险文案）+ `health.authorizations.storage`
+（各来源条数）。界面不自己推断，也不缓存"用户点过"的本地值 —— 关掉助手再打开，显示的是
+助手真实状态。
+
+**老助手兼容**：两个字段缺失时 `CredentialStoragePolicy.parse` 返回 nil，界面显示
+"这个版本的内嵌助手还没有本地 JSON 存储"，而不是一个点不动的开关。
+
+**验证**
+
+| 手段 | 结果 |
+| --- | --- |
+| `xcrun swiftc -typecheck`（全量 Sources + Widget 共享源码） | 通过，无新增 warning |
+| `swift test`（CI：`swift-test`） | 新增 3 条：解析、标题 / 摘要、老助手缺字段 |
+| `bash scripts/smoke-test-dashboard-visual.sh` | 设置页渲染通过（新增段在浅色 / 深色下均可读） |
+| `AICC_ALLOW_ADHOC=1 bash macos/build-aicc-swiftui.sh` | App + Widget + 内嵌助手签名与版本校验通过 |
+| 构建产物 RPC 走查 | `settings.get` → `0`；`set 1` → `health.credentials.jsonStorageEnabled = true` |
+
+> 本机没有 Xcode / XCTest，`swift test` 只能靠 CI；本地用 `swiftc -typecheck` + 离屏渲染
+> 覆盖编译与版式，两者的边界已在上面写清。
 
 ## 9. 风险
 

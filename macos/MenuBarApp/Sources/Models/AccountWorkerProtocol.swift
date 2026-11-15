@@ -23,6 +23,10 @@ public enum AccountWorkerProtocol {
     /// `app_settings` 里的键名，与 Rust 侧 `auth::broker::PREFERRED_SETTING` 一致。
     public static let settingPreferredAuthSource = "auth_preferred_source"
 
+    /// 明文 JSON 的开关，与 Rust 侧 `auth::consent::JSON_CONSENT_SETTING` 一致。
+    /// 只有用户在界面上明确同意之后才置 `"1"`；未置位时新登录继续走钥匙串。
+    public static let settingCredentialsJSONConsent = "credentials_json_consent"
+
     /// 助手在 bundle 里的相对路径。
     public static let helperRelativePath = "Contents/Helpers/aicc-account-worker"
 }
@@ -104,6 +108,77 @@ public enum AccountWorkerJSON {
 }
 
 /// `health` 的结构化视图。
+/// 凭据存储策略与现状。
+///
+/// 两个来源合成：`health.credentials`（是否已同意明文 JSON、风险说明）与
+/// `health.authorizations.storage`（`localjson` / `magpie` / `keychain` 各几条）。
+/// 助手没提供时返回 nil —— 老版本助手根本没有 JSON 存储，界面应当说"未知"而不是"未启用"。
+public struct CredentialStoragePolicy: Equatable {
+    /// 用户是否已同意把**新建**授权写成明文 JSON。
+    public let jsonEnabled: Bool
+    /// 尚未同意：界面需要先解释风险再让用户选择。
+    public let consentRequired: Bool
+    /// Rust 侧给出的风险说明（中文，可直接展示）。
+    public let risk: String
+    /// 引用种类 → 条数。只包含助手实际返回的项。
+    public let counts: [String: Int]
+
+    public static let kindJSON = "localjson"
+    public static let kindMagpie = "magpie"
+    public static let kindKeychain = "keychain"
+
+    public init(jsonEnabled: Bool, consentRequired: Bool, risk: String, counts: [String: Int]) {
+        self.jsonEnabled = jsonEnabled
+        self.consentRequired = consentRequired
+        self.risk = risk
+        self.counts = counts
+    }
+
+    public var localJSONCount: Int { counts[Self.kindJSON] ?? 0 }
+    public var magpieCount: Int { counts[Self.kindMagpie] ?? 0 }
+    public var keychainCount: Int { counts[Self.kindKeychain] ?? 0 }
+
+    /// 当前方式的一句话标题。
+    public var headline: String {
+        jsonEnabled ? "本地 JSON（明文）" : "macOS 钥匙串"
+    }
+
+    /// 各来源各几条，设置页直接显示。
+    public var summary: String {
+        var parts: [String] = []
+        if localJSONCount > 0 { parts.append("本地 JSON \(localJSONCount)") }
+        if keychainCount > 0 { parts.append("钥匙串 \(keychainCount)") }
+        if magpieCount > 0 { parts.append("Magpie \(magpieCount)") }
+        return parts.isEmpty ? "暂无授权" : parts.joined(separator: " · ")
+    }
+
+    /// 解析 `health` 里的两个字段。缺 `credentials` 说明是老助手，返回 nil。
+    public static func parse(_ object: [String: Any]) -> CredentialStoragePolicy? {
+        guard let credentials = object["credentials"] as? [String: Any],
+              let enabled = credentials["jsonStorageEnabled"] as? Bool,
+              let required = credentials["consentRequired"] as? Bool
+        else { return nil }
+
+        var counts: [String: Int] = [:]
+        if let authorizations = object["authorizations"] as? [String: Any],
+           let storage = authorizations["storage"] as? [[String: Any]] {
+            for row in storage {
+                guard let kind = row["kind"] as? String,
+                      let count = (row["count"] as? NSNumber)?.intValue,
+                      count > 0
+                else { continue }
+                counts[kind, default: 0] += count
+            }
+        }
+        return CredentialStoragePolicy(
+            jsonEnabled: enabled,
+            consentRequired: required,
+            risk: credentials["risk"] as? String ?? "",
+            counts: counts
+        )
+    }
+}
+
 public struct AccountWorkerHealth: Equatable {
     public let status: String
     public let protocolVersion: Int
@@ -118,6 +193,8 @@ public struct AccountWorkerHealth: Equatable {
     public let workbuddyState: String
     public let qoderState: String
     public let wbSwitchHomeOwned: Bool
+    /// 凭据存储策略；老助手不返回，此时为 nil。
+    public let credentialStorage: CredentialStoragePolicy?
 
     /// 协议对不上的助手必须拒绝使用，否则会出现"半个新协议"。
     public var isProtocolCompatible: Bool {
@@ -180,7 +257,8 @@ public struct AccountWorkerHealth: Equatable {
             accountCount: accountCount,
             workbuddyState: (providers["workbuddy"] as? [String: Any])?["state"] as? String ?? "unknown",
             qoderState: (providers["qoder"] as? [String: Any])?["state"] as? String ?? "unknown",
-            wbSwitchHomeOwned: paths["wbSwitchHomeOwned"] as? Bool ?? false
+            wbSwitchHomeOwned: paths["wbSwitchHomeOwned"] as? Bool ?? false,
+            credentialStorage: CredentialStoragePolicy.parse(object)
         )
     }
 }
