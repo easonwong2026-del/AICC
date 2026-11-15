@@ -101,7 +101,7 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 | 权限 | 目录 `0700`（每次操作顺带收紧），文件 `0600`（显式 chmod，防 umask） |
 | 目录不可被替换 | `secrets` 与 `v1` 两级目录逐个 `symlink_metadata` 校验：软链 / 非目录 / 属主不是当前用户 / 组或其他可写 一律拒绝，**且先校验再 chmod** |
 | 无半截文件 | 同目录 `.tmp-*` 写完 → `fsync` → `rename` 原子替换 → 目录 `fsync` |
-| 并发不互相盖 | `secrets/v1/.lock` advisory 锁：`O_NOFOLLOW` 打开、校验属主与 fd↔路径同一 inode、`fchmod` 收紧到 `0600`；等锁有上限（默认 2s），超时报 `lock_timeout` |
+| 并发不互相盖 | `secrets/v1/.lock` advisory 锁：`O_NOFOLLOW` 打开、校验属主、`nlink == 1`（挡硬链接）、fd↔路径同一 inode、`fchmod` 收紧到 `0600`；等锁有上限（默认 2s），超时报 `lock_timeout` |
 | 旧快照不覆盖新令牌 | `revision` 检查：对不上返回 `conflict`，一个字节都不写 |
 | 归属不可变 | `write()` 额外比对 `authorizationId` / `platform` / `source` / `credentialKind`，不一致返回 `conflict`；换归属只能新建凭据 |
 | 崩溃可恢复 | 残留 `.tmp-*` 由 `sweep_orphans` 清理；目标文件永远是"旧内容或新内容" |
@@ -111,6 +111,11 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 > 残余窗口：目录与锁文件的校验是"lstat → chmod/open"，理论上仍有极短的
 > TOCTOU 窗口。这里没有做 `openat` 全链路（std 不提供），因为前提是攻击者已经能在
 > 该用户的 `0700` 目录里改名——那已经等价于同一用户权限下的完全控制。
+>
+> 平台差异：`O_NOFOLLOW` 与 `ELOOP` 的数值在 macOS / Linux 上不同，两者都按
+> `target_os` 取值，不写死单一平台。凭据文件刻意**不**要求 `nlink == 1`
+> （`rsync --link-dest` 之类会正常产生硬链接，那份也是 `0600` 同一属主），
+> 只有锁文件要求——我们会 `fchmod` + `flock` 它，改动会落到共享 inode 上。
 
 ## 6. 读路径的硬规定
 
