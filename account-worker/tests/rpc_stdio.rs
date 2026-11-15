@@ -538,18 +538,26 @@ fn deleting_an_account_purges_its_credentials() {
         .as_str()
         .unwrap()
         .to_string();
+    // PR-CRED-2：导入只登记 `magpie:v1:` 引用，钥匙串里**不应该**有这份令牌。
     let magpie_key = scoped_key(&id, "magpie", "access");
-    let before = session.call(3, "secure.get", json!({"key": magpie_key}));
-    assert_eq!(before["result"]["exists"], json!(true), "{before}");
+    let borrowed = session.call(3, "secure.get", json!({"key": magpie_key}));
+    assert_eq!(
+        borrowed["error"]["code"],
+        json!(1002),
+        "导入不得把 Magpie 令牌复制进钥匙串：{borrowed}"
+    );
 
     session.call(4, "accounts.delete", json!({"id": id}));
 
-    let after = session.call(5, "secure.get", json!({"key": magpie_key}));
+    // 账号与授权行一起消失；借用授权没有任何钥匙串条目需要清理。
+    let after = session.call(5, "accounts.list", json!({}));
     assert_eq!(
-        after["error"]["code"],
-        json!(1002),
-        "凭据应该跟着账号一起删掉：{after}"
+        after["result"]["accounts"].as_array().unwrap().len(),
+        0,
+        "账号应被删除：{after}"
     );
+    let still = session.call(6, "secure.get", json!({"key": magpie_key}));
+    assert_eq!(still["error"]["code"], json!(1002), "{still}");
 
     session.call(6, "worker.shutdown", json!({}));
 }

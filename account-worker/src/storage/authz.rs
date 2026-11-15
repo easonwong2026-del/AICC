@@ -19,6 +19,27 @@ pub const KEY_STATE_FAILED: &str = "failed";
 
 pub const STATUSES: &[&str] = &["unknown", "valid", "expired", "invalid", "denied"];
 
+/// 凭据实际存在哪里（v20）。由 `access_ref` 的前缀决定，写库时同步记录。
+pub const STORAGE_KEYCHAIN: &str = "keychain";
+pub const STORAGE_LOCALJSON: &str = "localjson";
+pub const STORAGE_MAGPIE: &str = "magpie";
+/// 不认识的前缀。**不**并进 `keychain`：那会把"引用坏了"伪装成"老授权"，
+/// 让审计统计永远看不到异常（读路径仍然严格拒绝未知 scheme）。
+pub const STORAGE_UNKNOWN: &str = "unknown";
+
+/// `access_ref` → 存储种类。只认我们写得出的三种前缀，其余一律 `unknown`。
+pub fn storage_kind_of(access_ref: &str) -> &'static str {
+    if access_ref.starts_with(crate::credentials::reference::MAGPIE_PREFIX) {
+        STORAGE_MAGPIE
+    } else if access_ref.starts_with(crate::credentials::reference::LOCAL_JSON_PREFIX) {
+        STORAGE_LOCALJSON
+    } else if access_ref.starts_with(crate::credentials::reference::KEYCHAIN_PREFIX) {
+        STORAGE_KEYCHAIN
+    } else {
+        STORAGE_UNKNOWN
+    }
+}
+
 /// 一份授权。`kind` 只有 `own` / `magpie` 两种取值。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,6 +74,11 @@ impl AuthorizationRecord {
             .as_deref()
             .and_then(ids::ref_to_key)
             .map(str::to_string)
+    }
+
+    /// 凭据落在哪种存储里（v20）。由 `access_ref` 前缀决定，不单独存一份。
+    pub fn storage_kind(&self) -> &'static str {
+        storage_kind_of(&self.access_ref)
     }
 
     /// 凭据是不是已经搬完。`ready` 之前读旧键（G4）。
@@ -266,6 +292,151 @@ impl super::Db {
         Ok(n > 0)
     }
 
+    /// 带 CAS 的整份覆盖写：`expected_version` 与 `expected_access_ref` 必须同时命中，
+    /// 否则一个字节都不写，返回 `false`。
+    ///
+    /// 和 [`Self::replace_authorization`] 的差别就是这两个条件。Magpie 来源会被多个
+    /// 进程反复重写（导入 / resync / relink），只比 `id` 就是"谁最后写谁赢"，
+    /// 而"最后"往往正是那个最慢返回的旧快照。
+    pub fn replace_authorization_cas(
+        &self,
+        record: &AuthorizationRecord,
+        expected_version: i64,
+        expected_access_ref: &str,
+    ) -> RpcResult<bool> {
+        if !ids::is_known_kind(&record.kind) {
+            return Err(RpcError::invalid_params(format!(
+                "授权类型非法：{}",
+                record.kind
+            )));
+        }
+        let now = now_rfc3339();
+        let changed = self.conn.execute(
+            "UPDATE account_authorizations
+                SET access_ref = ?1,
+                    refresh_ref = ?2,
+                    auth_domain = ?3,
+                    token_expires_at = ?4,
+                    status = ?5,
+                    version = version + 1,
+                    key_migration_state = ?6,
+                    storage_kind = ?7,
+                    source_key = ?8,
+                    last_used_at = COALESCE(?9, last_used_at),
+                    last_error = ?10,
+                    ref_updated_at = CASE WHEN ?14 <> ?1 THEN ?11 ELSE ref_updated_at END,
+                    updated_at = ?11
+              WHERE id = ?12 AND version = ?13 AND access_ref = ?14",
+            params![
+                record.access_ref,
+                record.refresh_ref,
+                record.auth_domain,
+                record.token_expires_at,
+                record.status,
+                record.key_migration_state,
+                storage_kind_of(&record.access_ref),
+                record.source_key,
+                record.last_used_at,
+                record.last_error,
+                now,
+                record.id,
+                expected_version,
+                expected_access_ref
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// 改一份授权的凭据位置（v20 的重新关联用）。**带 CAS**。
+    ///
+    /// 必须同时命中 `id` + `kind = 'magpie'` + `version` + `access_ref` 才写：
+    /// 重新关联是"读旧行 → 读 Magpie → 写新引用"的三步操作，中间用户可能刚好
+    /// 重新导入过、或者另一个 Worker 已经改好了。只比 `id` 会把这些更新直接盖掉，
+    /// 而 `version + 1` 本身拦不住——它只保证"下一次写入看见的是新版本"。
+    ///
+    /// 返回 `false` = 有人先改了，调用方必须放弃（不重试、不盲写）。
+    /// 引用变了 = 凭据换了地方，所以 `version` 还会 +1；`refresh_ref` 一起清掉。
+    pub fn rebind_authorization_ref(
+        &self,
+        id: &str,
+        expected_version: i64,
+        expected_access_ref: &str,
+        access_ref: &str,
+        storage_kind: &str,
+        source_key: Option<&str>,
+    ) -> RpcResult<bool> {
+        if ![STORAGE_KEYCHAIN, STORAGE_LOCALJSON, STORAGE_MAGPIE].contains(&storage_kind) {
+            return Err(RpcError::invalid_params(format!(
+                "存储类型非法：{storage_kind}"
+            )));
+        }
+        let now = now_rfc3339();
+        let changed = self.conn.execute(
+            "UPDATE account_authorizations
+                SET access_ref = ?1,
+                    refresh_ref = NULL,
+                    storage_kind = ?2,
+                    source_key = COALESCE(?3, source_key),
+                    ref_updated_at = ?4,
+                    version = version + 1,
+                    updated_at = ?4
+              WHERE id = ?5
+                AND kind = 'magpie'
+                AND version = ?6
+                AND access_ref = ?7",
+            params![
+                access_ref,
+                storage_kind,
+                source_key,
+                now,
+                id,
+                expected_version,
+                expected_access_ref
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// `health` 用：凭据落在哪种存储里。
+    ///
+    /// 按 `access_ref` 前缀算，不读 `storage_kind` 列：**列只是审计留痕**，
+    /// 唯一真源是引用本身。这样即便有人用 SQL 直接改了引用，统计也不会撒谎。
+    pub fn authorization_storage_counts(&self) -> RpcResult<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT CASE
+                        WHEN access_ref LIKE 'magpie:v1:%' THEN 'magpie'
+                        WHEN access_ref LIKE 'localjson:v1:%' THEN 'localjson'
+                        WHEN access_ref LIKE 'keychain:%' THEN 'keychain'
+                        ELSE 'unknown'
+                    END AS storage_kind,
+                    COUNT(*)
+               FROM account_authorizations
+              GROUP BY storage_kind ORDER BY storage_kind ASC",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// 还没走 Magpie 动态关联的借用授权（v20 重新关联的输入）。
+    pub fn authorizations_pending_magpie_relink(&self) -> RpcResult<Vec<AuthorizationRecord>> {
+        // 判据是**引用**，不是列：列可能因为人工 SQL / 旧版本写入而漂移。
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {AUTH_COLUMNS} FROM account_authorizations
+              WHERE kind = 'magpie' AND access_ref NOT LIKE 'magpie:v1:%'
+              ORDER BY account_id ASC"
+        ))?;
+        let rows = stmt.query_map([], map_authorization)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// `health` 用：各迁移状态各有几行。
     pub fn authorization_migration_counts(&self) -> RpcResult<Vec<(String, i64)>> {
         let mut stmt = self.conn.prepare(
@@ -363,17 +534,24 @@ fn put_authorization(
     db.conn.execute(
         "INSERT INTO account_authorizations (
              id, account_id, kind, access_ref, refresh_ref, auth_domain, token_expires_at,
-             status, version, key_migration_state, source_key, last_used_at, last_error,
-             created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
+             status, version, key_migration_state, storage_kind, source_key, last_used_at,
+             last_error, created_at, updated_at, ref_updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?15)
          ON CONFLICT (id) DO UPDATE SET
              access_ref = excluded.access_ref,
              refresh_ref = excluded.refresh_ref,
              auth_domain = excluded.auth_domain,
              token_expires_at = excluded.token_expires_at,
              status = excluded.status,
-             version = account_authorizations.version + ?15,
+             version = account_authorizations.version + ?16,
              key_migration_state = excluded.key_migration_state,
+             storage_kind = excluded.storage_kind,
+             -- 引用变了才算凭据换地方；普通状态写入不刷新这个时间。
+             ref_updated_at = CASE
+                 WHEN account_authorizations.access_ref <> excluded.access_ref
+                 THEN excluded.updated_at
+                 ELSE account_authorizations.ref_updated_at
+             END,
              source_key = excluded.source_key,
              last_used_at = COALESCE(excluded.last_used_at, account_authorizations.last_used_at),
              last_error = excluded.last_error,
@@ -389,6 +567,8 @@ fn put_authorization(
             record.status,
             record.version,
             record.key_migration_state,
+            // 派生值：唯一真源是 access_ref 的前缀，不让调用方再传一份可能不一致的。
+            storage_kind_of(&record.access_ref),
             record.source_key,
             record.last_used_at,
             record.last_error,
@@ -541,5 +721,59 @@ pub(super) fn seed_mirror_v7(tx: &Transaction<'_>) -> RpcResult<()> {
             ],
         )?;
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// v20：凭据存储种类
+// ---------------------------------------------------------------------------
+
+/// v20 的 Rust 部分：给授权表加 `storage_kind` / `ref_updated_at`，并按
+/// `access_ref` 前缀回填。
+///
+/// **不猜归属**：这一步只把"引用已经写成什么"如实翻译成存储种类，不去读
+/// Magpie 文件、不改任何 `access_ref`。旧 Magpie 授权要从钥匙串引用改成
+/// `magpie:v1:` 必须在用户/服务显式触发的重新关联里做（`auth::relink`）。
+///
+/// 刻意不给新列加 `CHECK`：SQLite 的 `ALTER TABLE ADD COLUMN` 对 CHECK 支持
+/// 有限，而这一列只有 Rust 侧三个常量能写（`rebind_authorization_ref` 会校验）。
+pub(super) fn migrate_v20(tx: &rusqlite::Transaction<'_>) -> RpcResult<()> {
+    let has_storage_kind: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('account_authorizations') WHERE name = 'storage_kind'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_storage_kind == 0 {
+        tx.execute_batch(
+            "ALTER TABLE account_authorizations
+                 ADD COLUMN storage_kind TEXT NOT NULL DEFAULT 'keychain';",
+        )?;
+    }
+    let has_ref_at: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('account_authorizations') WHERE name = 'ref_updated_at'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_ref_at == 0 {
+        tx.execute_batch("ALTER TABLE account_authorizations ADD COLUMN ref_updated_at TEXT;")?;
+    }
+
+    // 幂等：每次启动都按当前引用重算一遍，人工改过引用的库也不会被写成错的种类。
+    tx.execute_batch(
+        "UPDATE account_authorizations
+            SET storage_kind = CASE
+                WHEN access_ref LIKE 'magpie:v1:%' THEN 'magpie'
+                WHEN access_ref LIKE 'localjson:v1:%' THEN 'localjson'
+                WHEN access_ref LIKE 'keychain:%' THEN 'keychain'
+                ELSE 'unknown'
+            END;",
+    )?;
+    let now = now_rfc3339();
+    tx.execute(
+        "UPDATE account_authorizations
+            SET ref_updated_at = ?1
+          WHERE storage_kind <> 'keychain' AND ref_updated_at IS NULL",
+        params![now],
+    )?;
     Ok(())
 }
