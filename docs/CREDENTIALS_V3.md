@@ -489,10 +489,23 @@ Qoder 有**两条**自有授权来源，各占 `qoder_authorizations` 的一行�
 没有行引用的文件。这是**有意**选的——宁可留一份 `0600` 的孤儿文件（可被后续核对扫到），
 也不能删掉用户刚保存的新令牌。
 
+### 第二轮复审修复（P0-A / P0-B / P1-C / P1-D）
+
+| 编号 | 问题 | 修法 | 错误时的副作用 |
+| --- | --- | --- | --- |
+| P0-A | 移除 PAT 时"行已删、文件才被发现重写"（`revision` 变了），旧实现记一行日志就返回 `removed: true`：盘上留下一份**有效却无任何引用的令牌**，再点一次也找不到它 | 该分支改为把行以 `missing` 放回（可定位、可重试、Credits 不用），返回 `removed: false` + `pending_cleanup: true`；RPC 新增 `pendingCleanup` | 不假报成功；文件仍被一行（停用状态）引用，重试即可收尾 |
+| P0-B | 删号按计划清完凭据后，若另一进程此时新存了一份授权（它读到推进后的 epoch，可合法提交），直接删账号行会让那份文件变成孤儿 | 删账号行改为**带生命周期条件**（`delete_qoder_account_if_current`，`generation` + 我们自己推进后的 `auth_epoch`）。不成立 → 拒绝删除、保留账号与那份新授权，返回 `authorization_changed_during_delete`；计划内的行按 `generation` 标 `missing` | 删除成功时不存在计划外凭据；竞争时态可重试，且每个留在盘上的文件都有行引用 |
+| P1-C | `missing` 只是文案，`credits::resolve_token` 仍会选它 → 失败的删除会"生效一半" | `usable` 排除 `missing`；只有 `missing` 行时给出"上次删除没完成、已停用"的明确提示 | 手动/自动领取都不会发请求（测试断言 `claimed_ids` 为空） |
+| P1-D | 补偿性恢复只查外键，可能把旧引用写进"同 UID 删号重建"的新账号 | `restore_qoder_authorization` 增加生命周期参数，`INSERT ... WHERE EXISTS(generation)`；只比 `generation`（删行本身就会推进 epoch，比 epoch 永远不成立）；唯一键存在时直接放弃 | 身份已变化时不恢复、只留痕；绝不覆盖更新的授权 |
+
 ### 验证
 
 | 项 | 手段 |
 | --- | --- |
+| P0-A 假成功 | `qoder_pat::tests::a_rewritten_secret_leaves_a_retryable_record_and_never_reports_success`（行以 `missing` 回来、Credits 拒绝使用、重试收尾） |
+| P0-B 删号竞争 | `qoder_admin::tests::a_new_authorization_during_delete_aborts_without_orphaning_it`（拒绝删除；磁盘上每份文件都有行引用；重试删净） |
+| P1-C missing | `credits::tests::a_missing_authorization_is_never_used_by_credits`（`resolve_token` 拒绝 + 领取零请求） |
+| P1-D 补偿 | `storage::qoder_accounts::tests::a_restored_authorization_is_marked_missing_and_retryable`（换 generation 后恢复落空） |
 | P0-1 确定性交错 | `qoder_secret::tests::a_stale_absent_observation_never_overwrites_the_winner`（赢家令牌与 `revision` 原样可读） |
 | P0-2 生命周期 | `storage::qoder_accounts::tests::an_absent_commit_from_a_deleted_account_is_rejected`、`..._after_another_source_moved_the_epoch` |
 | P0-3 先验后删 | `qoder_admin::tests::a_foreign_secret_aborts_the_whole_delete_before_anything_is_removed`、`a_magpie_link_is_counted_but_never_deleted`（钥匙串删除全失败的后端下仍成功） |

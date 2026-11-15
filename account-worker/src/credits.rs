@@ -99,9 +99,9 @@ fn try_claim_lock(account_id: &str) -> Option<ClaimLock> {
 // 凭据
 // ---------------------------------------------------------------------------
 
-struct Resolved {
-    source: &'static str,
-    token: String,
+pub(crate) struct Resolved {
+    pub(crate) source: &'static str,
+    pub(crate) token: String,
     /// 这次令牌是从哪读出来的：`keychain` / `localjson`。只用于诊断，不外泄。
     storage: &'static str,
 }
@@ -125,14 +125,19 @@ impl Resolved {
 ///
 /// 只有 Magpie 关联的账号一个请求都不发：那份令牌归 Magpie，AICC 手里没有凭据，
 /// 说"领取失败"会让人以为是权限问题，其实是"没有东西可发"。
-fn resolve_token(app: &App, account: &QoderAccountRecord) -> Result<Resolved, String> {
+pub(crate) fn resolve_token(app: &App, account: &QoderAccountRecord) -> Result<Resolved, String> {
     let rows = app
         .with_db(|db| db.list_qoder_authorizations(&account.id))
         .map_err(|err| err.message)?;
 
+    // `missing` 必须排除：那是"上一次删除/移除没做完"留下的行。凭据可能还在盘上，
+    // 但它已经被判为不可信（复审 P1-C）——继续用它等于让一次失败的删除静默生效一半。
     let usable = |source: &str| {
         rows.iter().any(|row| {
-            row.source == source && row.auth_status != "invalid" && row.auth_status != "denied"
+            row.source == source
+                && row.auth_status != "invalid"
+                && row.auth_status != "denied"
+                && row.auth_status != "missing"
         })
     };
 
@@ -168,6 +173,16 @@ fn resolve_token(app: &App, account: &QoderAccountRecord) -> Result<Resolved, St
     if rows.iter().any(|row| row.source == "magpie") {
         return Err(
             "这个账号只有 Magpie 关联，没有 AICC 自己的凭据；请先浏览器授权或保存 PAT".to_string(),
+        );
+    }
+    // 有行但全被停用：说清是"没删干净、已停用"，而不是含糊的"没有授权来源"。
+    if rows
+        .iter()
+        .any(|row| qoder_secret::is_own_source(&row.source) && row.auth_status == "missing")
+    {
+        return Err(
+            "这个账号的凭据上次删除没有完成（missing），已停用不会再使用；请重试移除或重新授权"
+                .to_string(),
         );
     }
     Err("还没有可用的授权来源".to_string())
@@ -1279,6 +1294,39 @@ mod tests {
         let err = resolve_token(&app, &account).err().expect("必须报错");
         assert!(err.contains("conflict"), "{err}");
         assert!(!err.contains("TOKEN-OF-SOMEONE-ELSE"), "错误消息不许带令牌");
+    }
+
+    // -- 复审 P1-C：missing 不许参与 Credits --------------------------
+
+    /// 删除没做完留下的 `missing` 行：凭据可能还在盘上，但**一个字请求都不该发**。
+    ///
+    /// 这条同时覆盖"手动"与"自动"两个入口 —— 它们都先过 `resolve_token`。
+    #[test]
+    fn a_missing_authorization_is_never_used_by_credits() {
+        let (app, _dir) = test_app();
+        let id = claimable_account(&app, "u-missing");
+        // 半途状态：凭据还在（删除失败），行被标成 missing。
+        app.with_db(|db| db.set_qoder_auth_status(&id, SOURCE_OWN_PAT, "missing"))
+            .unwrap();
+        assert!(
+            app.secure
+                .get(&crate::providers::qoder_pat::pat_key(&id))
+                .is_ok(),
+            "前提：令牌确实还在"
+        );
+
+        let account = account(&app, &id).unwrap();
+        let err = resolve_token(&app, &account)
+            .err()
+            .expect("missing 行不许被当作可用凭据");
+        assert!(err.contains("missing"), "{err}");
+        assert!(err.contains("已停用"), "{err}");
+
+        // 领取路径同样一个 POST 都不发。
+        let fake = FakeTransport::new(vec![], vec![]);
+        let value = run_claim(&app, &id, &fake);
+        assert_eq!(value["state"], json!("no_credential"), "{value}");
+        assert!(fake.claimed_ids().is_empty(), "不许发任何请求");
     }
 
     /// 手动与自动共用一把锁：同一账号同一时刻只能有一次领取在跑。

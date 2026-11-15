@@ -349,12 +349,16 @@ fn write_status_if_current(app: &App, account_id: &str, status: &str, lifecycle:
     });
 }
 
+#[derive(Debug)]
 pub struct Removed {
     pub removed: bool,
     pub secret_deleted: bool,
     /// 移除期间这一行被别的流程改过（例如另一个窗口刚保存了新 PAT）。
     /// 这种时候**什么都没删**，让用户刷新后重试。
     pub authorization_changed: bool,
+    /// 行已经摘掉了，但凭据没能删干净 —— 已把行以 `missing` 放回，等待重试。
+    /// 这时候**绝不能**报"已移除"：那份令牌还在盘上，只是暂时没有有效引用。
+    pub pending_cleanup: bool,
 }
 
 /// 删掉 PAT 这一份来源。
@@ -370,26 +374,36 @@ pub struct Removed {
 /// ```text
 /// ① 读一次快照（行 + 生命周期）并记下凭据版本（JSON revision / 钥匙串字节）
 /// ② 带核验删行：ref 或生命周期变了就整次放弃，一个字节都不动
-/// ③ 删凭据：版本对不上（期间被重写）就保留文件
-/// ④ ③ 失败时把行以 `missing` 状态放回去，保留可重试的入口
+/// ③ 删凭据：版本对不上（期间被重写）就**不删**，把行以 `missing` 放回
+/// ④ 其他删除失败同样把行放回 `missing`，返回可重试的错误
 /// ```
 ///
-/// 还顺带解决了"重新保存"的竞争：② 用的守卫是 `secret_ref + generation + auth_epoch`，
-/// 任何一次新授权都会推进 epoch，旧的移除动作因此落空。
+/// ## 为什么 ③ 冲突时不能报"已移除"（复审 P0-A）
 ///
-/// 代价：② 与 ③ 之间进程被强杀会留下一个没有行引用的文件（已在
-/// `qoder_secret` 顶部说明；CRED-4/5 的核对会扫到）。这是有意选的：宁可留一份
-/// 可被清理的孤儿文件，也不能删掉用户刚保存的新令牌。
+/// ② 成功之后这一行就没了。若此时才发现文件已被重写成新令牌（`revision` 变了），
+/// 直接返回 `removed: true` 会把一份**有效的、没有任何行引用的令牌**留在盘上，
+/// 而且再点一次移除也找不到它（行已经没了）。所以这个分支必须：
+///
+/// - 把行以 `missing` 放回（可定位、可重试）；
+/// - `missing` 状态下 `credits` 不会使用它（见 `credits::resolve_token`）；
+/// - 返回 `removed: false` + `pending_cleanup: true`，绝不假报成功。
+///
+/// ## 崩溃窗口
+///
+/// ② 与 ③ 之间进程被强杀会留下一个没有行引用的文件。这是**有意**选的：
+/// 宁可留一份可被 CRED-4/5 核对扫到的 `0600` 孤儿文件，也不能删掉用户刚保存的
+/// 新令牌。
 pub fn remove(app: &App, account_id: &str) -> RpcResult<Removed> {
-    remove_with(app, account_id, || {})
+    remove_with(app, account_id, || {}, || {})
 }
 
-/// `before_row_delete` 是测试用的确定性交错点：它在"读完快照"之后、
-/// "删行"之前执行，用来把另一个流程的重新保存固定进这个窗口。
+/// `before_row_delete` / `after_row_delete` 是测试用的确定性交错点：
+/// 前者在"读完快照"之后、"删行"之前执行；后者在"行已删、凭据未删"之间执行。
 pub(crate) fn remove_with(
     app: &App,
     account_id: &str,
     before_row_delete: impl FnOnce(),
+    after_row_delete: impl FnOnce(),
 ) -> RpcResult<Removed> {
     let account = app
         .with_db(|db| db.get_qoder_account(account_id))?
@@ -402,6 +416,7 @@ pub(crate) fn remove_with(
             removed: false,
             secret_deleted: true,
             authorization_changed: false,
+            pending_cleanup: false,
         });
     };
     let guard = match qoder_secret::observe_for_delete(app, &account, &row, CredentialKind::Pat) {
@@ -425,8 +440,11 @@ pub(crate) fn remove_with(
             removed: false,
             secret_deleted: false,
             authorization_changed: true,
+            pending_cleanup: false,
         });
     }
+
+    after_row_delete();
 
     // ③ 删凭据。本来就不在（`None`）算删干净。
     let Some(guard) = guard else {
@@ -434,6 +452,7 @@ pub(crate) fn remove_with(
             removed: true,
             secret_deleted: true,
             authorization_changed: false,
+            pending_cleanup: false,
         });
     };
     match qoder_secret::delete_guarded(app, &account, &row, CredentialKind::Pat, &guard) {
@@ -441,25 +460,26 @@ pub(crate) fn remove_with(
             removed: true,
             secret_deleted: true,
             authorization_changed: false,
+            pending_cleanup: false,
         }),
+        // 文件在 ② 之后被重写：**不删**这份可能已是新令牌的内容，
+        // 把行以 `missing` 放回，交给用户重试（不能假报已移除）。
         Err(err) if err.kind == CredentialErrorKind::Conflict => {
-            // 行已经摘掉了，但文件在这期间被重写（理论上只可能来自异常交错的
-            // 外部流程）：保留文件，别删掉可能是新令牌的内容，留痕。
-            crate::handlers::log_note(&format!(
-                "移除 PAT 时凭据已被重写（{}）：文件保留待人工核对",
-                err.kind.as_str()
-            ));
+            if !restore_missing(app, &row, &observed.lifecycle) {
+                crate::handlers::log_note(
+                    "PAT 凭据在移除期间被重写，且授权行未能放回：请重新保存 PAT 或删除该账号",
+                );
+            }
             Ok(Removed {
-                removed: true,
+                removed: false,
                 secret_deleted: false,
                 authorization_changed: false,
+                pending_cleanup: true,
             })
         }
         // ④ 删不掉：把行放回去（`missing`），让用户能再点一次。
         Err(err) => {
-            let restored = app
-                .with_db(|db| db.restore_qoder_authorization(&row, "missing"))
-                .unwrap_or(false);
+            let restored = restore_missing(app, &row, &observed.lifecycle);
             if !restored {
                 crate::handlers::log_note(
                     "移除 PAT 失败且授权行未能放回：请重新保存一次 PAT 或删除该账号",
@@ -468,6 +488,12 @@ pub(crate) fn remove_with(
             Err(secret_action_error(&err, "删除 PAT 凭据"))
         }
     }
+}
+
+/// 把行以 `missing` 放回，**限定在观察到的那个账号生命周期**（复审 P1-D）。
+fn restore_missing(app: &App, row: &QoderAuthRecord, observed: &QoderLifecycle) -> bool {
+    app.with_db(|db| db.restore_qoder_authorization(row, "missing", observed))
+        .unwrap_or(false)
 }
 
 /// 凭据层错误 → RPC 错误，**带 `可重试` 字样**（界面靠它决定是否让用户再点一次）。
@@ -744,11 +770,16 @@ mod tests {
         let new_pat = "qp_newnewnewnewnewnewnewnewnewnew02";
         let saved = persist(&app, QoderEdition::Cn, old_pat, &identity("u-race")).unwrap();
 
-        let outcome = remove_with(&app, &saved.account_id, || {
-            // 另一个窗口保存了新的 PAT（同一个来源 → 覆盖写 + epoch 前进）。
-            persist(&app, QoderEdition::Cn, new_pat, &identity("u-race"))
-                .expect("新 PAT 必须保存成功");
-        })
+        let outcome = remove_with(
+            &app,
+            &saved.account_id,
+            || {
+                // 另一个窗口保存了新的 PAT（同一个来源 → 覆盖写 + epoch 前进）。
+                persist(&app, QoderEdition::Cn, new_pat, &identity("u-race"))
+                    .expect("新 PAT 必须保存成功");
+            },
+            || {},
+        )
         .unwrap();
 
         assert!(outcome.authorization_changed, "旧快照的移除必须放弃");
@@ -780,9 +811,16 @@ mod tests {
         let new_pat = "qp_newnewnewnewnewnewnewnewnewnew02";
         let saved = persist(&app, QoderEdition::Cn, old_pat, &identity("u-json")).unwrap();
 
-        let outcome = remove_with(&app, &saved.account_id, || {
-            persist(&app, QoderEdition::Cn, new_pat, &identity("u-json")).unwrap();
-        })
+        // 交错点在"删行之前"：另一个窗口把新 PAT 覆盖写进同一个文件并提交，
+        // 于是我们的条件删行看到 epoch 变了，整次放弃（P0-4 的核心）。
+        let outcome = remove_with(
+            &app,
+            &saved.account_id,
+            || {
+                persist(&app, QoderEdition::Cn, new_pat, &identity("u-json")).unwrap();
+            },
+            || {},
+        )
         .unwrap();
 
         assert!(outcome.authorization_changed);
@@ -806,6 +844,93 @@ mod tests {
             new_pat
         );
         assert_eq!(secret.revision, 1, "只被新保存写过一次");
+    }
+
+    /// **复审 P0-A 的确定性交错**：行已摘掉之后才发现文件被重写（`revision` 变了）。
+    ///
+    /// 这时不能报"已移除"——那会把一份有效、却没有任何行引用的令牌留在盘上，
+    /// 而且再点一次也找不到它。正确结果是：行以 `missing` 放回（可定位、可重试、
+    /// Credits 不会用），返回 `removed: false` + `pending_cleanup: true`。
+    #[test]
+    fn a_rewritten_secret_leaves_a_retryable_record_and_never_reports_success() {
+        let (app, _dir) = test_app();
+        crate::auth::consent::set_json_storage(&app, true).unwrap();
+        let old_pat = "qp_oldoldoldoldoldoldoldoldoldold01";
+        let new_pat = "qp_newnewnewnewnewnewnewnewnewnew02";
+        let saved = persist(&app, QoderEdition::Cn, old_pat, &identity("u-strand")).unwrap();
+
+        let row = app
+            .with_db(|db| db.get_qoder_authorization(&saved.account_id, SOURCE_OWN_PAT))
+            .unwrap()
+            .expect("PAT 行");
+        let secret_id = row
+            .secret_ref
+            .as_deref()
+            .unwrap()
+            .trim_start_matches("localjson:v1:")
+            .to_string();
+
+        let outcome = remove_with(
+            &app,
+            &saved.account_id,
+            || {},
+            || {
+                // 行已摘掉、凭据还没删：另一个进程把新令牌写进了同一个文件。
+                crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths)
+                    .replace_credentials(
+                        &secret_id,
+                        0,
+                        crate::credentials::localjson::Credentials::access_only(new_pat),
+                        None,
+                    )
+                    .expect("模拟并发写入");
+            },
+        )
+        .unwrap();
+
+        assert!(!outcome.removed, "不能假报已移除");
+        assert!(!outcome.secret_deleted, "文件还在");
+        assert!(outcome.pending_cleanup, "必须留下可重试的清理入口");
+        assert!(!outcome.authorization_changed);
+
+        // 行回来了，标成 missing，并且指着那份文件。
+        let restored = app
+            .with_db(|db| db.get_qoder_authorization(&saved.account_id, SOURCE_OWN_PAT))
+            .unwrap()
+            .expect("行必须以 missing 恢复");
+        assert_eq!(restored.auth_status, "missing");
+        assert_eq!(
+            restored.secret_ref.as_deref(),
+            Some(row.secret_ref.as_deref().unwrap())
+        );
+
+        // **没有任何无主有效令牌**：那份文件现在有行引用，而且行是停用状态。
+        let account = app
+            .with_db(|db| db.get_qoder_account(&saved.account_id))
+            .unwrap()
+            .unwrap();
+        let err = crate::credits::resolve_token(&app, &account)
+            .err()
+            .expect("missing 行不许被 Credits 使用");
+        assert!(err.contains("missing"), "{err}");
+
+        // 再点一次 remove 就能收尾（文件按新 revision 删掉、行删掉）。
+        let retried = remove(&app, &saved.account_id).unwrap();
+        assert!(
+            retried.removed && retried.secret_deleted,
+            "removed={} deleted={}",
+            retried.removed,
+            retried.secret_deleted
+        );
+        assert!(app
+            .with_db(|db| db.list_qoder_authorizations(&saved.account_id))
+            .unwrap()
+            .is_empty());
+        assert!(
+            crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths)
+                .load(&secret_id)
+                .is_err()
+        );
     }
 
     /// 幂等重试：凭据已经不在（上次删到一半），再点一次照样把行删掉。

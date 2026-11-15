@@ -618,6 +618,10 @@ impl crate::storage::Db {
 
     /// 只改授权状态（例如 401 后标 `invalid`），**不推进版本号**。
     ///
+    /// 生产路径改用两个带核验的变体（`_if_current` / `_if_generation`）：无核验的
+    /// 状态写入会在"账号删了又建"时标脏新账号。这里保留给测试与调试。
+    #[allow(dead_code)]
+    ///
     /// 状态是观测结论，不是新的凭据事实：把"我刚被拒绝"也当成授权变更，
     /// 会让同一轮里已经拿到的正常快照白白作废。
     pub fn set_qoder_auth_status(
@@ -635,6 +639,34 @@ impl crate::storage::Db {
             "UPDATE qoder_authorizations SET auth_status = ?1, updated_at = ?2
              WHERE account_id = ?3 AND source = ?4",
             params![auth_status, now_rfc3339(), account_id, source],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// 只按 `generation` 核验的状态更新。
+    ///
+    /// 用在"删号中途被打断、需要把已经清掉凭据的行标成 `missing`"这种收尾上：
+    /// 那时 `auth_epoch` 已经被我们自己推进过、也可能被并发的授权写入再推一次，
+    /// 拿 epoch 做条件永远不成立；而 `generation` 仍然能区分"还是这个账号"与
+    /// "同一个 UID 删了又建"。返回 `false` 表示账号已经不是那一代，什么都没写。
+    pub fn set_qoder_auth_status_if_generation(
+        &mut self,
+        account_id: &str,
+        source: &str,
+        auth_status: &str,
+        generation: &str,
+    ) -> RpcResult<bool> {
+        if !AUTH_STATUSES.contains(&auth_status) {
+            return Err(RpcError::invalid_params(format!(
+                "authStatus 取值非法：{auth_status}"
+            )));
+        }
+        let changed = self.conn.execute(
+            "UPDATE qoder_authorizations SET auth_status = ?1, updated_at = ?2
+             WHERE account_id = ?3 AND source = ?4
+               AND EXISTS (SELECT 1 FROM qoder_accounts
+                           WHERE id = ?3 AND generation = ?5)",
+            params![auth_status, now_rfc3339(), account_id, source, generation],
         )?;
         Ok(changed > 0)
     }
@@ -779,11 +811,23 @@ impl crate::storage::Db {
     /// 为什么需要补偿：单独移除一份授权时**先摘引用、再销毁凭据**，这样并发的
     /// "重新保存"不可能被误删。代价是销毁那一步失败时行已经没了，必须放回去，
     /// 否则凭据变成没人认领的孤儿。放回去的行标成 `missing`：界面能看出
-    /// "凭据没删干净、可重试"，`credits` 也不会再拿它去发请求。
+    /// "凭据没删干净、可重试"，`credits` 也不会再拿它去发请求（见 `resolve_token`）。
+    ///
+    /// ## 必须带生命周期
+    ///
+    /// 账号 id 是 `(edition, uid)` 的确定性哈希：删号重建会得到**同一个 id**。
+    /// 没有守卫时，一次迟到的补偿会把旧凭据的引用写进**新**生命周期账号
+    /// （复审 P1-D）。所以这里要求 `observed` 的 `generation` 仍然相等。
+    ///
+    /// **只比 `generation`，不比 `auth_epoch`**：删掉这一行本身就会推进 epoch，
+    /// 补偿时看到的必然是新值，拿旧 epoch 去比永远不成立。`generation` 才是
+    /// "还是那一个账号"的标识；epoch 变化只说明别人又写过授权，那种情况下
+    /// 唯一键会让这次 INSERT 落空，不会覆盖更新的授权。
     pub fn restore_qoder_authorization(
         &mut self,
         row: &QoderAuthRecord,
         status: &str,
+        observed: &QoderLifecycle,
     ) -> RpcResult<bool> {
         if !AUTH_STATUSES.contains(&status) {
             return Err(RpcError::invalid_params(format!(
@@ -791,10 +835,15 @@ impl crate::storage::Db {
             )));
         }
         let changed = self.conn.execute(
-            "INSERT OR IGNORE INTO qoder_authorizations (
+            "INSERT INTO qoder_authorizations (
                  id, account_id, source, source_key, secret_ref, auth_status,
                  token_expires_at, fingerprint, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             )
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
+              WHERE EXISTS (SELECT 1 FROM qoder_accounts
+                            WHERE id = ?2 AND generation = ?11)
+               AND NOT EXISTS (SELECT 1 FROM qoder_authorizations
+                               WHERE account_id = ?2 AND source = ?3)",
             params![
                 row.id,
                 row.account_id,
@@ -805,7 +854,8 @@ impl crate::storage::Db {
                 row.token_expires_at,
                 row.fingerprint,
                 row.created_at,
-                now_rfc3339()
+                now_rfc3339(),
+                observed.generation
             ],
         )?;
         Ok(changed > 0)
@@ -849,6 +899,41 @@ impl crate::storage::Db {
             .conn
             .execute("DELETE FROM qoder_accounts WHERE id = ?1", params![id])?;
         Ok(changed > 0)
+    }
+
+    /// 带生命周期核验的删账号：**只有账号还停在我推进过的那一代才删**。
+    ///
+    /// 删号分两步：先按授权计划清凭据，再删账号行。两步之间可能有新的授权写入
+    /// （`persist` 会读到推进后的生命周期，因此可以合法提交），那份新凭据不在
+    /// 计划里，删完账号行就成了无人引用的有效令牌（复审 P0-B）。
+    ///
+    /// 所以最后这一步必须带条件：`generation` 必须是同一个账号，`auth_epoch`
+    /// 必须还是**我推进之后**的值。任何一次新的授权写入都会推进 epoch，于是这里
+    /// 返回 `false`，调用方据此拒绝删除并保留可重试的记录 —— 新凭据要么还在计划外
+    /// 的那一行上被引用着，要么下一次删除把它算进计划。
+    ///
+    /// 反过来，如果这里返回 `true`，账号行连同授权行一起消失，此后任何在途的
+    /// `persist` 提交都会因为 `EXISTS(generation, epoch)` 不成立而落空，并自行
+    /// 清掉它刚建的文件 —— 不会留下孤儿。
+    pub fn delete_qoder_account_if_current(
+        &mut self,
+        id: &str,
+        expected: &QoderLifecycle,
+    ) -> RpcResult<bool> {
+        let tx = self.conn.transaction()?;
+        let changed = tx.execute(
+            "DELETE FROM qoder_accounts
+              WHERE id = ?1 AND generation = ?2 AND auth_epoch = ?3",
+            params![id, expected.generation, expected.auth_epoch],
+        )?;
+        if changed == 0 {
+            // 什么都没删：不碰快照，`tx` 回滚。
+            return Ok(false);
+        }
+        tx.commit()?;
+        // 与 `delete_qoder_account` 一致：快照表无外键，删账号后显式清。
+        self.purge_account_quota_snapshots(id)?;
+        Ok(true)
     }
 }
 
@@ -1365,16 +1450,35 @@ mod tests {
             )
             .unwrap()
             .unwrap();
+        let observed = lifecycle_of(&db, &account.id);
         db.delete_qoder_account(&account.id).unwrap();
         assert!(
-            db.restore_qoder_authorization(&row, "missing").is_err(),
-            "账号不在时放不回去（外键），调用方要留痕"
+            !db.restore_qoder_authorization(&row, "missing", &observed)
+                .unwrap(),
+            "账号不在时放不回去（EXISTS 不成立），调用方要留痕"
         );
 
         let account = db
             .upsert_qoder_account("qoder_cn", "u-1", None, None)
             .unwrap();
-        assert!(db.restore_qoder_authorization(&row, "missing").unwrap());
+        // 复审 P1-D：账号已经换了 generation，旧行**不许**复活到新生命周期。
+        assert!(
+            !db.restore_qoder_authorization(&row, "missing", &observed)
+                .unwrap(),
+            "旧生命周期的补偿必须落空"
+        );
+        assert!(
+            db.get_qoder_authorization(&account.id, SOURCE_OWN_PAT)
+                .unwrap()
+                .is_none(),
+            "新账号里不能出现旧凭据的引用"
+        );
+
+        // 同一代账号（模拟"删行但没删账号"）才能放回去。
+        let current = lifecycle_of(&db, &account.id);
+        assert!(db
+            .restore_qoder_authorization(&row, "missing", &current)
+            .unwrap());
         let restored = db
             .get_qoder_authorization(&account.id, SOURCE_OWN_PAT)
             .unwrap()
@@ -1382,7 +1486,9 @@ mod tests {
         assert_eq!(restored.auth_status, "missing");
         assert_eq!(restored.secret_ref.as_deref(), Some("localjson:v1:p"));
         // 幂等：再放一次不会覆盖已有行。
-        assert!(!db.restore_qoder_authorization(&row, "missing").unwrap());
+        assert!(!db
+            .restore_qoder_authorization(&row, "missing", &current)
+            .unwrap());
     }
 
     #[test]

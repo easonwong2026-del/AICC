@@ -627,6 +627,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                 "secretDeleted": removed.secret_deleted,
                 // 期间这条授权被别的流程换过：什么都没删，让界面提示刷新重试。
                 "authorizationChanged": removed.authorization_changed,
+                // 行已摘掉但凭据没删干净（已以 missing 放回）：**不是**成功，要重试。
+                "pendingCleanup": removed.pending_cleanup,
             }))
         }
 
