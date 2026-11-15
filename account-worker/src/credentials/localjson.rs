@@ -521,6 +521,10 @@ impl LocalJsonStore {
 
     /// 新建一份凭据。`secretId` 由这里生成，`revision` 从 0 开始。
     pub fn create(&self, draft: SecretDraft) -> Result<StoredSecret, CredentialError> {
+        #[cfg(test)]
+        if let Some(point) = take_test_fault() {
+            self.inject_fault(point);
+        }
         let _lock = self.lock()?;
         // 持锁期间不可能有在写的临时文件，残留的一律是崩溃垃圾。
         self.sweep_orphans_unlocked(Duration::ZERO)?;
@@ -607,6 +611,10 @@ impl LocalJsonStore {
         credentials: Credentials,
         expires_at: Option<DateTime<Utc>>,
     ) -> Result<StoredSecret, CredentialError> {
+        #[cfg(test)]
+        if let Some(point) = take_test_fault() {
+            self.inject_fault(point);
+        }
         let _lock = self.lock()?;
         let mut next = self.load_unlocked(secret_id)?;
         if next.revision != expected_revision {
@@ -1202,6 +1210,35 @@ fn commit_temp_file(temp: &Path, target: &Path) -> Result<(), CredentialError> {
     fs::rename(temp, target).map_err(|e| CredentialError::io(&e, "替换凭据文件失败"))?;
     let dir = target.parent().unwrap_or(Path::new("."));
     sync_dir(dir)
+}
+
+/// 仅测试：进程内任意 `LocalJsonStore` 实例的一次性故障注入。
+///
+/// 凭据写入散落在 `App` 的多个调用点（登录 / 刷新），测试拿不到那个临时实例，
+/// 所以这里用线程局部开关（libtest 每个用例一个线程）。生产构建里整段不存在。
+#[cfg(test)]
+pub fn test_inject_fault(point: FaultPoint) {
+    TEST_FAULT.with(|slot| slot.set(point as u8));
+}
+
+/// 仅测试：清掉进程内的注入（用例之间互不污染）。
+#[cfg(test)]
+pub fn test_clear_faults() {
+    TEST_FAULT.with(|slot| slot.set(0));
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_FAULT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn take_test_fault() -> Option<FaultPoint> {
+    match TEST_FAULT.with(|slot| slot.replace(0)) {
+        1 => Some(FaultPoint::TempFile),
+        2 => Some(FaultPoint::Rename),
+        _ => None,
+    }
 }
 
 fn sync_dir(dir: &Path) -> Result<(), CredentialError> {

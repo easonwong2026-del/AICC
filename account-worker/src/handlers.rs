@@ -196,6 +196,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                 return Ok(json!({
                     "deleted": false,
                     "failedKeys": [],
+                    "failedSecrets": [],
                     "orphanCredentials": false,
                 }));
             };
@@ -207,21 +208,59 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
             // 就再也没法按 id 重试，只能留成孤儿。
             let rows = app.with_db(|db| db.list_authorizations(&account.id))?;
             let plan = crate::auth::service::account_purge_plan(&rows, &account);
+            // 自有授权的 JSON 文件也要跟着账号一起删；动态 Magpie 行没有文件。
+            // `account_secret_plan` 逐行验归属：引用指错时**不删**，而是拒绝整次删除 ——
+            // 那可能是另一个账号的有效凭据。
+            let secrets = crate::auth::service::account_secret_plan(app, &account, &rows);
+            if !secrets.refused.is_empty() {
+                log_note(&format!(
+                    "账号 {} 有 {} 份凭据归属校验失败，已停止删除",
+                    account.id,
+                    secrets.refused.len()
+                ));
+                return Ok(json!({
+                    "deleted": false,
+                    "failedKeys": [],
+                    "failedSecrets": [],
+                    "refusedSecrets": secrets.refused,
+                    "orphanCredentials": false,
+                    "reason": "secret_ownership_mismatch",
+                }));
+            }
             let failed_keys = crate::auth::service::purge_keys(app, &plan);
-            if !failed_keys.is_empty() {
-                // 删不掉的键要可见，账号保留以便重试。
+            let failed_secrets = crate::auth::service::purge_secrets(app, &secrets.owned);
+            if !failed_keys.is_empty() || !failed_secrets.is_empty() {
+                // 删不掉的凭据要可见，账号保留以便重试。
                 return Ok(json!({
                     "deleted": false,
                     "failedKeys": failed_keys,
+                    "failedSecrets": failed_secrets,
                     "orphanCredentials": true,
                 }));
             }
-            let deleted = app.with_db(|db| db.delete_account(&id))?;
-            Ok(json!({
-                "deleted": deleted,
-                "failedKeys": [],
-                "orphanCredentials": false,
-            }))
+            match app.with_db(|db| db.delete_account(&id)) {
+                Ok(deleted) => Ok(json!({
+                    "deleted": deleted,
+                    "failedKeys": [],
+                    "failedSecrets": [],
+                    "orphanCredentials": false,
+                })),
+                // 凭据已经清掉了，账号行因为数据库错误留下：不谎报成功，但可以重试
+                // （清凭据这一步对已删的键 / 文件是幂等的）。
+                Err(err) => {
+                    log_note(&format!(
+                        "账号行删除失败（{id}）：{}",
+                        crate::rpc::sanitize(&err.message)
+                    ));
+                    Ok(json!({
+                        "deleted": false,
+                        "failedKeys": [],
+                        "failedSecrets": [],
+                        "orphanCredentials": false,
+                        "recordError": "account_delete_failed",
+                    }))
+                }
+            }
         }
 
         "groups.list" => app.with_db(|db| Ok(json!({ "groups": db.list_groups()? }))),
@@ -300,6 +339,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                 None => Ok(json!({
                     "settings": {
                         crate::auth::broker::PREFERRED_SETTING: crate::auth::broker::preferred_source(app),
+                        crate::auth::consent::JSON_CONSENT_SETTING: crate::auth::consent::stored_value(app),
                     }
                 })),
             }
@@ -324,6 +364,12 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                         })
                         .collect();
                 }
+                crate::auth::consent::JSON_CONSENT_SETTING => {
+                    // 明文 JSON 的首次告知：只有明确肯定才打开，其余一律当作"不启用"。
+                    let enabled = matches!(value.trim(), "1" | "true" | "yes" | "on");
+                    crate::auth::consent::set_json_storage(app, enabled)?;
+                    mirror_errors = Vec::new();
+                }
                 other => return Err(RpcError::invalid_params(format!("未知设置项：{other}"))),
             }
             Ok(json!({ "key": key, "value": value, "mirrorErrors": mirror_errors }))
@@ -340,14 +386,37 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                 return Err(RpcError::not_found(format!("账号不存在：{account_id}")));
             }
             let report = crate::auth::service::delete_authorization(app, &account_id, &kind)?;
-            if !report.failed_keys.is_empty() {
+            if !report.failed_keys.is_empty() || !report.failed_secrets.is_empty() {
                 return Err(RpcError::new(
                     crate::rpc::E_SECURESTORE,
-                    "授权记录已保留，但有凭据未能从钥匙串删除，可重试",
+                    "授权记录已保留，但有凭据没能删除，可重试",
                 )
                 .with_data(json!({
                     "kind": "credential_delete_failed",
                     "failedKeys": report.failed_keys,
+                    "failedSecrets": report.failed_secrets,
+                })));
+            }
+            if let Some(reason) = &report.secret_error {
+                // 归属不符：一个字节都没删。这不是"删除失败"，是"不敢删"。
+                return Err(RpcError::new(
+                    crate::rpc::E_SECURESTORE,
+                    "凭据文件不属于这条授权，已拒绝删除（没有删除任何文件）",
+                )
+                .with_data(json!({
+                    "kind": "secret_ownership_mismatch",
+                    "reason": reason,
+                })));
+            }
+            if let Some(reason) = &report.record_error {
+                // 凭据已经删掉了、记录因为数据库错误留下：这句话必须说清楚，
+                // 否则界面会以为整份授权还在。
+                return Err(RpcError::internal(format!(
+                    "凭据已删除，但授权记录删除失败（{reason}）；可以重试删除"
+                ))
+                .with_data(json!({
+                    "kind": "record_delete_failed",
+                    "removedSecrets": report.removed_secrets,
                 })));
             }
             Ok(json!({
@@ -355,6 +424,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                 "kind": kind,
                 "deleted": report.record_deleted,
                 "removedKeys": report.removed_keys.len(),
+                "removedSecrets": report.removed_secrets.len(),
                 // 镜像没同步上不影响删除本身，但必须让调用方看见。
                 "mirrorError": report.mirror_error,
             }))
@@ -1031,6 +1101,8 @@ fn health(app: &App) -> Value {
     health["database"] = db;
     health["secureStore"] = secure;
     health["credentialMigration"] = crate::auth::migrate::health(app);
+    // 明文 JSON 是否已获用户确认：界面据此决定是否弹首次风险说明。
+    health["credentials"] = crate::auth::consent::status(app);
     health["authorizations"] = authorization_fleet(app);
     health["providers"] = json!({ "workbuddy": workbuddy, "qoder": qoder });
     health["methods"] = json!(METHODS);
@@ -1813,38 +1885,58 @@ fn persist_login(
 
     // 顺序：写凭据 → 建账号行 → 记授权行。账号行还不存在时授权行会被外键拒掉，
     // 所以凭据必须最先落，而它也是唯一需要显式回滚的一步（钥匙串没有事务）。
-    let snapshot = crate::auth::service::write_own(
+    // 新登录默认写 AICC 自己的 JSON（一次写、原子替换）；只有 CRED-4 之前
+    // 还没迁移的老账号继续走钥匙串。
+    let expires = payload
+        .expires_at_ms
+        .and_then(workbuddy_auth::ms_to_rfc3339);
+    let write = crate::auth::service::write_own(
         app,
         &account_id,
+        "workbuddy",
         &payload.access_token,
         payload.refresh_token.as_deref(),
+        expires
+            .as_deref()
+            .and_then(crate::auth::service::parse_rfc3339),
     )?;
 
     let (mut value, existed) = match write_login_row(app, payload, variant) {
         Ok(pair) => pair,
-        Err(err) => return Err(fail_login(app, &snapshot, err)),
+        Err(err) => return Err(fail_login(app, &write, err)),
     };
 
-    let expires = payload
-        .expires_at_ms
-        .and_then(workbuddy_auth::ms_to_rfc3339);
     match crate::auth::service::record_grant(
         app,
         &account_id,
         &uid,
         crate::auth::ids::KIND_OWN,
         expires.as_deref(),
+        Some((write.access_ref(), write.refresh_ref())),
+        write.expectation(),
     ) {
         Ok(saved) => {
             if let Some(reason) = saved.degraded {
                 // 凭据和授权行都好了，只有兼容别名没同步成功：如实报降级。
                 value["degraded"] = json!({ "kind": "alias_sync_failed", "message": reason });
             }
+            // 让界面知道这次令牌落在哪：没确认过明文风险时它仍是钥匙串。
+            value["credentialStorage"] = json!(saved.authorization.storage_kind());
+            if !crate::auth::consent::json_storage_enabled(app) {
+                value["jsonConsentRequired"] = json!(true);
+            }
             Ok(value)
+        }
+        // 竞争失败：另一个 Worker 先建好/改好了这条授权。只丢弃"这次新建、没人引用"
+        // 的文件；复用已有文件的那次写入保持不动（那是刚拿到的有效令牌）。
+        // 账号行也不撤 —— 它可能是胜者建的。
+        Err(err) if is_stale_snapshot(&err) => {
+            write.discard_unreferenced(app);
+            Err(err)
         }
         Err(err) => {
             // 授权行没记上 = 这次登录没有完成。凭据回滚，新建的账号行也撤掉。
-            let clean = snapshot.restore(app);
+            let clean = write.restore(app);
             if !existed {
                 let _ = app.with_db(|db| db.delete_account(&account_id));
             }
@@ -1861,9 +1953,213 @@ fn persist_login(
     }
 }
 
+/// 刷新成功后把新令牌写回 AICC 的 JSON 文件。
+///
+/// 与钥匙串版本的区别：`replace_credentials` 在锁内**一次换掉 access + refresh**，
+/// 不存在"新 access + 旧 refresh"的中间态；写失败时旧凭据原样有效。
+fn persist_rotated_json(
+    app: &App,
+    account: &crate::storage::AccountRecord,
+    row: &crate::storage::AuthorizationRecord,
+    access: &str,
+    refresh: Option<&str>,
+    expires: Option<&str>,
+) -> RpcResult<Value> {
+    use crate::credentials::localjson::LocalJsonStore;
+
+    let secret_id = match crate::auth::owned::secret_id_of(row) {
+        Ok(secret_id) => secret_id,
+        Err(_) => {
+            return Ok(json!({
+                "state": "invalid",
+                "needsRelogin": true,
+                "error": {
+                    "kind": "credential_ref_unusable",
+                    "message": "自有授权的凭据引用不可用，请重新登录",
+                },
+            }))
+        }
+    };
+    // 轮换会**写**这个文件：和读路径一样先验归属。引用指错时写下去就是覆盖别人的令牌。
+    let verified = match crate::auth::owned::load(app, account, row) {
+        Ok(secret) => secret,
+        Err(err) => return Ok(unverified_rotation(&err)),
+    };
+    let store = LocalJsonStore::for_paths(&app.paths);
+    commit_rotated_json(
+        app, row, &store, &secret_id, &verified, access, refresh, expires,
+    )
+}
+
+/// 归属/可读性校验没过时的回应。
+///
+/// 串号（`conflict`）**不**标 `needsRelogin`：重新登录解决不了"库指错了文件"，
+/// 还会把这条坏引用盖成一条新授权，问题就此消失。让它显式留在界面上。
+fn unverified_rotation(err: &crate::credentials::CredentialError) -> Value {
+    let kind = match err.kind {
+        crate::credentials::CredentialErrorKind::Conflict => "credential_ownership_mismatch",
+        crate::credentials::CredentialErrorKind::NotFound => "credential_unreadable",
+        other => other.as_str(),
+    };
+    json!({
+        "state": "invalid",
+        "needsRelogin": err.kind != crate::credentials::CredentialErrorKind::Conflict,
+        "error": {
+            "kind": kind,
+            "message": crate::rpc::sanitize(&err.message),
+        },
+    })
+}
+
+/// 真正落盘的那一步。`expected_revision` 显式传进来：调用方读到的版本是多少，
+/// 这次写入就必须建立在那个版本上。并发刷新时后到的那一方会拿到 `conflict`，
+/// 结果是 `superseded`（不覆盖、不标失效），而不是把人家的新令牌盖掉。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn commit_rotated_json(
+    app: &App,
+    row: &crate::storage::AuthorizationRecord,
+    store: &crate::credentials::localjson::LocalJsonStore,
+    secret_id: &str,
+    // 已经验过归属的那份快照：`revision` 与旧 refresh 都从它取。
+    verified: &crate::credentials::localjson::StoredSecret,
+    access: &str,
+    refresh: Option<&str>,
+    expires: Option<&str>,
+) -> RpcResult<Value> {
+    use crate::credentials::localjson::Credentials;
+
+    // 服务端没轮换 refresh 时，旧的那份继续有效：用验过的那份快照里的值一起写。
+    let credentials = match refresh {
+        Some(next) => Credentials::oauth(access, next),
+        None => match verified.credentials.refresh_token.as_deref() {
+            Some(previous) => Credentials::oauth(access, previous),
+            None => Credentials::access_only(access),
+        },
+    };
+    let expires_at = expires.and_then(crate::auth::service::parse_rfc3339);
+
+    let updated =
+        match store.replace_credentials(secret_id, verified.revision, credentials, expires_at) {
+            Ok(updated) => updated,
+            // 另一个进程已经写过这个文件：我这份结论过时了，不覆盖、也不标记失效
+            // ——盘上那份才是新的，下一次读会拿到它。
+            Err(err) if err.kind == crate::credentials::CredentialErrorKind::Conflict => {
+                return Ok(json!({
+                    "state": "superseded",
+                    "reason": "credential_revision_changed",
+                }))
+            }
+            // 写失败：文件保持旧内容（原子替换保证没有半份），但服务端已经把旧的 refresh
+            // 作废了，这份授权确实不能再用 —— 标 invalid，等用户重新登录。
+            Err(err) => {
+                let _ = crate::auth::service::record_status(
+                    app,
+                    row,
+                    "invalid",
+                    None,
+                    Some("refresh_not_persisted"),
+                );
+                return Ok(json!({
+                    "state": "invalid",
+                    "needsRelogin": true,
+                    "error": {
+                        "kind": "refresh_not_persisted",
+                        "message": crate::rpc::sanitize(&err.message),
+                    },
+                }));
+            }
+        };
+
+    // **提交边界**：文件写完之后必须确认 SQLite 那条授权还指着这份文件、版本也没变。
+    // 否则就是"给一份已经不被引用的旧文件写了新令牌，还向界面报告刷新成功"。
+    match crate::auth::service::record_status(app, row, "valid", expires, None) {
+        Ok(true) => Ok(json!({
+            "state": "valid",
+            "tokenExpiresAt": expires,
+            "secretRevision": updated.revision,
+        })),
+        // CAS 失败。**版本变了不等于引用变了**，这两件事的后果相反：
+        Ok(false) => {
+            match app.with_db(|db| db.find_authorization(&row.account_id, &row.kind)) {
+                // ① 还指着同一份文件：别的流程只是更新了状态 / 有效期。
+                // 我们刚写进去的令牌是最新的，回滚只会把账号退回到服务端已作废的旧 refresh。
+                // 保留新令牌，如实报告版本冲突。
+                Ok(Some(current)) if current.access_ref == row.access_ref => Ok(json!({
+                    "state": "superseded",
+                    "reason": "authorization_version_changed",
+                    "fileReverted": false,
+                    "fileUpdated": true,
+                })),
+                // ② 引用被迁到别的文件（或整行被删）：F 已经没人引用，撤销这次写入。
+                Ok(_) => {
+                    let reverted = revert_rotation(store, secret_id, &updated, verified);
+                    Ok(json!({
+                        "state": "superseded",
+                        "reason": "authorization_moved",
+                        "fileReverted": reverted,
+                        // 回滚失败 = 一份没人引用的文件里留着刚拿到的有效令牌，必须让调用方看见。
+                        "orphanSecret": !reverted,
+                    }))
+                }
+                // ③ 读不出来：不知道 F 还有没有主人。回滚的风险更大（可能毁掉唯一有效的
+                // refresh），所以保留新令牌，但**不**声称成功。
+                Err(err) => Ok(json!({
+                    "state": "invalid",
+                    "needsRelogin": false,
+                    "fileUpdated": true,
+                    "error": {
+                        "kind": "rotation_state_unknown",
+                        "message": crate::rpc::sanitize(&err.message),
+                    },
+                })),
+            }
+        }
+        // 库写不进去：文件里的新令牌是真的、可用的（旧 refresh 已被服务端作废），
+        // 所以**不回滚**，但也不能声称成功。
+        Err(err) => Ok(json!({
+            "state": "invalid",
+            "needsRelogin": false,
+            "fileUpdated": true,
+            "error": {
+                "kind": "rotation_not_committed",
+                "message": crate::rpc::sanitize(&err.message),
+            },
+        })),
+    }
+}
+
+/// 把文件写回"轮换前"的内容。返回 false = 没写回去，调用方要留痕。
+fn revert_rotation(
+    store: &crate::credentials::localjson::LocalJsonStore,
+    secret_id: &str,
+    updated: &crate::credentials::localjson::StoredSecret,
+    verified: &crate::credentials::localjson::StoredSecret,
+) -> bool {
+    let expires = verified
+        .expires_at
+        .as_deref()
+        .and_then(crate::auth::service::parse_rfc3339);
+    match store.replace_credentials(
+        secret_id,
+        updated.revision,
+        verified.credentials.clone(),
+        expires,
+    ) {
+        Ok(_) => true,
+        Err(err) => {
+            crate::handlers::log_note(&format!(
+                "轮换回滚失败（{}）：{}",
+                err.kind.as_str(),
+                crate::rpc::sanitize(&err.message)
+            ));
+            false
+        }
+    }
+}
+
 /// 登录失败时统一收尾：回滚钥匙串，回滚不干净就如实说。
-fn fail_login(app: &App, snapshot: &crate::auth::service::Snapshot, err: RpcError) -> RpcError {
-    if snapshot.restore(app) {
+fn fail_login(app: &App, write: &crate::auth::service::OwnWrite, err: RpcError) -> RpcError {
+    if write.restore(app) {
         return err;
     }
     RpcError::new(
@@ -1963,6 +2259,10 @@ fn persist_rotated_tokens(
     else {
         return Ok(json!({ "state": "superseded", "reason": "no_own_authorization" }));
     };
+    // PR-CRED-3：JSON 行整组换令牌（access + refresh 一次替换），不碰钥匙串。
+    if row.storage_kind() == crate::storage::authz::STORAGE_LOCALJSON {
+        return persist_rotated_json(app, &current, &row, access, refresh, expires);
+    }
     let keys = crate::auth::service::own_keys(&current.id);
     let refresh_key = keys.refresh.clone().expect("own 一定有 refresh 键");
 
@@ -1975,8 +2275,27 @@ fn persist_rotated_tokens(
     };
 
     if access_saved.is_ok() && refresh_saved.is_ok() {
-        let _ = crate::auth::service::record_status(app, &row, "valid", expires, None);
-        return Ok(json!({ "state": "valid", "tokenExpiresAt": expires }));
+        // 老账号（`keychain:` 行）同样不能"写完就报成功"：状态提交的 CAS 失败
+        // 说明这一行已经被别的流程改过，界面不该收到"刷新成功"。
+        return match crate::auth::service::record_status(app, &row, "valid", expires, None) {
+            Ok(true) => Ok(json!({ "state": "valid", "tokenExpiresAt": expires })),
+            Ok(false) => Ok(json!({
+                "state": "superseded",
+                "reason": "authorization_moved",
+                // 钥匙串的键名是按账号确定的，令牌本身仍然可用；
+                // 只是这一行的状态没被这次刷新更新。
+                "fileReverted": true,
+            })),
+            Err(err) => Ok(json!({
+                "state": "invalid",
+                "needsRelogin": false,
+                "fileUpdated": true,
+                "error": {
+                    "kind": "rotation_not_committed",
+                    "message": crate::rpc::sanitize(&err.message),
+                },
+            })),
+        };
     }
 
     // 只有「服务端确实给了新 refresh、而这个新 refresh 没写进去」才说明旧 refresh 已经作废，
@@ -2239,7 +2558,9 @@ fn validate_secure_key(key: &str) -> RpcResult<()> {
 }
 
 fn require_setting_key(key: &str) -> RpcResult<()> {
-    if key == crate::auth::broker::PREFERRED_SETTING {
+    if key == crate::auth::broker::PREFERRED_SETTING
+        || key == crate::auth::consent::JSON_CONSENT_SETTING
+    {
         Ok(())
     } else {
         Err(RpcError::invalid_params(format!("未知设置项：{key}")))
@@ -2300,7 +2621,14 @@ mod tests {
     use crate::providers::workbuddy_auth::{Profile, TokenPayload};
     use crate::securestore::SecureStore;
 
+    /// 默认测试环境：**已确认**明文风险（否则新登录会走钥匙串，见 `consent`）。
     fn test_app(store: SecureStore) -> (Arc<App>, tempfile::TempDir) {
+        let (app, dir) = test_app_without_consent(store);
+        crate::auth::consent::set_json_storage(&app, true).expect("enable json storage");
+        (app, dir)
+    }
+
+    fn test_app_without_consent(store: SecureStore) -> (Arc<App>, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let data = dir.path().to_path_buf();
         let paths = Paths {
@@ -2396,6 +2724,12 @@ mod tests {
         assert_eq!(
             own_access(&app, &record.id).as_deref(),
             Some("own-access-ai")
+        );
+        // 国际版的自有授权同样落 JSON：provider 只影响账号归属，不影响凭据存储。
+        assert_eq!(own_row(&app, &record.id).storage_kind(), "localjson");
+        assert!(
+            read_key(&app, &ids::access_key(&record.id, ids::KIND_OWN)).is_none(),
+            "国际版登录也不许写钥匙串"
         );
         let kinds: Vec<String> = app
             .with_db(|db| db.list_authorizations(&record.id))
@@ -2552,6 +2886,81 @@ mod tests {
             .expect("account")
     }
 
+    /// 造一份"CRED-4 之前的旧账号"：账号行 + `keychain:` 引用 + 钥匙串里的令牌。
+    ///
+    /// CRED-3 只改**新**授权，这类行必须继续按老路径读写，直到用户显式迁移。
+    /// 没有这个 helper 就没法测"老路径仍然可靠"——直接调 persist_login 只会走 JSON。
+    fn seed_legacy_own(app: &App, uid: &str, access: &str, refresh: Option<&str>) -> String {
+        let account_id = crate::storage::account_id("workbuddy", uid);
+        let keys = service::own_keys(&account_id);
+        app.secure
+            .set(&keys.access, access.as_bytes())
+            .expect("seed access");
+        if let Some(token) = refresh {
+            app.secure
+                .set(
+                    keys.refresh.as_deref().expect("own 一定有 refresh 键"),
+                    token.as_bytes(),
+                )
+                .expect("seed refresh");
+        }
+        app.with_db(|db| {
+            db.upsert_account(&crate::storage::AccountInput {
+                platform: "workbuddy".to_string(),
+                uid: uid.to_string(),
+                provider: Some("workbuddy".to_string()),
+                ..Default::default()
+            })?;
+            let now = crate::clock::now_rfc3339();
+            db.upsert_authorization(&crate::storage::AuthorizationRecord {
+                id: ids::auth_id(&account_id, ids::KIND_OWN),
+                account_id: account_id.clone(),
+                kind: ids::KIND_OWN.to_string(),
+                access_ref: ids::keychain_ref(&keys.access),
+                refresh_ref: keys.refresh.as_deref().map(ids::keychain_ref),
+                auth_domain: None,
+                token_expires_at: None,
+                status: "valid".to_string(),
+                version: 0,
+                key_migration_state: "ready".to_string(),
+                source_key: None,
+                last_used_at: None,
+                last_error: None,
+                created_at: now.clone(),
+                updated_at: now,
+            })
+        })
+        .expect("seed legacy row");
+        account_id
+    }
+
+    fn own_row(app: &App, account_id: &str) -> crate::storage::AuthorizationRecord {
+        app.with_db(|db| db.find_authorization(account_id, ids::KIND_OWN))
+            .expect("query")
+            .expect("own 授权应当存在")
+    }
+
+    /// 本地凭据目录里的所有文件（含坏文件），用来断言"有没有留下半套"。
+    fn secret_ids(app: &App) -> Vec<String> {
+        crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths)
+            .scan()
+            .expect("scan")
+            .secrets
+            .into_iter()
+            .map(|secret| secret.secret_id)
+            .collect()
+    }
+
+    fn secret_id_of(app: &App, account_id: &str) -> String {
+        match crate::credentials::reference::CredentialRef::parse(
+            &own_row(app, account_id).access_ref,
+        ) {
+            Ok(crate::credentials::reference::CredentialRef::LocalJson { secret_id }) => secret_id,
+            Ok(other) => panic!("应当是本 JSON 引用，实际 {other:?}"),
+            Err(err) => panic!("引用不可解析：{err}"),
+        }
+    }
+
     fn read_key(app: &App, key: &str) -> Option<String> {
         app.secure
             .get(key)
@@ -2559,12 +2968,26 @@ mod tests {
             .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
     }
 
+    /// 自有授权的 access：**按引用读**（JSON 或钥匙串），与生产读路径一致。
     fn own_access(app: &App, account_id: &str) -> Option<String> {
-        read_key(app, &ids::access_key(account_id, ids::KIND_OWN))
+        let account = app
+            .with_db(|db| db.get_account(account_id))
+            .ok()
+            .flatten()?;
+        crate::auth::service::read_access(app, &account, ids::KIND_OWN)
+            .ok()
+            .flatten()
     }
 
+    /// 自有授权的 refresh：同样按引用读。
     fn own_refresh(app: &App, account_id: &str) -> Option<String> {
-        read_key(app, &ids::refresh_key(account_id, ids::KIND_OWN))
+        let account = app
+            .with_db(|db| db.get_account(account_id))
+            .ok()
+            .flatten()?;
+        crate::auth::service::read_own_refresh(app, &account)
+            .ok()
+            .flatten()
     }
 
     fn magpie_ref(app: &App, account_id: &str) -> Option<String> {
@@ -2586,8 +3009,12 @@ mod tests {
     // G1：两套授权互不覆盖
     // -----------------------------------------------------------------------
 
+    /// 新登录写 AICC 自己的 JSON：引用 `localjson:v1:`、文件 0600、钥匙串里没有新凭据。
+    ///
+    /// 替代原来的 `own_login_writes_only_the_own_keys`：业务约束没变（登录只影响自有授权、
+    /// 不碰借用授权），变的是落点。
     #[test]
-    fn own_login_writes_only_the_own_keys() {
+    fn own_login_writes_a_local_json_secret_and_no_keychain_entry() {
         let (app, _dir) = test_app(SecureStore::memory());
         let uid = "6f1c2d94-1111-2222-3333-444455556666";
         let out = persist_login(
@@ -2599,14 +3026,53 @@ mod tests {
         assert_eq!(out["state"], json!("success"));
 
         let acc = account(&app, uid);
+        let row = own_row(&app, &acc.id);
+        assert_eq!(row.storage_kind(), "localjson");
+        assert!(
+            row.access_ref.starts_with("localjson:v1:"),
+            "新授权必须落在本地 JSON：{}",
+            row.access_ref
+        );
+        assert_eq!(
+            row.refresh_ref.as_deref(),
+            Some(row.access_ref.as_str()),
+            "access 与 refresh 是同一个文件的两个槽位"
+        );
+
+        // 读得到，而且读的是文件。
         assert_eq!(own_access(&app, &acc.id).as_deref(), Some("own-access"));
         assert_eq!(own_refresh(&app, &acc.id).as_deref(), Some("own-refresh"));
+
+        // 钥匙串里一个字节都不该有：新键、旧别名、借用键全都不存在。
+        assert!(
+            read_key(&app, &ids::access_key(&acc.id, ids::KIND_OWN)).is_none(),
+            "新授权不许写钥匙串"
+        );
+        assert!(
+            read_key(&app, &ids::refresh_key(&acc.id, ids::KIND_OWN)).is_none(),
+            "新授权不许写钥匙串"
+        );
+        assert!(legacy_access(&app, uid).is_none(), "JSON 行不该同步旧别名");
         assert!(
             magpie_access(&app, &acc.id).is_none(),
             "登录不能顺手造一份借用授权"
         );
-        // 只有一份授权时，它就是镜像来源：旧别名必须同步。
-        assert_eq!(legacy_access(&app, uid).as_deref(), Some("own-access"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
+            let path = store
+                .root()
+                .join(format!("{}.json", secret_id_of(&app, &acc.id)));
+            let mode = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "凭据文件必须 0600");
+        }
+
         assert_eq!(acc.auth_source, "own");
     }
 
@@ -3049,7 +3515,6 @@ mod tests {
         assert_eq!(kinds, vec!["magpie", "own"], "按 kind 排序，各一行");
     }
 
-    /// 扫码不能把 magpie 那份挤掉，反之亦然；镜像跟着首选来源走（G6）。
     #[test]
     fn mirror_follows_the_preferred_source() {
         let (app, _dir) = test_app(SecureStore::memory());
@@ -3079,7 +3544,11 @@ mod tests {
         service::sync_mirror(&app, &acc.id).expect("mirror");
         let acc = account(&app, uid);
         assert_eq!(acc.auth_source, "own");
-        assert_eq!(legacy_access(&app, uid).as_deref(), Some("own-access"));
+        // 镜像是自有授权，但它现在住在 JSON 里 —— 旧别名仍然一个字节都不写。
+        assert!(
+            legacy_access(&app, uid).is_none(),
+            "JSON 授权不走旧别名：那是又一次隐性钥匙串写入"
+        );
         match broker::resolve(&app, &acc).expect("resolve") {
             broker::Outcome::Resolved(resolved) => {
                 assert_eq!(resolved.kind, "own");
@@ -3187,37 +3656,57 @@ mod tests {
         assert_eq!(own_access(&app, &acc.id).as_deref(), Some("second-access"));
     }
 
+    /// 新登录根本不碰钥匙串：后端把一切都拒了，登录照样成功。
     #[test]
-    fn keychain_failure_leaves_no_half_account() {
+    fn a_new_login_never_touches_a_failing_keychain() {
         let (app, _dir) = test_app(SecureStore::failing());
         let uid = "6f1c2d94-9999-8888-7777-666655554444";
+        persist_login(
+            &app,
+            &payload(uid, "access", Some("refresh")),
+            WbVariant::Cn,
+        )
+        .expect("JSON 路径不该被钥匙串挡住");
+
+        let acc = account(&app, uid);
+        assert_eq!(own_access(&app, &acc.id).as_deref(), Some("access"));
+        assert_eq!(own_refresh(&app, &acc.id).as_deref(), Some("refresh"));
+        assert_eq!(own_row(&app, &acc.id).storage_kind(), "localjson");
+    }
+
+    /// JSON 写入失败：账号行、授权行、凭据文件一个都不许留下。
+    #[test]
+    fn a_failed_json_write_leaves_no_secret_and_no_account() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-9999-8888-7777-666655554445";
+        crate::credentials::localjson::test_inject_fault(
+            crate::credentials::localjson::FaultPoint::TempFile,
+        );
+
         let err = persist_login(
             &app,
             &payload(uid, "access", Some("refresh")),
             WbVariant::Cn,
         )
-        .expect_err("must fail");
+        .expect_err("凭据写不进去就该失败");
+        crate::credentials::localjson::test_clear_faults();
+
         assert_eq!(err.code, crate::rpc::E_SECURESTORE);
         assert!(
             app.with_db(|db| db.find_account("workbuddy", uid))
                 .unwrap()
                 .is_none(),
-            "钥匙串写不进去就不能留下账号行"
+            "凭据没落盘就不能留下账号行"
         );
+        assert!(secret_ids(&app).is_empty(), "不许留下半份凭据文件");
     }
 
-    /// access 写进去了、refresh 写失败：必须回到原来那套。
+    /// 老账号：refresh 写失败时旧的一对保持不变（含旧 refresh，它可能还能用）。
     #[test]
-    fn refresh_write_failure_keeps_the_old_pair() {
+    fn legacy_keychain_refresh_write_failure_keeps_the_old_pair() {
         let (app, _dir) = test_app(SecureStore::faulty_on_value("boom"));
         let uid = "6f1c2d94-aaaa-0001-0002-000000000001";
-        let account_id = crate::storage::account_id("workbuddy", uid);
-        app.secure
-            .set(&ids::access_key(&account_id, "own"), b"old-access")
-            .unwrap();
-        app.secure
-            .set(&ids::refresh_key(&account_id, "own"), b"old-refresh")
-            .unwrap();
+        let account_id = seed_legacy_own(&app, uid, "old-access", Some("old-refresh"));
         app.secure.arm();
 
         let err = persist_login(
@@ -3234,17 +3723,15 @@ mod tests {
         );
     }
 
+    /// 老账号（`keychain:` 引用）的写入失败：新值写不进，旧值必须原样还在。
+    ///
+    /// 这条必须显式造一份旧行 —— 直接调 `persist_login` 现在只会走 JSON，
+    /// 那样测的是另一条路径，等于把 CRED-4 之前的老账号完全丢出覆盖。
     #[test]
-    fn access_write_failure_keeps_the_old_pair() {
+    fn legacy_keychain_login_keeps_the_old_pair_when_the_write_fails() {
         let (app, _dir) = test_app(SecureStore::faulty_on_value("boom"));
         let uid = "6f1c2d94-aaaa-0001-0002-000000000002";
-        let account_id = crate::storage::account_id("workbuddy", uid);
-        app.secure
-            .set(&ids::access_key(&account_id, "own"), b"old-access")
-            .unwrap();
-        app.secure
-            .set(&ids::refresh_key(&account_id, "own"), b"old-refresh")
-            .unwrap();
+        let account_id = seed_legacy_own(&app, uid, "old-access", Some("old-refresh"));
         app.secure.arm();
 
         let err = persist_login(
@@ -3259,20 +3746,16 @@ mod tests {
             own_refresh(&app, &account_id).as_deref(),
             Some("old-refresh")
         );
+        // 老行不能被"升级"成 JSON：CRED-3 不做隐式迁移。
+        assert_eq!(own_row(&app, &account_id).storage_kind(), "keychain");
     }
 
-    /// 登录没发新 refresh、旧的又删不掉：整体失败并回滚。
+    /// 老账号：这次登录没给 refresh，旧的必须清掉；清不掉就整体失败。
     #[test]
-    fn stale_refresh_cleanup_failure_aborts_the_login() {
+    fn legacy_keychain_stale_refresh_cleanup_failure_aborts_the_login() {
         let (app, _dir) = test_app(SecureStore::faulty(&[], &["/own/refresh"]));
         let uid = "6f1c2d94-aaaa-0001-0002-000000000003";
-        let account_id = crate::storage::account_id("workbuddy", uid);
-        app.secure
-            .set(&ids::access_key(&account_id, "own"), b"old-access")
-            .unwrap();
-        app.secure
-            .set(&ids::refresh_key(&account_id, "own"), b"old-refresh")
-            .unwrap();
+        let account_id = seed_legacy_own(&app, uid, "old-access", Some("old-refresh"));
         app.secure.arm();
 
         let err = persist_login(&app, &payload(uid, "new-access", None), WbVariant::Cn)
@@ -3328,17 +3811,14 @@ mod tests {
         );
     }
 
+    /// 老账号：读不到旧凭据就不能盲写（否则快照回滚会写进一份猜的值）。
+    ///
+    /// 读取的故障注入只在 `arm()` 之后生效，所以先种数据、再武装。
     #[test]
-    fn snapshot_read_failure_aborts_the_login() {
+    fn legacy_keychain_snapshot_read_failure_aborts_the_login() {
         let (app, _dir) = test_app(SecureStore::faulty_on_read());
         let uid = "6f1c2d94-dddd-0001-0002-000000000001";
-        let account_id = crate::storage::account_id("workbuddy", uid);
-        app.secure
-            .set(&ids::access_key(&account_id, "own"), b"old-access")
-            .unwrap();
-        app.secure
-            .set(&ids::refresh_key(&account_id, "own"), b"old-refresh")
-            .unwrap();
+        let account_id = seed_legacy_own(&app, uid, "old-access", Some("old-refresh"));
         app.secure.arm();
 
         let err = persist_login(
@@ -3360,15 +3840,12 @@ mod tests {
         );
     }
 
-    /// 回滚本身失败时必须报 `rollback_incomplete`。
+    /// 老账号：回滚本身也失败时必须如实报告，不能假装干净。
     #[test]
-    fn rollback_failure_is_reported_as_incomplete() {
+    fn legacy_keychain_rollback_failure_is_reported_as_incomplete() {
         let (app, _dir) = test_app(SecureStore::faulty(&["/own/access"], &[]));
         let uid = "6f1c2d94-dddd-0001-0002-000000000002";
-        let account_id = crate::storage::account_id("workbuddy", uid);
-        app.secure
-            .set(&ids::access_key(&account_id, "own"), b"old-access")
-            .unwrap();
+        let account_id = seed_legacy_own(&app, uid, "old-access", None);
         app.secure.arm();
 
         let err = persist_login(
@@ -3383,6 +3860,7 @@ mod tests {
             "{err:?}"
         );
         assert!(err.message.contains("未能完整恢复"), "{}", err.message);
+        assert_eq!(own_row(&app, &account_id).storage_kind(), "keychain");
     }
 
     // -----------------------------------------------------------------------
@@ -3511,10 +3989,11 @@ mod tests {
         assert_eq!(own_refresh(&app, &acc.id).as_deref(), Some("own-refresh"));
     }
 
-    /// 服务端轮换了、refresh 写不进去：新 access 尽力保住，死 refresh 必须删掉。
+    /// 轮换写失败：文件保持旧内容（原子替换，没有半份），但旧 refresh 已被服务端
+    /// 作废，所以这份授权确实不能再用 —— 标 invalid，要求重新登录。
     #[test]
-    fn rotation_failure_marks_invalid_and_drops_the_dead_refresh() {
-        let (app, _dir) = test_app(SecureStore::faulty(&["/own/refresh"], &[]));
+    fn rotation_write_failure_keeps_the_file_intact_and_marks_invalid() {
+        let (app, _dir) = test_app(SecureStore::memory());
         let uid = "6f1c2d94-aaaa-0001-0002-000000000005";
         persist_login(
             &app,
@@ -3524,7 +4003,320 @@ mod tests {
         .expect("login");
         let acc = account(&app, uid);
         let account_id = acc.id.clone();
-        app.secure.arm();
+        let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
+        let secret_id = secret_id_of(&app, &account_id);
+        let before = store.load(&secret_id).expect("load");
+
+        crate::credentials::localjson::test_inject_fault(
+            crate::credentials::localjson::FaultPoint::TempFile,
+        );
+        let out = persist_rotated_tokens(
+            &app,
+            &acc,
+            acc.auth_epoch,
+            "new-access",
+            Some("new-refresh"),
+            None,
+        )
+        .expect("返回 invalid 而不是抛错");
+        crate::credentials::localjson::test_clear_faults();
+
+        assert_eq!(out["state"], json!("invalid"));
+        assert_eq!(out["needsRelogin"], json!(true));
+        assert_eq!(out["error"]["kind"], json!("refresh_not_persisted"));
+
+        // 盘上一个字节都没变：access + refresh 是一起失败的。
+        let after = store.load(&secret_id).expect("load");
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(own_access(&app, &account_id).as_deref(), Some("old-access"));
+        assert_eq!(
+            own_refresh(&app, &account_id).as_deref(),
+            Some("dead-refresh")
+        );
+        assert_eq!(own_row(&app, &account_id).status, "invalid");
+    }
+
+    /// P0 回归：轮换**写**路径也必须验归属 —— 引用指错时不能改写别人的令牌。
+    #[test]
+    fn rotation_refuses_to_write_another_accounts_secret() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid_a = "6f1c2d94-0000-0001-0002-0000000000f1";
+        let uid_b = "6f1c2d94-0000-0001-0002-0000000000f2";
+        persist_login(
+            &app,
+            &payload(uid_a, "access-a", Some("refresh-a")),
+            WbVariant::Cn,
+        )
+        .expect("login a");
+        persist_login(
+            &app,
+            &payload(uid_b, "access-b", Some("refresh-b")),
+            WbVariant::Cn,
+        )
+        .expect("login b");
+        let a = account(&app, uid_a);
+        let b = account(&app, uid_b);
+        let b_secret = secret_id_of(&app, &b.id);
+        let b_path = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths)
+            .root()
+            .join(format!("{b_secret}.json"));
+        let b_bytes = std::fs::read(&b_path).expect("read b");
+
+        // A 的引用被改成 B 的合法文件。
+        app.with_db(|db| {
+            db.exec_raw(&format!(
+                "UPDATE account_authorizations
+                    SET access_ref = 'localjson:v1:{b_secret}',
+                        refresh_ref = 'localjson:v1:{b_secret}'
+                  WHERE account_id = '{}' AND kind = 'own'",
+                a.id
+            ))
+        })
+        .expect("tamper");
+
+        let out = persist_rotated_tokens(
+            &app,
+            &a,
+            a.auth_epoch,
+            "attacker-access",
+            Some("attacker-refresh"),
+            None,
+        )
+        .expect("返回 invalid 而不是抛错");
+
+        assert_eq!(out["state"], json!("invalid"), "{out}");
+        assert_eq!(
+            out["error"]["kind"],
+            json!("credential_ownership_mismatch"),
+            "{out}"
+        );
+        assert_eq!(
+            out["needsRelogin"],
+            json!(false),
+            "串号不是「重新登录」能解决的，别把坏引用盖掉：{out}"
+        );
+
+        // B 的凭据一个字节都没变，而且仍然可读。
+        assert_eq!(std::fs::read(&b_path).expect("read b"), b_bytes);
+        assert_eq!(own_access(&app, &b.id).as_deref(), Some("access-b"));
+        assert_eq!(own_refresh(&app, &b.id).as_deref(), Some("refresh-b"));
+        // A 那一行也没被标成 invalid（不掩盖数据损坏）。
+        assert_eq!(own_row(&app, &a.id).status, "valid");
+    }
+
+    /// P1 回归：`settings.set` 认的键，单键 `settings.get` 也必须能读回来。
+    #[tokio::test]
+    async fn settings_round_trip_covers_the_plaintext_consent_key() {
+        let (app, _dir) = test_app_without_consent(SecureStore::memory());
+        let key = crate::auth::consent::JSON_CONSENT_SETTING;
+
+        let before = dispatch(&app, "settings.get", &json!({ "key": key }))
+            .await
+            .expect("get before");
+        assert_eq!(before["value"], json!("0"), "{before}");
+
+        dispatch(&app, "settings.set", &json!({ "key": key, "value": "1" }))
+            .await
+            .expect("set");
+
+        let after = dispatch(&app, "settings.get", &json!({ "key": key }))
+            .await
+            .expect("get after");
+        assert_eq!(after["value"], json!("1"), "{after}");
+        assert!(crate::auth::consent::json_storage_enabled(&app));
+
+        // 全量查询也要一致。
+        let all = dispatch(&app, "settings.get", &json!({}))
+            .await
+            .expect("get all");
+        assert_eq!(all["settings"][key], json!("1"), "{all}");
+    }
+
+    /// 轮换成功：access 与 refresh 一次换掉，版本只前进一格。
+    #[test]
+    fn rotation_replaces_both_tokens_in_one_write() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-aaaa-0001-0002-000000000007";
+        persist_login(
+            &app,
+            &payload(uid, "old-access", Some("old-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
+        let acc = account(&app, uid);
+        let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
+        let secret_id = secret_id_of(&app, &acc.id);
+        let before = store.load(&secret_id).expect("load");
+
+        let out = persist_rotated_tokens(
+            &app,
+            &acc,
+            acc.auth_epoch,
+            "new-access",
+            Some("new-refresh"),
+            None,
+        )
+        .expect("rotate");
+        assert_eq!(out["state"], json!("valid"), "{out}");
+
+        assert_eq!(own_access(&app, &acc.id).as_deref(), Some("new-access"));
+        assert_eq!(own_refresh(&app, &acc.id).as_deref(), Some("new-refresh"));
+        let after = store.load(&secret_id).expect("load");
+        assert_eq!(after.revision, before.revision + 1, "一次替换只该推进一格");
+        // 没有留下第二份文件。
+        assert_eq!(secret_ids(&app), vec![secret_id]);
+    }
+
+    /// P0 回归：轮换提交时 SQLite 引用已经被迁走 —— 不许写旧文件，更不许报成功。
+    ///
+    /// 确定性交错：`owned::load`（验归属 + 取快照）→ **别的进程把 ref 迁到 G**
+    /// → 迟到的 `commit_rotated_json` 才发现版本对不上。
+    #[test]
+    fn rotation_supersedes_when_the_authorization_moves_mid_flight() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-0000-0001-0002-0000000000g1";
+        persist_login(
+            &app,
+            &payload(uid, "old-access", Some("old-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
+        let acc = account(&app, uid);
+        let row = own_row(&app, &acc.id);
+        let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
+        let f_id = secret_id_of(&app, &acc.id);
+
+        // ① 轮换前那一刻：验过归属的快照（这正是 persist_rotated_json 做的事）。
+        let verified = crate::auth::owned::load(&app, &acc, &row).expect("verified");
+
+        // ② 另一个进程把引用迁到 G，旧文件 F **保留**（迁移/换源之后可能出现这种局面）。
+        let other = store
+            .create(crate::credentials::localjson::SecretDraft::oauth(
+                ids::auth_id(&acc.id, ids::KIND_OWN),
+                "workbuddy",
+                "moved-access",
+            ))
+            .expect("other secret");
+        let other_ref =
+            crate::credentials::reference::local_json_ref(&other.secret_id).expect("ref");
+        let mut moved = row.clone();
+        moved.access_ref = other_ref.clone();
+        moved.refresh_ref = Some(other_ref.clone());
+        assert!(app
+            .with_db(|db| db.replace_authorization_cas(&moved, row.version, &row.access_ref))
+            .expect("cas"));
+        let g_path = store.root().join(format!("{}.json", other.secret_id));
+        let g_before = std::fs::read(&g_path).expect("read g");
+
+        // ③ 迟到的轮换提交：必须 superseded，且不能把新令牌留在 F 里。
+        let out = commit_rotated_json(
+            &app,
+            &row,
+            &store,
+            &f_id,
+            &verified,
+            "late-access",
+            Some("late-refresh"),
+            None,
+        )
+        .expect("superseded 不是错误");
+
+        assert_eq!(out["state"], json!("superseded"), "{out}");
+        assert_eq!(out["reason"], json!("authorization_moved"), "{out}");
+        assert_eq!(out["fileReverted"], json!(true), "{out}");
+        assert_eq!(out["orphanSecret"], json!(false), "{out}");
+
+        let f_after = store.load(&f_id).expect("load f");
+        assert_eq!(
+            f_after.credentials.access_token.as_deref(),
+            Some("old-access"),
+            "旧文件里不能留下新令牌"
+        );
+        assert_eq!(
+            f_after.credentials.refresh_token.as_deref(),
+            Some("old-refresh")
+        );
+        assert_eq!(
+            std::fs::read(&g_path).expect("read g"),
+            g_before,
+            "G 不许被改"
+        );
+        assert_eq!(own_row(&app, &acc.id).access_ref, other_ref, "行必须还是 G");
+        assert_eq!(own_access(&app, &acc.id).as_deref(), Some("moved-access"));
+    }
+
+    /// P0 回归：**版本变了 ≠ 引用变了** —— 只更新过状态的账号不许被回滚成旧令牌。
+    ///
+    /// 交错：`owned::load` 取到快照 → 另一个流程只调了 `record_status`（版本 +1，引用仍是 F）
+    /// → 迟到的轮换提交。此时回滚会把服务端已作废的旧 refresh 写回去，账号反而更坏。
+    #[test]
+    fn rotation_keeps_the_new_tokens_when_only_the_row_version_changes() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-0000-0001-0002-0000000000g3";
+        persist_login(
+            &app,
+            &payload(uid, "old-access", Some("old-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
+        let acc = account(&app, uid);
+        let row = own_row(&app, &acc.id);
+        let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
+        let f_id = secret_id_of(&app, &acc.id);
+        let verified = crate::auth::owned::load(&app, &acc, &row).expect("verified");
+
+        // 另一个流程只更新了状态：版本 +1，`access_ref` 一个字符都没变。
+        assert!(app
+            .with_db(|db| db.set_authorization_status(&row.id, row.version, "valid", None, None))
+            .expect("status"));
+
+        let out = commit_rotated_json(
+            &app,
+            &row,
+            &store,
+            &f_id,
+            &verified,
+            "new-access",
+            Some("new-refresh"),
+            None,
+        )
+        .expect("superseded 不是错误");
+
+        assert_eq!(out["state"], json!("superseded"), "{out}");
+        assert_eq!(
+            out["reason"],
+            json!("authorization_version_changed"),
+            "{out}"
+        );
+        assert_eq!(out["fileReverted"], json!(false), "不许回滚：{out}");
+        assert_eq!(out["fileUpdated"], json!(true), "{out}");
+
+        // 新令牌必须留在 F 里 —— 回滚等于毁掉唯一有效的 refresh。
+        let f = store.load(&f_id).expect("load");
+        assert_eq!(f.credentials.access_token.as_deref(), Some("new-access"));
+        assert_eq!(f.credentials.refresh_token.as_deref(), Some("new-refresh"));
+        assert_eq!(own_access(&app, &acc.id).as_deref(), Some("new-access"));
+    }
+
+    /// P0 回归：状态提交失败时**不许**回报 `state=valid`。
+    #[test]
+    fn rotation_never_reports_valid_when_the_status_cannot_be_written() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-0000-0001-0002-0000000000g2";
+        persist_login(
+            &app,
+            &payload(uid, "old-access", Some("old-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
+        let acc = account(&app, uid);
+        app.with_db(|db| {
+            db.exec_raw(
+                "CREATE TRIGGER no_auth_update BEFORE UPDATE ON account_authorizations
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+        })
+        .expect("install trigger");
 
         let out = persist_rotated_tokens(
             &app,
@@ -3536,23 +4328,615 @@ mod tests {
         )
         .expect("返回 invalid 而不是抛错");
 
-        assert_eq!(out["state"], json!("invalid"));
-        assert_eq!(out["needsRelogin"], json!(true));
-        assert_eq!(out["error"]["kind"], json!("refresh_not_persisted"));
+        assert_eq!(out["state"], json!("invalid"), "{out}");
+        assert_eq!(
+            out["error"]["kind"],
+            json!("rotation_not_committed"),
+            "{out}"
+        );
+        assert_eq!(out["needsRelogin"], json!(false), "{out}");
+        // 新令牌是真的可用（旧 refresh 已被服务端作废），所以保留在文件里。
+        assert_eq!(out["fileUpdated"], json!(true), "{out}");
+        app.with_db(|db| db.exec_raw("DROP TRIGGER no_auth_update;"))
+            .expect("drop trigger");
+        assert_eq!(own_access(&app, &acc.id).as_deref(), Some("new-access"));
+    }
+
+    /// 并发轮换：后到的一方拿着旧版本，必须 superseded，而不是把人家的新令牌盖掉。
+    #[test]
+    fn a_concurrent_rotation_is_reported_as_superseded() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-aaaa-0001-0002-000000000008";
+        persist_login(
+            &app,
+            &payload(uid, "old-access", Some("old-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
+        let acc = account(&app, uid);
+        let row = own_row(&app, &acc.id);
+        let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
+        let secret_id = secret_id_of(&app, &acc.id);
+        let snapshot = crate::auth::owned::load(&app, &acc, &row).expect("verified snapshot");
+
+        // 另一个进程先写了同一个文件（它看到了同一个 revision）。
+        store
+            .replace_credentials(
+                &secret_id,
+                snapshot.revision,
+                crate::credentials::localjson::Credentials::oauth("other-access", "other-refresh"),
+                None,
+            )
+            .expect("另一个写入者");
+
+        // 我拿着旧的 revision 来写：必须被拒，且不标失效。
+        let out = commit_rotated_json(
+            &app,
+            &row,
+            &store,
+            &secret_id,
+            &snapshot,
+            "new-access",
+            Some("new-refresh"),
+            None,
+        )
+        .expect("superseded 不是错误");
+        assert_eq!(out["state"], json!("superseded"), "{out}");
+        assert_eq!(out["reason"], json!("credential_revision_changed"));
+        assert_eq!(
+            own_access(&app, &acc.id).as_deref(),
+            Some("other-access"),
+            "盘上必须是先写成功的那一份"
+        );
+        assert_eq!(own_row(&app, &acc.id).status, "valid", "不许标失效");
+    }
+
+    /// 同一份授权重新登录复用同一个文件：不留孤儿文件，也不换引用。
+    #[test]
+    fn a_second_login_reuses_the_same_secret_file() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-aaaa-0001-0002-000000000009";
+        persist_login(
+            &app,
+            &payload(uid, "first-access", Some("first-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
+        let acc = account(&app, uid);
+        let first_ref = own_row(&app, &acc.id).access_ref;
+        let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
+        let secret_id = secret_id_of(&app, &acc.id);
+        let first_revision = store.load(&secret_id).expect("load").revision;
+
+        persist_login(
+            &app,
+            &payload(uid, "second-access", Some("second-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("re-login");
+
+        let acc = account(&app, uid);
+        assert_eq!(
+            own_row(&app, &acc.id).access_ref,
+            first_ref,
+            "重新登录不该换文件"
+        );
+        assert_eq!(
+            secret_ids(&app),
+            vec![secret_id.clone()],
+            "不该留下孤儿文件"
+        );
+        assert_eq!(own_access(&app, &acc.id).as_deref(), Some("second-access"));
+        assert_eq!(
+            own_refresh(&app, &acc.id).as_deref(),
+            Some("second-refresh")
+        );
+        assert!(store.load(&secret_id).expect("load").revision > first_revision);
+    }
+
+    /// 已有 JSON 授权重新登录、写入失败：旧的一对必须原样还在。
+    #[test]
+    fn an_existing_json_login_keeps_the_old_pair_when_the_write_fails() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-aaaa-0001-0002-00000000000a";
+        persist_login(
+            &app,
+            &payload(uid, "old-access", Some("old-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
+        let acc = account(&app, uid);
+        let secret_id = secret_id_of(&app, &acc.id);
+        let before = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths)
+            .load(&secret_id)
+            .expect("load");
+
+        crate::credentials::localjson::test_inject_fault(
+            crate::credentials::localjson::FaultPoint::TempFile,
+        );
+        persist_login(
+            &app,
+            &payload(uid, "new-access", Some("new-refresh")),
+            WbVariant::Cn,
+        )
+        .expect_err("写不进去就该失败");
+        crate::credentials::localjson::test_clear_faults();
+
+        assert_eq!(own_access(&app, &acc.id).as_deref(), Some("old-access"));
+        assert_eq!(own_refresh(&app, &acc.id).as_deref(), Some("old-refresh"));
+        let after = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths)
+            .load(&secret_id)
+            .expect("load");
+        assert_eq!(after.revision, before.revision, "失败不该推进版本");
+        assert_eq!(secret_ids(&app), vec![secret_id]);
+    }
+
+    /// 引用与状态必须一次提交：库拒绝写入时，两个字段都不能动。
+    #[test]
+    fn record_grant_keeps_refs_and_status_in_one_write() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-aaaa-0001-0002-00000000000b";
+        let account_id = seed_legacy_own(&app, uid, "old-access", Some("old-refresh"));
+
+        // 准备一份可以指过去的 JSON（模拟凭据已经落盘）。
+        let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
+        let secret = store
+            .create(
+                crate::credentials::localjson::SecretDraft::oauth(
+                    ids::auth_id(&account_id, ids::KIND_OWN),
+                    "workbuddy",
+                    "json-access",
+                )
+                .with_refresh_token("json-refresh"),
+            )
+            .expect("create");
+        let reference =
+            crate::credentials::reference::local_json_ref(&secret.secret_id).expect("ref");
+
+        // 让这次 UPSERT 失败：引用与状态必须一起被拒。
+        app.with_db(|db| {
+            db.exec_raw(
+                "CREATE TRIGGER no_auth_update BEFORE UPDATE ON account_authorizations
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+        })
+        .expect("install trigger");
+
+        // 这条用例模拟"写凭据时这一行已存在"的时序：先人为造一行，再拿它的版本做 CAS。
+        let expected = own_row(&app, &account_id);
+        let err = match service::record_grant(
+            &app,
+            &account_id,
+            uid,
+            ids::KIND_OWN,
+            None,
+            Some((&reference, Some(&reference))),
+            &service::GrantExpectation::Present {
+                version: expected.version,
+                access_ref: expected.access_ref.clone(),
+            },
+        ) {
+            Ok(_) => panic!("库写不进去就该失败"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code, crate::rpc::E_STORAGE);
+
+        // 一个字段都没动：没有"引用换了但状态还是旧的"这种中间态。
+        let row = own_row(&app, &account_id);
+        assert_eq!(row.storage_kind(), "keychain", "引用不许先被改掉");
+        assert_eq!(row.status, "valid", "状态不许先被改掉");
+        assert_eq!(own_access(&app, &account_id).as_deref(), Some("old-access"));
+    }
+
+    /// P0-1 回归：引用指到**别人的**文件时，读 / 重登 / 删除都必须拒绝，且不碰对方。
+    ///
+    /// 这条是"凭据永远属于正确账号"的核心证据：文件权限 0600 挡不住业务层串号。
+    #[tokio::test]
+    async fn a_reference_to_another_accounts_secret_is_refused_on_every_path() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid_a = "6f1c2d94-0000-0001-0002-0000000000b1";
+        let uid_b = "6f1c2d94-0000-0001-0002-0000000000b2";
+        persist_login(
+            &app,
+            &payload(uid_a, "access-a", Some("refresh-a")),
+            WbVariant::Cn,
+        )
+        .expect("login a");
+        persist_login(
+            &app,
+            &payload(uid_b, "access-b", Some("refresh-b")),
+            WbVariant::Cn,
+        )
+        .expect("login b");
+        let a = account(&app, uid_a);
+        let b = account(&app, uid_b);
+        let b_secret = secret_id_of(&app, &b.id);
+        let b_path = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths)
+            .root()
+            .join(format!("{b_secret}.json"));
+        let b_bytes = std::fs::read(&b_path).expect("read b");
+
+        // 人为把 A 的引用改成 B 的文件（模拟迁移出错 / 库损坏）。
+        app.with_db(|db| {
+            db.exec_raw(&format!(
+                "UPDATE account_authorizations
+                    SET access_ref = 'localjson:v1:{b_secret}',
+                        refresh_ref = 'localjson:v1:{b_secret}'
+                  WHERE account_id = '{}' AND kind = 'own'",
+                a.id
+            ))
+        })
+        .expect("tamper");
+
+        // ① 读：拒绝，绝不会把 B 的令牌返回给 A。
+        let read = service::read_access(&app, &a, ids::KIND_OWN);
+        assert!(read.is_err(), "不能把 B 的令牌返回给 A：{read:?}");
+        let refresh = service::read_own_refresh(&app, &a);
+        assert!(refresh.is_err(), "{refresh:?}");
+        match broker::resolve(&app, &a).expect("resolve 不抛错") {
+            broker::Outcome::Resolved(resolved) => {
+                panic!("不许解析出令牌：{}", resolved.access)
+            }
+            broker::Outcome::Unavailable { reason, .. } => {
+                assert_eq!(reason, "credential_ownership_mismatch", "{reason}");
+            }
+        }
+
+        // ② 重登：拒绝，且 B 的文件一个字节都没变。
+        let err = persist_login(
+            &app,
+            &payload(uid_a, "new-a", Some("new-a-refresh")),
+            WbVariant::Cn,
+        )
+        .expect_err("引用不属于自己，重登必须失败");
+        assert_eq!(
+            err.data.as_ref().unwrap()["kind"],
+            json!("conflict"),
+            "{err:?}"
+        );
+        assert_eq!(
+            std::fs::read(&b_path).expect("read b"),
+            b_bytes,
+            "B 的凭据被改写了"
+        );
+
+        // ③ 单份删除：拒绝（一个文件都不删）。
+        let report = service::delete_authorization(&app, &a.id, ids::KIND_OWN).expect("report");
+        assert!(!report.record_deleted);
+        assert_eq!(report.secret_error.as_deref(), Some("conflict"));
+        assert!(
+            report.removed_secrets.is_empty(),
+            "{:?}",
+            report.removed_secrets
+        );
+        assert!(b_path.exists());
+
+        // ④ 整账号删除：拒绝，账号保留。
+        let out = dispatch(&app, "accounts.delete", &json!({ "id": a.id }))
+            .await
+            .expect("delete");
+        assert_eq!(out["deleted"], json!(false), "{out}");
+        assert_eq!(out["reason"], json!("secret_ownership_mismatch"), "{out}");
+        assert!(
+            app.with_db(|db| db.get_account(&a.id)).unwrap().is_some(),
+            "拒绝删除时账号必须保留"
+        );
+
+        // ⑤ B 完全不受影响。
+        assert_eq!(own_access(&app, &b.id).as_deref(), Some("access-b"));
+        assert_eq!(own_refresh(&app, &b.id).as_deref(), Some("refresh-b"));
+    }
+
+    /// P0-2 回归：首次并发登录时，晚到的那个不许插入，也不许留下有效令牌孤儿文件。
+    ///
+    /// 场景：两个进程都在"还没有 own 行"时各写了一份文件，然后先后落库。
+    #[test]
+    fn a_lost_first_insert_race_leaves_no_orphan_file() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-0000-0001-0002-0000000000c1";
+        let account_id = crate::storage::account_id("workbuddy", uid);
+        app.with_db(|db| {
+            db.upsert_account(&crate::storage::AccountInput {
+                platform: "workbuddy".to_string(),
+                uid: uid.to_string(),
+                provider: Some("workbuddy".to_string()),
+                ..Default::default()
+            })
+        })
+        .expect("account");
+
+        // 竞争窗口：两边都看到"没有这一行"，各自落了一份文件。
+        let first = service::write_own(
+            &app,
+            &account_id,
+            "workbuddy",
+            "first-access",
+            Some("first-refresh"),
+            None,
+        )
+        .expect("first write");
+        let second = service::write_own(
+            &app,
+            &account_id,
+            "workbuddy",
+            "second-access",
+            Some("second-refresh"),
+            None,
+        )
+        .expect("second write");
+        assert_eq!(secret_ids(&app).len(), 2, "竞争窗口里确实有两份文件");
+
+        // 先到者插入成功。
+        service::record_grant(
+            &app,
+            &account_id,
+            uid,
+            ids::KIND_OWN,
+            None,
+            Some((first.access_ref(), first.refresh_ref())),
+            first.expectation(),
+        )
+        .expect("first wins");
+
+        // 后到者：只允许 INSERT，所以必须被打回。
+        let err = match service::record_grant(
+            &app,
+            &account_id,
+            uid,
+            ids::KIND_OWN,
+            None,
+            Some((second.access_ref(), second.refresh_ref())),
+            second.expectation(),
+        ) {
+            Ok(_) => panic!("后来者不许覆盖先到者"),
+            Err(err) => err,
+        };
+        assert!(is_stale_snapshot(&err), "{err:?}");
+
+        // 清理只能删掉"没人引用"的那一份。
+        second.discard_unreferenced(&app);
+
+        let row = own_row(&app, &account_id);
+        assert_eq!(row.access_ref, first.access_ref());
+        assert_eq!(
+            secret_ids(&app),
+            vec![secret_id_of(&app, &account_id)],
+            "不许留下未被引用的有效凭据文件"
+        );
         assert_eq!(
             own_access(&app, &account_id).as_deref(),
-            Some("new-access"),
-            "新 access 能写就写"
+            Some("first-access")
+        );
+    }
+
+    /// P0-2 回归：写凭据之后、落库之前，别人把引用换掉了 —— 迟到的落库不许覆盖。
+    #[test]
+    fn a_late_login_does_not_overwrite_a_newer_reference() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-0000-0001-0002-0000000000c2";
+        persist_login(
+            &app,
+            &payload(uid, "old-access", Some("old-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
+        let acc = account(&app, uid);
+
+        // ① 我读到这一行、写好凭据（此时行还指着旧文件）。
+        let late = service::write_own(
+            &app,
+            &acc.id,
+            "workbuddy",
+            "late-access",
+            Some("late-refresh"),
+            None,
+        )
+        .expect("late write");
+
+        // ② 另一个流程把引用换成了另一份文件。
+        let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
+        let other = store
+            .create(crate::credentials::localjson::SecretDraft::oauth(
+                ids::auth_id(&acc.id, ids::KIND_OWN),
+                "workbuddy",
+                "other-access",
+            ))
+            .expect("other secret");
+        let other_ref =
+            crate::credentials::reference::local_json_ref(&other.secret_id).expect("ref");
+        let row = own_row(&app, &acc.id);
+        let mut moved = row.clone();
+        moved.access_ref = other_ref.clone();
+        moved.refresh_ref = Some(other_ref.clone());
+        assert!(app
+            .with_db(|db| db.replace_authorization_cas(&moved, row.version, &row.access_ref))
+            .unwrap());
+
+        // ③ 我再落库：CAS 对不上，放弃。
+        let err = match service::record_grant(
+            &app,
+            &acc.id,
+            uid,
+            ids::KIND_OWN,
+            None,
+            Some((late.access_ref(), late.refresh_ref())),
+            late.expectation(),
+        ) {
+            Ok(_) => panic!("旧快照不许覆盖新引用"),
+            Err(err) => err,
+        };
+        assert!(is_stale_snapshot(&err), "{err:?}");
+
+        late.discard_unreferenced(&app);
+        let after = own_row(&app, &acc.id);
+        assert_eq!(after.access_ref, other_ref, "行必须还是新的那份");
+        assert_eq!(secret_ids(&app), vec![other.secret_id.clone()]);
+    }
+
+    /// P1-3 回归：own 行出现别的种类的引用时，**显式失败**，不静默重建、不猜。
+    #[test]
+    fn an_unknown_own_reference_is_refused_instead_of_rebuilt() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-0000-0001-0002-0000000000d1";
+        let account_id = seed_legacy_own(&app, uid, "old-access", Some("old-refresh"));
+        app.with_db(|db| {
+            db.exec_raw(&format!(
+                "UPDATE account_authorizations
+                    SET access_ref = 'magpie:v1:workbuddy#{uid}'
+                  WHERE account_id = '{account_id}' AND kind = 'own'"
+            ))
+        })
+        .expect("make it dirty");
+
+        let err = persist_login(
+            &app,
+            &payload(uid, "new-access", Some("new-refresh")),
+            WbVariant::Cn,
+        )
+        .expect_err("引用不可用就该显式失败");
+        assert_eq!(
+            err.data.as_ref().unwrap()["kind"],
+            json!("credential_ref_unusable"),
+            "{err:?}"
         );
         assert!(
-            own_refresh(&app, &account_id).is_none(),
-            "被服务端作废的 refresh 必须清掉"
+            secret_ids(&app).is_empty(),
+            "不许顺手新建一份 JSON 把坏引用盖过去"
         );
-        let row = app
-            .with_db(|db| db.find_authorization(&account_id, "own"))
+        // 引用本身也没被改。
+        assert_eq!(own_row(&app, &account_id).storage_kind(), "magpie");
+    }
+
+    /// P1-3 回归：未知引用不能退到钥匙串（后端全拒，退过去就会变成 denied）。
+    #[test]
+    fn an_unknown_own_reference_does_not_fall_back_to_the_keychain() {
+        let (app, _dir) = test_app(SecureStore::failing());
+        let uid = "6f1c2d94-0000-0001-0002-0000000000d2";
+        let account_id = crate::storage::account_id("workbuddy", uid);
+        app.with_db(|db| {
+            db.upsert_account(&crate::storage::AccountInput {
+                platform: "workbuddy".to_string(),
+                uid: uid.to_string(),
+                provider: Some("workbuddy".to_string()),
+                ..Default::default()
+            })?;
+            db.upsert_authorization(&crate::storage::AuthorizationRecord {
+                id: ids::auth_id(&account_id, ids::KIND_OWN),
+                account_id: account_id.clone(),
+                kind: ids::KIND_OWN.to_string(),
+                access_ref: "magpie:v1:workbuddy#someone".to_string(),
+                refresh_ref: None,
+                auth_domain: None,
+                token_expires_at: None,
+                status: "valid".to_string(),
+                version: 0,
+                key_migration_state: "ready".to_string(),
+                source_key: None,
+                last_used_at: None,
+                last_error: None,
+                created_at: crate::clock::now_rfc3339(),
+                updated_at: crate::clock::now_rfc3339(),
+            })
+        })
+        .expect("seed");
+
+        let acc = account(&app, uid);
+        let err = service::read_own_refresh(&app, &acc).expect_err("必须报错");
+        assert_eq!(
+            err.data.as_ref().unwrap()["kind"],
+            json!("credential_ref_unusable"),
+            "{err:?}"
+        );
+        let err =
+            service::read_access(&app, &acc, ids::KIND_OWN).expect_err("读 access 同样不许回退");
+        assert_eq!(
+            err.data.as_ref().unwrap()["kind"],
+            json!("conflict"),
+            "own 行写着 magpie 引用是串号，不是「没凭据」：{err:?}"
+        );
+    }
+
+    /// 上线前闸门：没确认过明文风险时，新登录仍然写钥匙串。
+    #[test]
+    fn new_logins_stay_on_the_keychain_until_the_plaintext_risk_is_confirmed() {
+        let (app, _dir) = test_app_without_consent(SecureStore::memory());
+        let uid = "6f1c2d94-0000-0001-0002-0000000000e1";
+        let out = persist_login(
+            &app,
+            &payload(uid, "k-access", Some("k-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
+        assert_eq!(out["credentialStorage"], json!("keychain"), "{out}");
+        assert_eq!(out["jsonConsentRequired"], json!(true), "{out}");
+
+        let acc = account(&app, uid);
+        assert_eq!(own_row(&app, &acc.id).storage_kind(), "keychain");
+        assert!(secret_ids(&app).is_empty(), "没确认之前不许落明文");
+        assert_eq!(own_access(&app, &acc.id).as_deref(), Some("k-access"));
+
+        // 确认之后只影响**新建**的授权：已有 keychain 行不动（那是 CRED-4 的事）。
+        crate::auth::consent::set_json_storage(&app, true).expect("consent");
+        let uid2 = "6f1c2d94-0000-0001-0002-0000000000e2";
+        let out = persist_login(
+            &app,
+            &payload(uid2, "j-access", Some("j-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login 2");
+        assert_eq!(out["credentialStorage"], json!("localjson"), "{out}");
+        assert_eq!(out.get("jsonConsentRequired"), None);
+        let acc2 = account(&app, uid2);
+        assert_eq!(own_row(&app, &acc2.id).storage_kind(), "localjson");
+        assert_eq!(secret_ids(&app).len(), 1);
+        // 老账号仍是老的：不因为打开开关就被隐性迁移。
+        assert_eq!(own_row(&app, &acc.id).storage_kind(), "keychain");
+    }
+
+    /// `health` 要把"是否需要告知"暴露给界面，否则没人能弹这个框。
+    #[test]
+    fn health_reports_the_plaintext_consent_state() {
+        let (app, _dir) = test_app_without_consent(SecureStore::memory());
+        let report = health(&app);
+        assert_eq!(
+            report["credentials"]["jsonStorageEnabled"],
+            json!(false),
+            "{report}"
+        );
+        assert_eq!(report["credentials"]["consentRequired"], json!(true));
+        assert!(report["credentials"]["risk"]
+            .as_str()
             .unwrap()
-            .unwrap();
-        assert_eq!(row.status, "invalid");
+            .contains("明文"));
+
+        crate::auth::consent::set_json_storage(&app, true).expect("consent");
+        let report = health(&app);
+        assert_eq!(report["credentials"]["jsonStorageEnabled"], json!(true));
+        assert_eq!(report["credentials"]["consentRequired"], json!(false));
+    }
+
+    /// 全新 JSON 授权：登录 + 读取全程不碰钥匙串（后端把一切操作都拒了）。
+    #[test]
+    fn a_json_only_account_never_touches_the_keychain() {
+        let (app, _dir) = test_app(SecureStore::failing());
+        let uid = "6f1c2d94-aaaa-0001-0002-00000000000c";
+        persist_login(
+            &app,
+            &payload(uid, "json-access", Some("json-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("登录不该被钥匙串挡住");
+
+        let acc = account(&app, uid);
+        assert_eq!(own_access(&app, &acc.id).as_deref(), Some("json-access"));
+        assert_eq!(own_refresh(&app, &acc.id).as_deref(), Some("json-refresh"));
+        match broker::resolve(&app, &acc).expect("resolve") {
+            broker::Outcome::Resolved(resolved) => {
+                assert_eq!(resolved.kind, "own");
+                assert_eq!(resolved.access, "json-access");
+            }
+            broker::Outcome::Unavailable { reason, .. } => panic!("不该不可用：{reason}"),
+        }
     }
 
     /// PR-CRED-2 的核心不变量：Magpie 导入**一个字节都不进钥匙串**。
@@ -3810,20 +5194,16 @@ mod tests {
         magpie::test_set_logins(None);
     }
 
-    /// 还是 `keychain:` 引用的混合账号：钥匙串那一侧仍按旧安全语义清理。
+    /// 老账号（`keychain:` 自有）+ Magpie：钥匙串那一侧仍按旧规则清理干净。
     #[tokio::test]
     async fn deleting_a_mixed_account_purges_the_keychain_side() {
         let (app, _dir) = test_app(SecureStore::memory());
         let uid = "6f1c2d94-9999-0001-0002-000000000022";
         magpie::test_set_logins(Some(vec![magpie_login(uid, "borrowed")]));
         import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
-        persist_login(
-            &app,
-            &payload(uid, "own-access", Some("own-refresh")),
-            WbVariant::Cn,
-        )
-        .expect("login");
+        let account_id = seed_legacy_own(&app, uid, "own-access", Some("own-refresh"));
         let acc = account(&app, uid);
+        assert_eq!(acc.id, account_id);
         let (legacy_access_key, legacy_refresh_key) = ids::legacy_keys(uid);
         app.secure
             .set(&legacy_access_key, b"legacy-access")
@@ -3845,18 +5225,14 @@ mod tests {
         magpie::test_set_logins(None);
     }
 
-    /// 清理失败时**不删库**：否则账号一消失，就再也没法按 id 重试，只能留孤儿。
+    /// 老账号：清理失败时账号必须保留，否则没有 id 可以重试。
     #[tokio::test]
     async fn a_failed_purge_keeps_the_account_for_retry() {
         let (app, _dir) = test_app(SecureStore::faulty(&[], &["workbuddy/"]));
         let uid = "6f1c2d94-9999-0001-0002-000000000023";
-        persist_login(
-            &app,
-            &payload(uid, "own-access", Some("own-refresh")),
-            WbVariant::Cn,
-        )
-        .expect("login");
+        let account_id = seed_legacy_own(&app, uid, "own-access", Some("own-refresh"));
         let acc = account(&app, uid);
+        assert_eq!(acc.id, account_id);
         app.secure.arm();
 
         let out = dispatch(&app, "accounts.delete", &json!({ "id": acc.id }))
@@ -3957,8 +5333,9 @@ mod tests {
             .is_some());
     }
 
+    /// 账号的授权全是 JSON / Magpie：账号删除不产生任何钥匙串键，只删自己的文件。
     #[test]
-    fn deleting_an_account_purges_only_the_keychain_side() {
+    fn deleting_a_json_and_magpie_account_purges_nothing() {
         let (app, _dir) = test_app(SecureStore::memory());
         let uid = "6f1c2d94-9999-0001-0002-000000000002";
         import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
@@ -3973,17 +5350,216 @@ mod tests {
         let rows = app.with_db(|db| db.list_authorizations(&acc.id)).unwrap();
         let plan = service::account_purge_plan(&rows, &acc);
         assert!(
-            plan.iter().all(|key| !key.contains("/magpie/")),
-            "动态 magpie 引用不该产生任何钥匙串键：{plan:?}"
+            plan.is_empty(),
+            "全是动态 / JSON 引用，不该产生任何钥匙串键：{plan:?}"
         );
-        let failed = service::purge_keys(&app, &plan);
-        assert!(failed.is_empty(), "{failed:?}");
+
+        // access 与 refresh 指向同一个文件，只能删一次；归属校验必须全部通过。
+        let secrets = service::account_secret_plan(&app, &acc, &rows);
+        assert!(secrets.refused.is_empty(), "{secrets:?}");
+        assert_eq!(secrets.owned.len(), 1, "{secrets:?}");
+        assert!(service::purge_secrets(&app, &secrets.owned).is_empty());
+        assert!(secret_ids(&app).is_empty(), "凭据文件应当被删掉");
         assert!(own_access(&app, &acc.id).is_none());
-        assert!(own_refresh(&app, &acc.id).is_none());
-        assert!(magpie_access(&app, &acc.id).is_none());
-        assert!(legacy_access(&app, uid).is_none());
-        assert!(read_key(&app, &ids::legacy_keys(uid).1).is_none());
     }
+
+    /// 单份授权删除：只删自己的文件，不碰钥匙串。
+    #[test]
+    fn deleting_a_json_authorization_removes_only_the_file() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-9999-0001-0002-00000000000d";
+        persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
+        let acc = account(&app, uid);
+        let secret_id = secret_id_of(&app, &acc.id);
+
+        let report = service::delete_authorization(&app, &acc.id, ids::KIND_OWN).expect("delete");
+        assert!(report.record_deleted, "{:?}", report.record_error);
+        assert_eq!(report.removed_secrets, vec![secret_id.clone()]);
+        assert!(
+            report.removed_keys.is_empty() && report.failed_keys.is_empty(),
+            "JSON 授权删除不许碰钥匙串：{:?} / {:?}",
+            report.removed_keys,
+            report.failed_keys
+        );
+        assert!(report.failed_secrets.is_empty());
+        assert!(secret_ids(&app).is_empty());
+        assert!(app
+            .with_db(|db| db.find_authorization(&acc.id, ids::KIND_OWN))
+            .unwrap()
+            .is_none());
+    }
+
+    /// 凭据文件删不掉（被换成软链）时**不删记录**：否则再也找不到这次失败。
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_secret_delete_keeps_the_row() {
+        let (app, dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-9999-0001-0002-00000000000e";
+        persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
+        let acc = account(&app, uid);
+        let store = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths);
+        let path = store
+            .root()
+            .join(format!("{}.json", secret_id_of(&app, &acc.id)));
+
+        // 把文件换成指向别处的软链：删除必须拒绝，而不是顺着软链删到外面。
+        let outside = dir.path().join("outside.json");
+        std::fs::rename(&path, &outside).expect("move");
+        std::os::unix::fs::symlink(&outside, &path).expect("symlink");
+
+        let report = service::delete_authorization(&app, &acc.id, ids::KIND_OWN).expect("report");
+        assert!(!report.record_deleted, "文件没删掉就不能删记录");
+        // 归属校验先失败（`unsafe`：路径是软链），所以这一步连"删除失败"都不算 —— 是拒绝。
+        assert_eq!(
+            report.secret_error.as_deref(),
+            Some("unsafe"),
+            "{:?}",
+            report.secret_error
+        );
+        assert_eq!(
+            report.failed_secrets.len(),
+            0,
+            "{:?}",
+            report.failed_secrets
+        );
+        assert!(report.removed_keys.is_empty(), "JSON 授权不该碰钥匙串");
+        assert!(
+            app.with_db(|db| db.find_authorization(&acc.id, ids::KIND_OWN))
+                .unwrap()
+                .is_some(),
+            "记录必须留着，否则无法重试"
+        );
+        assert!(outside.exists(), "拒绝删软链时也不能删到目标文件");
+    }
+
+    /// 记录删除失败（凭据已删）：如实报告，并且**重试能成功**。
+    ///
+    /// 这是「先凭据、后记录」这个顺序必须付的代价，所以要证明它是可恢复的：
+    /// 文件已经没了，行还指着它 —— 读会得到 not_found，而删除本身是幂等的。
+    #[test]
+    fn a_failed_record_delete_is_reported_and_can_be_retried() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-9999-0001-0002-000000000010";
+        persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
+        let acc = account(&app, uid);
+
+        app.with_db(|db| {
+            db.exec_raw(
+                "CREATE TRIGGER no_auth_delete BEFORE DELETE ON account_authorizations
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+        })
+        .expect("install trigger");
+
+        let report = service::delete_authorization(&app, &acc.id, ids::KIND_OWN).expect("report");
+        assert!(!report.record_deleted);
+        assert_eq!(
+            report.record_error.as_deref(),
+            Some("record_delete_failed"),
+            "{:?}",
+            report.record_error
+        );
+        assert_eq!(report.removed_secrets.len(), 1, "凭据文件这一步已经完成");
+        assert!(secret_ids(&app).is_empty(), "文件确实已经删了");
+        assert!(
+            app.with_db(|db| db.find_authorization(&acc.id, ids::KIND_OWN))
+                .unwrap()
+                .is_some(),
+            "行还在，所以还能重试"
+        );
+
+        // 去掉注入后重试：删一个不存在的文件是幂等的，整份删除应当完成。
+        app.with_db(|db| db.exec_raw("DROP TRIGGER no_auth_delete;"))
+            .expect("drop trigger");
+        let retry = service::delete_authorization(&app, &acc.id, ids::KIND_OWN).expect("retry");
+        assert!(retry.record_deleted, "{:?}", retry.record_error);
+        assert!(retry.failed_secrets.is_empty());
+        assert!(app
+            .with_db(|db| db.find_authorization(&acc.id, ids::KIND_OWN))
+            .unwrap()
+            .is_none());
+    }
+
+    /// 整账号删除：记录删不掉时不谎报成功，账号保留（有 id 才能重试）。
+    #[tokio::test]
+    async fn a_failed_account_delete_is_reported_and_can_be_retried() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-9999-0001-0002-000000000011";
+        persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
+        let acc = account(&app, uid);
+
+        app.with_db(|db| {
+            db.exec_raw(
+                "CREATE TRIGGER no_account_delete BEFORE DELETE ON accounts
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+        })
+        .expect("install trigger");
+
+        let out = dispatch(&app, "accounts.delete", &json!({ "id": acc.id }))
+            .await
+            .expect("delete");
+        assert_eq!(out["deleted"], json!(false), "{out}");
+        assert_eq!(out["recordError"], json!("account_delete_failed"), "{out}");
+        assert!(
+            app.with_db(|db| db.get_account(&acc.id)).unwrap().is_some(),
+            "账号必须保留，否则没有 id 可以重试"
+        );
+
+        app.with_db(|db| db.exec_raw("DROP TRIGGER no_account_delete;"))
+            .expect("drop trigger");
+        let retry = dispatch(&app, "accounts.delete", &json!({ "id": acc.id }))
+            .await
+            .expect("retry");
+        assert_eq!(retry["deleted"], json!(true), "{retry}");
+        assert!(app.with_db(|db| db.get_account(&acc.id)).unwrap().is_none());
+        assert!(secret_ids(&app).is_empty());
+    }
+
+    /// 整账号删除：JSON-only 账号在所有删除操作都被拒的后端上也要成功。
+    #[tokio::test]
+    async fn deleting_a_json_only_account_never_touches_the_keychain() {
+        let (app, _dir) = test_app(SecureStore::faulty(&["workbuddy/"], &["workbuddy/"]));
+        let uid = "6f1c2d94-9999-0001-0002-00000000000f";
+        persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
+        let acc = account(&app, uid);
+        app.secure.arm();
+
+        let out = dispatch(&app, "accounts.delete", &json!({ "id": acc.id }))
+            .await
+            .expect("delete");
+        assert_eq!(out["deleted"], json!(true), "{out}");
+        assert_eq!(out["failedKeys"], json!([]), "不许碰钥匙串：{out}");
+        assert_eq!(out["failedSecrets"], json!([]), "{out}");
+        assert!(app.with_db(|db| db.get_account(&acc.id)).unwrap().is_none());
+        assert!(secret_ids(&app).is_empty(), "凭据文件要跟着账号一起删");
+    }
+
     /// 只剩一份时删它才算"最后一份"；删的是两份里的一份，别名要留给另一份。
     #[test]
     fn deleting_one_of_two_keeps_the_legacy_alias() {
@@ -4011,8 +5587,6 @@ mod tests {
         );
     }
 
-    /// 改全局首选来源必须当场同步所有账号的兼容镜像，
-    /// 不能等到下一次登录 / 导入才生效 —— 否则界面说 own、旧版二进制还在用 magpie。
     #[tokio::test]
     async fn changing_the_preferred_source_resyncs_every_mirror() {
         let (app, _dir) = test_app(SecureStore::memory());
@@ -4043,36 +5617,31 @@ mod tests {
 
         let acc = account(&app, uid);
         assert_eq!(acc.auth_source, "own", "镜像列要立刻跟着换");
-        assert_eq!(
-            legacy_access(&app, uid).as_deref(),
-            Some("own-access"),
-            "旧别名键也要立刻跟着换"
+        // 两份来源都不是 keychain 引用，所以别名两侧都不该被写。
+        assert!(
+            legacy_access(&app, uid).is_none(),
+            "JSON 授权不写旧别名：{}",
+            acc.auth_source
         );
-        assert_eq!(
-            read_key(&app, &ids::legacy_keys(uid).1).as_deref(),
-            Some("own-refresh")
-        );
+        assert!(read_key(&app, &ids::legacy_keys(uid).1).is_none());
+        // 切换之后仍然读得到自有授权（走 JSON）。
+        assert_eq!(own_access(&app, &acc.id).as_deref(), Some("own-access"));
     }
 
-    /// 删不掉的键必须如实报出来（不吞错），并且记录留着以便重试。
+    /// 老账号：删除失败必须报出来，且**记录保留**（否则再也找不到这次失败）。
     #[test]
     fn failed_key_deletion_is_reported_and_record_survives() {
         let (app, _dir) = test_app(SecureStore::faulty(&[], &["/own/access"]));
         let uid = "6f1c2d94-9999-0001-0002-000000000003";
-        persist_login(
-            &app,
-            &payload(uid, "own-access", Some("own-refresh")),
-            WbVariant::Cn,
-        )
-        .expect("login");
-        let acc = account(&app, uid);
+        let account_id = seed_legacy_own(&app, uid, "own-access", Some("own-refresh"));
         app.secure.arm();
 
-        let report = service::delete_authorization(&app, &acc.id, "own").expect("report");
+        let report =
+            service::delete_authorization(&app, &account_id, ids::KIND_OWN).expect("report");
         assert_eq!(report.failed_keys.len(), 1);
         assert!(!report.record_deleted, "删不干净就不能声称删除成功");
         assert!(
-            app.with_db(|db| db.find_authorization(&acc.id, "own"))
+            app.with_db(|db| db.find_authorization(&account_id, ids::KIND_OWN))
                 .unwrap()
                 .is_some(),
             "记录必须留着，否则再也找不到这次失败"

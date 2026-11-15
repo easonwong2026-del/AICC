@@ -8,8 +8,10 @@ mod app;
 mod auth;
 mod checkin;
 mod clock;
-// PR-CRED-1 只铺地基：本地 JSON 存储与引用解析尚未接入生产路径（CRED-2/3 才接），
-// 所以这里显式放行 dead_code —— 别在接入之前删掉"没人调用"的接口。
+#[cfg(test)]
+mod cred_harness;
+// 凭据模块已有生产调用方（CRED-2/3），但仍有为 CRED-3b（Qoder PAT）准备、
+// 暂时没人调用的接口（`KNOWN_PLATFORMS`、PAT 相关分支）。别在接入前删它们。
 #[allow(dead_code)]
 mod credentials;
 mod credits;

@@ -1,10 +1,11 @@
 # 凭据存储 v3：本地 JSON + 动态 Magpie
 
 > 状态：**CRED-1 已合并**（`LocalJsonStore` + 引用解析 + 文件系统边界加固）；
-> **CRED-2 已交付待验收**（SQLite v20 + Magpie 动态关联 + 统一 Broker 解析）。
-> CRED-3/4/5 尚未开始：自有登录仍写钥匙串，旧 Keychain 迁移也还没做 —— 本文件随每个 PR 更新。
+> **CRED-2 已合并**（SQLite v20 + Magpie 动态关联 + 统一 Broker 解析）；
+> **CRED-3a 已交付待验收**（WorkBuddy 自有授权 JSON 化，**默认关闭**，见 §8ter）。
+> CRED-3b（Qoder 两种授权）/ CRED-4（旧 Keychain 迁移）/ CRED-5（免弹窗收口）尚未开始。
 >
-> 基线：`main` @ `3d8f23c`（#82 已合并），数据库 Schema **v20**。
+> 基线：`main` @ `6adde70`（#84 已合并），数据库 Schema **v20**。
 > 范围：只动凭据的**存取方式**，不动账号模型、签到 / 成长 / 旅行 / Credits 业务。
 
 ## 1. 为什么要换掉钥匙串
@@ -43,7 +44,7 @@ Magpie 授权             AICC 自有授权
 | refresh | **严禁读取 / 复制 / 刷新** | 保存登录实际返回的值 |
 | 落盘位置 | `~/.config/magpie/plugin-auth.json` | `<data>/secrets/v1/<uuid>.json` |
 
-## 3. 引用方案（本 PR 交付）
+## 3. 引用方案（CRED-1 交付）
 
 SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的余地：
 
@@ -126,7 +127,7 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 * JSON 解析失败只报行列号：`serde` 的原始消息会把字段值抄进错误里，那可能是令牌。
 * 坏文件不参与读取，但**不删、不覆盖**；`scan()` 把它单独列进 `broken`，健康文件照常可用。
 
-## 7. 本 PR 的范围
+## 7. CRED-1 的范围
 
 **做了**：`src/credentials/reference.rs`（引用解析）、`src/credentials/localjson.rs`
 （存储）、35 个测试（并发写、revision 冲突、锁超时、注入写失败、rename 前中断、
@@ -146,14 +147,15 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 旧 Keychain 迁移 UI、Worker 免弹窗收口。本 PR 不改变生产默认行为，也不创建
 `secrets/` 目录 —— 没有任何调用方。
 
-## 8. 五个 PR 的顺序
+## 8. 阶段顺序
 
 | PR | 内容 | 状态 |
 | --- | --- | --- |
 | CRED-1 | JSON 存储底层 + 引用解析 | 已合并（#82） |
 | CRED-2 | SQLite v20 + Magpie 动态授权 | **本 PR** |
-| CRED-3 | 自有登录 JSON 化（四平台） | 待开始 |
-| CRED-4 | 旧 Keychain 显式迁移（备份 / 核对 / 回滚） | 待开始 |
+| CRED-3a | WorkBuddy 自有授权 JSON 化 | **本 PR** |
+| CRED-3b | Qoder CN / International 浏览器、设备授权、PAT JSON 化 | 待开始（等 3a 合并） |
+| CRED-4 | 旧 Keychain 显式迁移（备份 / 核对 / 回滚） | 待开始（两平台都 JSON 化之后） |
 | CRED-5 | Worker 免弹窗收口 + 端到端验收 | 待开始 |
 
 ## 8bis. CRED-2：Magpie 动态关联
@@ -211,6 +213,152 @@ SQLite 只存引用串。三种方案由**显式前缀**决定，没有"猜"的�
 
 借用授权不再写旧别名键，所以 PR #65 时代的二进制看不到"当前借用令牌"。
 回退到旧版本必须用迁移前的数据库备份（PRD §7.4 已接受）。
+
+## 8ter. CRED-3a：WorkBuddy 自有授权 JSON 化
+
+**落点矩阵**（`auth/service.rs::write_own`）
+
+| 账号现状 | 写哪里 | 回滚方式 |
+| --- | --- | --- |
+| 还没有自有授权行 | 新建 `<uuid>.json`，`localjson:v1:<uuid>` | 删掉刚建的文件 |
+| 已经是 `localjson:` | **覆盖同一个文件**（一份授权一个文件，不留孤儿） | 把旧 access/refresh 写回去（带 revision 校验） |
+| 还是 `keychain:`（CRED-4 之前的老账号） | 维持钥匙串写入，一个字段都不迁移 | 快照恢复 |
+
+**三条硬规则**
+
+1. **引用与状态一次提交。** `record_grant` 用单条 UPSERT 同时写 `access_ref` /
+   `refresh_ref` / `status` / `token_expires_at` / `storage_kind` / `version+1`。
+   先写引用再写状态会留下「新凭据 + 旧状态」或「新状态 + 旧引用」，后者会让库永远
+   指着一份不是这次登录写出来的文件。
+2. **删除顺序固定为「先凭据、后记录」。** 反过来的话，文件名是随机 UUID，行一删就再也
+   定位不到那个文件，只能扫目录找孤儿，而孤儿里躺着的是**有效令牌**。现在这一侧最坏
+   是「文件已删、行还在」：读得到 `not_found`，界面提示重新登录，而删除可以原样重试
+   （删文件、删行都幂等）。行删除失败会返回 `recordError = record_delete_failed`，
+   不谎报成功。
+3. **老账号不迁移。** 只要行的引用还是 `keychain:`，读写都照旧：`write_own` 走原快照
+   路径、`read_access` / `read_own_refresh` 走钥匙串、删除按旧规则连旧别名一起清。
+   CRED-3 一个字节都不搬 —— 迁移是 CRED-4 的显式动作。
+
+**刷新路径**（`handlers.rs::persist_rotated_json` / `commit_rotated_json`）
+
+* `replace_credentials` 在锁内一次换掉 access + refresh，不存在"新 access + 旧 refresh"；
+* 写失败 → 文件保持旧内容（原子替换），但服务端已作废旧 refresh，所以行标 `invalid`；
+* `revision` 冲突 → `superseded`（不覆盖、不标失效），盘上那份是别人先写成功的新令牌。
+
+**删除清理矩阵**
+
+| 引用 | 钥匙串键 | 本地文件 | 旧别名 |
+| --- | --- | --- | --- |
+| `keychain:` | 自己的 access / refresh | — | 最后一份时清 |
+| `localjson:v1:` | **不产生任何键** | 删自己那个文件 | 不清（从没写过） |
+| `magpie:v1:` | **不产生任何键** | — | 不清（CRED-4 的回滚依据） |
+
+`DeleteReport` 分列 `removedKeys` / `removedSecrets` / `failedKeys` / `failedSecrets` /
+`recordError`；`accounts.delete` 的响应同样分列 `failedKeys` 与 `failedSecrets`。
+
+**本阶段没做**
+
+- Qoder 的浏览器 / 设备授权、PAT（`credits` 读取路径）—— CRED-3b。
+- 旧 Keychain 批量迁移与 UI —— CRED-4。
+- Worker 全链路免弹窗收口与端到端验收 —— CRED-5。
+
+**已知限制**
+
+钥匙串与 SQLite 之间没有跨存储事务（`#84` 复审已记录）。可能出现的中间态只有一种：
+凭据已删、记录还在。两个删除步骤都是幂等的，重试即收敛；CRED-4/5 会补一致性检查与
+恢复提示。
+
+**复审后补的边界（#85 第二轮）**
+
+| 问题 | 修法 |
+| --- | --- |
+| 引用只是 UUID，没校验文件属于这一行 | `auth/owned.rs`：读 / 刷新 / 覆盖写 / 删除四个入口统一 `load` + 校验 `authorizationId` / `platform` / `source` / `credentialKind`，不符返回 `conflict`，**不返回令牌、不写、不删**；整账号删除逐行验归属（`SecretPlan { owned, refused }`），有 `refused` 就整次拒绝 |
+| 首次并发登录两个 UPSERT 都成功 → 孤儿文件 | `write_own` 把"当时看到的是不是已有行"记进 `GrantExpectation`：没有行只允许 `INSERT ... DO NOTHING`，有行走 `version + access_ref` CAS；输的那一方只删"没有任何行引用"的文件（`count_authorizations_referencing`） |
+| 非法引用被静默重建 / 回退钥匙串 | `write_own` 遇到 `magpie:` / `unknown` 直接报 `credential_ref_unusable`；`read_own_refresh` 只有明确 `keychain:` 才走钥匙串；Broker 额外校验"引用种类配得上授权种类" |
+| 明文落盘早于风险告知 | 新登录**默认不写 JSON**：`credentials_json_consent` 未置位时继续写钥匙串，`health.credentials` 暴露 `consentRequired`，登录响应带 `credentialStorage` / `jsonConsentRequired` |
+
+**复审第三轮（#85 第三次提交）**
+
+| 问题 | 修法 |
+| --- | --- |
+| 轮换写（`persist_rotated_json`）绕过归属校验 | 写之前也走 `owned::load`；`commit_rotated_json` 改成吃"已验证快照"，`revision` 与旧 refresh 都从它取。串号返回 `credential_ownership_mismatch` 且**不**标 `needsRelogin`（重新登录只会把坏引用盖成一条新授权） |
+| `settings.get` 单键读不到新设置 | `broker::read_setting` 认 `credentials_json_consent`，返回 `"1"` / `"0"`；全量查询复用同一个 `stored_value()` |
+| 跨进程证据只有线程级 | 新增离线 harness `src/cred_harness.rs`：两个**真进程**共享临时 SQLite + `secrets/`，文件握手摆出竞争窗口，父进程断言最终状态 |
+
+**跨进程 harness 的两个场景**
+
+| 用例 | 断言 |
+| --- | --- |
+| 并发首次登录 | 恰好一个 `won` / 一个 `superseded`；DB 只有一条 own 授权；`secrets/` 只剩 1 份且就是被引用的那份，内容属于赢家 |
+| 迟到的登录（另一个进程） | 引用被挪走后旧快照写入被拒（`superseded`）；行仍是新引用；迟到者写的旧文件被清掉，不留有效令牌 |
+
+harness 不联网、不使用真实令牌（`SecureStore::memory` + 临时目录），跑一次约 0.1s。
+
+**复审第四轮（#85 第四次提交）**
+
+| 问题 | 修法 |
+| --- | --- |
+| 轮换写完文件后不校验 SQLite 引用是否还在 | `commit_rotated_json` 在文件写完后用 `record_status` 做 `version` CAS：失败就把文件写回旧内容并返回 `superseded`（`fileReverted` / `orphanSecret` 如实上报），绝不报 `valid` |
+| `record_status` 的返回值被 `let _ =` 吞掉 | 分三支处理：`Ok(true)` → valid；`Ok(false)` → 再读一次行决定（见下）；`Err` → `rotation_not_committed`（文件保留新令牌，因为旧 refresh 已被服务端作废，回滚只会让账号更坏） |
+| **CAS 失败一律当成"引用被迁走"** | `Ok(false)` 之后再读一次授权行：仍指向同一份文件 → **保留新令牌**，返回 `authorization_version_changed`；引用换了 / 行没了 → 才回滚并返回 `authorization_moved`；行读不出来 → 保留新令牌，返回 `rotation_state_unknown` |
+| 老 keychain 行同样"写完就报成功" | 钥匙串分支也检查 `record_status` 的 CAS 结果 |
+
+**为什么是"写完再撤销"而不是"先查一次"**
+
+文件写和 SQLite 提交跨两个存储，没有事务可用。写前查一次挡不住写后迁移；真正的判据是
+**写完之后这次提交还能不能成立**：
+
+```text
+owned::load（验归属，取 revision R）
+      ↓   ← 另一个进程 CAS 把引用从 F 迁到 G（F 保留）
+写 F（R → R+1）                       ← 这一步无法阻止
+record_status（CAS on version）→ false
+      ↓
+把 F 写回旧内容（R+1 → R+2），返回 superseded
+```
+
+F 已经不被任何行引用，没人会读到那半秒的新令牌；最终状态是"F 里是旧值、G 未被碰过、
+行指向 G、界面收到 superseded"。回归：`rotation_supersedes_when_the_authorization_moves_mid_flight`
+（进程内确定性交错）与 harness 的 `a_rotation_in_another_process_reports_superseded_after_the_reference_moves`（真双进程）。
+
+**但"版本变了"不等于"引用变了"**：另一支只更新状态、仍指向 F 时，把 F 回滚成旧令牌等于
+毁掉服务端之后唯一有效的 refresh。所以 `Ok(false)` 之后必须再读一次行：
+
+| 重新读取的结果 | 处理 | 回应 |
+| --- | --- | --- |
+| 仍指向 F | 保留新令牌（回滚风险更大） | `superseded` / `authorization_version_changed` / `fileReverted=false` |
+| 指向 G 或行已删 | 撤销对 F 的写入 | `superseded` / `authorization_moved` / `fileReverted` + `orphanSecret` |
+| 读不出来 | 保留新令牌，不声称成功 | `invalid` / `rotation_state_unknown` |
+
+回归：`rotation_keeps_the_new_tokens_when_only_the_row_version_changes`。
+
+### 归属校验为什么必须在业务层
+
+文件 `0600` 只回答"别的用户能不能读"，回答不了"这个文件是不是这条授权的"。引用写错
+（迁移出错、并发覆盖、库损坏）时，按 UUID 直接读就会把**另一个账号的有效令牌**当成自己的。
+四个入口全部校验，且错误分类为 `conflict`（`credential_ownership_mismatch`），不是
+`not_found` —— 后者会被上层当成"没凭据，请重新登录"，把串号糊过去。
+
+### 并发首次登录的收敛方式
+
+```text
+进程 A: 读库(无 own 行) → 写 file-A → INSERT ... DO NOTHING ✔
+进程 B: 读库(无 own 行) → 写 file-B → INSERT ... DO NOTHING ✘ → superseded
+                                        → 删 file-B（无任何行引用）→ 返回 superseded
+```
+
+已有行则走 `version + access_ref` CAS：谁先把引用改掉，后到的旧快照写不进去。
+**不回滚赢家的文件**：清理前先查 `count_authorizations_referencing`，被引用就一个字节都不动。
+
+### 明文存储的开关
+
+| 状态 | 新登录写哪 | 界面提示 |
+| --- | --- | --- |
+| `credentials_json_consent` 未设置（默认） | 钥匙串（与 #84 一致） | `health.credentials.consentRequired = true`，登录响应 `jsonConsentRequired = true` |
+| 置为 `1` | 新建 `<uuid>.json` | `jsonStorageEnabled = true` |
+
+这条闸门只管**新建**：已有 JSON 行照旧读写（文件早就落盘了，退回钥匙串不会减少暴露，
+还会让同一份授权分裂成两处）。老 `keychain:` 行不因开关变化而迁移。
 
 ## 9. 风险
 
