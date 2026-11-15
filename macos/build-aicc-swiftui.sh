@@ -24,7 +24,10 @@ REQUESTED_IDENTITY="${AICC_SIGNING_IDENTITY:-}"
 # 本机自签证书通常没有"信任设置"（CSSMERR_TP_NOT_TRUSTED），find-identity 会报
 # 0 valid identities，但 codesign 照样能用——它的 DR 只需要证书根。
 identity_present() {
-  security find-certificate -a -c "$1" >/dev/null 2>&1
+  # 关键：`security find-certificate` 找不到证书时也可能退出 0（错误只写到 stderr），
+  # 所以要判断输出，不能只看退出码。CI 上正是这里误判成"有证书"，
+  # 接着 codesign 报 "The specified item could not be found in the keychain"。
+  [[ -n "$(security find-certificate -a -c "$1" 2>/dev/null)" ]]
 }
 
 if [[ -n "$REQUESTED_IDENTITY" ]]; then
