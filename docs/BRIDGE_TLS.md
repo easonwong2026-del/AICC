@@ -76,8 +76,32 @@ UDP 广播没有认证能力，所以它只负责「这里有个服务器」。�
 | 并发只产生一个身份 | 4 线程单测 + 6 进程实测（同一 pin） |
 | ECDSA P-256 真机兼容 | `docs/verification/poke4s-ecdsa-probe.txt`（13/13） |
 
-真机记录在 `docs/verification/poke4s-ecdsa-probe.txt`。**该记录只覆盖 USB + `adb reverse`**：
-UDP 自动发现与真实 Wi-Fi 端到端仍未验证（PR-B4）。
+## 真实 Wi-Fi 端到端（PR-B3，2026-11-16 实测）
+
+Mac `192.168.0.14`（AICC 2.12.2 自带运行时 + 根证书 gen 2）／POKE4S `192.168.0.8`，
+不经 USB、不经 `adb reverse`，两端都在 Wi-Fi 上。
+
+| # | 场景 | 结果 | 证据 |
+| --- | --- | --- | --- |
+| 1 | UDP 发现 | `Candidate found: https://192.168.0.14:8767` | logcat `AICC Discovery` |
+| 2 | 首次信任 | 弹「核对指纹」，显示 `SAeN 58Qk lqPm 10pm …`，与 Mac 设置页一致后才继续 | 界面操作、截图 |
+| 3 | HTTPS 配对 | 200，token 保存，随后 `Candidate verified` | logcat |
+| 4 | 额度读取 | 面板显示真实额度（SYNC 15:31） | `docs/verification/poke4s-wifi-paired-online.png` |
+| 5 | App 重启 | 新进程重新 `verified`，无需重新配对 | logcat 15:28:46 |
+| 6 | 熄屏唤醒 | 唤醒后立即 `verified` 并刷新 SYNC | logcat 15:29:51 |
+| 7 | AICC 重启 | LAN 关闭→开启各一次，重启后均自动恢复 | logcat 15:31:07 |
+| 8 | 关闭局域网 | `8767`/`8766` 无监听；设备 `ConnectException` → 面板 `OFFLINE` + 「上次 15:30」 | `poke4s-lan-off-offline.png` |
+| 9 | 根证书重置 | 设备 `SSLHandshakeException` 拒绝，面板 OFFLINE，**未发送 token**；确认新指纹后重新配对恢复 | `poke4s-root-reset-refused.png` |
+| 10 | HTTP 回退 | 不存在：URL 解析拒绝 `http://`、`usesCleartextTraffic=false`、失败即报错 | 代码 + 单测 |
+
+两点如实说明：
+
+- 「Mac 重启」这一项本轮是用 **AICC 进程重启 + 局域网开关循环**验证的，没有真的重启整台 Mac。
+- 失败时不做任何"清数据重来"：根证书重置那条是故意制造的负向场景，现场先是 OFFLINE + 旧数据，
+  确认新指纹后才恢复，没有用重置/清空去掩盖问题。
+
+真机探针记录（USB + `adb reverse`，ECDSA 13/13）在 `docs/verification/poke4s-ecdsa-probe.txt`，
+与上面的 Wi-Fi 验收是两件事，不能互相替代。
 
 ## 还没做
 
