@@ -34,8 +34,11 @@ adb logcat -s AICCTlsProbe
 adb pull /sdcard/Android/data/com.aieink.tlsprobe/files/probe.txt
 ```
 
-`server.py` 需要 Python 3.10+（TLS 1.3）。系统自带的 `/usr/bin/python3` 是 3.9 + LibreSSL，
-跑不了 1.3 —— 这本身就是下面第 2 条结论的一部分。
+`server.py` 需要带 TLS 1.3 的解释器。**项目基线已定为 CPython 3.14.10 + OpenSSL 3.5 LTS**
+（3.10 已于 2026-10-01 EOL，3.9 于 2025-10-31 EOL，都不再作为长期依赖）。
+系统自带的 `/usr/bin/python3` 是 3.9.6 + LibreSSL 2.8.3，跑不了 1.3 —— 这本身就是下面第 2 条结论的一部分。
+
+本机验证时用任意 ≥3.14 的解释器即可；构建时请核验 `ssl.OPENSSL_VERSION`，不要只看 Python 版本号。
 
 ### Boox 设备的一个坑
 
@@ -67,9 +70,9 @@ SUMMARY pass=8 fail=0 elapsedMs=512
 
 1. **设备侧没问题**：TLS 1.2/1.3、自签 CA 的 App 级信任、SPKI pinning、明文拦截，四项都成立。
    所以 PR-B 不需要为兼容性留 HTTP 后门。
-2. **但桥接服务端目前只能到 TLS 1.2**：App 用 `/usr/bin/python3`（3.9.6 + LibreSSL 2.8.3，
-   `HAS_TLSv1_3 == False`）启动 `server.py`。要上 1.3，必须换解释器（bundled python 或要求
-   用户装 3.10+），这会改变打包与安装体积，是 PR-B 要单独决定的事。
+2. **桥接服务端目前只能到 TLS 1.2**：App 用 `/usr/bin/python3`（3.9.6 + LibreSSL 2.8.3，
+   `HAS_TLSv1_3 == False`）启动 `server.py`。**已决策**：换成随 App 打包的 CPython 3.14.10 +
+   OpenSSL 3.5 LTS，TLS 1.2 保留兼容、默认优先 1.3；运行时不再是"用户机器上碰巧装了什么"。
 3. **现有 APK 连不上自签 HTTPS**：`poke-dashboard` 既没有 `networkSecurityConfig`，
    也没有自定义 `TrustManager`，走系统信任库；Android 7 以上不信任用户 CA。
    PR-B 必须同时改客户端（NSC + pin 或 `CertificatePinner` 等价物），不能只改 Mac 端。
@@ -79,6 +82,8 @@ SUMMARY pass=8 fail=0 elapsedMs=512
 ## 已知局限
 
 - 只验证了 `127.0.0.1` + `adb reverse`，**没有验证 LAN 与 UDP 发现**（那需要真 Wi-Fi）。
+- 本装置只证明"设备能完成 TLS"，**不证明首次配对可信**：UDP 广播里的指纹是未认证信息，
+  生产流程必须让人对照 Mac 与设备上的指纹后再固定，不能自动采纳。
 - 只测了 RSA-2048 单证书链，没测 ECDSA、证书轮换、OCSP。
 - 设备系统信任库里是否有用户 CA 未确认（`/data/misc/user/0/cacerts-added/` 需要 root）；
   因此负向用例改用"第二套未安装的 CA"来判定，不依赖系统库内容。
