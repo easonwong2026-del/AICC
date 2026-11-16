@@ -60,8 +60,14 @@ struct SettingsView: View {
                 Toggle("启用墨水屏桥接", isOn: $settings.bridgeEnabled)
                 if settings.bridgeEnabled {
                     LabeledContent("桥接状态", value: server.isServerRunning ? "运行中" : "等待连接")
-                    Text("Mac 与墨水屏需在同一可信网络。APK 自动发现电脑，输入下方配对码即可连接。")
-                        .font(.caption).foregroundStyle(.secondary)
+                    Toggle("允许局域网设备连接", isOn: $settings.bridgeLANEnabled)
+                    if settings.bridgeLANEnabled {
+                        Text("会监听本机所有网卡并广播设备发现。同一网络里拿到配对码的设备可以读取额度；传输仍是未加密的 HTTP，公共网络下可能被监听。只在可信网络里打开。")
+                            .font(.caption).foregroundStyle(.orange)
+                    } else {
+                        Text("默认只监听本机（127.0.0.1），墨水屏与 Android 连不上，只用小组件时够用。要让墨水屏连接，必须在这里显式打开。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     HStack {
                         Button("生成配对码") { Task { await pair() } }.disabled(!server.isServerRunning || busy)
                         if !pairingCode.isEmpty {
@@ -173,6 +179,12 @@ struct SettingsView: View {
                 server.stopServer(reason: .user)
                 loginAtLaunch.setEnabled(false)
             }
+        }
+        .onChange(of: settings.bridgeLANEnabled) { _, _ in
+            // 改监听范围必须真的重启进程：只改开关不动绑定，等于界面说"已关闭"
+            // 而端口还开着。
+            pairingCode = ""
+            if settings.bridgeEnabled { Task { _ = await server.restartServer() } }
         }
         .onChange(of: settings.magpiePort) { _, _ in
             reloadWidgets()

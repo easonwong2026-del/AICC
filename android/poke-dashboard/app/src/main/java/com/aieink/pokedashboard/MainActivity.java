@@ -298,7 +298,11 @@ public final class MainActivity extends Activity {
             handler.post(() -> {
                 if (destroyed) return;
                 if (found.isEmpty()) {
-                    Toast.makeText(this, "未找到可用的 AICC 服务器", Toast.LENGTH_SHORT).show();
+                    // 桥接默认只监听本机：局域网发现收不到响应时，多半是 Mac 上
+                    // 没打开「允许局域网设备连接」，这句话要直接告诉用户去哪儿开。
+                    Toast.makeText(this,
+                            "未找到 AICC。请在 Mac 的「设置 → 墨水屏连接」打开「允许局域网设备连接」，并确认在同一网络",
+                            Toast.LENGTH_LONG).show();
                 } else if (found.size() == 1) {
                     selectServer(found.get(0), urlField);
                 } else {
