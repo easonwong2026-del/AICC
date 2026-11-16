@@ -200,8 +200,10 @@ impl TlsStore {
     pub fn reset(&self) -> Result<TlsIdentity, CertError> {
         fs::create_dir_all(&self.directory)?;
         fs::set_permissions(&self.directory, fs::Permissions::from_mode(0o700))?;
-        let previous = self.read().map(|identity| identity.generation).unwrap_or(0);
         let guard = self.lock()?;
+        // Read the counter *inside* the lock: two concurrent resets must not
+        // both see the pre-reset value and both write generation 1.
+        let previous = self.read().map(|identity| identity.generation).unwrap_or(0);
         for name in [CA_CERT, CA_KEY, LEAF_CERT, LEAF_KEY, IDENTITY] {
             let path = self.directory.join(name);
             if path.exists() {
@@ -211,10 +213,8 @@ impl TlsStore {
         let mut identity = self.ensure_locked(&[])?;
         // The generation only ever moves forward: a device that pinned
         // generation 3 must not be told the rotated root is still 3.
-        if identity.generation <= previous {
-            identity.generation = previous + 1;
-            self.write_identity(&identity)?;
-        }
+        identity.generation = previous + 1;
+        self.write_identity(&identity)?;
         drop(guard);
         Ok(identity)
     }
@@ -832,6 +832,32 @@ mod tests {
             "and must not force a re-pair"
         );
         assert!(certificate_not_after(&store, CA_CERT) > root_expiry);
+    }
+
+    #[test]
+    fn concurrent_resets_still_move_generation_forward() {
+        let (_keep, store) = store();
+        let first = store.ensure(&[]).expect("ensure");
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let store = TlsStore::new(store.directory().to_path_buf());
+            handles.push(std::thread::spawn(move || {
+                store.reset().expect("reset").generation
+            }));
+        }
+        let generations: Vec<u32> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert!(
+            generations.iter().all(|value| *value > first.generation),
+            "a reset must always publish a newer generation: {generations:?}"
+        );
+        let final_generation = store.read().expect("identity").generation;
+        assert!(
+            final_generation >= first.generation + 4,
+            "four resets must produce four new generations, got {final_generation}"
+        );
     }
 
     #[test]
