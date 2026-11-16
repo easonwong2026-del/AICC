@@ -10,6 +10,7 @@ pub mod api;
 pub mod catalog;
 pub mod manager;
 pub mod models;
+pub mod reward_ledger;
 pub mod rewards;
 pub mod scanner;
 pub mod scheduler;
