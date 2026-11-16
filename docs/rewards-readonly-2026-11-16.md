@@ -84,28 +84,38 @@ today = /heatmap 的 today.date（服务端日期，不用本机时区）
 | `missing_cells` / `bad_cell` | 没有 `cells[]`、分数非法、同一天两个分数 | 活跃日历格式异常 |
 
 日历里**没出现的日期不推测为断签**（缺项 ≠ 零分）；`score` 为负、同一天两个分数都直接停。
-余额两种情况分开：`no_cards`（有断签但没卡）、`no_broken_day`（本来就没断），
-两者都不该让用户以为"功能坏了"。
+余额分三种情况：`no_cards`（**确认** 0 张）、`balance_unknown`（余额没查到）、
+`no_broken_day`（本来就没断）。把"没查到"说成"没有卡"就是错误结论 —— 用户抽屉里
+可能还有卡（复审 P1）。
 
 ### 3. 回查判定：看不出来就不下结论
 
 `growth/reward_ledger.rs` 新增纯函数：
 
 ```rust
-Observation::Applied | NotApplied | Rejected | Inconclusive
+Observation::Applied | Unchanged | ProvablyNotExecuted | Rejected | Inconclusive
         ↓ verdict()
-Verdict::Confirmed | NotApplied | Rejected | StillUnknown
+Verdict::Confirmed | StillUnknown | NotApplied | Rejected
 ```
 
 | 观察 | 结论 | 账本阶段 | verified |
 | --- | --- | --- | --- |
 | 目标确实变了（次数少了/档位 claimed/日期进了 makeup_dates） | `Confirmed` | `confirmed` | 是 |
-| 目标与发请求前完全一致 | `NotApplied` | `failed` | **是（必须）** |
+| **前后一致**（次数还是那个次数） | `StillUnknown` | `unknown` | 否 |
+| 服务端明确说"没这条操作 / 未受理" | `NotApplied` | `failed` | **是（必须）** |
 | 服务端明确拒绝 | `Rejected` | `rejected` | 是 |
 | 查询失败/字段缺失/自相矛盾 | `StillUnknown` | `unknown` | 否 |
 
-`Inconclusive → StillUnknown` 这一条是整条回查链上最危险的一次"猜"：猜成"没生效"就会
-释放目标，下一轮重新发一次，等于同一次用户意图扣两次。
+两条都不能省：
+
+1. **"没变化"不是"没执行"**（复审 P0）。写请求本机超时、随后 GET 到的次数与原值相同，
+   完全可能是响应还在路上、读接口走了缓存、或另一个客户端刚补了一次。判成 `failed`
+   会释放目标，下一轮生成新的 `client_token` —— 同一次用户意图扣两次。所以
+   `Unchanged` 只能 → `StillUnknown`。
+2. **"看不出来"更不是"没执行"**。`Inconclusive` 同样只能 → `StillUnknown`。
+
+只有服务端亲口说"没有这条操作"（`ProvablyNotExecuted`）才允许落 `failed`。
+`failed` 在存储层还额外要求 `verified == true`，两道门都必须过。
 
 ## 三、发送次数上限落到存储层（复审遗留）
 
@@ -132,8 +142,8 @@ UPDATE reward_operations
 | --- | --- |
 | 档位 | 空值/未知值不默认可领；三来源优先级；空串不挡住后面的值；两份响应都缺时三档仍齐全 |
 | 补签候选 | 当月窗口、排除今天、排除上个月、活动起始下限、已补签排除、日历缺项不推测、六种结构异常 |
-| 补签视图 | `no_cards` / `no_broken_day` / `calendar_missing`；日历坏了仍显示余额 |
-| 回查 | `Applied→confirmed`、`Inconclusive→unknown`（不释放）、`NotApplied→failed(verified)`、`Rejected→rejected` |
+| 补签视图 | `no_cards`（确认 0 张）/ `balance_unknown`（余额没查到）/ `no_broken_day` / `calendar_missing`；日历坏了仍显示余额 |
+| 回查 | `Applied→confirmed`、`Unchanged→unknown`（**不释放**）、`Inconclusive→unknown`、`ProvablyNotExecuted→failed(verified)`、`Rejected→rejected` |
 | 存储上限 | 第 1~3 次可发，第 4 次被同一条 UPDATE 拒绝且状态保持 `ready` |
 | RPC | 无账号时返回 `accounts: []`；传写形状参数（`draw`/`redeem`）也不产生任何动作 |
 
@@ -175,3 +185,10 @@ UPDATE reward_operations
 **v23 迁到 v24**（只建 `reward_operations` 空表 + 索引）。`integrity_check ok`、
 `accounts` 仍 5 行、`growth_runs` 29 行未动。这是 main 上已合并的迁移，正式构建下次启动
 也会做同一件事；旧构建读到 `user_version=24` 会跳过全部迁移，不会降级失败。
+
+## 八、复审修复（2026-11-17）
+
+| 编号 | 问题 | 修复 | 回归测试 |
+| --- | --- | --- | --- |
+| P0 | `Observation::NotApplied` 被定义为"操作前后状态一致"并直接落 `failed(verified)`。超时后 GET 没变化不等于服务端没执行（响应延迟、缓存、并发改动都能造成同样的观察），一旦落 `failed` 就释放目标，下一轮生成新 `client_token` | 观察值拆成三个：`Applied` / `Unchanged` / `ProvablyNotExecuted`。`Unchanged` → `StillUnknown`（继续占着），只有 `ProvablyNotExecuted`（服务端明确说没这条操作/未受理）才 → `NotApplied` → `failed(verified)`。`failed` 仍在存储层被 `verified` 二次校验 | `an_unchanged_state_is_still_unknown_not_failed`、`only_provable_non_execution_lands_on_failed` |
+| P1 | 补签卡余额 `None` 被 `unwrap_or(0)` 当成 0，界面会提示"没有补签卡" | 拆成 `no_cards`（确认 0 张）与 `balance_unknown`（没查到），`Some(n>0)` 时不给任何理由 | `makeup_state_explains_why_there_is_nothing_to_do` 增加余额未知与有卡两组断言 |

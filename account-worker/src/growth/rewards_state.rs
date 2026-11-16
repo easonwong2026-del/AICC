@@ -64,7 +64,8 @@ pub struct MakeupState {
     pub today: Option<String>,
     /// 可补签日期，最近的优先。**只有服务端确认过的断签日才会出现在这里。**
     pub candidates: Vec<String>,
-    /// 为什么没有候选：`no_cards` / `no_broken_day` / `calendar_missing` / `calendar_invalid`。
+    /// 为什么现在不能补签：`no_broken_day`（本来就没断）/ `no_cards`（确认 0 张）/
+    /// `balance_unknown`（余额没查到，**不能说成没有卡**）/ `calendar_missing` / 各 `CalendarProblem`。
     pub note: Option<&'static str>,
 }
 
@@ -378,8 +379,14 @@ pub fn makeup_state(
             Ok(days) => {
                 if days.is_empty() {
                     state.note = Some("no_broken_day");
-                } else if state.balance.unwrap_or(0) <= 0 {
-                    state.note = Some("no_cards");
+                } else {
+                    // 余额未知 ≠ 没有卡。把 None 当 0 会让界面写着"没有补签卡"，
+                    // 而用户其实还有卡 —— 那是错误结论，不是保守结论。
+                    state.note = match state.balance {
+                        Some(balance) if balance <= 0 => Some("no_cards"),
+                        Some(_) => None,
+                        None => Some("balance_unknown"),
+                    };
                 }
                 state.candidates = days;
             }
@@ -762,6 +769,24 @@ mod tests {
         let (state, _) = makeup_state(Some(&no_cards), Some(&broken));
         assert_eq!(state.candidates.len(), 1);
         assert_eq!(state.note, Some("no_cards"));
+
+        // 有断签但**余额未知**：不许说成"没有卡"（P1 回归）
+        let unknown_cards =
+            json!({ "launch_date": "2026-06-17", "streak": { "makeup_dates": [] } });
+        let (state, _) = makeup_state(Some(&unknown_cards), Some(&broken));
+        assert_eq!(state.balance, None);
+        assert_eq!(state.candidates.len(), 1);
+        assert_eq!(
+            state.note,
+            Some("balance_unknown"),
+            "余额查不到时必须单独一类，不能报成 no_cards"
+        );
+
+        // 还有卡：不报任何"不能补"的理由
+        let with_cards = json!({ "launch_date": "2026-06-17", "streak": { "makeup_dates": [] },
+                                 "makeup_cards": { "balance": 2 } });
+        let (state, _) = makeup_state(Some(&with_cards), Some(&broken));
+        assert_eq!(state.note, None);
 
         // 日历整段缺失
         let (state, _) = makeup_state(Some(&streak), None);

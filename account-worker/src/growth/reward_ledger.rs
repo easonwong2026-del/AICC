@@ -215,8 +215,12 @@ pub fn plan(existing: Option<&Open>, needs_token: bool) -> Next {
 pub enum Observation {
     /// 目标变成"已完成"：抽奖次数少了 / 档位变 claimed / 补签日期进了 makeup_dates。
     Applied,
-    /// 目标状态与发请求之前完全一致 —— 说明那次请求确实没生效。
-    NotApplied,
+    /// **前后一致**。注意这不等于"没执行"：写请求可能还在排队、读接口可能有缓存、
+    /// 也可能别的客户端同时改了状态。只凭它关账就是把"不知道"当成"没发生"。
+    Unchanged,
+    /// 服务端给出**明确的未执行证据**：例如按 `client_token` 查不到这条操作、
+    /// 服务端直接答复"该请求未受理"。这是唯一允许落 `failed` 的观察。
+    ProvablyNotExecuted,
     /// 服务端明确拒绝（活动结束、不再满足条件）。
     Rejected,
     /// 看不出来：查询失败、字段缺失、状态自相矛盾。
@@ -228,11 +232,12 @@ pub enum Observation {
 pub enum Verdict {
     /// 真的生效了。
     Confirmed,
-    /// 回查确认没生效 —— 这是唯一允许落 `failed` 的路径（并且必须带 verified）。
+    /// 服务端明确表示这条请求没有执行 —— 这是唯一允许落 `failed` 的路径
+    /// （并且必须带 verified）。"状态没变化"不在此列。
     NotApplied,
     /// 服务端明确拒绝。
     Rejected,
-    /// 查不清：继续 `unknown`，继续占着目标。
+    /// 查不清（含"状态没变化"）：继续 `unknown`，继续占着目标。
     StillUnknown,
 }
 
@@ -254,21 +259,28 @@ impl Verdict {
     pub fn describe(self) -> &'static str {
         match self {
             Self::Confirmed => "服务端状态显示这次操作已生效",
-            Self::NotApplied => "服务端状态与操作前一致，这次请求没有生效",
+            Self::NotApplied => "服务端明确表示这条请求没有执行",
             Self::Rejected => "服务端明确拒绝",
             Self::StillUnknown => "回查仍无法确认，保持占用并等待下一次回查",
         }
     }
 }
 
-/// 把观察结果翻成结论。**看不出来就不许下结论**：`Inconclusive` 只能落到
-/// `StillUnknown`，绝不会变成"没生效"而释放目标（那是重复消耗的入口）。
+/// 把观察结果翻成结论。两条都不能省：
+///
+/// 1. **"没变化"不是"没执行"。** 写请求发出后本机超时，随后 GET 到的次数与原值相同，
+///    完全可能是响应还在路上、读接口走了缓存、或另一个客户端刚好补了一次。把这种
+///    情况判成 `failed` 会释放目标，下一轮生成新的 `client_token` —— 一次用户意图扣两次。
+///    所以 `Unchanged` 只能 → `StillUnknown`。
+/// 2. **"看不出来"更不是"没执行"。** `Inconclusive` 同样只能 → `StillUnknown`。
+///
+/// 只有服务端亲口说"没这条操作 / 未受理"（`ProvablyNotExecuted`）才允许落 `failed`。
 pub fn verdict(observation: Observation) -> Verdict {
     match observation {
         Observation::Applied => Verdict::Confirmed,
-        Observation::NotApplied => Verdict::NotApplied,
         Observation::Rejected => Verdict::Rejected,
-        Observation::Inconclusive => Verdict::StillUnknown,
+        Observation::ProvablyNotExecuted => Verdict::NotApplied,
+        Observation::Unchanged | Observation::Inconclusive => Verdict::StillUnknown,
     }
 }
 
@@ -429,11 +441,21 @@ mod tests {
     }
 
     #[test]
-    fn not_applied_needs_verification_because_it_lands_on_failed() {
-        let not_applied = verdict(Observation::NotApplied);
-        assert_eq!(not_applied.phase(), "failed");
+    fn an_unchanged_state_is_still_unknown_not_failed() {
+        // P0 回归：超时后 GET 到的次数与原值相同，不等于服务端没执行。
+        let unchanged = verdict(Observation::Unchanged);
+        assert_eq!(unchanged, Verdict::StillUnknown);
+        assert_eq!(unchanged.phase(), "unknown");
+        assert!(!unchanged.verified(), "没有核实过，不许带 verified");
+    }
+
+    /// 只有服务端明确的"未执行"证据才允许落 failed，并且必须带 verified。
+    #[test]
+    fn only_provable_non_execution_lands_on_failed() {
+        let provable = verdict(Observation::ProvablyNotExecuted);
+        assert_eq!(provable.phase(), "failed");
         assert!(
-            not_applied.verified(),
+            provable.verified(),
             "failed 必须带 verified，否则存储层拒绝"
         );
     }
