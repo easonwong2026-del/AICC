@@ -99,7 +99,10 @@ pub struct RewardState {
     pub lottery_chances: Option<i64>,
     pub makeup: MakeupState,
     /// 账本里等回查的条数。**这是只读提示，不会自动收敛。**
-    pub awaiting_verification: usize,
+    ///
+    /// `None` 表示**本地账本读不到**（数据库打不开/查询失败）。这不是 0：
+    /// 把"不知道"渲染成"没有未核验记录"，用户会以为一切都已经结算完。
+    pub awaiting_verification: Option<usize>,
     pub recent_operations: Vec<OperationView>,
     pub errors: Vec<FieldError>,
     pub scanned_at: String,
@@ -120,7 +123,7 @@ impl RewardState {
                 .collect(),
             lottery_chances: None,
             makeup: MakeupState::default(),
-            awaiting_verification: 0,
+            awaiting_verification: None,
             recent_operations: Vec::new(),
             errors: Vec::new(),
             scanned_at: crate::clock::now_rfc3339(),

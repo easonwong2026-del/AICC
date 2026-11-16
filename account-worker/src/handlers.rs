@@ -915,16 +915,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
         // 与签到 / 旅行共用同一把凭据锁：扫描虽然只读，但读的是同一份 access，
         // 不能与「正在轮换令牌」的写入撞在一起。
         "growth.scan" => {
-            let ids: Vec<String> = params
-                .get("accountIds")
-                .and_then(Value::as_array)
-                .map(|list| {
-                    list.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default();
+            let ids = optional_string_list(params, "accountIds")?;
             let scans = crate::growth::scan_fleet(app, &ids).await;
             let overview = crate::growth::overview(&scans);
             // 扫描日志：只记结论，不记令牌与任务正文。
@@ -1003,22 +994,16 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
         // "还没核验"的条数。**这里没有抽奖、兑换、补签的写入口** —— 它们要等
         // AICC 自己拿到 A 级接口证据（见 docs/growth-rewards-protocol-2026-11-16.md）。
         "growth.rewards.status" => {
-            let ids: Vec<String> = params
-                .get("accountIds")
-                .and_then(Value::as_array)
-                .map(|list| {
-                    list.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default();
-            let states = crate::growth::reward_states(app, &ids).await;
+            // 类型不对就报错：静默当成"全部账号"是一次意外访问。
+            let ids = optional_string_list(params, "accountIds")?;
+            // 账号列表读不到时返回错误，不返回空数组（空 = "你没有账号"，
+            // 那是完全不同的结论）。
+            let states = crate::growth::reward_states(app, &ids).await?;
             let summary: Vec<String> = states
                 .iter()
                 .map(|state| {
                     format!(
-                        "{}={}(claimable {}, chances {:?}, makeup {} candidates, awaiting {})",
+                        "{}={}(claimable {}, chances {:?}, makeup {} candidates, awaiting {:?})",
                         state.account_id,
                         state.state,
                         state.tiers.iter().filter(|tier| tier.claimable).count(),
@@ -2697,6 +2682,31 @@ fn require_bool(params: &Value, key: &str) -> RpcResult<bool> {
         .get(key)
         .and_then(Value::as_bool)
         .ok_or_else(|| RpcError::invalid_params(format!("缺少布尔参数 {key}")))
+}
+
+/// 可选字符串数组参数。**类型不对就报错，不当作空数组**。
+///
+/// `accountIds` 的语义是"只查这些账号"，空数组是"全部账号"。把
+/// `"abc"` / `[1,2]` / `{a:1}` 静默当成空数组，等于用户想查一个账号、
+/// 结果扫了全库 —— 既是意外访问，也让日志看起来像"没人指定"。
+fn optional_string_list(params: &Value, key: &str) -> RpcResult<Vec<String>> {
+    let Some(raw) = params.get(key) else {
+        return Ok(Vec::new());
+    };
+    if raw.is_null() {
+        return Ok(Vec::new());
+    }
+    let Some(items) = raw.as_array() else {
+        return Err(RpcError::invalid_params(format!("{key} 必须是字符串数组")));
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        match item.as_str() {
+            Some(text) => out.push(text.to_string()),
+            None => return Err(RpcError::invalid_params(format!("{key} 里只能放字符串"))),
+        }
+    }
+    Ok(out)
 }
 
 fn require_str(params: &Value, key: &str) -> RpcResult<String> {

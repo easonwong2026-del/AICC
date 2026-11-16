@@ -789,6 +789,43 @@ fn rewards_status_ignores_write_shaped_parameters() {
     session.call(2, "worker.shutdown", json!({}));
 }
 
+/// `accountIds` 类型不对必须报参数错误，不能静默当成"全部账号"。
+///
+/// 静默把它当空数组，等于用户只想查一个账号、结果扫了整个账号库；
+/// 日志看起来还像"没指定账号"。
+#[test]
+fn rewards_status_rejects_malformed_account_ids() {
+    let mut session = Session::start();
+    for (index, bad) in [json!("all"), json!([1, 2]), json!({"a": 1})]
+        .into_iter()
+        .enumerate()
+    {
+        let reply = session.call(
+            index as i64 + 1,
+            "growth.rewards.status",
+            json!({"accountIds": bad}),
+        );
+        assert_eq!(
+            reply["error"]["code"],
+            json!(-32602),
+            "accountIds 类型不对必须报 INVALID_PARAMS：{reply}"
+        );
+    }
+    // null 与缺省仍然表示"全部账号"。
+    let ok = session.call(9, "growth.rewards.status", json!({"accountIds": null}));
+    assert_eq!(ok["result"]["readOnly"], json!(true), "{ok}");
+    session.call(10, "worker.shutdown", json!({}));
+}
+
+/// `growth.scan` 用同一个解析器，同样不接受错误类型。
+#[test]
+fn growth_scan_rejects_malformed_account_ids() {
+    let mut session = Session::start();
+    let reply = session.call(1, "growth.scan", json!({"accountIds": "abc"}));
+    assert_eq!(reply["error"]["code"], json!(-32602), "{reply}");
+    session.call(2, "worker.shutdown", json!({}));
+}
+
 /// 签到记录是空的就返回空数组，不编造历史。
 #[test]
 fn checkin_records_start_empty() {

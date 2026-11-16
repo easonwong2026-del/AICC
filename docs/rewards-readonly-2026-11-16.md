@@ -36,6 +36,13 @@ A 级接口证据（见 `growth-rewards-protocol-2026-11-16.md` §八）。
 用的是和 `growth.scan` 同一套凭据解析（`auth::broker`）、同一条"国际版不支持"跳过规则，
 四个 GET 并发拉取：`/streak`、`/redeem/summary`、`/lottery/chances`、`/heatmap`。
 
+两个字段需要特别注意：
+
+| 字段 | 语义 |
+| --- | --- |
+| `awaitingVerification` | 数字 = 本地账本里等回查的条数；**`null` = 账本读不到**（数据库打不开/查询失败），此时 `errors` 里一定有一条 `field: "ledger"`，`state` 降级为 `partial` |
+| `accountIds` 参数 | 缺省 / `null` / `[]` = 全部账号；**类型不对（字符串、数字数组、对象）直接 `-32602`**，不会被静默当成"全部账号" |
+
 ## 二、三个必须做对的地方
 
 ### 1. 档位状态：三个来源合成，但"空"不等于"可领"
@@ -192,3 +199,12 @@ UPDATE reward_operations
 | --- | --- | --- | --- |
 | P0 | `Observation::NotApplied` 被定义为"操作前后状态一致"并直接落 `failed(verified)`。超时后 GET 没变化不等于服务端没执行（响应延迟、缓存、并发改动都能造成同样的观察），一旦落 `failed` 就释放目标，下一轮生成新 `client_token` | 观察值拆成三个：`Applied` / `Unchanged` / `ProvablyNotExecuted`。`Unchanged` → `StillUnknown`（继续占着），只有 `ProvablyNotExecuted`（服务端明确说没这条操作/未受理）才 → `NotApplied` → `failed(verified)`。`failed` 仍在存储层被 `verified` 二次校验 | `an_unchanged_state_is_still_unknown_not_failed`、`only_provable_non_execution_lands_on_failed` |
 | P1 | 补签卡余额 `None` 被 `unwrap_or(0)` 当成 0，界面会提示"没有补签卡" | 拆成 `no_cards`（确认 0 张）与 `balance_unknown`（没查到），`Some(n>0)` 时不给任何理由 | `makeup_state_explains_why_there_is_nothing_to_do` 增加余额未知与有卡两组断言 |
+
+## 九、复审修复（2026-11-17 第二轮）
+
+| 优先级 | 问题 | 修复 | 回归测试 |
+| --- | --- | --- | --- |
+| P1 | `attach_ledger` 在本地库读取失败时静默保留 `awaitingVerification = 0`；`reward_states` 在账号列表读取失败时返回空数组 | `awaitingVerification` 改为 `Option<usize>`：读不到就是 `null`，同时压一条 `field: "ledger"` 的错误、`state` 降级为 `partial`（已有的 `unauthorized` 不被覆盖）。`reward_states` 返回 `RpcResult`，账号列表读不到时向上抛错，不再伪装成"你没有账号" | `an_unreadable_ledger_is_unknown_not_zero`、`an_unreadable_ledger_degrades_an_otherwise_ok_state`、`an_unreadable_ledger_does_not_mask_a_more_specific_state` |
+| P1 | `accountIds` 类型不对被 `and_then(as_array).unwrap_or_default()` 吞成空数组，等于意外扫描全部账号 | 新增 `optional_string_list()`：非数组 → `-32602`，数组里非字符串 → `-32602`，`null`/缺省 → 全部。`growth.scan` 与 `growth.rewards.status` 共用它 | `rewards_status_rejects_malformed_account_ids`、`growth_scan_rejects_malformed_account_ids` |
+
+顺带修正 `growth.scan` 的同一处输入校验 —— 它之前有一模一样的解析写法。
