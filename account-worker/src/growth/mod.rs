@@ -12,6 +12,7 @@ pub mod manager;
 pub mod models;
 pub mod reward_ledger;
 pub mod rewards;
+pub mod rewards_state;
 pub mod scanner;
 pub mod scheduler;
 pub mod streak_rewards;
@@ -151,4 +152,99 @@ pub fn overview(scans: &[AccountScan]) -> serde_json::Value {
         "tasksTotal": tasks_total,
         "needsAuth": needs_auth,
     })
+}
+
+// ---------------------------------------------------------------------------
+// 奖励状态（PR #96，只读）
+// ---------------------------------------------------------------------------
+
+/// 一个账号的奖励状态。**这里没有任何 POST**：三个写动作仍未接线。
+///
+/// 与 `scan_account` 共用同一套凭据解析与"国际版不支持"的判定，避免两处规则漂移。
+pub async fn reward_state(app: &Arc<App>, account: &AccountRecord) -> rewards_state::RewardState {
+    let mut state = rewards_state::RewardState::empty(&account.id, &account.nickname);
+
+    if !account.supports_workbuddy_cn_apis() {
+        state.state = "unsupported";
+        state.errors.push(FieldError {
+            field: "provider",
+            kind: "unsupported_provider".to_string(),
+            http: None,
+            code: None,
+            message: "WorkBuddy 国际版没有成长中心；没有向任何接口发送请求".to_string(),
+        });
+        return attach_ledger(app, account, state);
+    }
+
+    let resolved = match broker::resolve(app, account) {
+        Ok(broker::Outcome::Resolved(resolved)) => resolved,
+        Ok(broker::Outcome::Unavailable { reason, detail }) => {
+            state.state = "missing_credential";
+            state.errors.push(FieldError {
+                field: "credential",
+                kind: reason,
+                http: None,
+                code: None,
+                message: detail,
+            });
+            return attach_ledger(app, account, state);
+        }
+        Err(err) => {
+            state.state = "missing_credential";
+            state.errors.push(FieldError {
+                field: "credential",
+                kind: "error".to_string(),
+                http: None,
+                code: None,
+                message: err.message,
+            });
+            return attach_ledger(app, account, state);
+        }
+    };
+
+    let domain = account.auth_domain.clone().unwrap_or_default();
+    let (fetched, _unauthorized) =
+        rewards_state::fetch(&resolved.access, &account.uid, &domain).await;
+    state = fetched;
+    state.account_id = account.id.clone();
+    state.nickname = account.nickname.clone();
+    attach_ledger(app, account, state)
+}
+
+/// 账本部分只读本地库：**它不代表服务端状态**，只回答"有没有一条没核验完的操作"。
+fn attach_ledger(
+    app: &Arc<App>,
+    account: &AccountRecord,
+    mut state: rewards_state::RewardState,
+) -> rewards_state::RewardState {
+    if let Ok((awaiting, recent)) = app.with_db(|db| {
+        Ok((
+            db.reward_ops_awaiting_verification(&account.id)?,
+            db.reward_ops(&account.id, 5)?,
+        ))
+    }) {
+        state.awaiting_verification = awaiting.len();
+        state.recent_operations = recent.iter().map(rewards_state::operation_view).collect();
+    }
+    state
+}
+
+/// 全部账号（或指定账号）的奖励状态，账号之间串行。
+pub async fn reward_states(app: &Arc<App>, ids: &[String]) -> Vec<rewards_state::RewardState> {
+    let accounts = match app.with_db(|db| db.list_accounts(&Default::default())) {
+        Ok(list) => list,
+        Err(_) => Vec::new(),
+    };
+    let mut out = Vec::new();
+    for account in accounts {
+        // 国际版没有成长中心：不扫描、也不出现在结果里（`scan_fleet` 同样的规则）。
+        if !account.supports_workbuddy_cn_apis() {
+            continue;
+        }
+        if !ids.is_empty() && !ids.contains(&account.id) {
+            continue;
+        }
+        out.push(reward_state(app, &account).await);
+    }
+    out
 }

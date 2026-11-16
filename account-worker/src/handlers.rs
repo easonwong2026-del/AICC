@@ -119,6 +119,8 @@ pub const METHODS: &[&str] = &[
     "growth.auto.setEnabled",
     "growth.auto.tick",
     "growth.runs",
+    // ---- 奖励状态（PR #96：只读；三个写动作仍未接线）----
+    "growth.rewards.status",
     // ---- WorkBuddy 每日签到（PR #69）----
     "checkin.status",
     "checkin.run",
@@ -993,6 +995,45 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                     "grantedEnergy": energy,
                 }))
             })
+        }
+
+        // ---- 奖励状态（PR #96）----
+        //
+        // 只读：三档兑换状态、抽奖次数、补签卡余额与可补签日期，外加账本里
+        // "还没核验"的条数。**这里没有抽奖、兑换、补签的写入口** —— 它们要等
+        // AICC 自己拿到 A 级接口证据（见 docs/growth-rewards-protocol-2026-11-16.md）。
+        "growth.rewards.status" => {
+            let ids: Vec<String> = params
+                .get("accountIds")
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let states = crate::growth::reward_states(app, &ids).await;
+            let summary: Vec<String> = states
+                .iter()
+                .map(|state| {
+                    format!(
+                        "{}={}(claimable {}, chances {:?}, makeup {} candidates, awaiting {})",
+                        state.account_id,
+                        state.state,
+                        state.tiers.iter().filter(|tier| tier.claimable).count(),
+                        state.lottery_chances,
+                        state.makeup.candidates.len(),
+                        state.awaiting_verification
+                    )
+                })
+                .collect();
+            log_note(&format!("奖励状态查询：{}", summary.join("; ")));
+            Ok(json!({
+                "accounts": states,
+                "queriedAt": crate::clock::now_rfc3339(),
+                "readOnly": true,
+            }))
         }
 
         // ---- WorkBuddy 每日签到（PR #69）----

@@ -49,7 +49,11 @@ pub const PHASE_UNKNOWN: &str = "unknown";
 pub const PHASE_FROZEN: &str = "frozen";
 
 /// 一个目标最多发三次。超过就冻结 —— 继续重试只会让"到底扣了几次"更难说清。
-pub const MAX_SEND_ATTEMPTS: i64 = 3;
+///
+/// **真正的闸门在存储层**（`storage::reward_ops::MAX_SEND_ATTEMPTS` 写进
+/// `mark_reward_op_sent` 的原子 `UPDATE ... AND attempt < ?`）。这里这份只是让
+/// `plan()` 提前给出 `Blocked`，不能替代存储层 —— 调用方可以不问 `plan()` 就发（PR #96）。
+pub const MAX_SEND_ATTEMPTS: i64 = crate::storage::reward_ops::MAX_SEND_ATTEMPTS;
 
 /// 未决阶段：同一账号同一目标，物理上只允许有一条。
 pub const OPEN_PHASES: [&str; 5] = [
@@ -200,6 +204,79 @@ pub fn plan(existing: Option<&Open>, needs_token: bool) -> Next {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 回查：只读判定（PR #96）
+// ---------------------------------------------------------------------------
+
+/// 回查时**观察到的事实**。它不是"请求成功了吗"，而是"服务端现在长什么样"。
+///
+/// #96 只负责把观察结果翻成结论；真正去 GET 的编排在 #97。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Observation {
+    /// 目标变成"已完成"：抽奖次数少了 / 档位变 claimed / 补签日期进了 makeup_dates。
+    Applied,
+    /// 目标状态与发请求之前完全一致 —— 说明那次请求确实没生效。
+    NotApplied,
+    /// 服务端明确拒绝（活动结束、不再满足条件）。
+    Rejected,
+    /// 看不出来：查询失败、字段缺失、状态自相矛盾。
+    Inconclusive,
+}
+
+/// 回查结论。`phase` 直接就是账本要落的阶段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// 真的生效了。
+    Confirmed,
+    /// 回查确认没生效 —— 这是唯一允许落 `failed` 的路径（并且必须带 verified）。
+    NotApplied,
+    /// 服务端明确拒绝。
+    Rejected,
+    /// 查不清：继续 `unknown`，继续占着目标。
+    StillUnknown,
+}
+
+impl Verdict {
+    pub fn phase(self) -> &'static str {
+        match self {
+            Self::Confirmed => PHASE_CONFIRMED,
+            Self::NotApplied => PHASE_FAILED,
+            Self::Rejected => PHASE_REJECTED,
+            Self::StillUnknown => PHASE_UNKNOWN,
+        }
+    }
+
+    /// 落盘时要不要带 `verified`。`failed` 必须带，否则存储层直接拒绝。
+    pub fn verified(self) -> bool {
+        !matches!(self, Self::StillUnknown)
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Confirmed => "服务端状态显示这次操作已生效",
+            Self::NotApplied => "服务端状态与操作前一致，这次请求没有生效",
+            Self::Rejected => "服务端明确拒绝",
+            Self::StillUnknown => "回查仍无法确认，保持占用并等待下一次回查",
+        }
+    }
+}
+
+/// 把观察结果翻成结论。**看不出来就不许下结论**：`Inconclusive` 只能落到
+/// `StillUnknown`，绝不会变成"没生效"而释放目标（那是重复消耗的入口）。
+pub fn verdict(observation: Observation) -> Verdict {
+    match observation {
+        Observation::Applied => Verdict::Confirmed,
+        Observation::NotApplied => Verdict::NotApplied,
+        Observation::Rejected => Verdict::Rejected,
+        Observation::Inconclusive => Verdict::StillUnknown,
+    }
+}
+
+/// 这个账号现在能不能对某个目标发写请求（只读判断，不发送）。
+pub fn may_send_now(existing: Option<&Open>, needs_token: bool) -> Next {
+    plan(existing, needs_token)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,5 +409,39 @@ mod tests {
                 Next::Recheck { .. } | Next::Blocked { .. } => {}
             }
         }
+    }
+
+    // --- 回查判定 -----------------------------------------------------------
+
+    #[test]
+    fn only_applied_observations_close_as_confirmed() {
+        assert_eq!(verdict(Observation::Applied), Verdict::Confirmed);
+        assert_eq!(verdict(Observation::Applied).phase(), "confirmed");
+        assert!(verdict(Observation::Applied).verified());
+    }
+
+    #[test]
+    fn an_inconclusive_recheck_never_claims_the_request_did_not_happen() {
+        // 这是整条回查链上最危险的一次"猜"：猜成没生效就释放目标，下一轮会重发。
+        assert_eq!(verdict(Observation::Inconclusive), Verdict::StillUnknown);
+        assert_eq!(verdict(Observation::Inconclusive).phase(), "unknown");
+        assert!(!verdict(Observation::Inconclusive).verified(), "没核实过");
+    }
+
+    #[test]
+    fn not_applied_needs_verification_because_it_lands_on_failed() {
+        let not_applied = verdict(Observation::NotApplied);
+        assert_eq!(not_applied.phase(), "failed");
+        assert!(
+            not_applied.verified(),
+            "failed 必须带 verified，否则存储层拒绝"
+        );
+    }
+
+    #[test]
+    fn a_rejected_recheck_closes_the_target() {
+        let rejected = verdict(Observation::Rejected);
+        assert_eq!(rejected.phase(), "rejected");
+        assert!(rejected.verified());
     }
 }
