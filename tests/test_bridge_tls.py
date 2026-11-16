@@ -250,9 +250,19 @@ class LanListenerTests(unittest.TestCase):
         with server._lock:
             server._pair_code = "12345678"
             server._pair_deadline = __import__("time").monotonic() + 60
-        status, body = self.request("POST", "/api/pair", body=json.dumps({"code": "12345678"}))
+        os.environ["EINK_CERT_DIR"] = str(self.root)
+        try:
+            status, body = self.request("POST", "/api/pair", body=json.dumps({"code": "12345678"}))
+        finally:
+            os.environ.pop("EINK_CERT_DIR", None)
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["token"], self.token)
+        document = json.loads(body)
+        self.assertEqual(document["token"], self.token)
+        # The device needs an anchor for full PKIX; it must be the root whose
+        # fingerprint the user just confirmed by hand.
+        self.assertIn("-----BEGIN CERTIFICATE-----", document["ca_pem"])
+        self.assertEqual(document["spki"], self.spki)
+        self.assertEqual(document["protocol_version"], bridge_tls.PROTOCOL_VERSION)
 
     def test_wrong_code_is_counted_per_address(self):
         import time
@@ -315,6 +325,20 @@ class HostIdRaceTests(unittest.TestCase):
 
 
 class DiscoveryPayloadTests(unittest.TestCase):
+    def test_broadcast_fits_in_one_small_datagram(self):
+        import socket
+        with patch.dict("os.environ", {"EINK_HOST": "0.0.0.0"}, clear=True):
+            payload = server.server_identity()
+            # What discovery actually sends: small enough for a 512 byte datagram
+            # (the device's receive buffer), and no secrets.
+            broadcast = {"name": "AICC Companion", "port": 8767, "protocol": payload["protocol"],
+                         "protocol_version": payload["protocol_version"], "host_id": payload["host_id"],
+                         "hostname": payload["hostname"], "platform": payload["platform"],
+                         "version": payload["version"]}
+            self.assertLess(len(json.dumps(broadcast).encode()), 512)
+            self.assertNotIn("sans", json.dumps(broadcast))
+            self.assertGreater(socket.INADDR_ANY, -1)
+
     def test_broadcast_carries_the_pin_but_never_a_token(self):
         with patch.dict("os.environ", {"EINK_HOST": "0.0.0.0"}, clear=True):
             payload = server.server_identity()

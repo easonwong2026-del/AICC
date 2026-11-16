@@ -130,6 +130,20 @@ def diagnostics(context=None):
             "tls13_suites": len(tls13), "cipher_count": len(suites)}
 
 
+def pairing_material(directory=None):
+    """What a device needs to stop trusting *nothing* and start trusting us.
+
+    Full PKIX needs an anchor, and a self-signed root is not in any system store.
+    The pairing response therefore carries the root certificate: the device
+    stores it (plus the pin it already confirmed by hand) and validates every
+    later connection against it.
+    """
+    material = load_identity(directory)
+    anchor = (material.directory / "ca.pem").read_text(encoding="ascii")
+    return {"ca_pem": anchor, "spki": material.spki, "generation": material.generation,
+            "protocol_version": PROTOCOL_VERSION}
+
+
 def summary(material, context):
     """Published to the LAN and to the settings UI; carries no secret."""
     payload = {"port": LAN_PORT, "protocol_version": PROTOCOL_VERSION,

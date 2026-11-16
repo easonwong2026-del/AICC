@@ -434,7 +434,14 @@ def attempt_pairing(handler):
         note_pair_failure(address)
         return handler.send_json({"error": "Pairing code expired or incorrect"}, 403)
     clear_pair_failures(address)
-    return handler.send_json({"token": _token, "host_id": host_id()})
+    granted = {"token": _token, "host_id": host_id(), "protocol_version": bridge_tls.PROTOCOL_VERSION}
+    # 设备要能验证之后的每一次连接，就需要一个信任锚；自签根不在任何系统信任库里，
+    # 所以配对响应把根证书一起给它。这里的信任仍然来自用户人工核对过的指纹。
+    try:
+        granted.update(bridge_tls.pairing_material())
+    except bridge_tls.TlsUnavailable:
+        pass
+    return handler.send_json(granted)
 
 
 class LanHandler(DashboardHandler):
@@ -507,9 +514,25 @@ def start_discovery(https_port):
                 while True:
                     request, address = channel.recvfrom(512)
                     if request.strip() == DISCOVERY_MAGIC:
+                        # 广播要小：设备侧一个 512 字节的包就该装得下。整份 identity
+                        # 带上 sans / TLS 诊断后会超过 MTU 上限，设备解析直接失败。
                         identity = server_identity()
-                        payload = {"name": "AICC Companion", "port": https_port, **identity}
-                        # 旧字段 `port` 保留但含义变了：LAN 上只有 HTTPS。
+                        payload = {
+                            "name": "AICC Companion",
+                            "port": https_port,
+                            "protocol": identity["protocol"],
+                            "protocol_version": identity["protocol_version"],
+                            "host_id": identity["host_id"],
+                            "hostname": identity["hostname"],
+                            "platform": identity["platform"],
+                            "version": identity["version"],
+                        }
+                        if _lan_info is not None:
+                            payload["https"] = {
+                                "port": https_port,
+                                "protocol_version": _lan_info["protocol_version"],
+                                "spki": _lan_info["spki"],
+                            }
                         channel.sendto(json.dumps(payload).encode(), address)
         except OSError:
             pass
