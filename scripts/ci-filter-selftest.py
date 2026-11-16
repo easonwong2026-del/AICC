@@ -8,7 +8,6 @@
 """
 import re
 import subprocess
-import sys
 
 FILTERS = {
     "workflow": [".github/workflows/**"],
