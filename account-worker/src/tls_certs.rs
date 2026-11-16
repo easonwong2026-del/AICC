@@ -52,6 +52,10 @@ const CA_KEY: &str = "ca.key";
 const LEAF_CERT: &str = "server.pem";
 const LEAF_KEY: &str = "server.key";
 const IDENTITY: &str = "identity.json";
+/// Symlink pointing at the published generation; swapped atomically.
+const CURRENT: &str = "current";
+/// Prefix for a generation being built; never published, removed on startup.
+const STAGE_PREFIX: &str = ".stage-";
 const LOCK: &str = "identity.lock";
 
 #[derive(Debug)]
@@ -101,7 +105,8 @@ pub struct TlsIdentity {
 }
 
 pub struct TlsStore {
-    directory: PathBuf,
+    /// Root of the certificate directory (`certs/`).
+    base: PathBuf,
     /// Injectable so renewal windows can be tested without waiting a year.
     clock: Box<dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync>,
 }
@@ -109,7 +114,7 @@ pub struct TlsStore {
 impl TlsStore {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         TlsStore {
-            directory: directory.into(),
+            base: directory.into(),
             clock: Box::new(chrono::Utc::now),
         }
     }
@@ -120,7 +125,7 @@ impl TlsStore {
         clock: impl Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync + 'static,
     ) -> Self {
         TlsStore {
-            directory: directory.into(),
+            base: directory.into(),
             clock: Box::new(clock),
         }
     }
@@ -142,14 +147,35 @@ impl TlsStore {
         PathBuf::from(home).join("Library/Application Support/AICC-Dashboard/certs")
     }
 
+    /// Directory the bridge reads: the published generation, or the flat
+    /// layout used before generations existed.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn directory(&self) -> &Path {
-        &self.directory
+    pub fn directory(&self) -> PathBuf {
+        self.active_dir()
+    }
+
+    /// The store root (above the generation symlink).  Only tests need it.
+    #[cfg(test)]
+    pub fn base_path(&self) -> &Path {
+        &self.base
+    }
+
+    fn active_dir(&self) -> PathBuf {
+        let link = self.base.join(CURRENT);
+        if let Ok(target) = fs::read_link(&link) {
+            if let Some(name) = target.file_name() {
+                let candidate = self.base.join(name);
+                if candidate.join(LEAF_CERT).exists() || candidate.join(CA_CERT).exists() {
+                    return candidate;
+                }
+            }
+        }
+        self.base.clone()
     }
 
     /// Current identity without touching anything that already exists.
     pub fn read(&self) -> Result<TlsIdentity, CertError> {
-        let document = fs::read_to_string(self.directory.join(IDENTITY))?;
+        let document = fs::read_to_string(self.active_dir().join(IDENTITY))?;
         let parsed: serde_json::Value = serde_json::from_str(&document)
             .map_err(|error| CertError::Crypto(error.to_string()))?;
         let spki = parsed
@@ -173,7 +199,7 @@ impl TlsStore {
                 .map(|items| {
                     items
                         .iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .filter_map(|value| value.as_str().map(str::to_string))
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -183,44 +209,38 @@ impl TlsStore {
     }
 
     /// Create, renew or reuse the identity.  Safe to call on every launch.
-    ///
-    /// `extra_sans` lets the host add addresses it actually bound (an extra
-    /// interface, a fixed alias) on top of the ones discovered here.
     pub fn ensure(&self, extra_sans: &[String]) -> Result<TlsIdentity, CertError> {
-        fs::create_dir_all(&self.directory)?;
-        fs::set_permissions(&self.directory, fs::Permissions::from_mode(0o700))?;
-        let guard = self.lock()?;
-        let outcome = self.ensure_locked(extra_sans);
-        drop(guard);
-        outcome
+        self.prepare()?;
+        let _guard = self.lock()?;
+        self.ensure_locked(extra_sans, false)
     }
 
     /// Throw the root away.  Every paired device has to confirm the new
     /// fingerprint: this is the "I think someone copied my key" button.
     pub fn reset(&self) -> Result<TlsIdentity, CertError> {
-        fs::create_dir_all(&self.directory)?;
-        fs::set_permissions(&self.directory, fs::Permissions::from_mode(0o700))?;
-        let guard = self.lock()?;
-        // Read the counter *inside* the lock: two concurrent resets must not
-        // both see the pre-reset value and both write generation 1.
-        let previous = self.read().map(|identity| identity.generation).unwrap_or(0);
-        for name in [CA_CERT, CA_KEY, LEAF_CERT, LEAF_KEY, IDENTITY] {
-            let path = self.directory.join(name);
-            if path.exists() {
-                fs::remove_file(&path)?;
+        self.prepare()?;
+        let _guard = self.lock()?;
+        self.ensure_locked(&[], true)
+    }
+
+    fn prepare(&self) -> Result<(), CertError> {
+        fs::create_dir_all(&self.base)?;
+        fs::set_permissions(&self.base, fs::Permissions::from_mode(0o700))?;
+        // Half-written generations from a crash are never trusted: they are
+        // removed here so they cannot accumulate or be mistaken for state.
+        if let Ok(entries) = fs::read_dir(&self.base) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name.to_string_lossy().starts_with(STAGE_PREFIX) {
+                    let _ = fs::remove_dir_all(entry.path());
+                }
             }
         }
-        let mut identity = self.ensure_locked(&[])?;
-        // The generation only ever moves forward: a device that pinned
-        // generation 3 must not be told the rotated root is still 3.
-        identity.generation = previous + 1;
-        self.write_identity(&identity)?;
-        drop(guard);
-        Ok(identity)
+        Ok(())
     }
 
     fn lock(&self) -> Result<File, CertError> {
-        let path = self.directory.join(LOCK);
+        let path = self.base.join(LOCK);
         let file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -236,167 +256,236 @@ impl TlsStore {
         Err(CertError::Busy)
     }
 
-    fn ensure_locked(&self, extra_sans: &[String]) -> Result<TlsIdentity, CertError> {
+    fn ensure_locked(
+        &self,
+        extra_sans: &[String],
+        force_new_root: bool,
+    ) -> Result<TlsIdentity, CertError> {
+        let active = self.active_dir();
         let wanted = san_set(extra_sans);
-        let mut ca_created = false;
+        let previous = self.read().map(|identity| identity.generation).unwrap_or(0);
 
-        let root = match self.load_root()? {
-            Some(existing) => existing,
-            None => {
-                let (key, pem) = self.mint_root()?;
-                ca_created = true;
-                RootMaterial {
-                    key,
-                    pem,
-                    generation: 1,
+        let existing_root = if force_new_root {
+            None
+        } else {
+            self.load_root(&active)?
+        };
+        let root_created = existing_root.is_none();
+        let (root_key, root_pem) = match existing_root {
+            Some(root) => (root.key, root.pem),
+            None => self.mint_root()?,
+        };
+
+        if !root_created && !force_new_root {
+            if let Ok(state) = self.leaf_state_in(&active) {
+                let key_ok = self
+                    .leaf_key_in(&active)
+                    .map(|key| key_matches_certificate(&key, &state))
+                    .unwrap_or(false);
+                let fresh =
+                    state.not_after - self.now() >= chrono::Duration::days(LEAF_RENEW_BEFORE_DAYS);
+                if key_ok && fresh && covers(&state.sans, &wanted.names) {
+                    // Nothing to issue: only the published metadata is rewritten,
+                    // and it is the certificate's own notAfter.
+                    let identity = TlsIdentity {
+                        spki: pin(&root_key),
+                        not_after: state.not_after.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                        generation: previous.max(1),
+                        sans: state.sans.clone(),
+                        ca_created: false,
+                        leaf_reissued: false,
+                    };
+                    self.write_identity_in(&active, &identity)?;
+                    return Ok(identity);
                 }
             }
-        };
-        let (root_key, root_pem) = (&root.key, &root.pem);
-        let mut generation = root.generation;
+        }
 
-        // Whether to re-issue is decided from the certificate on disk, never
-        // from identity.json: a stale JSON must not be able to keep an expired
-        // leaf alive, and a fresh JSON must not be able to skip a renewal.
-        let on_disk = self.leaf_state();
-        let needs_issue = match &on_disk {
-            Ok(state) => {
-                state.not_after - self.now() < chrono::Duration::days(LEAF_RENEW_BEFORE_DAYS)
-                    || !covers(&state.sans, &wanted.names)
+        // Build a complete generation first; nothing is published until every
+        // file in it has been verified.
+        let stage = self
+            .base
+            .join(format!("{STAGE_PREFIX}{}", uuid::Uuid::new_v4().simple()));
+        fs::create_dir_all(&stage)?;
+        fs::set_permissions(&stage, fs::Permissions::from_mode(0o700))?;
+        let outcome = self.build_generation(
+            &stage,
+            &root_key,
+            &root_pem,
+            &wanted,
+            previous,
+            root_created,
+        );
+        let identity = match outcome {
+            Ok(identity) => identity,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&stage);
+                return Err(error);
             }
-            Err(_) => true, // absent or unparseable: mint a leaf we can trust
         };
-        if needs_issue {
-            let leaf_key = self.leaf_key().unwrap_or(KeyPair::generate()?);
-            self.write_leaf(&leaf_key, root_key, root_pem, &wanted)?;
-        }
-
-        // Read the truth back from server.pem, whether it was just written or
-        // already there.  This is the value identity.json publishes, so the
-        // metadata can never drift ahead of the certificate it describes.
-        let state = self.leaf_state()?;
-        if state.not_after <= self.now() {
-            return Err(CertError::Crypto(format!(
-                "leaf certificate expired at {}",
-                state.not_after.to_rfc3339()
-            )));
-        }
-
-        let spki = pin(root_key);
-        let identity = TlsIdentity {
-            spki,
-            not_after: state.not_after.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            generation,
-            sans: state.sans,
-            ca_created,
-            leaf_reissued: needs_issue,
-        };
-        // A root that was rotated by an older build (or restored from a backup
-        // with a stale counter) must still move the generation forward, because
-        // devices compare it to decide whether to re-confirm the fingerprint.
-        if !ca_created {
-            generation = match self.read() {
-                Ok(previous) if previous.spki == identity.spki => {
-                    previous.generation.max(generation)
-                }
-                _ => generation + 1,
-            };
-        }
-        let identity = TlsIdentity {
-            generation,
-            ..identity
-        };
-        self.write_identity(&identity)?;
+        self.publish(&stage)?;
         Ok(identity)
     }
 
-    fn leaf_key(&self) -> Option<KeyPair> {
-        fs::read_to_string(self.directory.join(LEAF_KEY))
+    fn build_generation(
+        &self,
+        stage: &Path,
+        root_key: &KeyPair,
+        root_pem: &str,
+        wanted: &SanSet,
+        previous_generation: u32,
+        root_created: bool,
+    ) -> Result<TlsIdentity, CertError> {
+        write_atomic(&stage.join(CA_CERT), root_pem.as_bytes())?;
+        self.write_private(&stage.join(CA_KEY), root_key.serialize_pem().as_bytes())?;
+
+        // Reuse the leaf key when one exists, so a renewal does not disturb
+        // anything pinned to the leaf (nothing should be — the pin is the root —
+        // but rotating keys unnecessarily is still worse).
+        let leaf_key = self
+            .leaf_key_in(&self.active_dir())
+            .unwrap_or(KeyPair::generate()?);
+        self.write_leaf_into(stage, &leaf_key, root_key, root_pem, wanted)?;
+
+        let state = self.leaf_state_in(stage)?;
+        self.verify_generation(stage, root_key, wanted, &state)?;
+
+        let generation = if root_created {
+            previous_generation + 1
+        } else {
+            previous_generation.max(1)
+        };
+        let identity = TlsIdentity {
+            spki: pin(root_key),
+            not_after: state.not_after.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            generation,
+            sans: state.sans,
+            ca_created: root_created,
+            leaf_reissued: true,
+        };
+        self.write_identity_in(stage, &identity)?;
+        Ok(identity)
+    }
+
+    /// Everything inside a generation must be consistent before it is published.
+    fn verify_generation(
+        &self,
+        directory: &Path,
+        root_key: &KeyPair,
+        wanted: &SanSet,
+        leaf: &LeafState,
+    ) -> Result<(), CertError> {
+        let root = self.certificate_state_in(directory, CA_CERT)?;
+        let leaf_key = self
+            .leaf_key_in(directory)
+            .ok_or_else(|| CertError::Crypto("generation has no readable leaf key".into()))?;
+        let root_key_on_disk = fs::read_to_string(directory.join(CA_KEY))
             .ok()
             .and_then(|pem| KeyPair::from_pem(&pem).ok())
-    }
+            .ok_or_else(|| CertError::Crypto("generation has no readable root key".into()))?;
 
-    /// Expiry and SANs as they really are in `server.pem`.
-    fn leaf_state(&self) -> Result<LeafState, CertError> {
-        self.certificate_state(LEAF_CERT)
-    }
-
-    fn certificate_state(&self, name: &str) -> Result<LeafState, CertError> {
-        let text = fs::read_to_string(self.directory.join(name))?;
-        let body = text
-            .split("-----BEGIN CERTIFICATE-----")
-            .nth(1)
-            .ok_or_else(|| CertError::Crypto(format!("{name} holds no certificate")))?
-            .split("-----END CERTIFICATE-----")
-            .next()
-            .ok_or_else(|| CertError::Crypto(format!("{name} certificate is truncated")))?;
-        let der = base64::engine::general_purpose::STANDARD
-            .decode(body.trim().replace(['\n', '\r'], ""))
-            .map_err(|error| CertError::Crypto(format!("{name} is not base64: {error}")))?;
-        let (_, certificate) = x509_parser::parse_x509_certificate(&der)
-            .map_err(|error| CertError::Crypto(format!("{name} is not X.509: {error}")))?;
-        let not_after =
-            chrono::DateTime::from_timestamp(certificate.validity().not_after.timestamp(), 0)
-                .ok_or_else(|| CertError::Crypto("certificate notAfter out of range".into()))?;
-        let mut sans: Vec<String> = Vec::new();
-        if let Ok(Some(extension)) = certificate.subject_alternative_name() {
-            for name in &extension.value.general_names {
-                if let x509_parser::extensions::GeneralName::DNSName(name) = name {
-                    sans.push(name.to_string());
-                }
-                if let x509_parser::extensions::GeneralName::IPAddress(bytes) = name {
-                    if bytes.len() == 4 {
-                        sans.push(
-                            std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3])
-                                .to_string(),
-                        );
-                    } else if bytes.len() == 16 {
-                        let mut octets = [0u8; 16];
-                        octets.copy_from_slice(bytes);
-                        sans.push(std::net::Ipv6Addr::from(octets).to_string());
-                    }
-                }
-            }
+        if !key_matches_certificate(&leaf_key, leaf) {
+            return Err(CertError::Crypto(
+                "leaf key does not match the leaf certificate".into(),
+            ));
         }
-        sans.sort();
-        sans.dedup();
-        Ok(LeafState { not_after, sans })
+        if !key_matches_certificate(&root_key_on_disk, &root) {
+            return Err(CertError::Crypto(
+                "root key does not match the root certificate".into(),
+            ));
+        }
+        if pin(&root_key_on_disk) != pin(root_key) {
+            return Err(CertError::Crypto(
+                "root key on disk is not the key used to sign".into(),
+            ));
+        }
+        if !covers(&leaf.sans, &wanted.names) {
+            return Err(CertError::Crypto(
+                "generation does not cover every wanted address".into(),
+            ));
+        }
+        if leaf.not_after <= self.now() {
+            return Err(CertError::Crypto(
+                "generation leaf is already expired".into(),
+            ));
+        }
+        if leaf.not_after > root.not_after {
+            return Err(CertError::Crypto("leaf outlives its root".into()));
+        }
+        // Cryptographic chain check, not just a name comparison.
+        verify_chain(directory, LEAF_CERT, CA_CERT)?;
+        Ok(())
     }
 
-    fn load_root(&self) -> Result<Option<RootMaterial>, CertError> {
-        let (cert_path, key_path) = (self.directory.join(CA_CERT), self.directory.join(CA_KEY));
+    fn publish(&self, stage: &Path) -> Result<(), CertError> {
+        let name = format!("gen-{}", uuid::Uuid::new_v4().simple());
+        let target = self.base.join(&name);
+        fs::rename(stage, &target)?;
+        sync_directory(&self.base);
+
+        // Atomic switch: the symlink is replaced, never edited in place, so a
+        // reader sees either the old generation or the new one, never a mix.
+        let temporary = self.base.join(format!("{CURRENT}.tmp"));
+        let _ = fs::remove_file(&temporary);
+        std::os::unix::fs::symlink(&name, &temporary)?;
+        fs::rename(&temporary, self.base.join(CURRENT))?;
+        sync_directory(&self.base);
+        self.cleanup(&name);
+        Ok(())
+    }
+
+    /// Keep the live generation and one predecessor for rollback; drop the rest.
+    fn cleanup(&self, live: &str) {
+        let mut generations: Vec<String> = match fs::read_dir(&self.base) {
+            Ok(entries) => entries
+                .flatten()
+                .filter(|entry| entry.path().is_dir())
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .filter(|name| name.starts_with("gen-"))
+                .collect(),
+            Err(_) => return,
+        };
+        generations.sort();
+        generations.retain(|name| name != live);
+        while generations.len() > 1 {
+            let stale = generations.remove(0);
+            let _ = fs::remove_dir_all(self.base.join(stale));
+        }
+    }
+
+    fn load_root(&self, directory: &Path) -> Result<Option<RootMaterial>, CertError> {
+        let (cert_path, key_path) = (directory.join(CA_CERT), directory.join(CA_KEY));
         if !cert_path.exists() || !key_path.exists() {
+            // A root without its key cannot sign leaves; and a root we cannot
+            // read is not a root we can keep.  Either way a new one is minted,
+            // which changes the pin and forces devices to re-confirm.
             return Ok(None);
         }
         let pem = fs::read_to_string(&cert_path)?;
         let key_pem = fs::read_to_string(&key_path)?;
         let key = match KeyPair::from_pem(&key_pem) {
             Ok(key) => key,
-            Err(_) => return Ok(None), // unreadable key: treat as absent, mint a new root
+            Err(_) => return Ok(None),
         };
-        let generation = self.read().map(|identity| identity.generation).unwrap_or(1);
-        let pem = match self.certificate_state(CA_CERT) {
-            Ok(state)
-                if state.not_after - self.now()
-                    < chrono::Duration::days(ROOT_RENEW_BEFORE_DAYS) =>
-            {
-                // Same key, new dates: the pin stays, the devices stay paired.
-                self.sign_root(&key)?
-            }
-            Ok(_) => pem,
-            Err(_) => self.sign_root(&key)?,
+        let state = match self.certificate_state_in(directory, CA_CERT) {
+            Ok(state) => state,
+            Err(_) => return Ok(None),
         };
-        Ok(Some(RootMaterial {
-            key,
-            pem,
-            generation,
-        }))
+        if !key_matches_certificate(&key, &state) {
+            return Ok(None);
+        }
+        let pem = if state.not_after - self.now() < chrono::Duration::days(ROOT_RENEW_BEFORE_DAYS) {
+            // Same key, new dates: the pin stays, the devices stay paired.
+            self.sign_root(&key)?
+        } else {
+            pem
+        };
+        Ok(Some(RootMaterial { key, pem }))
     }
 
     fn mint_root(&self) -> Result<(KeyPair, String), CertError> {
         let key = KeyPair::generate()?;
         let pem = self.sign_root(&key)?;
-        self.write_private(&self.directory.join(CA_KEY), key.serialize_pem().as_bytes())?;
         Ok((key, pem))
     }
 
@@ -406,75 +495,79 @@ impl TlsStore {
     /// touching the pin: the public key — and therefore the SPKI a device
     /// pinned — does not change, so no one has to re-pair.
     fn sign_root(&self, key: &KeyPair) -> Result<String, CertError> {
-        let mut params = CertificateParams::new(Vec::new())?;
-        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        params.key_usages = vec![
-            KeyUsagePurpose::KeyCertSign,
-            KeyUsagePurpose::CrlSign,
-            KeyUsagePurpose::DigitalSignature,
-        ];
-        params
-            .distinguished_name
-            .push(DnType::CommonName, "AICC Bridge Root");
-        params
-            .distinguished_name
-            .push(DnType::OrganizationName, "AICC");
-        params.not_before = stamp(self.now() - chrono::Duration::days(1));
-        params.not_after = stamp(self.now() + chrono::Duration::days(ROOT_LIFETIME_DAYS));
+        let mut params = root_params(self.now())?;
         params.serial_number = Some(serial());
-        let pem = params.self_signed(key)?.pem();
-        write_atomic(&self.directory.join(CA_CERT), pem.as_bytes())?;
-        Ok(pem)
+        Ok(params.self_signed(key)?.pem())
     }
 
-    fn write_leaf(
+    fn write_leaf_into(
         &self,
+        directory: &Path,
         leaf_key: &KeyPair,
         root_key: &KeyPair,
         root_pem: &str,
         wanted: &SanSet,
     ) -> Result<(), CertError> {
-        let mut params = CertificateParams::new(Vec::new())?;
-        params.is_ca = IsCa::ExplicitNoCa;
-        params.key_usages = vec![
-            KeyUsagePurpose::DigitalSignature,
-            KeyUsagePurpose::KeyEncipherment,
-        ];
-        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-        params
-            .distinguished_name
-            .push(DnType::CommonName, "AICC Bridge");
-        params
-            .distinguished_name
-            .push(DnType::OrganizationName, "AICC");
-        params.subject_alt_names = wanted
-            .names
-            .iter()
-            .map(|name| match name.parse::<IpAddr>() {
-                Ok(address) => SanType::IpAddress(address),
-                Err(_) => SanType::DnsName(name.clone().try_into().expect("san")),
-            })
-            .collect();
-        params.not_before = stamp(self.now() - chrono::Duration::days(1));
-        params.not_after = stamp(self.now() + chrono::Duration::days(LEAF_LIFETIME_DAYS));
-        params.serial_number = Some(serial());
-
-        // Take the issuer's subject from the root certificate on disk: minting
-        // a fresh distinguished name here would produce an authority key
-        // identifier that no longer matches the root, and the device would
-        // reject a chain it cannot build.
-        let issuer = Issuer::from_ca_cert_pem(root_pem, root_key)?;
-        let certificate = params.signed_by(leaf_key, &issuer)?;
+        let certificate = leaf_certificate(self.now(), leaf_key, root_key, root_pem, wanted)?;
         let chain = format!("{}{}", certificate.pem(), root_pem);
-        write_atomic(&self.directory.join(LEAF_CERT), chain.as_bytes())?;
+        write_atomic(&directory.join(LEAF_CERT), chain.as_bytes())?;
         self.write_private(
-            &self.directory.join(LEAF_KEY),
+            &directory.join(LEAF_KEY),
             leaf_key.serialize_pem().as_bytes(),
         )?;
         Ok(())
     }
 
-    fn write_identity(&self, identity: &TlsIdentity) -> Result<(), CertError> {
+    fn leaf_key_in(&self, directory: &Path) -> Option<KeyPair> {
+        fs::read_to_string(directory.join(LEAF_KEY))
+            .ok()
+            .and_then(|pem| KeyPair::from_pem(&pem).ok())
+    }
+
+    /// Expiry, SANs and SPKI as they really are in `server.pem`.
+    fn leaf_state_in(&self, directory: &Path) -> Result<LeafState, CertError> {
+        self.certificate_state_in(directory, LEAF_CERT)
+    }
+
+    fn certificate_state_in(&self, directory: &Path, name: &str) -> Result<LeafState, CertError> {
+        let der = read_certificate_der(&directory.join(name))?;
+        let (_, certificate) = x509_parser::parse_x509_certificate(&der)
+            .map_err(|error| CertError::Crypto(format!("{name} is not X.509: {error}")))?;
+        let validity = certificate.validity();
+        let not_after = chrono::DateTime::from_timestamp(validity.not_after.timestamp(), 0)
+            .ok_or_else(|| CertError::Crypto(format!("{name} notAfter is out of range")))?;
+        let mut sans: Vec<String> = Vec::new();
+        if let Ok(Some(extension)) = certificate.subject_alternative_name() {
+            for name in &extension.value.general_names {
+                match name {
+                    x509_parser::extensions::GeneralName::DNSName(value) => {
+                        sans.push(value.to_string())
+                    }
+                    x509_parser::extensions::GeneralName::IPAddress(bytes) if bytes.len() == 4 => {
+                        sans.push(
+                            std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3])
+                                .to_string(),
+                        )
+                    }
+                    x509_parser::extensions::GeneralName::IPAddress(bytes) if bytes.len() == 16 => {
+                        let mut octets = [0u8; 16];
+                        octets.copy_from_slice(bytes);
+                        sans.push(std::net::Ipv6Addr::from(octets).to_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        sans.sort();
+        sans.dedup();
+        Ok(LeafState {
+            not_after,
+            sans,
+            spki: certificate.public_key().raw.to_vec(),
+        })
+    }
+
+    fn write_identity_in(&self, directory: &Path, identity: &TlsIdentity) -> Result<(), CertError> {
         let document = serde_json::json!({
             "version": 1,
             "spki": identity.spki,
@@ -482,10 +575,7 @@ impl TlsStore {
             "generation": identity.generation,
             "sans": identity.sans,
         });
-        write_atomic(
-            &self.directory.join(IDENTITY),
-            document.to_string().as_bytes(),
-        )
+        write_atomic(&directory.join(IDENTITY), document.to_string().as_bytes())
     }
 
     fn write_private(&self, path: &Path, contents: &[u8]) -> Result<(), CertError> {
@@ -509,12 +599,13 @@ impl TlsStore {
 struct RootMaterial {
     key: KeyPair,
     pem: String,
-    generation: u32,
 }
 
 struct LeafState {
     not_after: chrono::DateTime<chrono::Utc>,
     sans: Vec<String>,
+    /// DER SubjectPublicKeyInfo from the certificate itself.
+    spki: Vec<u8>,
 }
 
 #[derive(Debug, Default)]
@@ -633,7 +724,7 @@ mod tests {
             assert!(store.directory().join(name).exists(), "{name} missing");
         }
         assert_eq!(
-            mode(store.directory()),
+            mode(&store.directory()),
             0o700,
             "certificate directory must be private"
         );
@@ -708,7 +799,7 @@ mod tests {
 
     fn certificate_not_after(store: &TlsStore, name: &str) -> chrono::DateTime<chrono::Utc> {
         store
-            .certificate_state(name)
+            .certificate_state_in(&store.directory(), name)
             .expect("certificate")
             .not_after
     }
@@ -738,7 +829,7 @@ mod tests {
         let (_keep, store) = store();
         let first = store.ensure(&[]).expect("ensure");
         let expiry = certificate_not_after(&store, LEAF_CERT);
-        let later = TlsStore::with_clock(store.directory().to_path_buf(), clock_window(expiry, 31));
+        let later = TlsStore::with_clock(store.base_path().to_path_buf(), clock_window(expiry, 31));
         let second = later.ensure(&[]).expect("ensure");
         assert!(
             !second.leaf_reissued,
@@ -757,7 +848,7 @@ mod tests {
         let (_keep, store) = store();
         let first = store.ensure(&[]).expect("ensure");
         let expiry = certificate_not_after(&store, LEAF_CERT);
-        let later = TlsStore::with_clock(store.directory().to_path_buf(), clock_window(expiry, 29));
+        let later = TlsStore::with_clock(store.base_path().to_path_buf(), clock_window(expiry, 29));
         let second = later.ensure(&[]).expect("ensure");
         assert!(second.leaf_reissued, "29 days is inside the renewal window");
         assert_eq!(second.spki, first.spki, "renewal must not change the pin");
@@ -778,7 +869,7 @@ mod tests {
         store.ensure(&[]).expect("ensure");
         let expiry = certificate_not_after(&store, LEAF_CERT);
         let after_expiry =
-            TlsStore::with_clock(store.directory().to_path_buf(), clock_window(expiry, -10));
+            TlsStore::with_clock(store.base_path().to_path_buf(), clock_window(expiry, -10));
         let renewed = after_expiry.ensure(&[]).expect("ensure");
         assert!(
             renewed.leaf_reissued,
@@ -819,7 +910,7 @@ mod tests {
         let first = store.ensure(&[]).expect("ensure");
         let root_expiry = certificate_not_after(&store, CA_CERT);
         let later = TlsStore::with_clock(
-            store.directory().to_path_buf(),
+            store.base_path().to_path_buf(),
             clock_window(root_expiry, 100),
         );
         let renewed = later.ensure(&[]).expect("ensure");
@@ -840,7 +931,7 @@ mod tests {
         let first = store.ensure(&[]).expect("ensure");
         let mut handles = Vec::new();
         for _ in 0..4 {
-            let store = TlsStore::new(store.directory().to_path_buf());
+            let store = TlsStore::new(store.base_path().to_path_buf());
             handles.push(std::thread::spawn(move || {
                 store.reset().expect("reset").generation
             }));
@@ -905,6 +996,112 @@ mod tests {
         );
     }
 
+    fn generation_dirs(store: &TlsStore) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(store.base_path())
+            .expect("base")
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with("gen-"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_half_written_generation_never_becomes_current() {
+        let (_keep, store) = store();
+        store.ensure(&[]).expect("ensure");
+        // Simulate a crash in the middle of issuing: the certificate landed in
+        // a staging directory but the key never did, and nothing was published.
+        let stage = store.base_path().join(format!("{STAGE_PREFIX}crash"));
+        fs::create_dir_all(&stage).unwrap();
+        fs::copy(store.directory().join(LEAF_CERT), stage.join(LEAF_CERT)).unwrap();
+        let before = store.read().expect("identity").spki;
+
+        let recovered = store.ensure(&[]).expect("ensure after a crash");
+        assert!(
+            !stage.exists(),
+            "a staging directory must be cleaned up, never trusted"
+        );
+        assert_eq!(recovered.spki, before, "the published root must not move");
+        let active = store.directory();
+        assert!(
+            active.join(LEAF_KEY).exists(),
+            "a usable identity needs its key"
+        );
+        let key = store.leaf_key_in(&active).expect("leaf key");
+        let state = store.leaf_state_in(&active).expect("leaf state");
+        assert!(
+            key_matches_certificate(&key, &state),
+            "certificate and key must pair"
+        );
+    }
+
+    #[test]
+    fn a_published_generation_that_lost_its_key_is_repaired() {
+        let (_keep, store) = store();
+        let first = store.ensure(&[]).expect("ensure");
+        // The exact failure mode this refactor exists for: the certificate is
+        // valid and covers every address, but the key is gone.
+        fs::remove_file(store.directory().join(LEAF_KEY)).expect("remove key");
+
+        let repaired = store.ensure(&[]).expect("ensure after losing the key");
+        assert!(
+            repaired.leaf_reissued,
+            "a certificate without its key is not usable"
+        );
+        assert_eq!(
+            repaired.spki, first.spki,
+            "the root and the pin are untouched"
+        );
+        let active = store.directory();
+        assert!(active.join(LEAF_KEY).exists());
+        let key = store.leaf_key_in(&active).expect("leaf key");
+        let state = store.leaf_state_in(&active).expect("leaf state");
+        assert!(key_matches_certificate(&key, &state));
+        assert_eq!(
+            identity_not_after(&store),
+            certificate_not_after(&store, LEAF_CERT)
+        );
+    }
+
+    #[test]
+    fn a_key_that_belongs_to_another_certificate_is_replaced() {
+        let (_keep, store) = store();
+        store.ensure(&[]).expect("ensure");
+        let stranger = KeyPair::generate().expect("keypair");
+        fs::write(store.directory().join(LEAF_KEY), stranger.serialize_pem()).unwrap();
+
+        let repaired = store.ensure(&[]).expect("ensure after a key swap");
+        assert!(repaired.leaf_reissued);
+        let active = store.directory();
+        let key = store.leaf_key_in(&active).expect("leaf key");
+        let state = store.leaf_state_in(&active).expect("leaf state");
+        assert!(
+            key_matches_certificate(&key, &state),
+            "the mismatched key must not survive"
+        );
+    }
+
+    #[test]
+    fn the_previous_generation_is_kept_for_rollback() {
+        let (_keep, store) = store();
+        store.ensure(&[]).expect("ensure");
+        let first_generation = store.directory();
+        store.reset().expect("reset");
+        let generations = generation_dirs(&store);
+        assert!(
+            generations.len() >= 2,
+            "keep the old generation until the new one proves itself"
+        );
+        assert!(
+            first_generation.exists(),
+            "the replaced generation is still on disk"
+        );
+        assert!(store.directory().exists());
+    }
+
     #[test]
     fn the_identity_file_never_contains_key_material() {
         let (_keep, store) = store();
@@ -919,7 +1116,7 @@ mod tests {
         let (_keep, store) = store();
         let mut handles = Vec::new();
         for _ in 0..4 {
-            let store = TlsStore::new(store.directory().to_path_buf());
+            let store = TlsStore::new(store.base_path().to_path_buf());
             handles.push(std::thread::spawn(move || {
                 store.ensure(&[]).expect("ensure").spki
             }));
@@ -932,5 +1129,102 @@ mod tests {
             pins.windows(2).all(|pair| pair[0] == pair[1]),
             "two workers minted different roots: {pins:?}"
         );
+    }
+}
+
+/// Read the first certificate of a PEM file as DER.
+fn read_certificate_der(path: &Path) -> Result<Vec<u8>, CertError> {
+    let text = fs::read_to_string(path)?;
+    let body = text
+        .split("-----BEGIN CERTIFICATE-----")
+        .nth(1)
+        .ok_or_else(|| CertError::Crypto(format!("{} holds no certificate", path.display())))?
+        .split("-----END CERTIFICATE-----")
+        .next()
+        .ok_or_else(|| CertError::Crypto(format!("{} is truncated", path.display())))?;
+    base64::engine::general_purpose::STANDARD
+        .decode(body.trim().replace(['\n', '\r'], ""))
+        .map_err(|error| CertError::Crypto(format!("{} is not base64: {error}", path.display())))
+}
+
+/// A leaf is only usable if it is signed by the certificate above it.
+fn verify_chain(directory: &Path, leaf: &str, issuer: &str) -> Result<(), CertError> {
+    let leaf_der = read_certificate_der(&directory.join(leaf))?;
+    let issuer_der = read_certificate_der(&directory.join(issuer))?;
+    let (_, leaf) = x509_parser::parse_x509_certificate(&leaf_der)
+        .map_err(|error| CertError::Crypto(format!("{leaf} is not X.509: {error}")))?;
+    let (_, issuer_certificate) = x509_parser::parse_x509_certificate(&issuer_der)
+        .map_err(|error| CertError::Crypto(format!("{issuer} is not X.509: {error}")))?;
+    leaf.verify_signature(Some(issuer_certificate.public_key()))
+        .map_err(|error| CertError::Crypto(format!("leaf is not signed by the root: {error}")))?;
+    Ok(())
+}
+
+/// Does this private key belong to the certificate in `state`?
+fn key_matches_certificate(key: &KeyPair, state: &LeafState) -> bool {
+    use rcgen::PublicKeyData;
+    key.subject_public_key_info() == state.spki
+}
+
+fn root_params(now: chrono::DateTime<chrono::Utc>) -> Result<CertificateParams, CertError> {
+    let mut params = CertificateParams::new(Vec::new())?;
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.key_usages = vec![
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::CrlSign,
+        KeyUsagePurpose::DigitalSignature,
+    ];
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "AICC Bridge Root");
+    params
+        .distinguished_name
+        .push(DnType::OrganizationName, "AICC");
+    params.not_before = stamp(now - chrono::Duration::days(1));
+    params.not_after = stamp(now + chrono::Duration::days(ROOT_LIFETIME_DAYS));
+    Ok(params)
+}
+
+fn leaf_certificate(
+    now: chrono::DateTime<chrono::Utc>,
+    leaf_key: &KeyPair,
+    root_key: &KeyPair,
+    root_pem: &str,
+    wanted: &SanSet,
+) -> Result<rcgen::Certificate, CertError> {
+    let mut params = CertificateParams::new(Vec::new())?;
+    params.is_ca = IsCa::ExplicitNoCa;
+    params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyEncipherment,
+    ];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "AICC Bridge");
+    params
+        .distinguished_name
+        .push(DnType::OrganizationName, "AICC");
+    params.subject_alt_names = wanted
+        .names
+        .iter()
+        .map(|name| match name.parse::<IpAddr>() {
+            Ok(address) => SanType::IpAddress(address),
+            Err(_) => SanType::DnsName(name.clone().try_into().expect("san")),
+        })
+        .collect();
+    params.not_before = stamp(now - chrono::Duration::days(1));
+    params.not_after = stamp(now + chrono::Duration::days(LEAF_LIFETIME_DAYS));
+    params.serial_number = Some(serial());
+    // The issuer's subject must come from the root certificate on disk,
+    // otherwise the authority key identifier stops matching and a device
+    // cannot build the chain.
+    let issuer = Issuer::from_ca_cert_pem(root_pem, root_key)?;
+    Ok(params.signed_by(leaf_key, &issuer)?)
+}
+
+fn sync_directory(path: &Path) {
+    if let Ok(handle) = File::open(path) {
+        let _ = handle.sync_all();
     }
 }

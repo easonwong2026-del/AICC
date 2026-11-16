@@ -10,11 +10,16 @@ here: the bundled runtime has OpenSSL as a library but no `openssl` CLI, and
 signing keys must never be handled by the process that also serves untrusted
 network traffic.  The layout this module reads is:
 
-    <dir>/ca.pem        self-signed root, long lived, public half of the pin
-    <dir>/server.pem    leaf certificate followed by the root (chain)
-    <dir>/server.key    leaf private key, mode 0600
-    <dir>/identity.json {"spki": base64 SHA-256 over the root SPKI,
-                         "not_after": ISO-8601, "sans": [...], "generation": n}
+    <dir>/current -> gen-<id>/   published generation, switched atomically
+    <dir>/gen-<id>/ca.pem        self-signed root, long lived, pin is its SPKI
+    <dir>/gen-<id>/server.pem    leaf certificate followed by the root (chain)
+    <dir>/gen-<id>/server.key    leaf private key, mode 0600
+    <dir>/gen-<id>/identity.json {"spki": ..., "not_after": ..., "generation": n}
+
+The worker builds a whole generation, verifies it, then swaps the `current`
+symlink, so a half-written certificate can never be read.  Older flat layouts
+(files directly in `<dir>`) are still accepted: that is what the tests mint and
+what a pre-generation install looks like.
 """
 
 import json
@@ -65,8 +70,22 @@ def _tighten(path):
             raise TlsUnavailable(f"{path.name} is {oct(mode)} and cannot be tightened: {error}")
 
 
+def resolve_generation(root):
+    """The published generation, or `root` itself for a flat layout."""
+    current = root / "current"
+    try:
+        if current.is_symlink():
+            target = current.resolve()
+            if target.is_dir():
+                return target
+    except OSError:
+        pass
+    return root
+
+
 def load_identity(directory=None):
     root = cert_directory() if directory is None else Path(directory)
+    root = resolve_generation(Path(root))
     missing = [name for name in REQUIRED_FILES if not (root / name).is_file()]
     if missing:
         raise TlsUnavailable(f"no certificate material in {root}: missing {', '.join(missing)}")
