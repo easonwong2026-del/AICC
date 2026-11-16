@@ -275,6 +275,45 @@ def spki_of_peer(connection, root):
     return spki_pin(leaf)
 
 
+class HostIdRaceTests(unittest.TestCase):
+    """PR-B owns a long-lived device identity now, so a second host_id is worse
+    than a wrong one: two ids mean two devices think they paired with two Macs."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.data = patch.object(server, "DATA_PATH", Path(self.directory.name) / "status.json")
+        self.data.start()
+
+    def tearDown(self):
+        self.data.stop()
+        self.directory.cleanup()
+
+    def test_a_blank_file_is_filled_without_overwriting_a_concurrent_writer(self):
+        path = Path(self.directory.name) / "host_id"
+        path.write_text("", encoding="utf-8")
+        first = server.host_id()
+        self.assertTrue(first)
+        self.assertEqual(path.read_text(encoding="utf-8").strip(), first)
+        self.assertEqual(server.host_id(), first, "a second call must reuse the same id")
+
+    def test_ten_threads_agree_on_one_id(self):
+        results = []
+        lock = threading.Lock()
+
+        def worker():
+            value = server.host_id()
+            with lock:
+                results.append(value)
+
+        threads = [threading.Thread(target=worker) for _ in range(10)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(len(set(results)), 1, f"multiple host ids: {set(results)}")
+        self.assertEqual(Path(self.directory.name, "host_id").read_text(encoding="utf-8").strip(), results[0])
+
+
 class DiscoveryPayloadTests(unittest.TestCase):
     def test_broadcast_carries_the_pin_but_never_a_token(self):
         with patch.dict("os.environ", {"EINK_HOST": "0.0.0.0"}, clear=True):

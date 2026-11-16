@@ -61,37 +61,64 @@ def version():
 
 
 def host_id():
+    """Stable identity of this Mac, created once and never rewritten.
+
+    PR-B pairs devices against this id and a certificate, so a second value is
+    worse than a wrong one: two ids mean two devices believe they paired with
+    two different Macs.  Creation therefore happens under an advisory lock, and
+    the file is replaced atomically — a reader can never see a half-written id,
+    and a wedged empty file gets healed instead of being overwritten by every
+    caller in turn.
+    """
     path = DATA_PATH.parent / "host_id"
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        # 由**创建者**写完再返回。以前创建成功与失败之后都走同一条读路径，
-        # 两个线程同时进来时，输的一方会读到刚创建、还没写完的空文件，
-        # 于是把空 host_id 发给设备（两台机器被记成同一台）。
-        value = uuid.uuid4().hex
-        with path.open("x", encoding="utf-8") as output:
-            output.write(value)
-            output.flush()
-            os.fsync(output.fileno())
-        return value
-    except FileExistsError:
-        pass
+        guard = _host_id_lock(path)
     except OSError:
-        return uuid.uuid4().hex
-    # 读到空内容说明别人刚建还没落盘：短暂重试，仍然为空就自己写一份。
-    for _ in range(3):
+        guard = None
+    try:
         try:
             value = path.read_text(encoding="utf-8").strip()
         except (FileNotFoundError, OSError):
             value = ""
         if value:
             return value
-        time.sleep(0.02)
-    value = uuid.uuid4().hex
-    try:
-        path.write_text(value, encoding="utf-8")
-    except OSError:
-        pass
-    return value
+        value = uuid.uuid4().hex
+        temporary = path.with_name("host_id.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as output:
+                output.write(value)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, path)
+        except OSError:
+            return value
+        return value
+    finally:
+        if guard is not None:
+            guard.close()
+
+
+def _host_id_lock(path):
+    """Cross-process lock file; `close()` releases it."""
+    import fcntl
+
+    handle = os.open(str(path.with_name("host_id.lock")), os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    return _FdGuard(handle)
+
+
+class _FdGuard:
+    def __init__(self, descriptor):
+        self.descriptor = descriptor
+
+    def close(self):
+        import fcntl
+
+        try:
+            fcntl.flock(self.descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(self.descriptor)
 
 
 def requested_host():
