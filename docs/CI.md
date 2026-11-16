@@ -161,3 +161,8 @@ CI 自身        全部 run（强制全量）
 ```
 
 
+
+### 复现方式
+
+- 全量：`workflow_dispatch` 选 `full`（缺省值），或 CLI `-f run_mode=full`
+- 单域：`-f run_mode=only-rust` / `only-swift` / `only-android` / `only-python`
