@@ -32,11 +32,14 @@ on:
 permissions:
   contents: read
 
-# 同一个 PR（github.ref = refs/pull/<n>/merge）新提交取消旧运行；
-# 不同 PR 的 ref 不同，互不影响；push/dispatch 不取消（cancel-in-progress=false）。
+# 同一个 PR 新提交取消旧运行；不同 PR / main / 手动运行互不影响。
+# 组名用假三元：PR 走 pr-<编号>，其它事件走 run-<run_id>（天然唯一 → 永不同组），
+# 于是 `cancel-in-progress: true` 的作用范围恰好只有"同一个 PR 的上一次运行"。
+# 不写成 `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`：
+# 表达式形式在这里实测没有生效（旧运行没被取消，新运行卡在 pending）。
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: true
 
 jobs:
   # ---------------------------------------------------------------------------
