@@ -14,17 +14,20 @@ import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
 
 /**
- * TLS for the bridge: certificate validation plus a pin on the root's public key.
+ * TLS for the bridge: full chain validation plus a pin on the root's public key.
  *
  * The Mac serves a self-signed root, which no system store knows about, so the
  * anchor is established out of band: the user compares the SHA-256 fingerprint
  * on the Mac with the one on this screen, and only then does the app trust that
  * key. Two contexts follow from that:
  *
- * {@link #bootstrap} is used for exactly one request — the pairing POST — on a
- * connection that is *not* validated by PKIX (there is no anchor yet), but only
- * if the certificate presented carries the confirmed fingerprint. That is the
- * same trust decision, verified instead of assumed.
+ * {@link #bootstrap} is used for exactly one request — the pairing POST — when
+ * the anchor itself is what we are about to learn. The certificate the server
+ * presents as its root must carry the confirmed fingerprint, and then it is
+ * used as a real trust anchor: the whole chain is validated against it (leaf
+ * signature, validity, CA bit, key usage, server-auth EKU). Comparing the last
+ * certificate's key alone would be a bypass — an attacker could append the real
+ * public root certificate to a leaf signed by their own key.
  *
  * {@link #anchored} is used for everything else: normal PKIX validation against
  * the root we stored at pairing time, plus a pin check on the root's SPKI so a
@@ -89,7 +92,7 @@ final class BridgeTls {
             throw new IllegalArgumentException("A fingerprint is required before pairing");
         }
         SSLContext context = SSLContext.getInstance("TLS");
-        context.init(null, new TrustManager[]{new PinOnlyTrustManager(expectedPin)}, null);
+        context.init(null, new TrustManager[]{new PinnedAnchorTrustManager(expectedPin)}, null);
         return context;
     }
 
@@ -156,27 +159,88 @@ final class BridgeTls {
         }
     }
 
-    /** No PKIX: only the fingerprint matters, and it must match exactly. */
-    private static final class PinOnlyTrustManager implements X509TrustManager {
+    /**
+     * Pairing-time trust: the confirmed fingerprint identifies the anchor, and
+     * the anchor then has to actually validate the chain.
+     *
+     * Checking only that the last certificate's key matches the pin (which this
+     * used to do) accepts any leaf at all — forged leaf in front, real public
+     * root behind it, pin matches, handshake succeeds. So the pinned root is
+     * loaded as a trust anchor and the platform's PKIX validation runs against
+     * it, with the CA and key-usage checks made explicit.
+     */
+    private static final class PinnedAnchorTrustManager implements X509TrustManager {
+        private static final String SERVER_AUTH = "1.3.6.1.5.5.7.3.1";
         private final String expectedPin;
 
-        PinOnlyTrustManager(String expectedPin) {
+        PinnedAnchorTrustManager(String expectedPin) {
             this.expectedPin = expectedPin;
         }
 
         @Override
         public void checkClientTrusted(X509Certificate[] chain, String authType) {
+            // Devices authenticate with a bearer token, not a client certificate.
         }
 
         @Override
         public void checkServerTrusted(X509Certificate[] chain, String authType)
                 throws java.security.cert.CertificateException {
-            verifyRoot(chain, expectedPin);
+            if (chain == null || chain.length == 0) {
+                throw new java.security.cert.CertificateException("Server presented no certificate");
+            }
+            X509Certificate root = chain[chain.length - 1];
+            String served = pin(root.getPublicKey());
+            if (!served.equals(expectedPin)) {
+                throw new java.security.cert.CertificateException(
+                        "Server identity changed: expected " + expectedPin + " but saw " + served);
+            }
+            if (root.getBasicConstraints() < 0) {
+                throw new java.security.cert.CertificateException(
+                        "The confirmed certificate is not a certificate authority");
+            }
+            boolean[] usage = root.getKeyUsage();
+            if (usage != null && (usage.length <= 5 || !usage[5])) {
+                throw new java.security.cert.CertificateException(
+                        "The confirmed certificate may not sign other certificates");
+            }
+            X509Certificate leaf = chain[0];
+            leaf.checkValidity();
+            java.util.List<String> purposes = leaf.getExtendedKeyUsage();
+            if (purposes != null && !purposes.contains(SERVER_AUTH)) {
+                throw new java.security.cert.CertificateException(
+                        "Leaf certificate is not valid for server authentication");
+            }
+            // Now the actual chain validation, with the confirmed root as anchor.
+            try {
+                validatorFor(root).checkServerTrusted(chain, authType);
+            } catch (java.security.cert.CertificateException error) {
+                throw new java.security.cert.CertificateException(
+                        "Leaf certificate is not signed by the confirmed root: " + error.getMessage());
+            }
         }
 
         @Override
         public X509Certificate[] getAcceptedIssuers() {
             return new X509Certificate[0];
+        }
+
+        private static X509TrustManager validatorFor(X509Certificate anchor) throws java.security.cert.CertificateException {
+            try {
+                KeyStore store = KeyStore.getInstance(KeyStore.getDefaultType());
+                store.load(null, null);
+                store.setCertificateEntry("confirmed-anchor", anchor);
+                TrustManagerFactory managers =
+                        TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+                managers.init(store);
+                for (TrustManager manager : managers.getTrustManagers()) {
+                    if (manager instanceof X509TrustManager) return (X509TrustManager) manager;
+                }
+                throw new java.security.cert.CertificateException("No X509 trust manager available");
+            } catch (java.security.cert.CertificateException error) {
+                throw error;
+            } catch (Exception error) {
+                throw new java.security.cert.CertificateException("Cannot build a validator: " + error, error);
+            }
         }
     }
 

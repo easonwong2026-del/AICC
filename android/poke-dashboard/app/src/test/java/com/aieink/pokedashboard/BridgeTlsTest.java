@@ -26,6 +26,8 @@ import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLSocket;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 
 /**
  * Real handshakes against a local TLS server, so the pinning rules are exercised
@@ -45,10 +47,39 @@ public final class BridgeTlsTest {
 
     @Before
     public void startServer() throws Exception {
+        startServer("test-bridge.p12");
+    }
+
+    private void startServer(String keystoreResource) throws Exception {
         KeyStore store = KeyStore.getInstance("PKCS12");
-        try (InputStream input = resource("test-bridge.p12")) {
+        try (InputStream input = resource(keystoreResource)) {
             store.load(input, PASSWORD.toCharArray());
         }
+        startServerWith(store);
+    }
+
+    /**
+     * The attacker's shape: their own leaf, with the real public root appended
+     * as the chain. Built in memory because a PKCS12 exported by openssl keeps
+     * the appended CA as a separate entry, which the JVM would not send.
+     */
+    private KeyStore forgedStore() throws Exception {
+        KeyStore source = KeyStore.getInstance("PKCS12");
+        try (InputStream input = resource("forged-chain.p12")) {
+            source.load(input, PASSWORD.toCharArray());
+        }
+        java.security.Key key = source.getKey("bridge", PASSWORD.toCharArray());
+        java.security.cert.Certificate forged = source.getCertificate("bridge");
+        // JKS, not PKCS12: the PKCS12 implementation refuses to *store* a chain
+        // whose signature does not verify, which is exactly the point here.
+        KeyStore store = KeyStore.getInstance("JKS");
+        store.load(null, null);
+        store.setKeyEntry("bridge", key, PASSWORD.toCharArray(),
+                new java.security.cert.Certificate[]{forged, anchor()});
+        return store;
+    }
+
+    private void startServerWith(KeyStore store) throws Exception {
         KeyManagerFactory managers = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
         managers.init(store, PASSWORD.toCharArray());
         SSLContext context = SSLContext.getInstance("TLS");
@@ -85,7 +116,13 @@ public final class BridgeTlsTest {
     @After
     public void stopServer() throws Exception {
         running = false;
-        if (server != null) server.close();
+        if (server != null) {
+            try {
+                server.close();
+            } catch (Exception alreadyClosed) {
+                // closing twice is fine
+            }
+        }
         if (acceptor != null) acceptor.join(2000);
         synchronized (accepted) {
             for (Socket socket : accepted) {
@@ -152,6 +189,59 @@ public final class BridgeTlsTest {
         String wrongPin = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         SSLContext context = BridgeTls.bootstrap(wrongPin);
         assertThrows(javax.net.ssl.SSLException.class, () -> handshake(context));
+    }
+
+    /**
+     * The attack the old code allowed: a leaf signed by the attacker, with the
+     * real public root certificate appended behind it.
+     *
+     * The leaf carries IP:127.0.0.1, so hostname verification passes; the last
+     * certificate in the chain really is the Mac's root, so a check that only
+     * compares that key against the pin passes too. Only validating the chain
+     * against the pinned root catches it — which is why pairing now does PKIX
+     * instead of one key comparison.
+     */
+    @Test
+    public void aForgedLeafInFrontOfTheRealRootIsRefused() throws Exception {
+        String pin = BridgeTls.pin(anchor().getPublicKey());
+        stopServer();
+        startServerWith(forgedStore());
+        SSLContext context = BridgeTls.bootstrap(pin);
+        javax.net.ssl.SSLException error = assertThrows(javax.net.ssl.SSLException.class,
+                () -> handshake(context));
+        // Refused because the chain does not verify, not because of some
+        // unrelated failure: the message comes from the anchor validator.
+        String detail = String.valueOf(error.getMessage()) + " " + String.valueOf(error.getCause());
+        assertTrue("unexpected reason: " + detail,
+                detail.contains("not signed by the confirmed root") || detail.contains("chain"));
+    }
+
+    /**
+     * Proof that the forged chain is not refused for some unrelated reason: a
+     * manager that only compares the last certificate's key (which is what
+     * pairing used to do) happily completes the handshake with it.
+     */
+    @Test
+    public void theOldPinOnlyCheckWouldHaveAcceptedThatChain() throws Exception {
+        String pin = BridgeTls.pin(anchor().getPublicKey());
+        stopServer();
+        startServerWith(forgedStore());
+        SSLContext context = SSLContext.getInstance("TLS");
+        context.init(null, new TrustManager[]{new X509TrustManager() {
+            public void checkClientTrusted(X509Certificate[] chain, String authType) {
+            }
+
+            public void checkServerTrusted(X509Certificate[] chain, String authType) {
+                String served = BridgeTls.pin(chain[chain.length - 1].getPublicKey());
+                if (!served.equals(pin)) throw new AssertionError("pin should match");
+            }
+
+            public X509Certificate[] getAcceptedIssuers() {
+                return new X509Certificate[0];
+            }
+        }}, null);
+        // No exception: the old check passes on a chain the new one rejects.
+        handshake(context);
     }
 
     @Test
