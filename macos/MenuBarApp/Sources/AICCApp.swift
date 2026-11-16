@@ -34,6 +34,9 @@ final class ServerManager: ObservableObject {
 
     @Published var isServerRunning = false
     @Published var healthState: ServerHealthState = .stopped
+    /// Set when the bundled runtime is missing, so the UI can say why the
+    /// bridge refuses to start instead of just looking broken.
+    @Published var runtimeError: String?
     /// Whether the LAN listener is really up. "LAN enabled" in Settings is only
     /// the user's intent; without a certificate the bridge keeps loopback only
     /// and this stays false.
@@ -243,30 +246,26 @@ final class ServerManager: ObservableObject {
 
     /// The interpreter the bridge runs on.
     ///
-    /// PR-B ships its own CPython: the host's `/usr/bin/python3` is 3.9 with
-    /// LibreSSL, which cannot do TLS 1.3 at all, so "which python is installed"
-    /// must not decide whether LAN devices work. The bundled runtime is the
-    /// product path; the environment override exists for development and for
-    /// explicit diagnostics only.
+    /// A release build uses the runtime inside the bundle and nothing else: the
+    /// host's `/usr/bin/python3` is 3.9 with LibreSSL, so falling back silently
+    /// would mean "LAN works on the developer's Mac and not on the user's".
+    /// `AICC_DEV=1` is the only way to point it elsewhere.
     private func resolvePython() -> String? {
-        let environment = ProcessInfo.processInfo.environment
-        if let bundled = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/Resources/Python/bin/python3").path as String?,
-           FileManager.default.isExecutableFile(atPath: bundled) {
-            return bundled
+        let choice = PythonRuntime.locate(
+            bundleURL: Bundle.main.bundleURL,
+            environment: ProcessInfo.processInfo.environment,
+            isExecutable: { FileManager.default.isExecutableFile(atPath: $0) }
+        )
+        if let reason = choice.message {
+            runtimeError = reason
+            NSLog("[AICC] %@", reason)
+            return nil
         }
-        let development = environment["AICC_DEV"] == "1"
-        let candidates = [
-            development ? environment["AICC_PYTHON_PATH"] : nil,
-            "/opt/homebrew/bin/python3",
-            "/usr/local/bin/python3",
-            "/usr/bin/python3"
-        ].compactMap { $0 }
-        let chosen = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
-        if chosen != nil && !development {
-            NSLog("[AICC] bundled Python runtime missing; falling back to %@", chosen ?? "")
+        if case .development(let path) = choice {
+            NSLog("[AICC] development runtime in use: %@", path)
         }
-        return chosen
+        runtimeError = nil
+        return choice.path
     }
 
     private struct LiveHealthResponse: Decodable {

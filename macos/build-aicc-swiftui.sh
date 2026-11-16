@@ -299,9 +299,17 @@ if [[ -d "$PY_RUNTIME_SRC" ]]; then
   bash "$ROOT/scripts/validate-python-runtime.sh" "$PY_RUNTIME_DST"
   PY_RUNTIME_BUNDLED=1
   echo "Python runtime: $PY_RUNTIME_DST"
+elif [[ "$BUNDLE_SERVER" == "1" ]]; then
+  # A packaging build without the runtime would produce an App that either
+  # borrows the host's python3 (3.9 + LibreSSL, no TLS 1.3) or refuses to start.
+  # Failing here is the only honest outcome: the runtime is a product
+  # requirement, not an optional extra.
+  echo "ERROR: BUNDLE_SERVER=1 requires the bundled Python runtime at $PY_RUNTIME_SRC" >&2
+  echo "       run: bash scripts/fetch-python-runtime.sh" >&2
+  exit 1
 else
-  echo "WARNING: no prepared runtime at $PY_RUNTIME_SRC — the App will fall back to a host python3" >&2
-  echo "         (run: bash scripts/fetch-python-runtime.sh)" >&2
+  echo "WARNING: no prepared runtime at $PY_RUNTIME_SRC — this is a development build." >&2
+  echo "         The App will only start it with AICC_DEV=1 and a host python3." >&2
 fi
 
 echo "=== Signing ==="

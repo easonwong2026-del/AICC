@@ -60,6 +60,11 @@ struct SettingsView: View {
                 Toggle("启用墨水屏桥接", isOn: $settings.bridgeEnabled)
                 if settings.bridgeEnabled {
                     LabeledContent("桥接状态", value: server.isServerRunning ? "运行中" : "等待连接")
+                    if let reason = server.runtimeError {
+                        // 内置运行时缺失时桥接不会启动，也不会退回系统 Python：
+                        // 界面必须说明原因，否则用户只看到"连不上"。
+                        Text(reason).font(.caption).foregroundStyle(.red)
+                    }
                     Toggle("允许局域网设备连接", isOn: $settings.bridgeLANEnabled)
                     if settings.bridgeLANEnabled {
                         lanStatus
