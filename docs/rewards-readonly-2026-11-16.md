@@ -150,3 +150,28 @@ UPDATE reward_operations
 2. 手动抽奖 / 兑换 / 补签的 UI 与确认流程（先用 Mock 与只读数据驱动）；
 3. 回查编排：把 `verdict()` 接上 `resolve_reward_op`，把 `awaitingVerification` 收敛掉；
 4. 真实 POST 的启用条件：AICC 自己抓到一次真实响应（A 级），且用户逐次授权。
+
+## 七、真实数据核验（2026-11-16，A 级）
+
+用本机真实账号库跑了一次 `growth.rewards.status`（**全是 GET**，没有抽奖/兑换/补签）：
+
+| 账号 | streak | 档位 | 抽奖次数 | 补签卡 | 候选 | note |
+| --- | --- | --- | --- | --- | --- | --- |
+| 卡里 `1d32cc97c9a3ec26` | 16 | 7d claimed / 14d claimed / 28d locked | 1 | 4 | 0 | `no_broken_day` |
+| 高亮 `d3de2ea3626c2b44` | 0 | 7d/14d/28d locked | 0 | 0 | 15 | `no_cards` |
+| 一锅端 `c4255d2bcfcd10a7` | 0 | 7d/14d/28d locked | 0 | 0 | 15 | `no_cards` |
+| SAMSUNG `ab809e1e7cf247c6` | 0 | 7d/14d/28d locked | 0 | 0 | 14 | `no_cards` |
+
+这三条结论因此从 B 升到 **A**：
+
+1. `/streak` 或 `/redeem/summary` 里确实有 `claimed` / `locked` 两种状态，且"卡里"7d/14d 已领、
+   28d 未解锁 —— 与连登 16 天一致；
+2. 候选日期只覆盖**当月**（2026-11-01 起）且不含今天，说明服务端 `today.date` 与
+   `launch_date` 边界确实生效；
+3. 三个 `no_cards` 账号的候选日期列表非空而余额为 0 —— 这正是"有断签但没卡"，
+   界面要能说清楚，而不是显示"没有可补签日期"。
+
+顺带说明一个副作用：这次 CLI 调用打开了真实账号库，`Db::open` 因此把 schema 从
+**v23 迁到 v24**（只建 `reward_operations` 空表 + 索引）。`integrity_check ok`、
+`accounts` 仍 5 行、`growth_runs` 29 行未动。这是 main 上已合并的迁移，正式构建下次启动
+也会做同一件事；旧构建读到 `user_version=24` 会跳过全部迁移，不会降级失败。
