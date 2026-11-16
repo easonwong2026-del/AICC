@@ -15,6 +15,7 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.security.cert.CertificateFactory;
 import java.security.KeyStore;
 import java.security.cert.X509Certificate;
 import java.io.ByteArrayInputStream;
@@ -27,6 +28,7 @@ import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
 
 /**
@@ -201,6 +203,90 @@ public final class BridgeTlsTest {
      * against the pinned root catches it — which is why pairing now does PKIX
      * instead of one key comparison.
      */
+
+    private static String text(String resource) {
+        try (InputStream input = resource(resource)) {
+            return new String(input.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (Exception error) {
+            throw new IllegalStateException("missing test resource " + resource, error);
+        }
+    }
+
+    private static X509Certificate certificate(String resource) throws Exception {
+        CertificateFactory factory = CertificateFactory.getInstance("X.509");
+        try (InputStream input = new java.io.ByteArrayInputStream(text(resource).getBytes(StandardCharsets.UTF_8))) {
+            return (X509Certificate) factory.generateCertificate(input);
+        }
+    }
+
+    private static java.security.PrivateKey privateKey(String resource) throws Exception {
+        String body = text(resource)
+                .replaceAll("-----[A-Z ]+-----", "")
+                .replaceAll("\\s", "");
+        byte[] der = java.util.Base64.getDecoder().decode(body);
+        return java.security.KeyFactory.getInstance("RSA")
+                .generatePrivate(new java.security.spec.PKCS8EncodedKeySpec(der));
+    }
+
+    /** leaf + root served as one chain, built in memory so PKCS12 cannot object. */
+    private KeyStore chain(String leafPem, String leafKeyPem, String rootPem) throws Exception {
+        KeyStore store = KeyStore.getInstance("JKS");
+        store.load(null, null);
+        store.setKeyEntry("bridge", privateKey(leafKeyPem), PASSWORD.toCharArray(),
+                new java.security.cert.Certificate[]{certificate(leafPem), certificate(rootPem)});
+        return store;
+    }
+
+    /** Plain PKIX against a given root: no extension policy of ours involved. */
+    private SSLContext plainPkix(String rootPem) throws Exception {
+        KeyStore store = KeyStore.getInstance(KeyStore.getDefaultType());
+        store.load(null, null);
+        store.setCertificateEntry("root", certificate(rootPem));
+        TrustManagerFactory managers = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        managers.init(store);
+        SSLContext context = SSLContext.getInstance("TLS");
+        context.init(null, managers.getTrustManagers(), null);
+        return context;
+    }
+
+    /**
+     * A root that is a CA but never declares `keyCertSign` is not a signer.
+     * PKIX alone accepts this (absent key usage means unrestricted), so the
+     * control below shows the rejection is our policy, not the library's.
+     */
+    @Test
+    public void aRootWithoutKeyUsageIsRefused() throws Exception {
+        stopServer();
+        startServerWith(chain("leaf-a.pem", "leaf-a.key", "root-a.pem"));
+        String pin = BridgeTls.pin(certificate("root-a.pem").getPublicKey());
+
+        // Control: the same chain, validated by PKIX with that root as anchor.
+        handshake(plainPkix("root-a.pem"));
+
+        SSLContext context = BridgeTls.bootstrap(pin);
+        javax.net.ssl.SSLException error = assertThrows(javax.net.ssl.SSLException.class,
+                () -> handshake(context));
+        assertTrue(String.valueOf(error.getMessage()) + error.getCause(),
+                String.valueOf(error.getMessage()).contains("key usage")
+                        || String.valueOf(error.getCause()).contains("key usage"));
+    }
+
+    /** A leaf that never declares server-auth is not a server certificate. */
+    @Test
+    public void aLeafWithoutServerAuthEkuIsRefused() throws Exception {
+        stopServer();
+        startServerWith(chain("leaf-b.pem", "leaf-b.key", "root-b.pem"));
+        String pin = BridgeTls.pin(certificate("root-b.pem").getPublicKey());
+
+        handshake(plainPkix("root-b.pem"));
+
+        SSLContext context = BridgeTls.bootstrap(pin);
+        javax.net.ssl.SSLException error = assertThrows(javax.net.ssl.SSLException.class,
+                () -> handshake(context));
+        String detail = String.valueOf(error.getMessage()) + error.getCause();
+        assertTrue(detail, detail.contains("extended key usage") || detail.contains("server authentication"));
+    }
+
     @Test
     public void aForgedLeafInFrontOfTheRealRootIsRefused() throws Exception {
         String pin = BridgeTls.pin(anchor().getPublicKey());

@@ -198,15 +198,26 @@ final class BridgeTls {
                 throw new java.security.cert.CertificateException(
                         "The confirmed certificate is not a certificate authority");
             }
+            // Absent must mean "no", not "unrestricted": a root that never says
+            // it may sign certificates is not a root we will trust to sign one.
             boolean[] usage = root.getKeyUsage();
-            if (usage != null && (usage.length <= 5 || !usage[5])) {
+            if (usage == null) {
+                throw new java.security.cert.CertificateException(
+                        "The confirmed certificate declares no key usage, so it may not sign certificates");
+            }
+            if (usage.length <= 5 || !usage[5]) {
                 throw new java.security.cert.CertificateException(
                         "The confirmed certificate may not sign other certificates");
             }
             X509Certificate leaf = chain[0];
             leaf.checkValidity();
+            // Same rule on the leaf: server-auth must be declared, not assumed.
             java.util.List<String> purposes = leaf.getExtendedKeyUsage();
-            if (purposes != null && !purposes.contains(SERVER_AUTH)) {
+            if (purposes == null) {
+                throw new java.security.cert.CertificateException(
+                        "Leaf certificate declares no extended key usage, so it is not a server certificate");
+            }
+            if (!purposes.contains(SERVER_AUTH)) {
                 throw new java.security.cert.CertificateException(
                         "Leaf certificate is not valid for server authentication");
             }
