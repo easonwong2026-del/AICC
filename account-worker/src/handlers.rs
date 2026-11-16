@@ -180,11 +180,14 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
         // expiry and the SAN list, and the private key stays in a 0600 file
         // the Python bridge reads directly.
         "tls.identity" => {
-            let store = crate::tls_certs::TlsStore::new(crate::tls_certs::TlsStore::default_directory());
+            let store =
+                crate::tls_certs::TlsStore::new(crate::tls_certs::TlsStore::default_directory());
             match store.read() {
                 Ok(identity) => Ok(serde_json::to_value(identity).unwrap_or_else(|_| json!({}))),
-                Err(_) => Ok(json!({ "spki": null, "generation": 0, "sans": [], "caCreated": false,
-                                     "leafReissued": false, "notAfter": null })),
+                Err(_) => Ok(
+                    json!({ "spki": null, "generation": 0, "sans": [], "caCreated": false,
+                                     "leafReissued": false, "notAfter": null }),
+                ),
             }
         }
 
@@ -192,16 +195,27 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
             let sans: Vec<String> = params
                 .get("sans")
                 .and_then(Value::as_array)
-                .map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
-            let store = crate::tls_certs::TlsStore::new(crate::tls_certs::TlsStore::default_directory());
-            let identity = store.ensure(&sans).map_err(|error| RpcError::internal(error.to_string()))?;
+            let store =
+                crate::tls_certs::TlsStore::new(crate::tls_certs::TlsStore::default_directory());
+            let identity = store
+                .ensure(&sans)
+                .map_err(|error| RpcError::internal(error.to_string()))?;
             serde_json::to_value(identity).map_err(|error| RpcError::internal(error.to_string()))
         }
 
         "tls.reset" => {
-            let store = crate::tls_certs::TlsStore::new(crate::tls_certs::TlsStore::default_directory());
-            let identity = store.reset().map_err(|error| RpcError::internal(error.to_string()))?;
+            let store =
+                crate::tls_certs::TlsStore::new(crate::tls_certs::TlsStore::default_directory());
+            let identity = store
+                .reset()
+                .map_err(|error| RpcError::internal(error.to_string()))?;
             serde_json::to_value(identity).map_err(|error| RpcError::internal(error.to_string()))
         }
 

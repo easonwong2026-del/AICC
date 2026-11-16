@@ -34,8 +34,8 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
-    KeyPair, KeyUsagePurpose, SanType, SerialNumber,
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose, SanType, SerialNumber,
 };
 use sha2::{Digest, Sha256};
 
@@ -106,7 +106,9 @@ pub struct TlsStore {
 
 impl TlsStore {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
-        TlsStore { directory: directory.into() }
+        TlsStore {
+            directory: directory.into(),
+        }
     }
 
     /// Default location shared with the Python bridge.  `EINK_CERT_DIR`
@@ -129,20 +131,32 @@ impl TlsStore {
     /// Current identity without touching anything that already exists.
     pub fn read(&self) -> Result<TlsIdentity, CertError> {
         let document = fs::read_to_string(self.directory.join(IDENTITY))?;
-        let parsed: serde_json::Value =
-            serde_json::from_str(&document).map_err(|error| CertError::Crypto(error.to_string()))?;
+        let parsed: serde_json::Value = serde_json::from_str(&document)
+            .map_err(|error| CertError::Crypto(error.to_string()))?;
         let spki = parsed
             .get("spki")
             .and_then(|value| value.as_str())
             .ok_or_else(|| CertError::Crypto("identity.json has no spki".into()))?;
         Ok(TlsIdentity {
             spki: spki.to_string(),
-            not_after: parsed.get("not_after").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            generation: parsed.get("generation").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
+            not_after: parsed
+                .get("not_after")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            generation: parsed
+                .get("generation")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1) as u32,
             sans: parsed
                 .get("sans")
                 .and_then(|v| v.as_array())
-                .map(|items| items.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default(),
             ca_created: false,
             leaf_reissued: false,
@@ -188,7 +202,11 @@ impl TlsStore {
 
     fn lock(&self) -> Result<File, CertError> {
         let path = self.directory.join(LOCK);
-        let file = OpenOptions::new().create(true).write(true).mode(0o600).open(path)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)?;
         for _ in 0..40 {
             if file.try_lock().is_ok() {
                 return Ok(file);
@@ -211,7 +229,8 @@ impl TlsStore {
             }
         };
 
-        let (leaf_key, leaf_reissued, leaf_not_after) = self.load_or_mint_leaf(&root_key, &root_pem, &wanted)?;
+        let (leaf_key, leaf_reissued, leaf_not_after) =
+            self.load_or_mint_leaf(&root_key, &root_pem, &wanted)?;
         let spki = pin(&root_key);
 
         let identity = TlsIdentity {
@@ -227,11 +246,16 @@ impl TlsStore {
         // devices compare it to decide whether to re-confirm the fingerprint.
         if !ca_created {
             generation = match self.read() {
-                Ok(previous) if previous.spki == identity.spki => previous.generation.max(generation),
+                Ok(previous) if previous.spki == identity.spki => {
+                    previous.generation.max(generation)
+                }
                 _ => generation + 1,
             };
         }
-        let identity = TlsIdentity { generation, ..identity };
+        let identity = TlsIdentity {
+            generation,
+            ..identity
+        };
         self.write_identity(&identity)?;
         if leaf_reissued || !self.directory.join(LEAF_CERT).exists() {
             self.write_leaf(&leaf_key, &root_key, &root_pem, &wanted)?;
@@ -263,8 +287,12 @@ impl TlsStore {
             KeyUsagePurpose::CrlSign,
             KeyUsagePurpose::DigitalSignature,
         ];
-        params.distinguished_name.push(DnType::CommonName, "AICC Bridge Root");
-        params.distinguished_name.push(DnType::OrganizationName, "AICC");
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "AICC Bridge Root");
+        params
+            .distinguished_name
+            .push(DnType::OrganizationName, "AICC");
         params.not_before = stamp(chrono::Utc::now() - chrono::Duration::days(1));
         params.not_after = stamp(chrono::Utc::now() + chrono::Duration::days(ROOT_LIFETIME_DAYS));
         params.serial_number = Some(serial());
@@ -282,7 +310,9 @@ impl TlsStore {
         wanted: &SanSet,
     ) -> Result<(KeyPair, bool, chrono::DateTime<chrono::Utc>), CertError> {
         let leaf_key_path = self.directory.join(LEAF_KEY);
-        let existing_key = fs::read_to_string(&leaf_key_path).ok().and_then(|pem| KeyPair::from_pem(&pem).ok());
+        let existing_key = fs::read_to_string(&leaf_key_path)
+            .ok()
+            .and_then(|pem| KeyPair::from_pem(&pem).ok());
         let reuse_key = existing_key.unwrap_or(KeyPair::generate()?);
 
         let needs_issue = match self.read() {
@@ -291,9 +321,12 @@ impl TlsStore {
                     .map(|value| value.with_timezone(&chrono::Utc))
                     .ok();
                 let soon = expires
-                    .map(|value| value - chrono::Utc::now() < chrono::Duration::days(LEAF_RENEW_BEFORE_DAYS))
+                    .map(|value| {
+                        value - chrono::Utc::now() < chrono::Duration::days(LEAF_RENEW_BEFORE_DAYS)
+                    })
                     .unwrap_or(true);
-                soon || !covers(&identity.sans, &wanted.names) || !self.directory.join(LEAF_CERT).exists()
+                soon || !covers(&identity.sans, &wanted.names)
+                    || !self.directory.join(LEAF_CERT).exists()
             }
             Err(_) => true,
         };
@@ -314,10 +347,17 @@ impl TlsStore {
     ) -> Result<(), CertError> {
         let mut params = CertificateParams::new(Vec::new())?;
         params.is_ca = IsCa::ExplicitNoCa;
-        params.key_usages = vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyEncipherment];
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-        params.distinguished_name.push(DnType::CommonName, "AICC Bridge");
-        params.distinguished_name.push(DnType::OrganizationName, "AICC");
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "AICC Bridge");
+        params
+            .distinguished_name
+            .push(DnType::OrganizationName, "AICC");
         params.subject_alt_names = wanted
             .names
             .iter()
@@ -338,7 +378,10 @@ impl TlsStore {
         let certificate = params.signed_by(leaf_key, &issuer)?;
         let chain = format!("{}{}", certificate.pem(), root_pem);
         write_atomic(&self.directory.join(LEAF_CERT), chain.as_bytes())?;
-        self.write_private(&self.directory.join(LEAF_KEY), leaf_key.serialize_pem().as_bytes())?;
+        self.write_private(
+            &self.directory.join(LEAF_KEY),
+            leaf_key.serialize_pem().as_bytes(),
+        )?;
         Ok(())
     }
 
@@ -350,7 +393,10 @@ impl TlsStore {
             "generation": identity.generation,
             "sans": identity.sans,
         });
-        write_atomic(&self.directory.join(IDENTITY), document.to_string().as_bytes())
+        write_atomic(
+            &self.directory.join(IDENTITY),
+            document.to_string().as_bytes(),
+        )
     }
 
     fn write_private(&self, path: &Path, contents: &[u8]) -> Result<(), CertError> {
@@ -399,7 +445,9 @@ fn san_set(extra: &[String]) -> SanSet {
 /// A certificate only has to cover what the device connects to; anything less
 /// and the handshake fails with a hostname error that looks like a bug.
 fn covers(existing: &[String], wanted: &[String]) -> bool {
-    wanted.iter().all(|name| existing.iter().any(|have| have == name))
+    wanted
+        .iter()
+        .all(|name| existing.iter().any(|have| have == name))
 }
 
 fn hostname() -> Result<String, std::io::Error> {
@@ -471,13 +519,24 @@ mod tests {
     fn first_run_mints_a_root_and_a_leaf() {
         let (_keep, store) = store();
         let identity = store.ensure(&[]).expect("ensure");
-        assert!(identity.ca_created, "a fresh directory has no root to reuse");
+        assert!(
+            identity.ca_created,
+            "a fresh directory has no root to reuse"
+        );
         assert_eq!(identity.generation, 1);
-        assert_eq!(identity.spki.len(), 44, "base64 of a SHA-256 is 44 characters");
+        assert_eq!(
+            identity.spki.len(),
+            44,
+            "base64 of a SHA-256 is 44 characters"
+        );
         for name in [CA_CERT, CA_KEY, LEAF_CERT, LEAF_KEY, IDENTITY] {
             assert!(store.directory().join(name).exists(), "{name} missing");
         }
-        assert_eq!(mode(store.directory()), 0o700, "certificate directory must be private");
+        assert_eq!(
+            mode(store.directory()),
+            0o700,
+            "certificate directory must be private"
+        );
         assert_eq!(mode(&store.directory().join(CA_KEY)), 0o600);
         assert_eq!(mode(&store.directory().join(LEAF_KEY)), 0o600);
     }
@@ -488,7 +547,10 @@ mod tests {
         let first = store.ensure(&[]).expect("ensure");
         let second = store.ensure(&[]).expect("ensure again");
         assert!(!second.ca_created, "the root must survive a relaunch");
-        assert!(!second.leaf_reissued, "a valid leaf must not be re-issued on every launch");
+        assert!(
+            !second.leaf_reissued,
+            "a valid leaf must not be re-issued on every launch"
+        );
         assert_eq!(first.spki, second.spki);
         assert_eq!(first.generation, second.generation);
     }
@@ -498,7 +560,11 @@ mod tests {
         let (_keep, store) = store();
         let identity = store.ensure(&[]).expect("ensure");
         let chain = fs::read_to_string(store.directory().join(LEAF_CERT)).expect("chain");
-        let leaf = chain.split("-----END CERTIFICATE-----").next().expect("leaf").to_owned()
+        let leaf = chain
+            .split("-----END CERTIFICATE-----")
+            .next()
+            .expect("leaf")
+            .to_owned()
             + "-----END CERTIFICATE-----\n";
         let leaf_path = store.directory().join("leaf-only.pem");
         fs::write(&leaf_path, leaf).expect("leaf");
@@ -516,8 +582,14 @@ mod tests {
             "leaf does not chain to the pinned root: {}",
             String::from_utf8_lossy(&verdict.stderr)
         );
-        let pinned = pin(&KeyPair::from_pem(&fs::read_to_string(store.directory().join(CA_KEY)).unwrap()).unwrap());
-        assert_eq!(pinned, identity.spki, "the published pin must be the root's SPKI");
+        let pinned = pin(&KeyPair::from_pem(
+            &fs::read_to_string(store.directory().join(CA_KEY)).unwrap(),
+        )
+        .unwrap());
+        assert_eq!(
+            pinned, identity.spki,
+            "the published pin must be the root's SPKI"
+        );
     }
 
     #[test]
@@ -525,13 +597,19 @@ mod tests {
         let (_keep, store) = store();
         let first = store.ensure(&[]).expect("ensure");
         let path = store.directory().join(IDENTITY);
-        let mut document: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let mut document: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         document["not_after"] = serde_json::Value::String(
-            (chrono::Utc::now() + chrono::Duration::days(10)).format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            (chrono::Utc::now() + chrono::Duration::days(10))
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string(),
         );
         fs::write(&path, document.to_string()).unwrap();
         let second = store.ensure(&[]).expect("ensure");
-        assert!(second.leaf_reissued, "a leaf inside the renewal window must be re-issued");
+        assert!(
+            second.leaf_reissued,
+            "a leaf inside the renewal window must be re-issued"
+        );
         assert_eq!(second.spki, first.spki, "renewal must not change the pin");
         assert_eq!(second.generation, first.generation);
     }
@@ -541,11 +619,17 @@ mod tests {
         let (_keep, store) = store();
         let first = store.ensure(&[]).expect("ensure");
         let second = store.ensure(&["192.0.2.55".to_string()]).expect("ensure");
-        assert!(second.leaf_reissued, "a SAN the leaf does not cover must re-issue it");
+        assert!(
+            second.leaf_reissued,
+            "a SAN the leaf does not cover must re-issue it"
+        );
         assert!(second.sans.iter().any(|name| name == "192.0.2.55"));
         assert_eq!(second.spki, first.spki);
         let third = store.ensure(&["192.0.2.55".to_string()]).expect("ensure");
-        assert!(!third.leaf_reissued, "the same address must not re-issue twice");
+        assert!(
+            !third.leaf_reissued,
+            "the same address must not re-issue twice"
+        );
     }
 
     #[test]
@@ -554,8 +638,14 @@ mod tests {
         let first = store.ensure(&[]).expect("ensure");
         let rotated = store.reset().expect("reset");
         assert!(rotated.ca_created);
-        assert_ne!(rotated.spki, first.spki, "reset must produce a different root");
-        assert!(rotated.generation > first.generation, "devices compare the generation");
+        assert_ne!(
+            rotated.spki, first.spki,
+            "reset must produce a different root"
+        );
+        assert!(
+            rotated.generation > first.generation,
+            "devices compare the generation"
+        );
     }
 
     #[test]
@@ -573,9 +663,14 @@ mod tests {
         let mut handles = Vec::new();
         for _ in 0..4 {
             let store = TlsStore::new(store.directory().to_path_buf());
-            handles.push(std::thread::spawn(move || store.ensure(&[]).expect("ensure").spki));
+            handles.push(std::thread::spawn(move || {
+                store.ensure(&[]).expect("ensure").spki
+            }));
         }
-        let pins: Vec<String> = handles.into_iter().map(|handle| handle.join().unwrap()).collect();
+        let pins: Vec<String> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
         assert!(
             pins.windows(2).all(|pair| pair[0] == pair[1]),
             "two workers minted different roots: {pins:?}"
