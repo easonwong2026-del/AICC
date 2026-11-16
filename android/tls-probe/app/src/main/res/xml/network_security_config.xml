@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Test-only trust store: the throwaway CA used by the local probe server.
+  Not a template for production — production pins the leaf certificate.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="@raw/aicc_test_ca" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
