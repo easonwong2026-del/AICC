@@ -13,6 +13,10 @@ import java.io.File;
 import java.io.FileOutputStream;
 
 public final class DashboardVisualTest extends Instrumentation {
+    /** Shape-only stand-ins: nothing here is used against a real server. */
+    private static final String TEST_PIN = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    private static final String TEST_ANCHOR = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+
     @Override public void onCreate(Bundle arguments) {
         super.onCreate(arguments);
         start();
@@ -110,7 +114,9 @@ public final class DashboardVisualTest extends Instrumentation {
         android.content.SharedPreferences preferences = getTargetContext().getSharedPreferences("credential-test", 0);
         preferences.edit().clear().putString("host_id", "test-host").commit();
         String token = "isolated-test-credential-never-a-real-secret";
-        BridgeCredential.save(preferences, token, "test-host");
+        // The pin and the anchor travel with the token: without them the token
+        // could not be used against this Mac and no other.
+        BridgeCredential.save(preferences, token, "test-host", TEST_PIN, TEST_ANCHOR);
         if (!token.equals(BridgeCredential.load(preferences))) throw new AssertionError("Credential roundtrip failed");
         if (preferences.getAll().containsValue(token)) throw new AssertionError("Plaintext credential persisted");
         preferences.edit().putString("host_id", "other-host").commit();
