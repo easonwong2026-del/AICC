@@ -125,7 +125,7 @@ if [[ "$BUNDLE_SERVER" == "1" ]]; then
   done
 
   mkdir -p "$BUNDLED_SERVER_DIR"
-  cp "$ROOT/server.py" "$ROOT/VERSION" "$BUNDLED_SERVER_DIR/"
+  cp "$ROOT/server.py" "$ROOT/bridge_tls.py" "$ROOT/VERSION" "$BUNDLED_SERVER_DIR/"
   cp -R "$ROOT/collectors" "$BUNDLED_SERVER_DIR/"
   # CI syntax/tests may leave bytecode; distribute source only.
   find "$BUNDLED_SERVER_DIR" -type d -name __pycache__ -prune -exec rm -rf {} +
@@ -279,11 +279,47 @@ else
   echo "Helper: $HELPER_BIN"
 fi
 
+# === 内置 Python 运行时（PR-B）===
+# 桥接不再借用宿主 python3：系统自带的 3.9 + LibreSSL 根本做不到 TLS 1.3。
+# 运行时放 Contents/Resources/Python：实测放进 Contents/Frameworks 时，
+# codesign 会把 lib/python3.14 当成一个嵌套 bundle 去验，直接拒绝封签
+# （"bundle format unrecognized ... In subcomponent: lib/python3.14"）。
+# Resources 下不会走进嵌套代码校验，两个 Mach-O 单独签名后 App 封签正常，
+# `codesign --verify --deep --strict` 通过。
+# 打包前仍由 scripts/validate-python-runtime.sh 再验一次：版本、OpenSSL、
+# 依赖路径、可重定位、真实握手。
+PY_RUNTIME_SRC="$ROOT/dist/python-runtime/python"
+PY_RUNTIME_DST="$RESOURCES_DIR/Python"
+PY_RUNTIME_BUNDLED=0
+if [[ -d "$PY_RUNTIME_SRC" ]]; then
+  mkdir -p "$CONTENTS/Frameworks"
+  rm -rf "$PY_RUNTIME_DST"
+  ditto "$PY_RUNTIME_SRC" "$PY_RUNTIME_DST"
+  chmod +x "$PY_RUNTIME_DST/bin/python3"
+  bash "$ROOT/scripts/validate-python-runtime.sh" "$PY_RUNTIME_DST"
+  PY_RUNTIME_BUNDLED=1
+  echo "Python runtime: $PY_RUNTIME_DST"
+else
+  echo "WARNING: no prepared runtime at $PY_RUNTIME_SRC — the App will fall back to a host python3" >&2
+  echo "         (run: bash scripts/fetch-python-runtime.sh)" >&2
+fi
+
 echo "=== Signing ==="
 # 嵌套可执行文件必须先签，再签外层 bundle，否则 --deep --strict 会失败。
 if [[ "$HELPER_BUILT" == "1" ]]; then
   codesign "${SIGN_ARGS[@]}" "$HELPER_BIN"
   codesign --verify --strict "$HELPER_BIN"
+fi
+# 运行时里只剩两个 Mach-O，但顺序仍然是先内层后外层：
+# 每个 .so/.dylib → 解释器 → 目录，最后才由 App 把整棵树封进去。
+if [[ "$PY_RUNTIME_BUNDLED" == "1" ]]; then
+  while IFS= read -r -d '' binary; do
+    codesign "${SIGN_ARGS[@]}" "$binary"
+  done < <(find "$PY_RUNTIME_DST" -type f \( -name "*.so" -o -name "*.dylib" \) -print0)
+  for executable in "$PY_RUNTIME_DST"/bin/python3.14 "$PY_RUNTIME_DST"/bin/python3; do
+    [[ -f "$executable" ]] && codesign "${SIGN_ARGS[@]}" "$executable"
+  done
+  codesign --verify --strict "$PY_RUNTIME_DST/bin/python3"
 fi
 codesign "${SIGN_ARGS[@]}" --entitlements "$WIDGET_ENTITLEMENTS" "$WIDGET_APP_DIR"
 codesign --verify --strict "$WIDGET_APP_DIR"

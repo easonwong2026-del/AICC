@@ -66,3 +66,32 @@ enum WidgetPreferences {
         defaults.set(["step": clamped, "at": at.timeIntervalSince1970], forKey: boardCommandKey)
     }
 }
+
+/// PR-B: the TLS identity the LAN bridge serves, as reported by the worker.
+struct BridgeTlsStatus: Equatable, Sendable {
+    let spki: String?
+    let notAfter: String?
+    let generation: Int?
+    let caCreated: Bool?
+    let leafReissued: Bool?
+
+    static func parse(_ payload: [String: Any]) -> BridgeTlsStatus {
+        BridgeTlsStatus(
+            spki: payload["spki"] as? String,
+            notAfter: payload["notAfter"] as? String,
+            generation: payload["generation"] as? Int,
+            caCreated: payload["caCreated"] as? Bool,
+            leafReissued: payload["leafReissued"] as? Bool
+        )
+    }
+
+    /// Grouped in fours, so it can be compared with the e-ink screen.
+    var groupedFingerprint: String {
+        guard let spki else { return "" }
+        return stride(from: 0, to: spki.count, by: 4).map { offset -> String in
+            let start = spki.index(spki.startIndex, offsetBy: offset)
+            let end = spki.index(start, offsetBy: min(4, spki.count - offset))
+            return String(spki[start..<end])
+        }.joined(separator: " ")
+    }
+}

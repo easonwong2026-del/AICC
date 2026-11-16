@@ -5,6 +5,13 @@ enum AICCPaths {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Logs/AICC-Dashboard", isDirectory: true)
     }
+
+    /// Where the LAN bridge keeps its TLS identity.  The worker writes it, the
+    /// Python bridge reads it, and both must agree on this path.
+    static var certDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/AICC-Dashboard/certs", isDirectory: true)
+    }
 }
 
 enum LogFileLimiter {
