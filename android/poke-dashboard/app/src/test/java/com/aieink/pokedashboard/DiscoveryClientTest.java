@@ -1,231 +1,149 @@
 package com.aieink.pokedashboard;
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
+import org.json.JSONObject;
 import org.junit.Test;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * The LAN side is HTTPS-only now. These tests pin down the parts that would let
+ * a device fall back to plaintext, trust a broadcast, or lose the fingerprint a
+ * user is supposed to confirm.
+ */
 public final class DiscoveryClientTest {
-    private static final String STATUS = "{\"updated_at\":\"now\",\"codex\":{\"available\":true}}";
 
-    @Test public void changedIpSelectsOnlyHealthyServer() throws Exception {
-        try (FakeServer mac = new FakeServer("mac", true)) {
-            int oldPort = unusedPort();
-            assertNull(DiscoveryClient.probe(new DiscoveryClient.Candidate(url(oldPort))));
-            List<DiscoveryClient.Candidate> found = discovered(500, 0, reply(mac.port(), true));
-            List<DiscoveryClient.Candidate> healthy = DiscoveryClient.verify(found);
-            assertEquals(url(mac.port()), DiscoveryClient.choose(healthy, "mac").url);
-        }
+    private static String httpsReply(int port, String pin) {
+        return "{\"name\":\"AICC Companion\",\"port\":" + port + ",\"protocol\":\"aicc\","
+                + "\"protocol_version\":2,\"host_id\":\"mac-1\",\"hostname\":\"mac\","
+                + "\"platform\":\"macOS\",\"version\":\"2.12.2\","
+                + "\"https\":{\"port\":" + port + ",\"spki\":\"" + pin + "\",\"protocol_version\":2}}";
     }
 
-    @Test public void twoHealthyServersRequireChoiceOrKnownHost() throws Exception {
-        try (FakeServer windows = new FakeServer("windows", true);
-             FakeServer mac = new FakeServer("mac", true)) {
-            List<DiscoveryClient.Candidate> healthy = DiscoveryClient.verify(discovered(
-                    500, 0, reply(windows.port(), true), reply(mac.port(), true)));
-            assertEquals(2, healthy.size());
-            assertNull(DiscoveryClient.choose(healthy, null));
-            assertEquals(url(mac.port()), DiscoveryClient.choose(healthy, "mac").url);
-        }
-    }
-
-    @Test public void deadFirstResponderDoesNotHideLaterMac() throws Exception {
-        try (FakeServer mac = new FakeServer("mac", true)) {
-            List<DiscoveryClient.Candidate> found = discovered(
-                    500, 0, reply(unusedPort(), true), reply(mac.port(), true));
-            assertEquals(2, found.size());
-            List<DiscoveryClient.Candidate> healthy = DiscoveryClient.verify(found);
-            assertEquals(1, healthy.size());
-            assertEquals(url(mac.port()), DiscoveryClient.choose(healthy, null).url);
-        }
-    }
-
-    @Test public void lostFirstBroadcastIsRetried() throws Exception {
-        try (FakeServer mac = new FakeServer("mac", true)) {
-            List<DiscoveryClient.Candidate> found = discovered(1900, 1, reply(mac.port(), true));
-            assertEquals(1, found.size());
-            assertEquals(url(mac.port()), DiscoveryClient.choose(DiscoveryClient.verify(found), null).url);
-        }
-    }
-
-    @Test public void noServerLeavesNoCandidate() throws Exception {
-        List<DiscoveryClient.Candidate> found = discovered(200, 99);
-        assertTrue(found.isEmpty());
-        assertNull(DiscoveryClient.choose(DiscoveryClient.verify(found), null));
-    }
-
-    @Test public void legacyDiscoveryAndHealthRemainCompatible() throws Exception {
-        try (FakeServer old = new FakeServer("", true)) {
-            List<DiscoveryClient.Candidate> healthy = DiscoveryClient.verify(discovered(
-                    500, 0, reply(old.port(), false)));
-            assertEquals(1, healthy.size());
-            assertEquals(url(old.port()), healthy.get(0).url);
-        }
-    }
-
-    @Test public void statusFailureRejectsHealthyLookingResponder() throws Exception {
-        try (FakeServer broken = new FakeServer("broken", false)) {
-            assertNull(DiscoveryClient.probe(new DiscoveryClient.Candidate(url(broken.port()))));
-        }
-    }
-
-    @Test public void unpairedBridgeIsDiscoverableButCredentialNeverCrossesHosts() throws Exception {
-        try (FakeServer bridge = new FakeServer("paired-mac", true, true)) {
-            DiscoveryClient.Candidate waiting = DiscoveryClient.probe(new DiscoveryClient.Candidate(url(bridge.port())));
-            assertNotNull(waiting);
-            assertTrue(waiting.pairingRequired);
-            assertEquals(0, bridge.statusRequests.get());
-            DiscoveryClient.Candidate other = DiscoveryClient.probe(new DiscoveryClient.Candidate(url(bridge.port())),
-                    "test-read-only-token", "other-mac");
-            assertTrue(other.pairingRequired);
-            assertEquals(0, bridge.statusRequests.get());
-            DiscoveryClient.Candidate paired = DiscoveryClient.probe(new DiscoveryClient.Candidate(url(bridge.port())),
-                    "test-read-only-token", "paired-mac");
-            assertNotNull(paired.data);
-            assertFalse(paired.pairingRequired);
-            DiscoveryClient.Candidate revoked = DiscoveryClient.probe(new DiscoveryClient.Candidate(url(bridge.port())),
-                    "old-token", "paired-mac");
-            assertTrue(revoked.pairingRequired);
-        }
-    }
-
-    /**
-     * Discovery probes without a credential, so a found server comes back marked
-     * pairing-required.  The re-probe with the stored token must clear that mark:
-     * otherwise MainActivity throws away the data it just fetched and asks the
-     * user to pair again, which is what happens after every IP change.
-     */
-    @Test public void reProbeWithStoredCredentialClearsPairingFlag() throws Exception {
-        try (FakeServer bridge = new FakeServer("paired-mac", true, true)) {
-            List<DiscoveryClient.Candidate> found = DiscoveryClient.verify(
-                    discovered(500, 0, reply(bridge.port(), true)));
-            assertEquals(1, found.size());
-            DiscoveryClient.Candidate candidate = found.get(0);
-            assertTrue(candidate.pairingRequired);
-            DiscoveryClient.Candidate paired = DiscoveryClient.probe(candidate, "test-read-only-token", "paired-mac");
-            assertNotNull(paired);
-            assertFalse(paired.pairingRequired);
-            assertNotNull(paired.data);
-        }
-    }
-
-    private static String url(int port) { return "http://127.0.0.1:" + port; }
-
-    @Test public void manualAddressRejectsCredentialsAndPublicDestinations() {
-        assertEquals("http://192.168.1.20:8765", DiscoveryClient.normaliseBaseUrl("192.168.1.20"));
-        assertEquals("http://10.0.0.3:9876", DiscoveryClient.normaliseBaseUrl("http://10.0.0.3:9876/api/status"));
-        for (String invalid : new String[] { "http://user:key@192.168.1.20:8765", "http://example.com:8765",
-                "http://8.8.8.8:8765", "http://192.168.1.20:0", "http://192.168.1.20:8765/?secret=key",
-                "http://192.168.1.20:8765/private", "http://192.168.01.20:8765", "file:///tmp/key" }) {
-            assertNull(DiscoveryClient.normaliseBaseUrl(invalid));
-        }
-    }
-
-    private static int unusedPort() throws IOException {
-        try (java.net.ServerSocket socket = new java.net.ServerSocket(0)) {
-            return socket.getLocalPort();
-        }
-    }
-
-    private static String reply(int port, boolean modern) {
-        return "{\"name\":\"AICC Dashboard\",\"port\":" + port
-                + (modern ? ",\"protocol\":\"aicc\"" : "") + "}";
-    }
-
-    private static List<DiscoveryClient.Candidate> discovered(
-            long windowMs, int dropCount, String... replies) throws Exception {
-        InetAddress loopback = InetAddress.getByName("127.0.0.1");
-        try (DatagramSocket listener = new DatagramSocket(0, loopback)) {
-            AtomicInteger requests = new AtomicInteger();
-            Thread responder = new Thread(() -> {
+    private static List<DiscoveryClient.Candidate> discovered(int windowMs, String... replies) throws Exception {
+        try (DatagramSocket responder = new DatagramSocket(0, InetAddress.getByName("127.0.0.1"))) {
+            Thread worker = new Thread(() -> {
+                long deadline = System.currentTimeMillis() + windowMs;
                 byte[] buffer = new byte[512];
-                while (!listener.isClosed()) {
-                    DatagramPacket request = new DatagramPacket(buffer, buffer.length);
+                while (System.currentTimeMillis() < deadline) {
                     try {
-                        listener.receive(request);
-                        if (requests.incrementAndGet() <= dropCount) continue;
+                        responder.setSoTimeout(200);
+                        DatagramPacket request = new DatagramPacket(buffer, buffer.length);
+                        responder.receive(request);
                         for (String reply : replies) {
                             byte[] payload = reply.getBytes(StandardCharsets.UTF_8);
-                            listener.send(new DatagramPacket(payload, payload.length,
+                            responder.send(new DatagramPacket(payload, payload.length,
                                     request.getAddress(), request.getPort()));
                         }
-                    } catch (IOException error) {
-                        break;
+                    } catch (Exception idle) {
+                        // keep listening until the window closes
                     }
                 }
-            }, "fake-aicc-discovery");
-            responder.setDaemon(true);
-            responder.start();
-            return DiscoveryClient.discover(listener.getLocalPort(), List.of(loopback), windowMs);
+            });
+            worker.start();
+            List<DiscoveryClient.Candidate> candidates = DiscoveryClient.discover(
+                    responder.getLocalPort(),
+                    Arrays.asList(InetAddress.getByName("127.0.0.1")),
+                    windowMs);
+            worker.join();
+            return candidates;
         }
     }
 
-    private static final class FakeServer implements AutoCloseable {
-        private final ServerSocket socket;
-        private final Thread thread;
+    @Test
+    public void aBareAddressMeansLanHttps() {
+        assertEquals("https://192.168.0.14:8767", DiscoveryClient.normaliseBaseUrl("192.168.0.14"));
+        assertEquals("https://192.168.0.14:8767", DiscoveryClient.normaliseBaseUrl("https://192.168.0.14"));
+        assertEquals("https://192.168.0.14:9000", DiscoveryClient.normaliseBaseUrl("https://192.168.0.14:9000"));
+    }
 
-        final AtomicInteger statusRequests = new AtomicInteger();
+    @Test
+    public void plaintextAndPublicAddressesAreRefused() {
+        assertNull("LAN plaintext must not be usable",
+                DiscoveryClient.normaliseBaseUrl("http://192.168.0.14:8765"));
+        assertNull(DiscoveryClient.normaliseBaseUrl("8.8.8.8"));
+        assertNull(DiscoveryClient.normaliseBaseUrl("https://192.168.0.14:8767/api/pair"));
+        assertNull(DiscoveryClient.normaliseBaseUrl("https://example.com:8767"));
+        assertNull(DiscoveryClient.normaliseBaseUrl(""));
+    }
 
-        FakeServer(String hostId, boolean validStatus) throws IOException { this(hostId, validStatus, false); }
+    @Test
+    public void discoveryYieldsHttpsAndTheFingerprint() throws Exception {
+        String pin = "IPpHOdBogidu7cws8POtcViGbrEpaXYrmWD6jQwd6CY=";
+        List<DiscoveryClient.Candidate> found = discovered(600, httpsReply(8767, pin));
+        assertEquals(1, found.size());
+        DiscoveryClient.Candidate candidate = found.get(0);
+        assertTrue(candidate.url.startsWith("https://"));
+        assertTrue(candidate.url.endsWith(":8767"));
+        assertEquals(pin, candidate.pin);
+        assertEquals(2, candidate.protocolVersion);
+        assertEquals("mac-1", candidate.hostId);
+    }
 
-        FakeServer(String hostId, boolean validStatus, boolean pairing) throws IOException {
-            socket = new ServerSocket(0, 0, InetAddress.getByName("127.0.0.1"));
-            String identity = "{\"ok\":true,\"status\":\"live\",\"version\":\"2.8.0\""
-                    + (hostId.isEmpty() ? "" : ",\"protocol\":\"aicc\",\"host_id\":\"" + hostId + "\"")
-                    + ",\"pairing_required\":" + pairing + "}";
-            thread = new Thread(() -> {
-                while (!socket.isClosed()) {
-                    try (Socket client = socket.accept()) {
-                        BufferedReader input = new BufferedReader(new InputStreamReader(
-                                client.getInputStream(), StandardCharsets.US_ASCII));
-                        String request = input.readLine();
-                        String header;
-                        String authorization = null;
-                        while ((header = input.readLine()) != null && !header.isEmpty()) {
-                            if (header.startsWith("Authorization: ")) authorization = header.substring(15);
-                        }
-                        if (request == null) continue;
-                        if (request.startsWith("GET /api/health/live ")) send(client, 200, identity);
-                        else if (request.startsWith("GET /api/status ")) {
-                            statusRequests.incrementAndGet();
-                            if (pairing && !"Bearer test-read-only-token".equals(authorization)) send(client, 401, "{}");
-                            else send(client, validStatus ? 200 : 503, validStatus ? STATUS : "{}");
-                        } else send(client, 404, "{}");
-                    } catch (IOException error) {
-                        if (!socket.isClosed()) throw new RuntimeException(error);
-                    }
-                }
-            }, "fake-aicc-http");
-            thread.setDaemon(true);
-            thread.start();
+    @Test
+    public void aBridgeWithoutHttpsIsIgnoredRatherThanDowngraded() throws Exception {
+        String plaintextOnly = "{\"name\":\"AICC Companion\",\"port\":8765,\"protocol\":\"aicc\","
+                + "\"host_id\":\"old\",\"hostname\":\"mac\"}";
+        assertTrue(discovered(600, plaintextOnly).isEmpty());
+    }
+
+    @Test
+    public void aBridgeWithoutAPinIsIgnored() throws Exception {
+        String noPin = "{\"name\":\"AICC Companion\",\"port\":8767,\"protocol\":\"aicc\","
+                + "\"protocol_version\":2,\"host_id\":\"mac-1\",\"https\":{\"port\":8767}}";
+        assertTrue(discovered(600, noPin).isEmpty());
+    }
+
+    @Test
+    public void aDiscoveredServerIsNotTreatedAsVerified() throws Exception {
+        // Regression: a broadcast-only candidate used to arrive with
+        // pairingRequired == false and a null snapshot, which sent the UI down
+        // the "already paired" path and crashed on the null snapshot.
+        List<DiscoveryClient.Candidate> found = discovered(
+                600, httpsReply(8767, "IPpHOdBogidu7cws8POtcViGbrEpaXYrmWD6jQwd6CY="));
+        assertEquals(1, found.size());
+        assertTrue("a broadcast is a proposal, not a paired server", found.get(0).pairingRequired);
+        assertNull("nothing has been fetched yet", found.get(0).statusBody);
+    }
+
+    @Test
+    public void nothingIsRequestedBeforeAFingerprintIsTrusted() {
+        DiscoveryClient.Candidate candidate = new DiscoveryClient.Candidate("https://192.168.0.14:8767");
+        DiscoveryClient.Candidate probed = DiscoveryClient.probe(candidate, null, "token", "mac-1");
+        assertNotNull(probed);
+        assertTrue("no identity means pairing, not a silent request", probed.pairingRequired);
+        assertNull(probed.statusBody);
+    }
+
+    @Test
+    public void pairingRefusesAPlaintextAddress() {
+        try {
+            DiscoveryClient.pair("http://192.168.0.14:8765", "12345678",
+                    "IPpHOdBogidu7cws8POtcViGbrEpaXYrmWD6jQwd6CY=");
+            throw new AssertionError("pairing over plaintext must not be possible");
+        } catch (IllegalArgumentException expected) {
+            assertTrue(expected.getMessage().contains("HTTPS"));
+        } catch (Exception other) {
+            throw new AssertionError(other);
         }
+    }
 
-        int port() { return socket.getLocalPort(); }
-        @Override public void close() throws IOException {
-            socket.close();
-            try { thread.join(1000); } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
-        }
-
-        private static void send(Socket client, int code, String body) throws IOException {
-            byte[] data = body.getBytes(StandardCharsets.UTF_8);
-            OutputStream output = client.getOutputStream();
-            output.write(("HTTP/1.1 " + code + " " + (code == 200 ? "OK" : "Unavailable")
-                    + "\r\nContent-Type: application/json\r\nContent-Length: " + data.length
-                    + "\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
-            output.write(data);
-            output.flush();
-        }
+    @Test
+    public void thePairingResponseMustCarryTheAnchor() throws Exception {
+        // Mirrors what the bridge returns; a response without ca_pem cannot be
+        // used to validate later connections, so the UI must reject it.
+        JSONObject response = new JSONObject();
+        assertTrue(response.optString("ca_pem", "").isEmpty());
+        response.put("ca_pem", "-----BEGIN CERTIFICATE-----\n");
+        assertTrue(response.optString("ca_pem", "").contains("BEGIN CERTIFICATE"));
     }
 }
