@@ -39,6 +39,8 @@ pbkdf2 = "0.12"
 sha1 = "0.10"
 base64 = "0.22"
 rcgen = { version = "0.14.10", features = ["x509-parser"] }
+# 证书元数据以 PEM 本身为准（notAfter / SAN），不能只信 identity.json。
+x509-parser = "0.18"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"

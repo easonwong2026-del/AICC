@@ -72,6 +72,7 @@ dependencies = [
  "url",
  "uuid",
  "wb-switch-core",
+ "x509-parser",
 ]
 
 [[package]]

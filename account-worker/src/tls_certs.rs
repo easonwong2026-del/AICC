@@ -102,13 +102,31 @@ pub struct TlsIdentity {
 
 pub struct TlsStore {
     directory: PathBuf,
+    /// Injectable so renewal windows can be tested without waiting a year.
+    clock: Box<dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync>,
 }
 
 impl TlsStore {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         TlsStore {
             directory: directory.into(),
+            clock: Box::new(chrono::Utc::now),
         }
+    }
+
+    #[cfg(test)]
+    pub fn with_clock(
+        directory: impl Into<PathBuf>,
+        clock: impl Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync + 'static,
+    ) -> Self {
+        TlsStore {
+            directory: directory.into(),
+            clock: Box::new(clock),
+        }
+    }
+
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        (self.clock)()
     }
 
     /// Default location shared with the Python bridge.  `EINK_CERT_DIR`
@@ -124,6 +142,7 @@ impl TlsStore {
         PathBuf::from(home).join("Library/Application Support/AICC-Dashboard/certs")
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn directory(&self) -> &Path {
         &self.directory
     }
@@ -205,6 +224,7 @@ impl TlsStore {
         let file = OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(false)
             .mode(0o600)
             .open(path)?;
         for _ in 0..40 {
@@ -220,26 +240,56 @@ impl TlsStore {
         let wanted = san_set(extra_sans);
         let mut ca_created = false;
 
-        let (root_key, root_pem, mut generation) = match self.load_root()? {
+        let root = match self.load_root()? {
             Some(existing) => existing,
             None => {
                 let (key, pem) = self.mint_root()?;
                 ca_created = true;
-                (key, pem, 1)
+                RootMaterial {
+                    key,
+                    pem,
+                    generation: 1,
+                }
             }
         };
+        let (root_key, root_pem) = (&root.key, &root.pem);
+        let mut generation = root.generation;
 
-        let (leaf_key, leaf_reissued, leaf_not_after) =
-            self.load_or_mint_leaf(&root_key, &root_pem, &wanted)?;
-        let spki = pin(&root_key);
+        // Whether to re-issue is decided from the certificate on disk, never
+        // from identity.json: a stale JSON must not be able to keep an expired
+        // leaf alive, and a fresh JSON must not be able to skip a renewal.
+        let on_disk = self.leaf_state();
+        let needs_issue = match &on_disk {
+            Ok(state) => {
+                state.not_after - self.now() < chrono::Duration::days(LEAF_RENEW_BEFORE_DAYS)
+                    || !covers(&state.sans, &wanted.names)
+            }
+            Err(_) => true, // absent or unparseable: mint a leaf we can trust
+        };
+        if needs_issue {
+            let leaf_key = self.leaf_key().unwrap_or(KeyPair::generate()?);
+            self.write_leaf(&leaf_key, root_key, root_pem, &wanted)?;
+        }
 
+        // Read the truth back from server.pem, whether it was just written or
+        // already there.  This is the value identity.json publishes, so the
+        // metadata can never drift ahead of the certificate it describes.
+        let state = self.leaf_state()?;
+        if state.not_after <= self.now() {
+            return Err(CertError::Crypto(format!(
+                "leaf certificate expired at {}",
+                state.not_after.to_rfc3339()
+            )));
+        }
+
+        let spki = pin(root_key);
         let identity = TlsIdentity {
             spki,
-            not_after: leaf_not_after.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            not_after: state.not_after.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
             generation,
-            sans: wanted.names.clone(),
+            sans: state.sans,
             ca_created,
-            leaf_reissued,
+            leaf_reissued: needs_issue,
         };
         // A root that was rotated by an older build (or restored from a backup
         // with a stale counter) must still move the generation forward, because
@@ -257,13 +307,63 @@ impl TlsStore {
             ..identity
         };
         self.write_identity(&identity)?;
-        if leaf_reissued || !self.directory.join(LEAF_CERT).exists() {
-            self.write_leaf(&leaf_key, &root_key, &root_pem, &wanted)?;
-        }
         Ok(identity)
     }
 
-    fn load_root(&self) -> Result<Option<(KeyPair, String, u32)>, CertError> {
+    fn leaf_key(&self) -> Option<KeyPair> {
+        fs::read_to_string(self.directory.join(LEAF_KEY))
+            .ok()
+            .and_then(|pem| KeyPair::from_pem(&pem).ok())
+    }
+
+    /// Expiry and SANs as they really are in `server.pem`.
+    fn leaf_state(&self) -> Result<LeafState, CertError> {
+        self.certificate_state(LEAF_CERT)
+    }
+
+    fn certificate_state(&self, name: &str) -> Result<LeafState, CertError> {
+        let text = fs::read_to_string(self.directory.join(name))?;
+        let body = text
+            .split("-----BEGIN CERTIFICATE-----")
+            .nth(1)
+            .ok_or_else(|| CertError::Crypto(format!("{name} holds no certificate")))?
+            .split("-----END CERTIFICATE-----")
+            .next()
+            .ok_or_else(|| CertError::Crypto(format!("{name} certificate is truncated")))?;
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(body.trim().replace(['\n', '\r'], ""))
+            .map_err(|error| CertError::Crypto(format!("{name} is not base64: {error}")))?;
+        let (_, certificate) = x509_parser::parse_x509_certificate(&der)
+            .map_err(|error| CertError::Crypto(format!("{name} is not X.509: {error}")))?;
+        let not_after =
+            chrono::DateTime::from_timestamp(certificate.validity().not_after.timestamp(), 0)
+                .ok_or_else(|| CertError::Crypto("certificate notAfter out of range".into()))?;
+        let mut sans: Vec<String> = Vec::new();
+        if let Ok(Some(extension)) = certificate.subject_alternative_name() {
+            for name in &extension.value.general_names {
+                if let x509_parser::extensions::GeneralName::DNSName(name) = name {
+                    sans.push(name.to_string());
+                }
+                if let x509_parser::extensions::GeneralName::IPAddress(bytes) = name {
+                    if bytes.len() == 4 {
+                        sans.push(
+                            std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3])
+                                .to_string(),
+                        );
+                    } else if bytes.len() == 16 {
+                        let mut octets = [0u8; 16];
+                        octets.copy_from_slice(bytes);
+                        sans.push(std::net::Ipv6Addr::from(octets).to_string());
+                    }
+                }
+            }
+        }
+        sans.sort();
+        sans.dedup();
+        Ok(LeafState { not_after, sans })
+    }
+
+    fn load_root(&self) -> Result<Option<RootMaterial>, CertError> {
         let (cert_path, key_path) = (self.directory.join(CA_CERT), self.directory.join(CA_KEY));
         if !cert_path.exists() || !key_path.exists() {
             return Ok(None);
@@ -275,11 +375,37 @@ impl TlsStore {
             Err(_) => return Ok(None), // unreadable key: treat as absent, mint a new root
         };
         let generation = self.read().map(|identity| identity.generation).unwrap_or(1);
-        Ok(Some((key, pem, generation)))
+        let pem = match self.certificate_state(CA_CERT) {
+            Ok(state)
+                if state.not_after - self.now()
+                    < chrono::Duration::days(ROOT_RENEW_BEFORE_DAYS) =>
+            {
+                // Same key, new dates: the pin stays, the devices stay paired.
+                self.sign_root(&key)?
+            }
+            Ok(_) => pem,
+            Err(_) => self.sign_root(&key)?,
+        };
+        Ok(Some(RootMaterial {
+            key,
+            pem,
+            generation,
+        }))
     }
 
     fn mint_root(&self) -> Result<(KeyPair, String), CertError> {
         let key = KeyPair::generate()?;
+        let pem = self.sign_root(&key)?;
+        self.write_private(&self.directory.join(CA_KEY), key.serialize_pem().as_bytes())?;
+        Ok((key, pem))
+    }
+
+    /// Sign (or re-sign) the root certificate with `key`.
+    ///
+    /// Re-signing on the same key is how a root near expiry is renewed without
+    /// touching the pin: the public key — and therefore the SPKI a device
+    /// pinned — does not change, so no one has to re-pair.
+    fn sign_root(&self, key: &KeyPair) -> Result<String, CertError> {
         let mut params = CertificateParams::new(Vec::new())?;
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         params.key_usages = vec![
@@ -293,49 +419,12 @@ impl TlsStore {
         params
             .distinguished_name
             .push(DnType::OrganizationName, "AICC");
-        params.not_before = stamp(chrono::Utc::now() - chrono::Duration::days(1));
-        params.not_after = stamp(chrono::Utc::now() + chrono::Duration::days(ROOT_LIFETIME_DAYS));
+        params.not_before = stamp(self.now() - chrono::Duration::days(1));
+        params.not_after = stamp(self.now() + chrono::Duration::days(ROOT_LIFETIME_DAYS));
         params.serial_number = Some(serial());
-        let certificate = params.self_signed(&key)?;
-        let pem = certificate.pem();
-        self.write_private(&self.directory.join(CA_KEY), key.serialize_pem().as_bytes())?;
+        let pem = params.self_signed(key)?.pem();
         write_atomic(&self.directory.join(CA_CERT), pem.as_bytes())?;
-        Ok((key, pem))
-    }
-
-    fn load_or_mint_leaf(
-        &self,
-        root_key: &KeyPair,
-        root_pem: &str,
-        wanted: &SanSet,
-    ) -> Result<(KeyPair, bool, chrono::DateTime<chrono::Utc>), CertError> {
-        let leaf_key_path = self.directory.join(LEAF_KEY);
-        let existing_key = fs::read_to_string(&leaf_key_path)
-            .ok()
-            .and_then(|pem| KeyPair::from_pem(&pem).ok());
-        let reuse_key = existing_key.unwrap_or(KeyPair::generate()?);
-
-        let needs_issue = match self.read() {
-            Ok(identity) => {
-                let expires = chrono::DateTime::parse_from_rfc3339(&identity.not_after)
-                    .map(|value| value.with_timezone(&chrono::Utc))
-                    .ok();
-                let soon = expires
-                    .map(|value| {
-                        value - chrono::Utc::now() < chrono::Duration::days(LEAF_RENEW_BEFORE_DAYS)
-                    })
-                    .unwrap_or(true);
-                soon || !covers(&identity.sans, &wanted.names)
-                    || !self.directory.join(LEAF_CERT).exists()
-            }
-            Err(_) => true,
-        };
-
-        let not_after = chrono::Utc::now() + chrono::Duration::days(LEAF_LIFETIME_DAYS);
-        if needs_issue {
-            self.write_leaf(&reuse_key, root_key, root_pem, wanted)?;
-        }
-        Ok((reuse_key, needs_issue, not_after))
+        Ok(pem)
     }
 
     fn write_leaf(
@@ -366,8 +455,8 @@ impl TlsStore {
                 Err(_) => SanType::DnsName(name.clone().try_into().expect("san")),
             })
             .collect();
-        params.not_before = stamp(chrono::Utc::now() - chrono::Duration::days(1));
-        params.not_after = stamp(chrono::Utc::now() + chrono::Duration::days(LEAF_LIFETIME_DAYS));
+        params.not_before = stamp(self.now() - chrono::Duration::days(1));
+        params.not_after = stamp(self.now() + chrono::Duration::days(LEAF_LIFETIME_DAYS));
         params.serial_number = Some(serial());
 
         // Take the issuer's subject from the root certificate on disk: minting
@@ -415,6 +504,17 @@ impl TlsStore {
         fs::rename(&temporary, path)?;
         Ok(())
     }
+}
+
+struct RootMaterial {
+    key: KeyPair,
+    pem: String,
+    generation: u32,
+}
+
+struct LeafState {
+    not_after: chrono::DateTime<chrono::Utc>,
+    sans: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -592,26 +692,157 @@ mod tests {
         );
     }
 
+    fn clock_window(
+        expiry: chrono::DateTime<chrono::Utc>,
+        days_before: i64,
+    ) -> impl Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync + 'static {
+        let moment = expiry - chrono::Duration::days(days_before);
+        move || moment
+    }
+
+    fn identity_not_after(store: &TlsStore) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(&store.read().expect("identity").not_after)
+            .expect("parse")
+            .with_timezone(&chrono::Utc)
+    }
+
+    fn certificate_not_after(store: &TlsStore, name: &str) -> chrono::DateTime<chrono::Utc> {
+        store
+            .certificate_state(name)
+            .expect("certificate")
+            .not_after
+    }
+
     #[test]
-    fn a_leaf_near_expiry_is_re_issued_on_the_same_root() {
+    fn metadata_never_drifts_ahead_of_the_certificate() {
         let (_keep, store) = store();
         let first = store.ensure(&[]).expect("ensure");
-        let path = store.directory().join(IDENTITY);
-        let mut document: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        document["not_after"] = serde_json::Value::String(
-            (chrono::Utc::now() + chrono::Duration::days(10))
-                .format("%Y-%m-%dT%H:%M:%SZ")
-                .to_string(),
+        // A daily launch must not push the published expiry forward: the leaf
+        // is not re-issued, so its notAfter cannot change.
+        for _ in 0..5 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            let again = store.ensure(&[]).expect("ensure again");
+            assert!(!again.leaf_reissued);
+            assert_eq!(again.not_after, first.not_after, "identity expiry drifted");
+        }
+        let on_pem = certificate_not_after(&store, LEAF_CERT);
+        assert_eq!(
+            identity_not_after(&store),
+            on_pem,
+            "identity.json disagrees with server.pem"
         );
-        fs::write(&path, document.to_string()).unwrap();
-        let second = store.ensure(&[]).expect("ensure");
+    }
+
+    #[test]
+    fn thirty_one_days_before_expiry_the_leaf_is_left_alone() {
+        let (_keep, store) = store();
+        let first = store.ensure(&[]).expect("ensure");
+        let expiry = certificate_not_after(&store, LEAF_CERT);
+        let later = TlsStore::with_clock(store.directory().to_path_buf(), clock_window(expiry, 31));
+        let second = later.ensure(&[]).expect("ensure");
         assert!(
-            second.leaf_reissued,
-            "a leaf inside the renewal window must be re-issued"
+            !second.leaf_reissued,
+            "31 days is outside the 30 day renewal window"
         );
+        assert_eq!(second.not_after, first.not_after);
+        assert_eq!(
+            certificate_not_after(&store, LEAF_CERT),
+            expiry,
+            "the certificate itself must not change"
+        );
+    }
+
+    #[test]
+    fn twenty_nine_days_before_expiry_the_leaf_is_renewed_under_the_same_pin() {
+        let (_keep, store) = store();
+        let first = store.ensure(&[]).expect("ensure");
+        let expiry = certificate_not_after(&store, LEAF_CERT);
+        let later = TlsStore::with_clock(store.directory().to_path_buf(), clock_window(expiry, 29));
+        let second = later.ensure(&[]).expect("ensure");
+        assert!(second.leaf_reissued, "29 days is inside the renewal window");
         assert_eq!(second.spki, first.spki, "renewal must not change the pin");
-        assert_eq!(second.generation, first.generation);
+        assert!(
+            certificate_not_after(&store, LEAF_CERT) > expiry,
+            "the new leaf must outlive the old one"
+        );
+        assert_eq!(
+            identity_not_after(&store),
+            certificate_not_after(&store, LEAF_CERT),
+            "identity.json must publish the new certificate's real expiry"
+        );
+    }
+
+    #[test]
+    fn an_expired_leaf_is_replaced_not_reported_as_valid() {
+        let (_keep, store) = store();
+        store.ensure(&[]).expect("ensure");
+        let expiry = certificate_not_after(&store, LEAF_CERT);
+        let after_expiry =
+            TlsStore::with_clock(store.directory().to_path_buf(), clock_window(expiry, -10));
+        let renewed = after_expiry.ensure(&[]).expect("ensure");
+        assert!(
+            renewed.leaf_reissued,
+            "an expired certificate must be replaced"
+        );
+        let published = identity_not_after(&store);
+        assert!(
+            published > after_expiry.now(),
+            "a new leaf must be valid now"
+        );
+        assert!(published > expiry);
+    }
+
+    #[test]
+    fn an_unreadable_certificate_is_replaced_instead_of_trusted() {
+        let (_keep, store) = store();
+        let first = store.ensure(&[]).expect("ensure");
+        fs::write(
+            store.directory().join(LEAF_CERT),
+            b"-----BEGIN CERTIFICATE-----\nnot base64\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let recovered = store.ensure(&[]).expect("ensure");
+        assert!(recovered.leaf_reissued);
+        assert_eq!(
+            recovered.spki, first.spki,
+            "the root, and therefore the pin, is untouched"
+        );
+        assert_eq!(
+            identity_not_after(&store),
+            certificate_not_after(&store, LEAF_CERT)
+        );
+    }
+
+    #[test]
+    fn a_root_near_expiry_is_renewed_on_the_same_key() {
+        let (_keep, store) = store();
+        let first = store.ensure(&[]).expect("ensure");
+        let root_expiry = certificate_not_after(&store, CA_CERT);
+        let later = TlsStore::with_clock(
+            store.directory().to_path_buf(),
+            clock_window(root_expiry, 100),
+        );
+        let renewed = later.ensure(&[]).expect("ensure");
+        assert_eq!(
+            renewed.spki, first.spki,
+            "renewing the root must not change the pin"
+        );
+        assert_eq!(
+            renewed.generation, first.generation,
+            "and must not force a re-pair"
+        );
+        assert!(certificate_not_after(&store, CA_CERT) > root_expiry);
+    }
+
+    #[test]
+    fn generation_only_moves_forward() {
+        let (_keep, store) = store();
+        let first = store.ensure(&[]).expect("ensure");
+        let second = store.reset().expect("reset");
+        let third = store.reset().expect("reset");
+        assert!(second.generation > first.generation);
+        assert!(third.generation > second.generation);
+        assert_ne!(first.spki, third.spki);
     }
 
     #[test]
