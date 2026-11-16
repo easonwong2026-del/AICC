@@ -17,6 +17,7 @@ PLATFORM="aarch64-apple-darwin"
 FLAVOUR="install_only"
 ASSET="cpython-${PY_VERSION}+${PBS_RELEASE}-${PLATFORM}-${FLAVOUR}.tar.gz"
 ASSET_SHA256="42031ed5f0d38777335252c8c77d64708c8010dd67c128246bdec25000672666"
+ASSET_BYTES=27109898
 RELEASE_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE}"
 
 DEST="$ROOT/dist/python-runtime/python"
@@ -32,22 +33,46 @@ while [[ $# -gt 0 ]]; do
 done
 
 mkdir -p "$CACHE"
+PART="$CACHE/$ASSET.part"
+ASSET_PATH="$CACHE/$ASSET"
 
-if [[ ! -f "$CACHE/$ASSET" ]]; then
+size_of() { stat -f%z "$1" 2>/dev/null || echo 0; }
+digest_of() { shasum -a 256 "$1" | awk '{print $1}'; }
+
+# A cached file that does not match the pin must never be reused: it would make
+# every later run fail the checksum instead of healing itself.
+if [[ -f "$ASSET_PATH" ]]; then
+  if [[ "$(digest_of "$ASSET_PATH")" != "$ASSET_SHA256" ]]; then
+    echo "==> cached archive does not match the pinned sha256; discarding it"
+    rm -f "$ASSET_PATH"
+  fi
+fi
+
+if [[ ! -f "$ASSET_PATH" ]]; then
   echo "==> downloading $ASSET"
   # This network drops large GitHub release downloads mid-transfer, so resume
   # instead of restarting: each attempt keeps what it already wrote.
   for attempt in $(seq 1 40); do
+    if [[ "$(size_of "$PART")" -ge "$ASSET_BYTES" ]]; then break; fi
     curl -sSL -C - --connect-timeout 15 --max-time 600 --speed-time 60 --speed-limit 2048 \
-      -o "$CACHE/$ASSET.part" "$RELEASE_URL/$ASSET" && break
-    have=$(stat -f%z "$CACHE/$ASSET.part" 2>/dev/null || echo 0)
-    echo "    attempt $attempt stopped at $have bytes; resuming"
+      -o "$PART" "$RELEASE_URL/$ASSET" || true
+    echo "    attempt $attempt: $(size_of "$PART") / $ASSET_BYTES bytes"
   done
-  mv "$CACHE/$ASSET.part" "$CACHE/$ASSET"
+  # Only a complete, correctly checksummed download may be promoted.  A partial
+  # `.part` stays put so the next run resumes it; promoting it would poison the
+  # cache with a file that fails the checksum forever.
+  [[ "$(size_of "$PART")" -eq "$ASSET_BYTES" ]] \
+    || { echo "FAIL: download incomplete ($(size_of "$PART") of $ASSET_BYTES bytes); rerun to resume" >&2; exit 1; }
+  if [[ "$(digest_of "$PART")" != "$ASSET_SHA256" ]]; then
+    rm -f "$PART"
+    echo "FAIL: downloaded archive failed sha256 and was removed; rerun to download it again" >&2
+    exit 1
+  fi
+  mv "$PART" "$ASSET_PATH"
 fi
 
 echo "==> verifying sha256"
-actual=$(shasum -a 256 "$CACHE/$ASSET" | awk '{print $1}')
+actual=$(digest_of "$ASSET_PATH")
 [[ "$actual" == "$ASSET_SHA256" ]] || { echo "FAIL: sha256 $actual != $ASSET_SHA256" >&2; exit 1; }
 echo "    $actual"
 

@@ -135,7 +135,35 @@ let candidates = [
 `AICC_PYTHON_PATH` 只在 `AICC_DEV=1` 时生效，否则正式包里的行为会因为开发者机器装了 Homebrew 而不同。
 另外要把 Swift 注入的 `PATH`（现在含 `/opt/homebrew/bin`）一并收敛：内置运行时不需要它。
 
-## 9. 遗留与风险
+## 9. POKE4S 设备侧已验证的事实（PR #91 探针，已并入 main）
+
+设备：Poke4S（Onyx）/ Android 11（API 30）/ arm64-v8a / 758×1024 @212dpi / serial `46C8BEA3`，
+构建 `2025-04-02_08-15_v4.0-rel`。探针代码与复现步骤在 `android/tls-probe/`，**测试私钥和测试 CA 不进正式产品**。
+
+```
+CASE tls12_handshake              => PASS: TLSv1.2
+CASE tls13_handshake              => PASS: TLSv1.3
+CASE https_health_200             => PASS: status 200
+CASE https_status_401_without_token => PASS: status 401
+CASE untrusted_server_rejected    => PASS: rejected: SSLHandshakeException
+CASE pinning_match                => PASS: Si8yl4K5Gvxq14fACg95+3MJ2QMTCXRC3dM5DJ9sI1Y=
+CASE pinning_mismatch_detected    => PASS: wrong pin does not match
+CASE cleartext_blocked            => PASS: blocked: IOException
+SUMMARY pass=8 fail=0 elapsedMs=512
+```
+
+三条结论直接约束 PR-B：
+
+1. **设备支持 TLS 1.3，服务端不支持**——App 侧用 `/usr/bin/python3`（3.9.6 / LibreSSL 2.8.3 / `HAS_TLSv1_3 == False`）。
+   所以 1.3 必须靠本文的自带运行时，不能默认"设备支持就行"。
+2. **现有 APK 连不上自签 HTTPS**——`poke-dashboard` 没有 `networkSecurityConfig`、没有自定义 `TrustManager`，
+   走系统信任库，而 Android 7+ 不信任用户 CA。PR-B 必须同时改两端。
+3. **负向用例要设计对**：最初用"系统信任库连我们的服务器期望失败"，第一轮竟然成功了——差点得出"这套配置在 trust-all"
+   的错误结论。改成"第二套未安装的 CA 提供的服务器，期望被拒"后才站得住（不依赖设备信任库里恰好有什么）。
+
+探针只覆盖 `127.0.0.1` + `adb reverse`、RSA-2048 单链；**LAN、UDP 发现、ECDSA、证书轮换都没验**，这些是 PR-B 的活。
+
+## 10. 遗留与风险
 
 | 问题 | 状态 |
 | --- | --- |
@@ -143,5 +171,5 @@ let candidates = [
 | 证书生成方案 | 未定。运行时只有 OpenSSL 库、没有 `openssl` CLI；候选：Rust `rcgen`（account-worker 已在用 Rust）生成 PEM，Python 只负责 `load_cert_chain`。PR-B 内定 |
 | 首次启动解压/校验开销 | 无（运行时随 DMG 分发，不在用户机上加解压步骤） |
 | x86_64 Mac | 未覆盖。上游有 `x86_64-apple-darwin` 资产，若要支持需再加一条构建线 |
-| 本机网络 | GitHub release 大文件会中途断流（本次分 26 段续传才下完）。`fetch-python-runtime.sh` 已内置断点续传；CI 上无此问题 |
+| 本机网络 | GitHub release 大文件会中途断流（本次分 26 段续传才下完）。`fetch-python-runtime.sh` 内置断点续传：缓存摘要不符会先丢弃再重下，下载没到全量字节不会把 `.part` 提升为正式文件（否则会把坏文件固化进缓存，之后每次都校验失败且无法自愈） |
 | 许可证合规 | CPython PSF-2.0、OpenSSL Apache-2.0、Tcl 不在包内（已删）。发布时需附第三方声明 |
