@@ -24,6 +24,7 @@
 
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::clock::now_rfc3339;
 use crate::rpc::{RpcError, RpcResult};
@@ -31,7 +32,16 @@ use crate::rpc::{RpcError, RpcResult};
 use super::Db;
 
 /// 一个目标同时只允许一条未决记录。SQL 里重复写了一遍，改动时同步两处。
-pub const OPEN_PHASES_SQL: &str = "'pending','sent','unknown','frozen'";
+pub const OPEN_PHASES_SQL: &str = "'pending','ready','sent','unknown','frozen'";
+
+/// `detail` 的字符上限（`rpc::sanitize` 之后再截）。
+pub const MAX_DETAIL_CHARS: usize = 200;
+/// 结构化回执的字节上限。超过就丢字段，绝不留一整份服务端响应。
+pub const MAX_PAYLOAD_BYTES: usize = 512;
+/// 结构化回执最多保留几个字段。
+pub const MAX_PAYLOAD_KEYS: usize = 16;
+/// 单个字符串值最多保留几个字符。
+pub const MAX_PAYLOAD_VALUE_CHARS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,7 +69,7 @@ impl RewardOp {
     pub fn is_open(&self) -> bool {
         matches!(
             self.phase.as_str(),
-            "pending" | "sent" | "unknown" | "frozen"
+            "pending" | "ready" | "sent" | "unknown" | "frozen"
         )
     }
 }
@@ -92,15 +102,118 @@ impl Opened {
     }
 }
 
-/// 结束一条记录。`phase` 只接受终态或 `unknown` / `frozen`。
+/// 结束一条记录。
+///
+/// `phase` 只接受终态（`confirmed`/`rejected`）和"继续占着"的 `unknown`/`frozen`，
+/// 外加**回查确认过**的 `failed`。
+///
+/// `grant` / `server_state` 收的是**结构**而不是字符串：存储层只保留扁平标量字段，
+/// 嵌套对象、数组、疑似凭据的键一律丢掉。调用方没有机会把一整份服务端响应塞进来。
 pub struct Resolution<'a> {
     pub phase: &'a str,
     pub outcome: &'a str,
-    pub grant_json: Option<&'a str>,
-    pub server_state: Option<&'a str>,
+    pub grant: Option<&'a Value>,
+    pub server_state: Option<&'a Value>,
     pub detail: Option<&'a str>,
-    /// 这一条结论是否经过服务端回查。
+    /// 这一条结论是否经过服务端回查。`failed` 必须有它。
     pub verified: bool,
+}
+
+/// 能落盘的阶段，以及 `failed` 的额外条件。
+///
+/// 这条规则是 P0-1 的落点：**结果不明（超时 / 5xx / 未知）只能落 `unknown`**，
+/// 一旦允许它落成 `failed`，部分唯一索引就放开，下一轮会生成新的 `client_token`，
+/// 同一次用户意图变成两次消耗。`failed` 只留给"回查之后确认确实没生效"。
+fn closing_rule(phase: &str, verified: bool) -> Result<(), &'static str> {
+    match phase {
+        // 终局：服务端明确说了结果，目标可以释放。
+        "confirmed" | "rejected" => Ok(()),
+        // 继续占着目标：等回查（unknown）、等人工（frozen）、等用同一 token 重发（ready）。
+        "unknown" | "frozen" | "ready" => Ok(()),
+        "failed" if verified => Ok(()),
+        "failed" => Err("failed 只能在回查确认请求确实没生效之后落盘；结果不明请落 unknown"),
+        _ => Err("不是可以落盘的阶段"),
+    }
+}
+
+/// `detail` 在存储边界强制脱敏 + 截断。调用方忘了也没关系。
+fn sanitize_detail(detail: Option<&str>) -> Option<String> {
+    let cleaned = crate::rpc::sanitize(detail?);
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.chars().take(MAX_DETAIL_CHARS).collect())
+}
+
+/// 结构化回执的清洗：只保留扁平标量，丢掉疑似凭据的键，整体有字节上限。
+///
+/// 原始服务端响应不属于账本：它可能带令牌、带整棵活动配置、几百个字段。
+/// 账本只需要"这次到账多少、服务端当时怎么看"，所以这里白名单化到扁平行。
+fn sanitize_payload(value: Option<&Value>) -> Option<String> {
+    let object = value?.as_object()?;
+    let mut kept = serde_json::Map::new();
+    for (key, raw) in object.iter() {
+        if kept.len() >= MAX_PAYLOAD_KEYS {
+            break;
+        }
+        if !payable_key(key) {
+            continue;
+        }
+        let scalar = match raw {
+            Value::Number(number) => Value::Number(number.clone()),
+            Value::Bool(flag) => Value::Bool(*flag),
+            Value::String(text) => {
+                let cleaned = crate::rpc::sanitize(text);
+                let cut: String = cleaned
+                    .trim()
+                    .chars()
+                    .take(MAX_PAYLOAD_VALUE_CHARS)
+                    .collect();
+                Value::String(cut)
+            }
+            // 嵌套对象 / 数组 / null：账本记不住也不需要，直接丢。
+            _ => continue,
+        };
+        kept.insert(key.clone(), scalar);
+        if serde_json::to_string(&kept)
+            .map(|text| text.len())
+            .unwrap_or(usize::MAX)
+            > MAX_PAYLOAD_BYTES
+        {
+            kept.remove(key);
+            break;
+        }
+    }
+    if kept.is_empty() {
+        return None;
+    }
+    serde_json::to_string(&kept).ok()
+}
+
+/// 可以进账本的键：短、ASCII、且不像是凭据字段。
+fn payable_key(key: &str) -> bool {
+    if key.is_empty() || key.len() > 32 {
+        return false;
+    }
+    if !key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return false;
+    }
+    let lowered = key.to_lowercase();
+    const SUSPICIOUS: [&str; 8] = [
+        "token",
+        "secret",
+        "password",
+        "cookie",
+        "authorization",
+        "bearer",
+        "refresh",
+        "access",
+    ];
+    !SUSPICIOUS.iter().any(|bad| lowered.contains(bad))
 }
 
 const COLUMNS: &str = "id, account_id, action, target, client_token, phase, attempt, outcome,
@@ -123,13 +236,6 @@ fn map_op(row: &rusqlite::Row<'_>) -> rusqlite::Result<RewardOp> {
         updated_at: row.get(12)?,
         verified_at: row.get(13)?,
     })
-}
-
-fn closed_phase(phase: &str) -> bool {
-    matches!(
-        phase,
-        "confirmed" | "rejected" | "failed" | "unknown" | "frozen"
-    )
 }
 
 impl Db {
@@ -187,17 +293,20 @@ impl Db {
     /// 记账"请求即将发出"。**必须在真正发请求之前调用**：
     /// 崩在中间最多是"多回查一次"，反过来就是"可能重复消耗"。
     ///
+    /// 允许从 `pending`（第一次）或 `ready`（服务端上次明确没执行）进入，
+    /// 但**始终沿用记录里那把 token** —— 换 token 等于换了一次新操作。
+    ///
     /// 返回这一次的尝试序号（从 1 开始）。
     pub fn mark_reward_op_sent(&mut self, id: &str) -> RpcResult<i64> {
         let now = now_rfc3339();
         let changed = self.conn.execute(
             "UPDATE reward_operations
                 SET phase = 'sent', attempt = attempt + 1, updated_at = ?2
-              WHERE id = ?1 AND phase = 'pending'",
+              WHERE id = ?1 AND phase IN ('pending','ready')",
             params![id, now],
         )?;
         if changed != 1 {
-            // 状态已经不是 pending：说明另一个进程/另一轮已经动过它。不发。
+            // 状态已经不是 pending/ready：另一个进程或另一轮已经动过它。不发。
             return Err(RpcError::internal("这条操作不在待发送状态，已停止发送"));
         }
         let attempt: i64 = self.conn.query_row(
@@ -209,27 +318,32 @@ impl Db {
     }
 
     /// 落结论。只允许改未决记录 —— 已经结束的记录不能被后来的回查覆盖。
+    ///
+    /// 三条边界都在这里强制（不依赖调用方自觉）：
+    /// 1. 结果不明只能落 `unknown` / `frozen`，`failed` 必须带 `verified`；
+    /// 2. `detail` 一定脱敏并截断；
+    /// 3. 回执只留扁平标量，原始响应进不来。
     pub fn resolve_reward_op(&mut self, id: &str, res: &Resolution<'_>) -> RpcResult<()> {
-        if !closed_phase(res.phase) {
-            return Err(RpcError::new(
-                crate::rpc::INVALID_PARAMS,
-                format!("不是可以落盘的结束状态：{}", res.phase),
-            ));
+        if let Err(reason) = closing_rule(res.phase, res.verified) {
+            return Err(RpcError::invalid_params(reason));
         }
         let now = now_rfc3339();
         let verified_at = res.verified.then(|| now.clone());
+        let grant = sanitize_payload(res.grant);
+        let server_state = sanitize_payload(res.server_state);
+        let detail = sanitize_detail(res.detail);
         let changed = self.conn.execute(
             "UPDATE reward_operations
                 SET phase = ?2, outcome = ?3, grant_json = ?4, server_state = ?5,
                     detail = ?6, updated_at = ?7, verified_at = ?8
-              WHERE id = ?1 AND phase IN ('pending','sent','unknown','frozen')",
+              WHERE id = ?1 AND phase IN ('pending','ready','sent','unknown','frozen')",
             params![
                 id,
                 res.phase,
                 res.outcome,
-                res.grant_json,
-                res.server_state,
-                res.detail,
+                grant,
+                server_state,
+                detail,
                 now,
                 verified_at
             ],
@@ -302,11 +416,12 @@ impl Db {
         Ok(out)
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::growth::reward_ledger::{self, Next};
+    use crate::storage::AccountInput;
+    use serde_json::json;
     use std::path::PathBuf;
 
     fn temp_db() -> (Db, tempfile::TempDir) {
@@ -324,15 +439,22 @@ mod tests {
         }
     }
 
-    fn conclude(phase: &'static str) -> Resolution<'static> {
+    fn conclude(phase: &'static str, verified: bool) -> Resolution<'static> {
         Resolution {
             phase,
             outcome: "granted",
-            grant_json: Some("{\"credits\":1}"),
-            server_state: Some("chances=0"),
+            grant: None,
+            server_state: None,
             detail: None,
-            verified: true,
+            verified,
         }
+    }
+
+    fn open_then_send(db: &mut Db, account: &str, token: &str) -> String {
+        let opened = db.open_reward_op(&new_op(account, Some(token))).unwrap();
+        let id = opened.op().id.clone();
+        db.mark_reward_op_sent(&id).unwrap();
+        id
     }
 
     #[test]
@@ -366,9 +488,7 @@ mod tests {
     fn only_one_open_operation_per_account_and_target() {
         let (mut db, _dir) = temp_db();
         db.open_reward_op(&new_op("acc", Some("u-1"))).unwrap();
-        // 另一个账号不受影响。
         db.open_reward_op(&new_op("other", Some("u-2"))).unwrap();
-        // 补签按日期区分，不同日期是不同目标。
         for date in ["2026-11-09", "2026-11-10"] {
             db.open_reward_op(&NewRewardOp {
                 account_id: "acc",
@@ -411,10 +531,9 @@ mod tests {
     #[test]
     fn a_closed_operation_frees_the_target_and_drops_out_of_the_open_query() {
         let (mut db, _dir) = temp_db();
-        let opened = db.open_reward_op(&new_op("acc", Some("u-1"))).unwrap();
-        let id = opened.op().id.clone();
-        db.mark_reward_op_sent(&id).unwrap();
-        db.resolve_reward_op(&id, &conclude("confirmed")).unwrap();
+        let id = open_then_send(&mut db, "acc", "u-1");
+        db.resolve_reward_op(&id, &conclude("confirmed", true))
+            .unwrap();
 
         assert!(db
             .open_reward_op_for("acc", "lottery_draw", "")
@@ -428,38 +547,39 @@ mod tests {
     #[test]
     fn marking_sent_twice_is_refused_so_a_request_is_never_double_counted() {
         let (mut db, _dir) = temp_db();
-        let opened = db.open_reward_op(&new_op("acc", Some("u-1"))).unwrap();
-        let id = opened.op().id.clone();
-        assert_eq!(db.mark_reward_op_sent(&id).unwrap(), 1);
+        let id = open_then_send(&mut db, "acc", "u-1");
         assert!(db.mark_reward_op_sent(&id).is_err(), "同一轮不能记两次发送");
     }
 
     #[test]
     fn a_closed_operation_is_never_overwritten_by_a_late_verification() {
         let (mut db, _dir) = temp_db();
-        let opened = db.open_reward_op(&new_op("acc", Some("u-1"))).unwrap();
-        let id = opened.op().id.clone();
-        db.mark_reward_op_sent(&id).unwrap();
-        db.resolve_reward_op(&id, &conclude("confirmed")).unwrap();
+        let id = open_then_send(&mut db, "acc", "u-1");
+        db.resolve_reward_op(&id, &conclude("confirmed", true))
+            .unwrap();
 
-        let retry = db.resolve_reward_op(&id, &conclude("rejected"));
+        let retry = db.resolve_reward_op(&id, &conclude("rejected", true));
         assert!(retry.is_err(), "结论不能被后来的回查改写");
         assert_eq!(db.reward_op(&id).unwrap().unwrap().phase, "confirmed");
     }
 
     #[test]
-    fn only_closing_phases_can_be_resolved_into() {
+    fn only_known_phases_can_be_resolved_into() {
         let (mut db, _dir) = temp_db();
-        let opened = db.open_reward_op(&new_op("acc", Some("u-1"))).unwrap();
-        let id = opened.op().id.clone();
-        let mut res = conclude("sent");
+        let id = open_then_send(&mut db, "acc", "u-1");
+
         assert!(
-            db.resolve_reward_op(&id, &res).is_err(),
-            "不能把结论落成 sent（它不是一个结束状态）"
+            db.resolve_reward_op(&id, &conclude("sent", true)).is_err(),
+            "不能把结论落成 sent（不是结论）"
         );
-        res.phase = "unknown";
         assert!(
-            db.resolve_reward_op(&id, &res).is_ok(),
+            db.resolve_reward_op(&id, &conclude("pending", true))
+                .is_err(),
+            "不能把结论落成 pending（不是结论）"
+        );
+        assert!(
+            db.resolve_reward_op(&id, &conclude("unknown", false))
+                .is_ok(),
             "unknown 是一个合法结论"
         );
     }
@@ -467,15 +587,13 @@ mod tests {
     #[test]
     fn a_timeout_leaves_the_operation_awaiting_verification() {
         let (mut db, _dir) = temp_db();
-        let opened = db.open_reward_op(&new_op("acc", Some("u-1"))).unwrap();
-        let id = opened.op().id.clone();
-        db.mark_reward_op_sent(&id).unwrap();
+        let id = open_then_send(&mut db, "acc", "u-1");
         db.resolve_reward_op(
             &id,
             &Resolution {
                 phase: "unknown",
                 outcome: "indeterminate",
-                grant_json: None,
+                grant: None,
                 server_state: None,
                 detail: Some("请求超时（15s）"),
                 verified: false,
@@ -489,7 +607,111 @@ mod tests {
         assert!(pending[0].verified_at.is_none(), "还没回查过");
     }
 
-    /// 崩溃恢复：进程 A 发了请求就没了；进程 B 起来必须**回查**，而且要用同一个 token。
+    /// **P0-1 回归**：超时 → unknown → 回查仍不确定 → 再次 open。
+    /// 必须拿回原来那条（同一个 token），账本里不能出现第二条记录。
+    #[test]
+    fn an_indeterminate_result_never_frees_the_target() {
+        let (mut db, _dir) = temp_db();
+        let id = open_then_send(&mut db, "acc", "u-original");
+
+        db.resolve_reward_op(&id, &conclude("unknown", false))
+            .unwrap();
+
+        let again = db.open_reward_op(&new_op("acc", Some("u-new"))).unwrap();
+        assert!(!again.was_created(), "unknown 期间不许开新操作");
+        assert_eq!(again.op().id, id);
+        assert_eq!(
+            again.op().client_token.as_deref(),
+            Some("u-original"),
+            "回查/重发必须用原来那把 token"
+        );
+        assert_eq!(db.reward_ops("acc", 10).unwrap().len(), 1, "不能有第二条");
+
+        let view = reward_ledger::Open::from(again.op());
+        assert!(matches!(
+            reward_ledger::plan(Some(&view), true),
+            Next::Recheck { .. }
+        ));
+
+        // 回查仍然不确定：还是 unknown，还占着。
+        db.resolve_reward_op(&id, &conclude("unknown", false))
+            .unwrap();
+        let third = db.open_reward_op(&new_op("acc", Some("u-third"))).unwrap();
+        assert!(!third.was_created());
+        assert_eq!(db.reward_ops("acc", 10).unwrap().len(), 1);
+    }
+
+    /// P0-1：`failed` 是"核实过确实没发生"，没有核实就不许落。
+    #[test]
+    fn failed_requires_a_verified_recheck() {
+        let (mut db, _dir) = temp_db();
+        let id = open_then_send(&mut db, "acc", "u-1");
+
+        let refused = db.resolve_reward_op(&id, &conclude("failed", false));
+        assert!(refused.is_err(), "未核验的 failed 不许关闭账本");
+        assert_eq!(
+            db.reward_op(&id).unwrap().unwrap().phase,
+            "sent",
+            "拒绝之后状态必须原样保留"
+        );
+
+        db.resolve_reward_op(&id, &conclude("failed", true))
+            .unwrap();
+        assert!(db
+            .open_reward_op_for("acc", "lottery_draw", "")
+            .unwrap()
+            .is_none());
+    }
+
+    /// P0-2 的存储侧：`frozen` 同样占着目标，不会被新的 open 顶掉。
+    #[test]
+    fn a_frozen_operation_keeps_the_target_and_blocks_new_tokens() {
+        let (mut db, _dir) = temp_db();
+        let id = open_then_send(&mut db, "acc", "u-1");
+        db.resolve_reward_op(
+            &id,
+            &Resolution {
+                phase: "frozen",
+                outcome: "forbidden",
+                grant: None,
+                server_state: None,
+                detail: Some("403 risk control"),
+                verified: false,
+            },
+        )
+        .unwrap();
+
+        let again = db.open_reward_op(&new_op("acc", Some("u-2"))).unwrap();
+        assert!(!again.was_created(), "冻结期间不许开新操作");
+        assert_eq!(again.op().id, id);
+
+        let view = reward_ledger::Open::from(again.op());
+        assert!(matches!(
+            reward_ledger::plan(Some(&view), true),
+            Next::Blocked { .. }
+        ));
+    }
+
+    /// 服务端明确没执行（404 / tier 不认识）→ `ready`：允许用同一 token 再发一次。
+    #[test]
+    fn a_ready_operation_may_send_again_with_the_same_token() {
+        let (mut db, _dir) = temp_db();
+        let id = open_then_send(&mut db, "acc", "u-1");
+        db.resolve_reward_op(&id, &conclude("ready", false))
+            .unwrap();
+
+        let stored = db.reward_op(&id).unwrap().unwrap();
+        let view = reward_ledger::Open::from(&stored);
+        match reward_ledger::plan(Some(&view), true) {
+            Next::Resend { client_token, .. } => assert_eq!(client_token.as_deref(), Some("u-1")),
+            other => panic!("ready 应该允许同 token 重发，实际 {other:?}"),
+        }
+
+        assert_eq!(db.mark_reward_op_sent(&id).unwrap(), 2, "第二次发送");
+        assert_eq!(db.reward_op(&id).unwrap().unwrap().phase, "sent");
+    }
+
+    /// 崩溃恢复：进程 A 发了请求就没了；进程 B 起来必须**回查**，且用同一个 token。
     #[test]
     fn a_restart_reuses_the_persisted_token_and_asks_for_a_recheck() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -512,19 +734,11 @@ mod tests {
             .expect("未决记录必须还在");
         assert_eq!(open.phase, "sent");
         let view = reward_ledger::Open::from(&open);
-        match reward_ledger::plan(Some(&view), true) {
-            Next::Recheck { .. } => {}
-            other => panic!("重启后必须先回查，实际是 {other:?}"),
-        }
-        assert_eq!(
-            view.client_token.as_deref(),
-            Some(token.as_str()),
-            "回查/重发都必须用落盘的那个 token"
-        );
-        assert!(!matches!(
+        assert!(matches!(
             reward_ledger::plan(Some(&view), true),
-            Next::Insert { .. }
+            Next::Recheck { .. }
         ));
+        assert_eq!(view.client_token.as_deref(), Some(token.as_str()));
     }
 
     /// 两个连接（等价两个进程）同时开同一条：只能有一个 Created。
@@ -532,7 +746,6 @@ mod tests {
     fn two_connections_cannot_both_create_the_same_operation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("accounts.sqlite");
-        // 先把库建好，避免两个线程同时跑迁移。
         drop(Db::open(&path).expect("open"));
 
         let mut handles = Vec::new();
@@ -560,10 +773,9 @@ mod tests {
     fn history_is_scoped_to_one_account_and_newest_first() {
         let (mut db, _dir) = temp_db();
         for (account, token) in [("a", "u-a1"), ("b", "u-b1")] {
-            let opened = db.open_reward_op(&new_op(account, Some(token))).unwrap();
-            let id = opened.op().id.clone();
-            db.mark_reward_op_sent(&id).unwrap();
-            db.resolve_reward_op(&id, &conclude("confirmed")).unwrap();
+            let id = open_then_send(&mut db, account, token);
+            db.resolve_reward_op(&id, &conclude("confirmed", true))
+                .unwrap();
         }
         let rows = db.reward_ops("a", 10).unwrap();
         assert_eq!(rows.len(), 1);
@@ -571,5 +783,171 @@ mod tests {
         assert_eq!(rows[0].phase, "confirmed");
         assert_eq!(rows[0].outcome.as_deref(), Some("granted"));
         assert!(db.reward_ops("nobody", 10).unwrap().is_empty());
+    }
+
+    // --- P1-2：账号删除与重新导入 -----------------------------------------
+
+    fn add_account(db: &mut Db, uid: &str) -> String {
+        db.upsert_account(&AccountInput {
+            platform: "workbuddy".into(),
+            uid: uid.into(),
+            nickname: Some("测试".into()),
+            email: None,
+            group_id: None,
+            auth_ref: None,
+            profile_ref: None,
+            auth_status: None,
+            checkin_enabled: None,
+            token_expires_at: None,
+            auth_domain: None,
+            auth_source: None,
+            travel_enabled: None,
+            provider: None,
+        })
+        .unwrap()
+        .id
+    }
+
+    #[test]
+    fn deleting_an_account_purges_its_reward_ledger() {
+        let (mut db, _dir) = temp_db();
+        let id = add_account(&mut db, "uid-1");
+        db.open_reward_op(&new_op(&id, Some("u-1"))).unwrap();
+        assert_eq!(db.reward_ops(&id, 10).unwrap().len(), 1);
+
+        assert!(db.delete_account(&id).unwrap());
+        assert!(
+            db.reward_ops(&id, 10).unwrap().is_empty(),
+            "删号必须把奖励账本一起清掉"
+        );
+    }
+
+    /// 删掉再导入同一个 UID：id 是确定性哈希，所以还是同一个 id ——
+    /// 旧账本必须已经没了，否则新账号一进来就被"未决记录"卡住。
+    #[test]
+    fn a_reimported_account_starts_with_a_clean_ledger() {
+        let (mut db, _dir) = temp_db();
+        let first = add_account(&mut db, "uid-1");
+        let stale = open_then_send(&mut db, &first, "u-old");
+
+        db.delete_account(&first).unwrap();
+
+        let second = add_account(&mut db, "uid-1");
+        assert_eq!(
+            second, first,
+            "同一 UID 复用同一个账号 id（这正是危险来源）"
+        );
+
+        let opened = db.open_reward_op(&new_op(&second, Some("u-new"))).unwrap();
+        assert!(opened.was_created(), "重新导入后必须能开新操作");
+        assert_ne!(opened.op().id, stale);
+        assert_eq!(opened.op().client_token.as_deref(), Some("u-new"));
+    }
+
+    // --- P1-3：存储边界脱敏 -----------------------------------------------
+
+    #[test]
+    fn detail_is_sanitised_and_truncated_at_the_storage_boundary() {
+        let (mut db, _dir) = temp_db();
+        let id = open_then_send(&mut db, "acc", "u-1");
+        let long = format!(
+            "{} Bearer abcdefghijklmnopqrstuvwxyz0123456789",
+            "很长的说明".repeat(80)
+        );
+        db.resolve_reward_op(
+            &id,
+            &Resolution {
+                phase: "unknown",
+                outcome: "unknown",
+                grant: None,
+                server_state: None,
+                detail: Some(&long),
+                verified: false,
+            },
+        )
+        .unwrap();
+
+        let detail = db.reward_op(&id).unwrap().unwrap().detail.unwrap();
+        assert!(
+            detail.chars().count() <= MAX_DETAIL_CHARS,
+            "detail 必须截断：{} 字",
+            detail.chars().count()
+        );
+        assert!(
+            !detail.contains("abcdefghijklmnopqrstuvwxyz0123456789"),
+            "必须脱敏"
+        );
+    }
+
+    #[test]
+    fn raw_server_payloads_cannot_be_stored() {
+        let (mut db, _dir) = temp_db();
+        let id = open_then_send(&mut db, "acc", "u-1");
+        let grant = json!({
+            "credits": 50,
+            "energy": 3,
+            "prize": "冰箱贴",
+            "nested": { "raw": "整个响应" },
+            "list": [1, 2, 3],
+            "access_token": "should-not-be-here",
+            "note": "x".repeat(500)
+        });
+        let state = json!({ "chances": 0, "days": 14 });
+        db.resolve_reward_op(
+            &id,
+            &Resolution {
+                phase: "confirmed",
+                outcome: "granted",
+                grant: Some(&grant),
+                server_state: Some(&state),
+                detail: None,
+                verified: true,
+            },
+        )
+        .unwrap();
+
+        let op = db.reward_op(&id).unwrap().unwrap();
+        let stored: Value = serde_json::from_str(op.grant_json.as_deref().unwrap()).unwrap();
+        assert_eq!(stored["credits"], 50);
+        assert_eq!(stored["prize"], "冰箱贴");
+        assert!(stored.get("nested").is_none(), "嵌套对象不许进账本");
+        assert!(stored.get("list").is_none(), "数组不许进账本");
+        assert!(stored.get("access_token").is_none(), "凭据字段不许进账本");
+        assert!(
+            stored["note"].as_str().unwrap().chars().count() <= MAX_PAYLOAD_VALUE_CHARS,
+            "长字符串必须截断"
+        );
+        assert!(
+            op.grant_json.as_deref().unwrap().len() <= MAX_PAYLOAD_BYTES,
+            "整体必须有字节上限"
+        );
+
+        let state: Value = serde_json::from_str(op.server_state.as_deref().unwrap()).unwrap();
+        assert_eq!(state["chances"], 0);
+        assert_eq!(state["days"], 14);
+    }
+
+    #[test]
+    fn a_payload_that_is_not_an_object_is_dropped_instead_of_stored_raw() {
+        let (mut db, _dir) = temp_db();
+        let id = open_then_send(&mut db, "acc", "u-1");
+        let raw = json!("{\"code\":0,\"data\":{...整份响应...}}");
+        let nested_only = json!({ "data": { "credit": 1 } });
+        db.resolve_reward_op(
+            &id,
+            &Resolution {
+                phase: "confirmed",
+                outcome: "granted",
+                grant: Some(&raw),
+                server_state: Some(&nested_only),
+                detail: None,
+                verified: true,
+            },
+        )
+        .unwrap();
+
+        let op = db.reward_op(&id).unwrap().unwrap();
+        assert!(op.grant_json.is_none(), "字符串不是结构化回执");
+        assert!(op.server_state.is_none(), "只有嵌套对象等于没有可用字段");
     }
 }

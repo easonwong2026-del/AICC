@@ -329,7 +329,7 @@ CREATE TABLE IF NOT EXISTS credential_migrations (\
 CREATE INDEX IF NOT EXISTS idx_cred_migrations_account \
     ON credential_migrations (domain, account_id);";
 
-/// v24：奖励操作账本（PR #95）。
+/// v24：奖励操作账本（PR #95，复审 P0-1/P0-2 后收紧）。
 ///
 /// 兑换 / 抽奖 / 补签都会消耗账号的一次机会，所以"这次发没发过"必须活过崩溃与并发。
 /// 三件事都由这一张表兜住：
@@ -339,6 +339,10 @@ CREATE INDEX IF NOT EXISTS idx_cred_migrations_account \
 /// | `ux_reward_ops_open` | 同一 `(账号, 动作, 目标)` 同时只允许一条未决记录 |
 /// | `ux_reward_ops_token` | 同一个 `client_token` 不能落在两条记录上 |
 /// | `client_token` 列 | 重启后回查/重发都用**同一个**幂等键 |
+///
+/// 阶段里 `ready` 是"服务端明确没执行"（404 / tier 参数不认识），允许用同一 token
+/// 再发一次；`unknown` / `frozen` 仍然占着目标 —— 这两者的区别是"再查一次"和
+/// "等人工"，共同点是**都不许生成新 token**。
 ///
 /// 只建表、不改任何已有表，也不动 `growth_runs`（那张记的是"接单/领奖"的最终结果，
 /// 这张记的是"每一次可能消耗机会的尝试"，两者互补而不是替代）。
@@ -350,7 +354,7 @@ CREATE TABLE IF NOT EXISTS reward_operations (\
     target       TEXT NOT NULL DEFAULT '',\
     client_token TEXT,\
     phase        TEXT NOT NULL CHECK (phase IN (\
-                     'pending','sent','confirmed','rejected','failed','unknown','frozen')),\
+                     'pending','ready','sent','confirmed','rejected','failed','unknown','frozen')),\
     attempt      INTEGER NOT NULL DEFAULT 0,\
     outcome      TEXT,\
     grant_json   TEXT,\
@@ -362,7 +366,7 @@ CREATE TABLE IF NOT EXISTS reward_operations (\
 );\
 CREATE UNIQUE INDEX IF NOT EXISTS ux_reward_ops_open \
     ON reward_operations (account_id, action, target) \
-    WHERE phase IN ('pending','sent','unknown','frozen');\
+    WHERE phase IN ('pending','ready','sent','unknown','frozen');\
 CREATE UNIQUE INDEX IF NOT EXISTS ux_reward_ops_token \
     ON reward_operations (account_id, action, client_token) \
     WHERE client_token IS NOT NULL;\
@@ -993,12 +997,25 @@ impl Db {
     }
 
     pub fn delete_account(&mut self, id: &str) -> RpcResult<bool> {
-        // 快照表没有外键（要同时装 Qoder 服务账号），所以这里必须显式清。
-        // 账号 id 是 uid 的确定性哈希，重加同一账号会复用同一 id。
-        self.purge_account_quota_snapshots(id)?;
-        let n = self
-            .conn
-            .execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
+        // 三张表都没有指向 accounts 的外键（额度快照要同时装 Qoder 服务账号，
+        // 奖励账本按账号 id 记账），所以这里必须显式清，而且要在**同一个事务**里：
+        // 删了账号行、留下未决的奖励记录，下次用同一个 UID 重新导入会复用同一个
+        // 账号 id（id 是 uid 的确定性哈希），旧记录立刻变成"这个账号还有一个没查完的
+        // 抽奖"，新账号一进界面就被卡住。
+        //
+        // 为什么不用 `auth_epoch` 做隔离：它每次重新授权都会 +1，而**重新授权不该
+        // 释放一个可能已经发出去的写操作** —— 那正好是重复消耗的入口。
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM quota_snapshots WHERE account_id = ?1",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM reward_operations WHERE account_id = ?1",
+            params![id],
+        )?;
+        let n = tx.execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(n > 0)
     }
 

@@ -320,6 +320,45 @@ pub enum CredentialEffect {
     Reauthenticate,
 }
 
+/// 判定落到账本上的阶段。**这是"服务端说了什么"到"账本怎么记"的唯一翻译点**；
+/// 存储层只认这几个字符串（`docs/growth-rewards-protocol-2026-11-16.md` §七）。
+///
+/// 关键区分是"能不能解除占用"：
+///
+/// | 阶段 | 解除占用 | 为什么 |
+/// | --- | --- | --- |
+/// | `confirmed` / `rejected` | 是 | 服务端明确给了终局答复 |
+/// | `unknown` | 否 | 不知道做没做，只能回查 |
+/// | `frozen` | 否 | 认不出来 / 可能风控，等人工 |
+/// | `ready` | 否 | 服务端明确没执行，允许用**同一个 token** 再发一次 |
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerPhase {
+    Confirmed,
+    Rejected,
+    Unknown,
+    Frozen,
+    Ready,
+}
+
+impl LedgerPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::Rejected => "rejected",
+            Self::Unknown => "unknown",
+            Self::Frozen => "frozen",
+            Self::Ready => "ready",
+        }
+    }
+
+    /// 只有明确的终局答复才能解除"同一目标只允许一条未决记录"的占用。
+    /// 未知 403、超时、5xx 都不在此列 —— 它们必须继续占着，否则下一轮就会生成
+    /// 新的 `client_token`，把同一次用户意图变成两次消耗。
+    pub fn closes(self) -> bool {
+        matches!(self, Self::Confirmed | Self::Rejected)
+    }
+}
+
 impl Outcome {
     /// 真的拿到了新奖励。
     pub fn granted(&self) -> bool {
@@ -327,14 +366,13 @@ impl Outcome {
     }
 
     /// 结论已定，账本可以关闭。`Unknown` / `RateLimited` / 5xx / 超时都不在此列。
+    ///
+    /// **`Forbidden` 也不在此列**：`403 risk control` 这类认不出来的拒绝，关掉之后
+    /// 下一轮又会重新提交，等于拿同一份授权反复撞风控。它要走冻结。
     pub fn terminal(&self) -> bool {
         matches!(
             self,
-            Self::Granted { .. }
-                | Self::AlreadyClaimed
-                | Self::Rejected(_)
-                | Self::Forbidden { .. }
-                | Self::Unauthorized
+            Self::Granted { .. } | Self::AlreadyClaimed | Self::Rejected(_) | Self::Unauthorized
         )
     }
 
@@ -354,6 +392,31 @@ impl Outcome {
                 | Self::RateLimited { .. }
                 | Self::Unknown { .. }
         )
+    }
+
+    /// 需要人工看一眼（不是"再查一次"就能解决的）。
+    pub fn requires_attention(&self) -> bool {
+        matches!(self, Self::Forbidden { .. })
+    }
+
+    /// 账本阶段。**一张表说完所有判定**，别在各个调用点再写一遍 match。
+    pub fn ledger_phase(&self) -> LedgerPhase {
+        match self {
+            Self::Granted { .. } => LedgerPhase::Confirmed,
+            // 幂等回执：这次没发新的，但状态已经是对的，目标可以释放。
+            Self::AlreadyClaimed => LedgerPhase::Rejected,
+            Self::Rejected(_) => LedgerPhase::Rejected,
+            // 401 的请求根本没被受理，释放目标是安全的（重试会先要求重新授权）。
+            Self::Unauthorized => LedgerPhase::Rejected,
+            // 403 认不出来：业务拒绝 + 可能风控 → 冻结，不改凭据、不自动重发。
+            Self::Forbidden { .. } => LedgerPhase::Frozen,
+            Self::RateLimited { .. }
+            | Self::ServerError { .. }
+            | Self::Indeterminate
+            | Self::Unknown { .. } => LedgerPhase::Unknown,
+            // 服务端明确什么都没做，允许换前缀/换写法，用同一个 token 再发一次。
+            Self::RouteMissing | Self::InvalidRequest(_) => LedgerPhase::Ready,
+        }
     }
 
     pub fn credential_effect(&self) -> CredentialEffect {
@@ -864,6 +927,24 @@ mod tests {
         assert!(matches!(outcome, Outcome::Forbidden { .. }));
         assert_eq!(outcome.credential_effect(), CredentialEffect::None);
         assert_ne!(outcome.label(), "unauthorized");
+        // 认不出来的 403 不能当"已完成"：关掉之后下一轮又会去撞风控。
+        assert!(!outcome.terminal(), "未知 403 不许关闭账本");
+        assert!(outcome.requires_attention());
+        assert_eq!(outcome.ledger_phase(), LedgerPhase::Frozen);
+        assert!(!outcome.ledger_phase().closes());
+    }
+
+    #[test]
+    fn an_unknown_403_is_frozen_rather_than_retried() {
+        for message in ["risk control", "restricted", "forbidden by policy"] {
+            let outcome = classify(&redeem(), 403, &json!({"code": 403, "msg": message}));
+            assert_eq!(outcome.ledger_phase().as_str(), "frozen", "{message}");
+            assert!(!outcome.may_resend(), "{message} 不许自动重发");
+            assert!(
+                !outcome.requires_recheck(),
+                "{message} 不是'再查一次'能解决的"
+            );
+        }
     }
 
     #[test]
@@ -1016,5 +1097,80 @@ mod tests {
             classify(&makeup(), 200, &json!({"data": {"insufficient": true}})),
             Outcome::Rejected(Rejection::NothingToMakeup)
         );
+    }
+
+    // --- 账本阶段 -----------------------------------------------------------
+
+    /// 判定 → 账本阶段的完整映射。任何一类都不允许"落不进去"。
+    #[test]
+    fn every_outcome_maps_to_exactly_one_ledger_phase() {
+        let cases = [
+            (
+                classify(&redeem(), 200, &json!({"data": {"credit": 1}})),
+                "confirmed",
+            ),
+            (
+                classify(&redeem(), 200, &json!({"data": {"already": true}})),
+                "rejected",
+            ),
+            (
+                classify(&redeem(), 403, &json!({"msg": "连续登录天数不足"})),
+                "rejected",
+            ),
+            (classify(&redeem(), 401, &json!({})), "rejected"),
+            (
+                classify(&redeem(), 403, &json!({"msg": "risk control"})),
+                "frozen",
+            ),
+            (classify(&draw(), 429, &json!({})), "unknown"),
+            (classify(&draw(), 502, &json!({})), "unknown"),
+            (classify(&draw(), 0, &json!({})), "unknown"),
+            (
+                classify(&draw(), 200, &json!({"data": {"?": 1}})),
+                "unknown",
+            ),
+            (classify(&redeem(), 404, &json!({})), "ready"),
+            (
+                classify(&redeem(), 400, &json!({"msg": "unknown tier"})),
+                "ready",
+            ),
+        ];
+        for (outcome, expected) in cases {
+            assert_eq!(outcome.ledger_phase().as_str(), expected, "{outcome:?}");
+        }
+    }
+
+    /// 只有明确终局才解除占用。这条是 P0-1 / P0-2 的语义锚点：
+    /// 超时、5xx、未知业务码、未知 403 都必须继续占着目标。
+    #[test]
+    fn only_confirmed_and_rejected_free_the_target() {
+        let closes = [
+            classify(&redeem(), 200, &json!({"data": {"credit": 1}})),
+            classify(&redeem(), 200, &json!({"data": {"already": true}})),
+            classify(
+                &draw(),
+                400,
+                &json!({"msg": "insufficient lottery chance balance"}),
+            ),
+            classify(&redeem(), 401, &json!({})),
+        ];
+        for outcome in closes {
+            assert!(outcome.ledger_phase().closes(), "{outcome:?} 应该能关闭");
+            assert!(outcome.terminal(), "{outcome:?} 应该是终态");
+        }
+
+        let must_stay_open = [
+            classify(&draw(), 0, &json!({})),
+            classify(&draw(), 503, &json!({})),
+            classify(&draw(), 429, &json!({})),
+            classify(&redeem(), 200, &json!({"code": 9999})),
+            classify(&redeem(), 403, &json!({"msg": "risk control"})),
+            classify(&redeem(), 404, &json!({})),
+            classify(&redeem(), 400, &json!({"msg": "unknown tier"})),
+        ];
+        for outcome in must_stay_open {
+            assert!(!outcome.ledger_phase().closes(), "{outcome:?} 不许关闭");
+            assert!(!outcome.terminal(), "{outcome:?} 不许当终态");
+        }
     }
 }

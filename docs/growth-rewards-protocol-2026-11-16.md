@@ -117,26 +117,28 @@ suffix  = "/redeem" | "/lottery/draw" | "/makeup-cards/use" | "/tasks" | ...
 
 **新契约**（`Outcome`，`growth/streak_rewards.rs`）：
 
-| 判定 | 触发条件 | 改授权状态？ | 可重发？ | 关闭账本？ |
-| --- | --- | --- | --- | --- |
-| `Granted` | 2xx + `code` 为 0/200，且解析到实发数值或 ok 标记 | 否 | 否 | 是 |
-| `AlreadyClaimed` | `already` / `already_claimed` / 403+已领取 | 否 | 否 | 是 |
-| `Rejected` | 明确常态拒绝：`TierLocked`(403+天数不足) / `NoChance` / `NothingToMakeup` / `ActivityEnded` | 否 | 否 | 是 |
-| `Forbidden` | 403 但文案认不出来 | 否 | 否 | 是 |
-| `Unauthorized` | 401 | **是**（唯一一个） | 否 | 是 |
-| `RateLimited` | 429 | 否 | 退避后（回查后） | 否 → 回查 |
-| `ServerError` | 5xx | 否 | **否**（可能已生效） | 否 → 回查 |
-| `Indeterminate` | 无响应 / 超时（`http_status == 0`） | 否 | **否** | 否 → 回查 |
-| `RouteMissing` | 404 | 否 | **是**（换前缀，服务端什么都没做） | 否 |
-| `InvalidRequest` | 400 + tier 不认识（参数校验阶段） | 否 | **是**（换写法，服务端什么都没做） | 否 |
-| `Unknown` | 其余一切 | 否 | 否 | 否 → 回查 |
+| 判定 | 触发条件 | 改授权状态？ | 可重发？ | 关闭账本？ | 账本阶段 |
+| --- | --- | --- | --- | --- | --- |
+| `Granted` | 2xx + `code` 为 0/200，且解析到实发数值或 ok 标记 | 否 | 否 | 是 | `confirmed` |
+| `AlreadyClaimed` | `already` / `already_claimed` / 403+已领取 | 否 | 否 | 是 | `rejected` |
+| `Rejected` | 明确常态拒绝：`TierLocked`(403+天数不足) / `NoChance` / `NothingToMakeup` / `ActivityEnded` | 否 | 否 | 是 | `rejected` |
+| `Unauthorized` | 401 | **是**（唯一一个） | 否 | 是 | `rejected` |
+| `Forbidden` | 403 但文案认不出来（风控 / 受限） | 否 | 否 | **否 —— 冻结** | `frozen` |
+| `RateLimited` | 429 | 否 | 退避后（回查后） | 否 → 回查 | `unknown` |
+| `ServerError` | 5xx | 否 | **否**（可能已生效） | 否 → 回查 | `unknown` |
+| `Indeterminate` | 无响应 / 超时（`http_status == 0`） | 否 | **否** | 否 → 回查 | `unknown` |
+| `Unknown` | 其余一切 | 否 | 否 | 否 → 回查 | `unknown` |
+| `RouteMissing` | 404 | 否 | **是**（换前缀，服务端什么都没做） | 否 | `ready` |
+| `InvalidRequest` | 400 + tier 不认识（参数校验阶段） | 否 | **是**（换写法，服务端什么都没做） | 否 | `ready` |
 
-三条硬规则：
+四条硬规则：
 
 1. **只有 `Unauthorized` 能改账号凭据状态。** `Forbidden`/`Rejected`/`Unknown` 一律不许。
 2. **`Unknown` 不是成功**，也不是"没资格"——它要求回查服务端，不许原地重发。
 3. **`data.results[]` 出现时一律 `Unknown`**：那是接单/领奖的逐条信封，这三个动作没有
    "逐条结果"的语义，读不懂就不许当成功（沿用 `rewards.rs` 的教训）。
+4. **认不出来的 403 冻结，不当作已完成。** 关掉之后下一轮又会重新提交，等于拿同一份
+   授权反复撞风控（复审 P0-2）。
 
 ## 六、幂等与 `client_token` 契约
 
@@ -166,22 +168,27 @@ suffix  = "/redeem" | "/lottery/draw" | "/makeup-cards/use" | "/tasks" | ...
 | `detail` | 脱敏说明（≤200 字，`rpc::sanitize`） |
 | `created_at`/`updated_at`/`verified_at` | 时间戳 |
 
-状态机：
+状态机（复审后收紧：**结果不明不许关闭**）：
 
 ```text
-            ┌──────────── 发送前先落盘 ────────────┐
-(无记录) ──▶ pending ──(mark_sent 紧接网络调用)──▶ sent
-                │                                   │
-                │  崩溃/未发出，可复用 token 重发      ├─▶ confirmed / rejected / failed（关闭）
-                │                                   ├─▶ unknown（结果不明）
-                │                                   └─▶ frozen（尝试次数用尽/需人工）
-                └──── 回查后仍未知 ─────────────────▶ unknown ──▶ 回查 ──▶ 关闭/继续 unknown ──▶ frozen
+        ┌──────── 发送前先落盘 ────────┐
+(无记录) ─▶ pending ─(mark_sent)─▶ sent ──┬─▶ confirmed   ← 明确到账（释放目标）
+                                          ├─▶ rejected    ← 常态拒绝/幂等/401（释放目标）
+                                          ├─▶ unknown     ← 超时/5xx/429/未知（继续占用）
+                                          ├─▶ frozen      ← 未知 403/风控（继续占用，等人工）
+                                          └─▶ ready       ← 404/tier 参数错（继续占用，可同 token 重发）
+ready ─(mark_sent，同一个 token)─▶ sent
+unknown ─(回查仍不确定)─▶ unknown ─(回查确认没生效 + verified)─▶ failed（释放目标）
+frozen  ─(人工核对)─▶ confirmed / rejected / failed(verified)
 ```
+
+`failed` 是**唯一**需要 `verified == true` 才能落盘的阶段：它的含义是"回查确认这次请求
+确实没生效"，不是"出错了"。超时、5xx、回查仍不确定一律落 `unknown`。
 
 跨进程保护的三层：
 
 1. **部分唯一索引**（DB 层，最关键）：
-   `UNIQUE (account_id, action, target) WHERE phase IN ('pending','sent','unknown','frozen')`
+   `UNIQUE (account_id, action, target) WHERE phase IN ('pending','ready','sent','unknown','frozen')`
    —— 同一账号同一目标**物理上不可能**有两条未决记录，绕过代码也挡得住。
 2. **`BEGIN IMMEDIATE` 事务**：选/插在同一次写事务里，配合 `busy_timeout=5s`（WAL 已开），
    两个进程只会有一个 `Created`，另一个拿到 `Existing` 并被迫走回查。
@@ -194,8 +201,35 @@ suffix  = "/redeem" | "/lottery/draw" | "/makeup-cards/use" | "/tasks" | ...
 | 没有未决记录 | `Insert`：生成新 token，先落盘再发 |
 | `pending` + `attempt == 0` | `Resend`：沿用已有 token（崩溃在发送前） |
 | `pending` + `attempt > 0` | `Recheck`：状态不明，先查服务端 |
-| `sent` / `unknown` | `Recheck`：**不许发**，先查服务端 |
-| `frozen` 或 `attempt >= 3` | `Blocked`：停下，等人工 |
+| `sent` / `unknown` | `Recheck`：**不许发**，先查服务端（**次数用尽也要回查**） |
+| `ready` 且 `attempt < 3` | `Resend`：同一个 token 再发一次 |
+| `ready` 且 `attempt >= 3` | `Blocked`：没有可查的东西，只能停手 |
+| `frozen` 或阶段不认识 | `Blocked`：停下，等人工 |
+
+**次数上限只约束"再发一次"，绝不约束只读回查**（复审 P1-1）：否则第 3 次发送之后
+结果就永远查不到，记录会一直悬在 `sent` 上。
+
+### 7.1 存储边界（复审 P1-3）
+
+`resolve_reward_op` 不信任调用方，三件事在存储层强制：
+
+| 项 | 规则 |
+| --- | --- |
+| `detail` | `rpc::sanitize` 脱敏 + 截断 200 字 |
+| `grant` / `server_state` | 只接受 **JSON 对象**；只保留扁平标量（数字/布尔/短字符串） |
+| 嵌套对象 / 数组 / null | 丢弃 —— 原始响应不属于账本 |
+| 键名 | ≤32 字符、ASCII；含 `token`/`secret`/`password`/`cookie`/`authorization`/`bearer`/`refresh`/`access` 一律丢弃 |
+| 值长度 | 字符串截断 64 字符；整体超过 512 字节就丢字段 |
+
+### 7.2 账号删除与重新导入（复审 P1-2）
+
+WorkBuddy 账号 id 是 `(platform, uid)` 的确定性哈希，删号后用同一个 UID 重新导入会
+**复用同一个 id**。所以 `delete_account` 在**一个事务**里同时清 `quota_snapshots`、
+`reward_operations` 和 `accounts` 行：否则新账号一进来就继承旧账号那条未决记录，
+界面会显示"还有一个没查完的抽奖"。
+
+**刻意不用 `auth_epoch` 做生命周期隔离**：它每次重新授权都会 +1，而"重新授权"恰恰
+不该释放一个可能已经发出去的写操作 —— 那正是重复消耗的入口。
 
 ## 八、本 PR 之后的未验证项（`#96` 接线前必须补）
 
@@ -215,8 +249,23 @@ suffix  = "/redeem" | "/lottery/draw" | "/makeup-cards/use" | "/tasks" | ...
 | --- | --- |
 | 唯一 URL 拼接点 | `growth/api.rs::endpoint` |
 | 三个动作的形态（suffix + body） | `growth/streak_rewards.rs::call` |
-| 结果分类 11 类 + 三条硬规则 | `growth/streak_rewards.rs::classify` |
+| 结果分类 11 类 + 四条硬规则 | `growth/streak_rewards.rs::classify` |
+| **判定 → 账本阶段的唯一翻译** | `growth/streak_rewards.rs::Outcome::ledger_phase` |
 | token 规则 | `growth/streak_rewards.rs::client_token` |
 | 下一步决策 | `growth/reward_ledger.rs::plan` |
-| 账本持久化 + 三层并发保护 | `storage/reward_ops.rs`、`storage/mod.rs` v24 |
+| 账本持久化 + 终态/脱敏/清理 | `storage/reward_ops.rs`、`storage/mod.rs` v24 |
 | 不发请求 | 三个动作**没有任何**调用 `api::post` 的代码路径（`#96` 才接） |
+
+## 十、复审修复（2026-11-16 第二轮，本节对应复审意见逐条）
+
+| 编号 | 问题 | 修复 | 回归测试 |
+| --- | --- | --- | --- |
+| P0-1 | `failed` 可当终态，超时后账本被关闭，下一轮生成新 token | `failed` 必须 `verified == true`（回查确认没生效）；超时/5xx/未知一律 `unknown`；`unknown` 与 `frozen` 继续占着唯一索引 | `an_indeterminate_result_never_frees_the_target`、`failed_requires_a_verified_recheck` |
+| P0-2 | 未知 403 被当终态，风控被反复触发 | `Outcome::terminal()` 不再包含 `Forbidden`；`ledger_phase()` 映射到 `frozen`；`requires_attention()` 只给 `Forbidden` | `an_unknown_403_is_frozen_rather_than_retried`、`a_frozen_operation_keeps_the_target_and_blocks_new_tokens` |
+| P1-1 | 次数上限挡住回查 | `plan()` 先判 `sent`/`unknown` → `Recheck`，上限只作用于 `ready` 的重发 | `the_attempt_cap_blocks_sending_but_never_blocks_a_recheck`、`a_ready_operation_resends_with_the_same_token_until_the_cap` |
+| P1-2 | 删号不清账本，同 UID 重导入继承旧记录 | `delete_account` 在一个事务里清 `quota_snapshots` + `reward_operations` + `accounts` | `deleting_an_account_purges_its_reward_ledger`、`a_reimported_account_starts_with_a_clean_ledger` |
+| P1-3 | `detail` 未在存储层脱敏，回执可存原始响应 | 存储边界强制脱敏/截断；`grant`/`server_state` 只收扁平标量，凭据键与嵌套结构丢弃 | `detail_is_sanitised_and_truncated_at_the_storage_boundary`、`raw_server_payloads_cannot_be_stored`、`a_payload_that_is_not_an_object_is_dropped_instead_of_stored_raw` |
+
+新增 `ready` 阶段的理由：404 / tier 参数错这两种"服务端明确没执行"的情况必须允许
+用**同一个 token** 再发一次（换前缀、换写法是正常协议行为）。它仍然占着目标，
+所以并发下不会变成两次操作；次数上限对它生效，因为此时没有可回查的东西。
