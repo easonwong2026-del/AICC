@@ -718,6 +718,42 @@ mod tests {
         }
     }
 
+    fn token_with(uid: &str, name: Option<&str>, email: Option<&str>, access: &str) -> DeviceToken {
+        DeviceToken {
+            access_token: access.to_string(),
+            refresh_token: Some("rt-1".to_string()),
+            expires_at_ms: Some(1_795_354_934_000),
+            identity: Identity {
+                uid: uid.to_string(),
+                name: name.map(str::to_string),
+                email: email.map(str::to_string),
+            },
+        }
+    }
+
+    /// The state a Magpie import leaves behind: an account with nothing but a
+    /// `magpie` row (no secret reference — AICC holds no token for it).
+    fn magpie_imported(app: &App, uid: &str, source_key: &str) -> String {
+        let account = app
+            .with_db(|db| {
+                db.upsert_qoder_account("qoder_global", uid, Some("imported@x.com"), None)
+            })
+            .unwrap();
+        app.with_db(|db| {
+            db.upsert_qoder_authorization(
+                &account.id,
+                "magpie",
+                Some(source_key),
+                None,
+                "valid",
+                Some("2026-12-12T03:39:39Z"),
+                None,
+            )
+        })
+        .unwrap();
+        account.id
+    }
+
     fn seed(login_id: &str, edition: QoderEdition, phase: Phase, age: Duration) {
         sessions().lock().unwrap().insert(
             login_id.to_string(),
@@ -896,6 +932,150 @@ mod tests {
         );
         sessions().lock().unwrap().remove("q73-cancel");
         sessions().lock().unwrap().remove("q73-expired");
+    }
+
+    /// The exact situation of the two Global accounts: Magpie linkage only, then
+    /// the user completes a browser authorization. The Magpie row must survive —
+    /// it still describes how the account was discovered — and the new source
+    /// must arrive with a reference, a newer epoch and the resolved identity.
+    #[test]
+    fn browser_authorization_adds_a_source_without_losing_the_magpie_link() {
+        let (app, _dir) = test_app();
+        let account_id = magpie_imported(&app, "u-global-1", "qoder#6j8tuq");
+        let before = app
+            .with_db(|db| db.get_qoder_account(&account_id))
+            .unwrap()
+            .expect("account");
+        // Not asserted as 0: inserting the magpie row is itself an authorization
+        // write, so an import already advances the epoch. What matters is that
+        // the browser authorization advances it again.
+
+        let saved = persist(
+            &app,
+            QoderEdition::Global,
+            &token_with(
+                "u-global-1",
+                Some("真的名字"),
+                Some("me@x.com"),
+                "dt-global",
+            ),
+        )
+        .unwrap();
+        assert_eq!(saved.account_id, account_id, "same UID must reuse the row");
+
+        let rows = app
+            .with_db(|db| db.list_qoder_authorizations(&account_id))
+            .unwrap();
+        assert_eq!(rows.len(), 2, "magpie + own_browser");
+        let magpie = rows
+            .iter()
+            .find(|row| row.source == "magpie")
+            .expect("magpie row");
+        assert_eq!(magpie.source_key.as_deref(), Some("qoder#6j8tuq"));
+        assert!(
+            magpie.secret_ref.is_none(),
+            "magpie never holds a reference"
+        );
+        assert_eq!(magpie.auth_status, "valid");
+
+        let own = rows
+            .iter()
+            .find(|row| row.source == SOURCE_OWN_BROWSER)
+            .expect("own row");
+        assert_eq!(own.auth_status, "valid");
+        assert!(
+            own.secret_ref
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("keychain:qoder/")
+                || own
+                    .secret_ref
+                    .as_deref()
+                    .unwrap_or("")
+                    .starts_with("localjson:v1:"),
+            "authorization must point at real storage: {:?}",
+            own.secret_ref
+        );
+
+        let after = app
+            .with_db(|db| db.get_qoder_account(&account_id))
+            .unwrap()
+            .expect("account");
+        assert_eq!(
+            after.auth_epoch,
+            before.auth_epoch + 1,
+            "epoch advances on a new authorization"
+        );
+        assert_eq!(
+            after.nickname, "真的名字",
+            "the resolved name replaces the import fallback"
+        );
+        assert_eq!(after.email.as_deref(), Some("me@x.com"));
+        assert_eq!(
+            app.with_db(|db| db.list_qoder_accounts(None))
+                .unwrap()
+                .len(),
+            1,
+            "no second account for the same UID"
+        );
+    }
+
+    /// Identity is `(edition, uid)`. Two people can share an email; merging on it
+    /// would silently point one person's token at the other's account.
+    #[test]
+    fn a_different_uid_with_the_same_email_is_a_different_account() {
+        let (app, _dir) = test_app();
+        let first = persist(
+            &app,
+            QoderEdition::Global,
+            &token_with("u-a", Some("A"), Some("same@x.com"), "dt-a"),
+        )
+        .unwrap();
+        let second = persist(
+            &app,
+            QoderEdition::Global,
+            &token_with("u-b", Some("B"), Some("same@x.com"), "dt-b"),
+        )
+        .unwrap();
+        assert_ne!(first.account_id, second.account_id);
+        assert_eq!(
+            app.with_db(|db| db.list_qoder_accounts(None))
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    /// The mirror case: same UID returning with a different email stays one
+    /// account, and the first known email is not overwritten.
+    #[test]
+    fn the_same_uid_with_a_changed_email_stays_one_account() {
+        let (app, _dir) = test_app();
+        let first = persist(
+            &app,
+            QoderEdition::Global,
+            &token_with("u-a", Some("A"), Some("old@x.com"), "dt-1"),
+        )
+        .unwrap();
+        let second = persist(
+            &app,
+            QoderEdition::Global,
+            &token_with("u-a", Some("A"), Some("new@x.com"), "dt-2"),
+        )
+        .unwrap();
+        assert_eq!(first.account_id, second.account_id);
+        assert_eq!(
+            app.with_db(|db| db.list_qoder_accounts(None))
+                .unwrap()
+                .len(),
+            1
+        );
+        let account = app
+            .with_db(|db| db.get_qoder_account(&first.account_id))
+            .unwrap()
+            .expect("account");
+        assert_eq!(account.email.as_deref(), Some("old@x.com"));
+        assert_eq!(account.auth_epoch, 2, "two authorizations, two epochs");
     }
 
     #[test]

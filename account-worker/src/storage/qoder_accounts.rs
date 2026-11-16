@@ -401,26 +401,45 @@ impl crate::storage::Db {
              ON CONFLICT (edition, uid) DO NOTHING",
             params![id, edition, uid, now, generation],
         )?;
-        let mut sets: Vec<&str> = Vec::new();
-        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        if let Some(name) = nickname.map(str::trim).filter(|s| !s.is_empty()) {
-            sets.push("nickname = CASE WHEN nickname = '' THEN ? ELSE nickname END");
-            args.push(Box::new(name.to_string()));
+        // 先读当前行，再决定每个字段要不要改：这件事用一条 CASE WHEN 表达
+        // 会变成"判断条件里又引用被改的列"，SQLite 用的是旧值，很容易写错。
+        let current = tx
+            .query_row(
+                &format!(
+                    "SELECT {ACCOUNT_COLUMNS} FROM qoder_accounts WHERE edition = ?1 AND uid = ?2"
+                ),
+                params![edition, uid],
+                map_account,
+            )
+            .optional()?
+            .ok_or_else(|| RpcError::storage("写入后读不到 Qoder 账号"))?;
+
+        // 昵称只在**没有更好的值**时才被覆盖：空、等于邮箱（导入时的兜底），
+        // 或者本身就是一串邮箱。用户自己改过的名字（"我改的名字"）不动。
+        let mut nickname_next = current.nickname.clone();
+        if let Some(name) = nickname.map(str::trim).filter(|value| !value.is_empty()) {
+            let fallback = nickname_next.is_empty()
+                || Some(nickname_next.as_str()) == current.email.as_deref()
+                || looks_like_email(&nickname_next);
+            if fallback {
+                nickname_next = name.to_string();
+            }
         }
-        if let Some(mail) = email.map(str::trim).filter(|s| !s.is_empty()) {
-            sets.push("email = COALESCE(email, ?)");
-            args.push(Box::new(mail.to_string()));
-        }
-        sets.push("updated_at = ?");
-        args.push(Box::new(now));
-        args.push(Box::new(edition.to_string()));
-        args.push(Box::new(uid.to_string()));
-        let sql = format!(
-            "UPDATE qoder_accounts SET {} WHERE edition = ? AND uid = ?",
-            sets.join(", ")
-        );
-        let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
-        tx.execute(&sql, refs.as_slice())?;
+        // 空串要当成"没有"：早期行被写成 `''`，若直接 COALESCE 就会把真实邮箱挡在外面。
+        let email_next = current
+            .email
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                email
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            });
+        tx.execute(
+            "UPDATE qoder_accounts SET nickname = ?1, email = ?2, updated_at = ?3 WHERE id = ?4",
+            params![nickname_next, email_next, now, current.id],
+        )?;
         tx.commit()?;
 
         self.find_qoder_account(edition, uid)?
@@ -1153,6 +1172,16 @@ fn is_constraint_violation(err: &rusqlite::Error) -> bool {
         rusqlite::Error::SqliteFailure(inner, _)
             if inner.code == rusqlite::ErrorCode::ConstraintViolation
     )
+}
+
+/// 导入路径会把邮箱写进昵称当兜底；这种值可以、也应该被真实用户名替换。
+fn looks_like_email(value: &str) -> bool {
+    match value.split_once('@') {
+        Some((name, domain)) => {
+            !name.is_empty() && domain.contains('.') && !domain.starts_with('.')
+        }
+        None => false,
+    }
 }
 
 #[cfg(test)]
