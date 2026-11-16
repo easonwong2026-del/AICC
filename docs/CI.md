@@ -99,7 +99,21 @@ concurrency:
 - **视觉回归**：五套离屏渲染脚本一张图都没少，只是整体跟随 `macos/**` 与
   `scripts/smoke-test-*visual*.sh` 触发。
 
-## 7. 实测
+## 7. 已知取舍
+
+1. **`macos-dmg` 会重复编译一次**。为了不动发版链路（`build-dmg.sh` 一行未改），
+   main 上 `macos-build` 与 `macos-dmg` 各编译一次。main 不在延迟关键路径上，接受。
+2. **`changes` 用一个第三方 action**（`dorny/paths-filter@v3`）。自己用 `git diff`
+   写一遍要处理 fork、rename、首个 push、force push 等边界，收益不抵风险；该 action
+   是事实标准，固定主版本号，与仓库已有的 `Swatinem/rust-cache`、`gradle/actions` 同类。
+3. **非测试类脚本不在任何 job 的触发路径里**（如 `scripts/release-publish.sh`、
+   `scripts/measure-resources.sh`）。它们本来就没有自动化覆盖，只是不再"顺便"被
+   macOS 构建里的 `bash -n` 顺带检查——所以 `Validate macOS scripts` 那步仍留在
+   `macos-build` 内，任何 `scripts/*.sh` 的语法仍会在 Swift/python 改动时被检查到。
+4. **视觉验收图 artifact 只在 macOS 变更时才产出**。需要看某一版的图，改一下
+   `macos/**` 或用 `run_mode: full` 手动跑。
+
+## 8. 实测
 
 ### 改造前（run 43894780102，PR `feat/rewards-readonly`）
 
@@ -119,3 +133,4 @@ concurrency:
 ### 改造后
 
 见 PR 描述里的对照表（每个场景都附了实际的 run 链接）。
+
