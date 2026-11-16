@@ -134,18 +134,25 @@ concurrency:
 
 | 场景 | 触发方式 | 实际运行 | 墙钟 | 需要排队的 macOS job |
 | --- | --- | --- | --- | --- |
-| Android-only | `run_mode=only-android` | android 0.75 min + android-visual 1.95 min，其余 6 个 skipped | **2.1 min** | 0 |
-| Rust-only | `run_mode=only-rust` | rust 1.78 min，其余 7 个 skipped | 15.9 min | 1（14 min 是排队） |
-| Swift-only | `run_mode=only-swift` | macos-build + swift-test + macos-dmg | 见 PR | 3 |
-| 全量（PR，无 DMG） | PR 自身 | 全部 8 个 job | 见 PR | 3 |
+| Android-only | `run_mode=only-android` | android 0.75 + android-visual 1.95，其余 6 个 skipped | **2.1 min** | 0 |
+| Rust-only | `run_mode=only-rust` | rust 1.78，其余 7 个 skipped | 15.9 min | 1（14 min 是排队） |
+| Swift-only | `run_mode=only-swift` | macos-build 7.05 + swift-test 5.65 + macos-dmg 6.67，其余 6 个 skipped | 28.9 min | 3 |
+| 全量（PR，无 DMG） | PR 自身 | 8 个 job 全 success，macos-dmg skipped | 34.9 min | 3 |
 
-`macos-build` 自身：**9.6 min → 6.0 min**（-37%），其中 `Build macOS app` 315s → 242s，
+全量那一行的明细（run 43954903320）：`macos-build` 5.85、`swift-test` 6.87、
+`android-visual` 2.23、`rust` 1.97、`android` 1.03、`test` 0.33、`changes` 0.25、`lint` 0.15。
+
+`macos-build` 自身：**9.6 min → 5.9/6.0 min**（-38%），其中 `Build macOS app` 315s → 242s，
 DMG 那 134 s 整体搬走；剩下的是编译 + 三套产物校验 + 内嵌 server smoke，全部保留。
 
-**关于墙钟**：这个时间窗口内 macOS runner 排队 10–15 min/job，墙钟被排队主导，
-所以在同一个 PR 上比较"墙钟绝对值"意义不大。真正该比的指标是**一个改动要排队等几个
-macOS job**：改造前无条件 3 个（rust + swift-test + macos-build），改造后按范围是 0 / 1 / 2 / 3。
-Android-only 的 2.1 min 就是"零 macOS job"时的真实墙钟。
+**关于墙钟**：这个时间窗口内 macOS runner 排队 10–15 min/job（`rust` 与 `macos-build`
+各排了 14.5 min），墙钟被排队主导，所以在同一个 PR 上比较"墙钟绝对值"意义不大。
+真正该比的指标是**一个改动要排队等几个 macOS job**：改造前无条件 3 个
+（rust + swift-test + macos-build），改造后按范围是 0 / 1 / 2 / 3。Android-only 的 2.1 min
+就是"零 macOS job"时的真实墙钟。
+
+**注意**：本 PR 自身每次 push 都会跑全量——PR 的 diff 里带着 `ci.yml`，命中"改 CI 自身 →
+全量"这条规则。合并之后，普通 PR 才会真正享受到按范围触发。
 
 ### 附：过滤逻辑的本地回归
 
