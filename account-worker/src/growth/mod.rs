@@ -13,6 +13,7 @@ pub mod models;
 pub mod rewards;
 pub mod scanner;
 pub mod scheduler;
+pub mod streak_rewards;
 
 use std::sync::Arc;
 
