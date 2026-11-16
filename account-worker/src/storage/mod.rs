@@ -21,6 +21,7 @@ pub mod qoder_credits;
 pub mod qoder_profiles;
 pub mod qoder_switch;
 pub mod quota;
+pub mod reward_ops;
 pub mod travel;
 
 pub use authz::AuthorizationRecord;
@@ -328,6 +329,48 @@ CREATE TABLE IF NOT EXISTS credential_migrations (\
 CREATE INDEX IF NOT EXISTS idx_cred_migrations_account \
     ON credential_migrations (domain, account_id);";
 
+/// v24：奖励操作账本（PR #95）。
+///
+/// 兑换 / 抽奖 / 补签都会消耗账号的一次机会，所以"这次发没发过"必须活过崩溃与并发。
+/// 三件事都由这一张表兜住：
+///
+/// | 约束 | 作用 |
+/// | --- | --- |
+/// | `ux_reward_ops_open` | 同一 `(账号, 动作, 目标)` 同时只允许一条未决记录 |
+/// | `ux_reward_ops_token` | 同一个 `client_token` 不能落在两条记录上 |
+/// | `client_token` 列 | 重启后回查/重发都用**同一个**幂等键 |
+///
+/// 只建表、不改任何已有表，也不动 `growth_runs`（那张记的是"接单/领奖"的最终结果，
+/// 这张记的是"每一次可能消耗机会的尝试"，两者互补而不是替代）。
+const MIGRATION_V24_SQL: &str = "\
+CREATE TABLE IF NOT EXISTS reward_operations (\
+    id           TEXT PRIMARY KEY,\
+    account_id   TEXT NOT NULL,\
+    action       TEXT NOT NULL CHECK (action IN ('redeem','lottery_draw','makeup_card')),\
+    target       TEXT NOT NULL DEFAULT '',\
+    client_token TEXT,\
+    phase        TEXT NOT NULL CHECK (phase IN (\
+                     'pending','sent','confirmed','rejected','failed','unknown','frozen')),\
+    attempt      INTEGER NOT NULL DEFAULT 0,\
+    outcome      TEXT,\
+    grant_json   TEXT,\
+    server_state TEXT,\
+    detail       TEXT,\
+    created_at   TEXT NOT NULL,\
+    updated_at   TEXT NOT NULL,\
+    verified_at  TEXT\
+);\
+CREATE UNIQUE INDEX IF NOT EXISTS ux_reward_ops_open \
+    ON reward_operations (account_id, action, target) \
+    WHERE phase IN ('pending','sent','unknown','frozen');\
+CREATE UNIQUE INDEX IF NOT EXISTS ux_reward_ops_token \
+    ON reward_operations (account_id, action, client_token) \
+    WHERE client_token IS NOT NULL;\
+CREATE INDEX IF NOT EXISTS idx_reward_ops_account \
+    ON reward_operations (account_id, created_at);\
+CREATE INDEX IF NOT EXISTS idx_reward_ops_phase \
+    ON reward_operations (phase);";
+
 /// 一次迁移里的一步：纯 SQL，或者需要 Rust 参与的数据迁移。
 ///
 /// v16 起的 Qoder 迁移都是 Rust 步骤：它们要先检测现状再动手，重复执行必须是
@@ -470,9 +513,17 @@ const MIGRATIONS: &[Migration] = &[
         version: 23,
         steps: &[MigrationStep::Rust(authz::migrate_v23)],
     },
+    // v24：奖励操作账本（PR #95）。只建新表 + 索引，不碰 accounts / growth_runs。
+    //
+    // 部分唯一索引（`WHERE phase IN (...)`）是这张表的核心：它让"同一账号同一目标
+    // 同时只能有一条未决记录"变成数据库约束，而不是"代码记得先查一下"。
+    Migration {
+        version: 24,
+        steps: &[MigrationStep::Sql(MIGRATION_V24_SQL)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 23;
+pub const LATEST_VERSION: i64 = 24;
 
 pub struct Db {
     conn: Connection,
@@ -1505,6 +1556,50 @@ mod tests {
                 .unwrap()
                 .cleanup_pending
         );
+    }
+
+    /// v24：奖励操作账本。只建表 + 索引，重复执行是空操作。
+    ///
+    /// 老库的真实形状是"没有这张表"，所以先 DROP 再把版本号回拨 —— 只清数据
+    /// 会把"建表"这一步测不到。回拨后必须还能补回来，且不产生半张表。
+    #[test]
+    fn v24_adds_the_reward_ledger_idempotently() {
+        let (mut db, _dir) = temp_db();
+        let opened = db
+            .open_reward_op(&crate::storage::reward_ops::NewRewardOp {
+                account_id: "acc",
+                action: "lottery_draw",
+                target: "",
+                client_token: Some("u-1"),
+            })
+            .unwrap();
+        assert!(opened.was_created());
+        let id = opened.op().id.clone();
+
+        // 退回 v23 的形状：没有这张表。
+        db.exec_raw("DROP TABLE reward_operations;").unwrap();
+        db.conn.pragma_update(None, "user_version", 23).unwrap();
+        assert_eq!(db.migrate().unwrap(), LATEST_VERSION);
+        assert!(
+            db.reward_ops("acc", 10).unwrap().is_empty(),
+            "旧库本来就没有账本，迁移后必须是空表"
+        );
+
+        let again = db
+            .open_reward_op(&crate::storage::reward_ops::NewRewardOp {
+                account_id: "acc",
+                action: "lottery_draw",
+                target: "",
+                client_token: Some("u-2"),
+            })
+            .unwrap();
+        assert!(again.was_created());
+        assert_ne!(again.op().id, id);
+
+        // 回拨重跑：空操作，不报错、不清数据。
+        db.conn.pragma_update(None, "user_version", 23).unwrap();
+        db.migrate().unwrap();
+        assert_eq!(db.reward_ops("acc", 10).unwrap().len(), 1);
     }
 
     /// v21：给授权行补 `auth_version`，老行从 0 起，重复执行不改写。    ///

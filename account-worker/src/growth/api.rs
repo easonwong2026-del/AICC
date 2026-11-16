@@ -28,6 +28,29 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// 成长中心在 API 域名下的两种路径形态，按优先级排列。
 const PREFIXES: [&str; 2] = ["/v2/activity/growth", "/activity/growth"];
 
+/// **全仓唯一的 URL 拼接点。**
+///
+/// 契约（`docs/growth-rewards-protocol-2026-11-16.md` §四）：
+///
+/// ```text
+/// URL = WORKBUDDY_API_ENDPOINT + prefix + suffix
+/// prefix ∈ { "/v2/activity/growth", "/activity/growth" }
+/// suffix = "/tasks" | "/redeem" | "/lottery/draw" | ...
+/// ```
+///
+/// `suffix` 永远是**前缀相对**的，绝不含 `activity/growth` 本身。上一版
+/// `streak_rewards` 自己再拼一段 `/activity/growth/xxx`，调用方传进来的前缀一旦
+/// 已经是成长中心，就会拼成 `.../activity/growth/activity/growth/redeem` ——
+/// 而且当时的测试把这个错误的 URL 当成了期望值。
+pub fn endpoint(prefix: &str, suffix: &str) -> String {
+    debug_assert!(suffix.starts_with('/'), "suffix 必须以 / 开头：{suffix}");
+    format!(
+        "{WORKBUDDY_API_ENDPOINT}{}{}",
+        prefix.trim_end_matches('/'),
+        suffix
+    )
+}
+
 /// 失败分类。**只有 `Unauthorized` 允许触发换源**，其余一律不动授权状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -173,7 +196,7 @@ async fn send_once(
     method: &str,
     body: Option<Value>,
 ) -> Result<Value, GrowthError> {
-    let url = format!("{WORKBUDDY_API_ENDPOINT}{prefix}{suffix}");
+    let url = endpoint(prefix, suffix);
     let headers = headers(payload);
     match tokio::time::timeout(
         REQUEST_TIMEOUT,
@@ -377,6 +400,7 @@ impl WriteEndpoints {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::growth::streak_rewards;
 
     #[test]
     fn success_is_code_zero_or_no_code_at_all() {
@@ -451,5 +475,38 @@ mod tests {
         let empty = json!({"access_token": "  ", "uid": "u"});
         let err = get(&empty, "/tasks").await.expect_err("空令牌必须被拒");
         assert_eq!(err.kind, ErrorKind::Unauthorized);
+    }
+
+    /// URL 只拼一次成长前缀。这条测试盯的是上一版的真实缺陷：
+    /// `streak_rewards` 自己又拼了一段 `/activity/growth`，于是
+    /// `.../v2/activity/growth` + `/activity/growth/redeem` 拼出了两段。
+    #[test]
+    fn the_growth_prefix_appears_exactly_once_in_every_url() {
+        for prefix in PREFIXES {
+            for suffix in [
+                "/tasks",
+                "/streak",
+                streak_rewards::SUFFIX_REDEEM,
+                streak_rewards::SUFFIX_LOTTERY_DRAW,
+                streak_rewards::SUFFIX_MAKEUP_USE,
+            ] {
+                let url = endpoint(prefix, suffix);
+                assert_eq!(
+                    url.matches("activity/growth").count(),
+                    1,
+                    "{prefix} + {suffix} 拼出了 {url}"
+                );
+                assert!(url.starts_with(WORKBUDDY_API_ENDPOINT));
+                assert!(url.ends_with(suffix));
+            }
+        }
+    }
+
+    #[test]
+    fn endpoint_tolerates_a_trailing_slash_but_never_doubles_it() {
+        assert_eq!(
+            endpoint("/v2/activity/growth/", "/redeem"),
+            format!("{WORKBUDDY_API_ENDPOINT}/v2/activity/growth/redeem")
+        );
     }
 }
