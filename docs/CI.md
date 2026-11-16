@@ -130,7 +130,34 @@ concurrency:
 
 关键路径是 `macos-build`：与改动内容无关的 macOS 构建 + DMG 打包，占了墙钟的六成以上。
 
-### 改造后
+### 改造后（同一批 runner 环境，2026-11-16 20:10Z 之后）
 
-见 PR 描述里的对照表（每个场景都附了实际的 run 链接）。
+| 场景 | 触发方式 | 实际运行 | 墙钟 | 需要排队的 macOS job |
+| --- | --- | --- | --- | --- |
+| Android-only | `run_mode=only-android` | android 0.75 min + android-visual 1.95 min，其余 6 个 skipped | **2.1 min** | 0 |
+| Rust-only | `run_mode=only-rust` | rust 1.78 min，其余 7 个 skipped | 15.9 min | 1（14 min 是排队） |
+| Swift-only | `run_mode=only-swift` | macos-build + swift-test + macos-dmg | 见 PR | 3 |
+| 全量（PR，无 DMG） | PR 自身 | 全部 8 个 job | 见 PR | 3 |
+
+`macos-build` 自身：**9.6 min → 6.0 min**（-37%），其中 `Build macOS app` 315s → 242s，
+DMG 那 134 s 整体搬走；剩下的是编译 + 三套产物校验 + 内嵌 server smoke，全部保留。
+
+**关于墙钟**：这个时间窗口内 macOS runner 排队 10–15 min/job，墙钟被排队主导，
+所以在同一个 PR 上比较"墙钟绝对值"意义不大。真正该比的指标是**一个改动要排队等几个
+macOS job**：改造前无条件 3 个（rust + swift-test + macos-build），改造后按范围是 0 / 1 / 2 / 3。
+Android-only 的 2.1 min 就是"零 macOS job"时的真实墙钟。
+
+### 附：过滤逻辑的本地回归
+
+`python3 scripts/ci-filter-selftest.py` 会用真实历史提交跑一遍分类：
+
+```
+Rust-only     python=skip rust=run  swift=skip android=skip macos=skip
+Swift-only    python=skip rust=skip swift=run  android=skip macos=run
+Android-only  python=skip rust=skip swift=skip android=run  macos=skip
+Python-only   python=run  rust=skip swift=skip android=skip macos=run
+Docs-only     全部 skip
+CI 自身        全部 run（强制全量）
+```
+
 
