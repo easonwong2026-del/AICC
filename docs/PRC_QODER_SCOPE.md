@@ -4,37 +4,65 @@
 
 ## 一、现状：数据库里真实存在什么
 
-只读查询 `~/Library/Application Support/AICC-Dashboard/accounts/accounts.sqlite`（2026-11-16 17:20）：
+只读查询 `~/Library/Application Support/AICC-Dashboard/accounts/accounts.sqlite`（2026-11-16 18:40）。
 
-| 表 | 内容 |
-| --- | --- |
-| `qoder_accounts` | 4 条：`qoder_global` ×2、`qoder_cn` ×2 |
-| `qoder_credit_runs` | 4 条，全部来自 CN 账号 |
-| `qoder_profiles` | 1 条 |
-| `qoder_authorizations` | **空**（当前 Qoder 凭据不走这张表） |
+### 1.1 账号与授权
 
-四条账号的实际状态：
+`qoder_accounts` 4 条，`qoder_authorizations` **5 条**（不是空表 —— 早前那版文档写错了，原因见 1.4）：
 
-| edition | nickname | email | credits_auto | auth_epoch |
-| --- | --- | --- | --- | --- |
-| qoder_global | `easonwong2026@gmail.com` | 空 | 0 | **0** |
-| qoder_global | `rakliang2026@gmail.com` | 空 | 0 | **0** |
-| qoder_cn | `01a1d9e6-c126-…`（uid） | 空 | 1 | 2 |
-| qoder_cn | `nick3871551154` | 空 | 1 | 2 |
+| account | edition | auth_epoch | 授权来源 |
+| --- | --- | --- | --- |
+| `qa_2f4076cb9818` | qoder_cn | 2 | `magpie`（qoder-cn） + **`own_browser` → `localjson:v1:d6667035…`**（valid，auth_version 1） |
+| `qa_625c109ab9a7` | qoder_cn | 2 | **`own_browser` → `localjson:v1:6e0c7342…`**（valid，auth_version 1） |
+| `qa_ff0e54f3e8b0` | qoder_global | **0** | **只有 `magpie`**（source_key `qoder`），`secret_ref` 为 NULL |
+| `qa_f74f2617d3d9` | qoder_global | **0** | **只有 `magpie`**（source_key `qoder#6j8tuq`），`secret_ref` 为 NULL |
 
-读法：
+两个 Global 账号的真实状态因此不是"浏览器授权没走完"，而是——**AICC 从来没为它们建立过自有凭据**：
+它们只是从 Magpie 导入的关联（`magpie` 行），AICC 手里没有可发请求的令牌。
+`credits::resolve_token` 遇到这种账号会直接返回「这个账号只有 Magpie 关联，没有 AICC 自己的凭据」，
+一个请求都不发（`account-worker/src/credits.rs:120-190`）。
 
-1. **两个 Global 账号从没完成过认证**：`auth_epoch = 0`，昵称直接是邮箱（`qoder_identity` 解析失败后的兜底），额度自动领取为 0。这就是之前说的"两个异常账号"。
-2. **两个 CN 账号是活的**：`auth_epoch = 2`、自动领取开启，且 `qoder_credit_runs` 有成功记录：
+`auth_epoch = 0` **不能**单独用来判断"从未认证"：v16 迁移给这一列加的是
+`NOT NULL DEFAULT 0`（`storage/qoder_accounts.rs:70`），老行全部是 0。
+能说明问题的是上面的`来源`列：只有 `magpie` 行、没有 `own_browser` / `own_pat`。
+
+### 1.2 历史 Credits 与今天的可用性
+
+`qoder_credit_runs` 4 条，全部来自 CN 账号：
 
 ```
-qa_2f4076cb9818  ok       100 credits  http 200  auth_source=own_browser  manual  2026-11-15T14:06:46Z
-qa_625c109ab9a7  already  100 credits            auth_source=own_browser  auto    2026-11-15T14:07:26Z
-qa_2f4076cb9818  already  100 credits                     own_browser     auto    2026-11-15T16:00:30Z
-qa_625c109ab9a7  already  100 credits                     own_browser     auto    2026-11-15T16:00:30Z
+qa_2f4076cb9818  ok       100 credits  http 200  own_browser  manual  2026-11-15T14:06:46Z
+qa_625c109ab9a7  already  100 credits            own_browser  auto    2026-11-15T14:07:26Z
+qa_2f4076cb9818  already  100 credits                     own_browser  auto    2026-11-15T16:00:30Z
+qa_625c109ab9a7  already  100 credits                     own_browser  auto    2026-11-15T16:00:30Z
 ```
 
-也就是说 **C2（Credits 查询与领取核验）在 CN 侧已经有真实成功证据**；Global 侧没有任何一次运行记录。
+这证明 **CN 侧的领取链路曾经真实成功过**；但"历史成功"不等于"今天可用"，
+今天的可用性要看 1.3 的凭据引用是否仍然成立。Global 侧一条运行记录都没有。
+
+### 1.3 凭据引用与迁移记录
+
+`credential_migrations` 3 条，与 `secrets/v1/` 下 3 个 JSON 文件一一对应：
+
+| 迁移 id | migrated_ref | 文件 |
+| --- | --- | --- |
+| `qoder:qa_2f4076cb9818:own_browser` | `localjson:v1:d6667035…` | 374 B |
+| `qoder:qa_625c109ab9a7:own_browser` | `localjson:v1:6e0c7342…` | 374 B |
+| `workbuddy:d69d4a7b1460b46d:own` | `localjson:v1:5078a797…` | 2422 B |
+
+CN 两个账号的 `qoder_authorizations.secret_ref` 与迁移记录的 `migrated_ref` **一致**，
+说明引用是自洽的，凭据文件也在盘上。这一层不需要"修"，只需要在真正跑一次领取时验证。
+
+### 1.4 更正说明
+
+上一版文档写了「`qoder_authorizations` 空表」和「两个 Global 从没完成过认证」，两处都不准确：
+
+- 空表结论来自一条**列名写错的 SQL**（用了不存在的 `platform` 列），查询报错后输出为空，被当成了"没有行"。
+  实际有 5 行。
+- `auth_epoch = 0` 是 v16 迁移的默认值，不能当作"从未登录"的证据。
+
+结论改为：**两个 Global 账号当前没有 AICC 自有授权，只有 Magpie 关联**；历史导入方式仍待核实
+（Magpie 行存在，说明至少经过 Magpie；`Qoder.app` 客户端曾登录过第一个账号，但那与 AICC 的授权无关）。
 
 ## 二、代码里已经有的能力
 
@@ -64,19 +92,42 @@ qoder.profiles.*  （扫描/导入/inspect/capture/recover；切换已永久关�
 
 C3/C4/C5 都涉及**写**操作（消耗次数、改变账号状态），在拿到真实请求证据前不写一行实现代码 —— 靠页面按钮猜参数会做出"看起来能跑、实际扣错东西"的功能。
 
-## 四、C3/C4 取证方案（需要你选一个）
+## 四、C3/C4 取证：第三方参考 + 待核实
 
-1. **抓真实请求（推荐）**：在 Mac 上用 mitmproxy/Charles 抓一次你手动点"抽奖 / 领取连登奖励"的请求，我只提取 URL、方法、body 结构、响应码与关键字段（不保存 cookie、不保存任何账号凭据）。
-   - 需要你同意在本机装/跑代理并信任其根证书；
-   - 只需要一次成功 + 一次失败（例如次数用完）的样本。
-2. **由我先做只读侦察**：用现有 `growth.scan` 的同一套鉴权，访问已知的只读接口（`/redeem/summary`、`/lottery/chances`），确认字段与状态机，写接口仍然等证据。
-   - 不需要代理，但**无法**得到写接口的请求形态。
+第三方项目 `magpie-workbuddy-tasks` 的 `engine/streak.mjs` 已经实现过这三项写操作：
 
-## 五、需要你决定的三件事
+| 功能 | 路径（第三方） | 请求体 |
+| --- | --- | --- |
+| 连登奖励兑换 | `POST /activity/growth/redeem` | `{"tier":"14d","client_token":"<uuid>"}` |
+| 活动抽奖 | `POST /activity/growth/lottery/draw` | `{"client_token":"<uuid>"}` |
+| 补签卡使用 | `POST /activity/growth/makeup-cards/use` | `{"target_date":"YYYY-MM-DD"}` |
 
-1. **C1 先修哪一个 Global 账号？** 建议先 `easonwong2026@gmail.com`（两条都 `auth_epoch=0`，先修一条能形成对比基线）。
-2. **Global 账号当初是怎么导入的？** 是浏览器授权没走完，还是走了 PAT？这决定是修回调还是修 PAT 校验 —— 如果你记得当时的操作，能省掉一轮猜测。
-3. **C3/C4 取证走方案 1 还是 2？** 方案 1 我能拿到完整证据但需要你操作一次；方案 2 只能确认只读侧。
+**这是参考，不是结论。** AICC 自己的实测前缀是 `/v2/activity/growth`（`growth/api.rs:29` 里两个前缀都试过），
+域名、前缀、当前协议是否与第三方一致，必须用本机账号的实际请求确认。
+
+取证顺序（按你的决定）：
+
+1. 先用**只读**接口确认抽奖次数、7/14/28 天档位、可领取状态（`/redeem/summary`、`/lottery/chances`），
+   与第三方源码的字段名对照；
+2. 再由你在浏览器里手动点一次真实操作，用开发者工具记录：路径、方法、脱敏后的 body 结构、响应码、奖励结果；
+3. 若必须抓 HTTPS，才临时上代理，用完**立即移除代理证书**，不动 AICC 已完成的 TLS 验证；
+4. 没有可领取的奖励时不强行测试写操作 —— 不为凑证据多消耗一次机会。
+
+在拿到第 2 步的证据前，不实现任何写接口。
+
+## 五、C1 执行计划（已定）
+
+先修 `easonwong2026@gmail.com`（`qa_ff0e54f3e8b0`），第二个 Global 账号暂不动。
+
+1. 跑一次 Qoder International **官方浏览器设备授权**（`qoder.auth.start` → 用户在浏览器确认 → `qoder.auth.poll`）；
+2. 按结果定位：
+   - `userinfo` 成功但账号/授权行没落库 → 查数据库提交与凭据存储；
+   - 轮询一直不成功 → 查登录域名、设备授权与轮询响应；
+   - 保存成功但 Credits 不可用 → 查 Credits 协议与权限（**当前 `capability(Global) = None`，
+     即 International 根本没有适配器，见 `qoder_credits.rs:49`），这不算登录失败；
+3. 浏览器授权确不可行时才退到 PAT。
+
+不做：删除已有账号、重建账号库、改 CRED-5。
 
 ## 六、不做什么
 
