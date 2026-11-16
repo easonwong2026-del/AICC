@@ -27,6 +27,7 @@ mod storage;
 mod tasks;
 #[cfg(test)]
 mod test_env;
+mod tls_certs;
 mod travel;
 mod version;
 

@@ -29,6 +29,8 @@ tokio = { version = "1", features = ["rt", "time", "net", "io-util", "macros", "
 uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
+# 证书有效期由 rcgen 以 OffsetDateTime 表达，这里直接换算时间戳。
+time = { version = "0.3", features = ["std"] }
 
 # Qoder CN 本地认证解密：AES-128-CBC + PBKDF2-HMAC-SHA1
 aes = "0.8"
@@ -36,6 +38,9 @@ cbc = "0.1"
 pbkdf2 = "0.12"
 sha1 = "0.10"
 base64 = "0.22"
+rcgen = { version = "0.14.10", features = ["x509-parser"] }
+# 证书元数据以 PEM 本身为准（notAfter / SAN），不能只信 identity.json。
+x509-parser = { version = "0.18", features = ["verify"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"

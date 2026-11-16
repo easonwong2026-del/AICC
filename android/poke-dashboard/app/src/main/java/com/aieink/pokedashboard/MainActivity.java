@@ -64,6 +64,8 @@ public final class MainActivity extends Activity {
     private boolean resumed;
     private boolean choicePromptShown;
     private volatile boolean destroyed;
+    /** Last discovery result, used to show a server's fingerprint when pairing. */
+    private volatile List<DiscoveryClient.Candidate> discovered = new ArrayList<>();
 
     private final Runnable immersiveRetry = this::enterImmersiveMode;
     private final BroadcastReceiver deviceStateReceiver = new BroadcastReceiver() {
@@ -186,8 +188,9 @@ public final class MainActivity extends Activity {
                 String saved = normaliseBaseUrl(preferences.getString(KEY_URL, null));
                 String preferredHostId = preferences.getString(KEY_HOST_ID, null);
                 String token = BridgeCredential.load(preferences);
+                BridgeTls.Identity identity = BridgeCredential.identity(preferences);
                 selected = saved == null ? null
-                        : DiscoveryClient.probe(new DiscoveryClient.Candidate(saved), token, preferredHostId);
+                        : DiscoveryClient.probe(new DiscoveryClient.Candidate(saved), identity, token, preferredHostId);
                 if (selected != null && preferredHostId != null
                         && !preferredHostId.equals(selected.hostId)) {
                     Log.w(TAG, "Saved address belongs to a different server: " + saved);
@@ -195,9 +198,10 @@ public final class MainActivity extends Activity {
                 }
                 if (selected == null) {
                     found = DiscoveryClient.findServers();
+                    discovered = found;
                     selected = DiscoveryClient.choose(found, preferredHostId);
-                    if (selected != null && selected.pairingRequired && token != null) {
-                        selected = DiscoveryClient.probe(selected, token, preferredHostId);
+                    if (selected != null && selected.pairingRequired && token != null && identity != null) {
+                        selected = DiscoveryClient.probe(selected, identity, token, preferredHostId);
                     }
                 }
             } catch (RuntimeException error) {
@@ -252,7 +256,14 @@ public final class MainActivity extends Activity {
         }
         Log.i(TAG, "Candidate selected: " + candidate.url);
         if (urlField != null) urlField.setText(candidate.url);
-        if (!candidate.statusBody.equals(preferences.getString(KEY_CACHE, null))) {
+        if (candidate.statusBody == null) {
+            // Defensive: a candidate without a snapshot must never be cached or
+            // compared, otherwise a single null turns into a crash on launch.
+            dashboard.setOffline(true);
+            if (urlField != null) urlField.setText(candidate.url);
+            return;
+        }
+        if (!java.util.Objects.equals(candidate.statusBody, preferences.getString(KEY_CACHE, null))) {
             preferences.edit().putString(KEY_CACHE, candidate.statusBody).apply();
         }
         if (resumed) {
@@ -293,6 +304,9 @@ public final class MainActivity extends Activity {
         }
         network.execute(() -> {
             List<DiscoveryClient.Candidate> found = DiscoveryClient.findServers();
+            // Keep them: the pairing dialog needs this server's fingerprint, and
+            // the user is supposed to compare it with the Mac's settings page.
+            discovered = found;
             fetching.set(false);
             if (destroyed) return;
             handler.post(() -> {
@@ -337,6 +351,29 @@ public final class MainActivity extends Activity {
         } catch (Exception ignored) { }
     }
 
+    /** Fingerprint of the server at this address, from discovery or the stored pin. */
+    private String pinFor(String base) {
+        for (DiscoveryClient.Candidate candidate : discovered) {
+            if (candidate.url.equals(base) && candidate.pin != null && candidate.pin.length() == 44) {
+                return candidate.pin;
+            }
+        }
+        String stored = BridgeCredential.pin(preferences);
+        String storedUrl = normaliseBaseUrl(preferences.getString(KEY_URL, null));
+        if (stored != null && base.equals(storedUrl)) return stored;
+        return null;
+    }
+
+    /** Grouped in fours, so a human can compare it with the Mac character by character. */
+    private static String formatPin(String pin) {
+        StringBuilder grouped = new StringBuilder();
+        for (int index = 0; index < pin.length(); index += 4) {
+            if (grouped.length() > 0) grouped.append(' ');
+            grouped.append(pin, index, Math.min(pin.length(), index + 4));
+        }
+        return grouped.toString();
+    }
+
     Dialog showSettings() {
         final int padding = dp(18);
         final int ink = Color.rgb(17, 17, 17);
@@ -378,27 +415,57 @@ public final class MainActivity extends Activity {
                 Toast.makeText(this, "请输入电脑地址和 8 位配对码", Toast.LENGTH_SHORT).show();
                 return;
             }
-            pair.setEnabled(false);
-            network.execute(() -> {
-                boolean success = false;
-                try {
-                    org.json.JSONObject result = DiscoveryClient.pair(base, pairingCode);
-                    String token = result.getString("token");
-                    String host = result.getString("host_id");
-                    if (token.length() < 32 || host.isEmpty()) throw new IllegalStateException();
-                    BridgeCredential.save(preferences, token, host);
-                    preferences.edit().putString(KEY_HOST_ID, host).putString(KEY_URL, base).remove(KEY_CACHE).commit();
-                    success = true;
-                } catch (Exception ignored) { }
-                boolean paired = success;
-                handler.post(() -> {
-                    if (destroyed) return;
-                    pair.setEnabled(true);
-                    code.setText("");
-                    Toast.makeText(this, paired ? "配对成功" : "配对失败，请生成新配对码后重试", Toast.LENGTH_LONG).show();
-                    if (paired) { dialog.dismiss(); fetchStatus(); }
-                });
-            });
+            String pin = pinFor(base);
+            if (pin == null) {
+                Toast.makeText(this, "请先点「选择服务器」以读出该电脑的证书指纹", Toast.LENGTH_LONG).show();
+                return;
+            }
+            // The fingerprint is the whole trust decision: it must be compared
+            // with the Mac's settings screen, not accepted because a broadcast
+            // said so. Nothing is sent until the user confirms it.
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle("核对指纹")
+                    .setMessage("请确认下面这段与 Mac 上 AICC 设置页显示的指纹完全一致：\n\n"
+                            + formatPin(pin)
+                            + "\n\n不一致说明这台机器不是你的 Mac，请取消。")
+                    .setNegativeButton("取消", null)
+                    .setPositiveButton("一致，开始配对", (confirmed, which) -> {
+                        pair.setEnabled(false);
+                        network.execute(() -> {
+                            boolean success = false;
+                            String failure = "配对失败，请生成新配对码后重试";
+                            try {
+                                org.json.JSONObject result = DiscoveryClient.pair(base, pairingCode, pin);
+                                String token = result.getString("token");
+                                String host = result.getString("host_id");
+                                String caPem = result.optString("ca_pem", "");
+                                String returnedPin = result.optString("spki", pin);
+                                if (token.length() < 32 || host.isEmpty() || !caPem.contains("BEGIN CERTIFICATE")) {
+                                    throw new IllegalStateException("Incomplete pairing response");
+                                }
+                                if (!returnedPin.equals(pin)) {
+                                    // The server answered with a different identity than
+                                    // the one the user confirmed: refuse, keep nothing.
+                                    throw new IllegalStateException("Server identity changed during pairing");
+                                }
+                                BridgeCredential.save(preferences, token, host, pin, caPem);
+                                preferences.edit().putString(KEY_HOST_ID, host).putString(KEY_URL, base)
+                                        .remove(KEY_CACHE).commit();
+                                success = true;
+                            } catch (Exception error) {
+                                Log.w(TAG, "Pairing failed: " + error.getClass().getSimpleName());
+                            }
+                            boolean paired = success;
+                            handler.post(() -> {
+                                if (destroyed) return;
+                                pair.setEnabled(true);
+                                code.setText("");
+                                Toast.makeText(this, paired ? "配对成功" : failure, Toast.LENGTH_LONG).show();
+                                if (paired) { dialog.dismiss(); fetchStatus(); }
+                            });
+                        });
+                    })
+                    .show();
         });
         LinearLayout addressHeader = new LinearLayout(this);
         addressHeader.setOrientation(LinearLayout.HORIZONTAL);

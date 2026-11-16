@@ -1,6 +1,23 @@
 #!/usr/bin/env bash
 # Regenerates the throwaway CAs and server certificates used by the TLS probe.
 #
+# NOTE (PR-B2.1): the ECDSA run does NOT use this script. The certificate the
+# Mac will actually serve is minted by the worker, so the probe is pointed at
+# that identity instead:
+#
+#   W=../../account-worker/target/debug/aicc-account-worker
+#   ensure() { echo '{"jsonrpc":"2.0","id":1,"method":"tls.ensure"}' \
+#       | EINK_CERT_DIR="$1" AICC_SECURE_STORE=memory $W; }
+#   ensure /tmp/probe/a                                   # root R1 + leaf L1
+#   cp -R /tmp/probe/a /tmp/probe/b && rm /tmp/probe/b/server.{pem,key}
+#   ensure /tmp/probe/b                                   # same root, new leaf
+#   cp -R /tmp/probe/a /tmp/probe/c
+#   echo '{"jsonrpc":"2.0","id":1,"method":"tls.reset"}' \
+#       | EINK_CERT_DIR=/tmp/probe/c AICC_SECURE_STORE=memory $W
+#   cp /tmp/probe/a/ca.pem app/src/main/res/raw/aicc_test_ca.pem
+#
+# This script remains for the RSA baseline recorded in #91.
+#
 # Two sets on purpose:
 #   certs/      signed by the CA embedded in the probe APK  -> must be trusted
 #   certs/ca2/  signed by a different CA                     -> must be rejected

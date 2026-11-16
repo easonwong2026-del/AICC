@@ -34,6 +34,13 @@ final class ServerManager: ObservableObject {
 
     @Published var isServerRunning = false
     @Published var healthState: ServerHealthState = .stopped
+    /// Set when the bundled runtime is missing, so the UI can say why the
+    /// bridge refuses to start instead of just looking broken.
+    @Published var runtimeError: String?
+    /// Whether the LAN listener is really up. "LAN enabled" in Settings is only
+    /// the user's intent; without a certificate the bridge keeps loopback only
+    /// and this stays false.
+    @Published var lanServing = false
     private var serverProcess: Process?
     private var ownership: ServerOwnership = .none
     private var supervisorTask: Task<Void, Never>?
@@ -70,6 +77,11 @@ final class ServerManager: ObservableObject {
 
         stopReason = .none
         healthState = .starting
+        // 局域网要开就必须先有证书：Python 侧没有证书时只开回环，不会退回明文。
+        // 启动顺序因此是"先准备身份，再拉进程"，而不是让用户去猜为什么连不上。
+        if AppSettings.shared.bridgeLANEnabled {
+            _ = await AccountWorkerManager.shared.ensureBridgeTls()
+        }
         guard let root = resolveServerRoot() else {
             healthState = .degraded
             return false
@@ -117,6 +129,11 @@ final class ServerManager: ObservableObject {
         let lanAccess = AppSettings.shared.bridgeLANEnabled
         env["EINK_HOST"] = lanAccess ? "0.0.0.0" : "127.0.0.1"
         env["EINK_DISCOVERY"] = lanAccess ? "1" : "0"
+        // No certificate, no listener: the bridge refuses to fall back to
+        // plaintext, so the identity has to exist before it starts.
+        if lanAccess {
+            env["EINK_CERT_DIR"] = AICCPaths.certDirectory.path
+        }
         let hostBuild = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !hostBuild.isEmpty {
@@ -227,15 +244,28 @@ final class ServerManager: ObservableObject {
         supervisorTask = nil
     }
 
+    /// The interpreter the bridge runs on.
+    ///
+    /// A release build uses the runtime inside the bundle and nothing else: the
+    /// host's `/usr/bin/python3` is 3.9 with LibreSSL, so falling back silently
+    /// would mean "LAN works on the developer's Mac and not on the user's".
+    /// `AICC_DEV=1` is the only way to point it elsewhere.
     private func resolvePython() -> String? {
-        let environment = ProcessInfo.processInfo.environment
-        let candidates = [
-            environment["AICC_PYTHON_PATH"],
-            "/opt/homebrew/bin/python3",
-            "/usr/local/bin/python3",
-            "/usr/bin/python3"
-        ].compactMap { $0 }
-        return candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+        let choice = PythonRuntime.locate(
+            bundleURL: Bundle.main.bundleURL,
+            environment: ProcessInfo.processInfo.environment,
+            isExecutable: { FileManager.default.isExecutableFile(atPath: $0) }
+        )
+        if let reason = choice.message {
+            runtimeError = reason
+            NSLog("[AICC] %@", reason)
+            return nil
+        }
+        if case .development(let path) = choice {
+            NSLog("[AICC] development runtime in use: %@", path)
+        }
+        runtimeError = nil
+        return choice.path
     }
 
     private struct LiveHealthResponse: Decodable {
@@ -250,6 +280,9 @@ final class ServerManager: ObservableObject {
         /// 当前进程的监听范围（`loopback` / `lan`）。旧版本不返回，按不兼容处理：
         /// 否则升级之后那个绑在 `0.0.0.0` 的旧进程会被当成"兼容"继续复用。
         let bind: String?
+        /// `lan_serving` 是"HTTPS 真的起来了"，`bind` 只是"打算开局域网"。
+        /// 两者不一致时界面必须显示后者，不能让开关冒充监听状态。
+        let lanServing: Bool?
 
         enum CodingKeys: String, CodingKey {
             case ok
@@ -261,6 +294,7 @@ final class ServerManager: ObservableObject {
             case serverInstanceID = "server_instance_id"
             case companion
             case bind
+            case lanServing = "lan_serving"
         }
     }
 
@@ -278,8 +312,12 @@ final class ServerManager: ObservableObject {
             }
             guard let health = try? JSONDecoder().decode(LiveHealthResponse.self, from: data),
                   health.ok == true else {
+                lanServing = false
                 return (true, false, false, false, nil)
             }
+            // 界面区分"用户打开了 LAN"与"HTTPS 真的起来了"：没有证书时
+            // 桥接只开回环，这里必须是 false，不能让开关状态冒充监听状态。
+            lanServing = health.lanServing ?? false
             let currentVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let currentBuild = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String)?

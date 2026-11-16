@@ -56,8 +56,16 @@ public class MainActivity extends Activity {
     private static final int UNTRUSTED_PORT = 8768;
     private static final int TIMEOUT_MS = 4000;
 
-    /** SPKI SHA-256 of the probe server's leaf certificate, base64. */
-    private static final String EXPECTED_PIN = "Si8yl4K5Gvxq14fACg95+3MJ2QMTCXRC3dM5DJ9sI1Y=";
+    /**
+     * Same root, but the leaf has been re-issued (the state after a renewal):
+     * the pin must still match, because the pin is the root's SPKI.
+     */
+    private static final int RENEWED_PORT = 8769;
+    /**
+     * A different root altogether (the state after `tls.reset`): a device
+     * pinned to the first root must refuse it.
+     */
+    private static final int RESET_PORT = 8770;
 
     private final List<String> lines = new ArrayList<>();
     private TextView view;
@@ -78,6 +86,22 @@ public class MainActivity extends Activity {
 
     private void runAll() {
         long started = System.currentTimeMillis();
+        run("ecdsa_root_is_p256", () -> {
+            // The Mac now mints ECDSA P-256. RSA results from the earlier probe
+            // do not carry over, so assert the key type before anything else.
+            X509Certificate ca = probeCa();
+            require("EC".equals(ca.getPublicKey().getAlgorithm()), "CA key is " + ca.getPublicKey().getAlgorithm());
+            String curve = java.security.interfaces.ECPublicKey.class.isInstance(ca.getPublicKey())
+                    ? ((java.security.interfaces.ECPublicKey) ca.getPublicKey()).getParams().getCurve()
+                        .getField().getFieldSize() + " bit" : "unknown";
+            require(curve.startsWith("256"), "curve is " + curve);
+            return ca.getSigAlgName() + ", " + curve;
+        });
+        run("ecdsa_chain_verified", () -> {
+            String protocol = handshake(PORT, "TLSv1.3", trustingProbeCa());
+            require(protocol != null, "no handshake");
+            return "leaf chains to the pinned root (" + protocol + ")";
+        });
         run("tls12_handshake", () -> {
             String protocol = handshake(PORT, "TLSv1.2", trustingProbeCa());
             require("TLSv1.2".equals(protocol), "negotiated " + protocol);
@@ -110,19 +134,61 @@ public class MainActivity extends Activity {
                 return "rejected: " + expected.getClass().getSimpleName();
             }
         });
-        run("pinning_match", () -> {
-            String pin = leafPin();
-            require(EXPECTED_PIN.equals(pin), "pin " + pin);
-            return pin;
+        run("root_pinning_match", () -> {
+            // Pin the root, not the leaf: otherwise every renewal would force
+            // the user to re-pair. The chain the server sends ends with the
+            // root, so compare the pin of that certificate with the anchor.
+            String served = rootPin(PORT);
+            String pinned = pinOf(probeCa());
+            require(pinned.equals(served), "served root " + served + " != pinned " + pinned);
+            return served;
         });
-        run("pinning_mismatch_detected", () -> {
-            String pin = leafPin();
-            // A pin that is the right length but the wrong value: the comparison
-            // must report a mismatch, otherwise pinning in production would be a
-            // no-op that always passes.
+        run("wrong_pin_rejected", () -> {
+            String served = rootPin(PORT);
+            // A pin of the right shape but the wrong value must not match;
+            // otherwise pinning is a no-op that always passes.
             String wrongPin = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-            require(!wrongPin.equals(pin), "a wrong pin matched: " + pin);
+            require(!wrongPin.equals(served), "a wrong pin matched: " + served);
             return "wrong pin does not match";
+        });
+        run("wrong_hostname_rejected", () -> {
+            try {
+                handshakeWithHostname(PORT, "wrong.example");
+                throw new AssertionError("handshake succeeded for an unrelated hostname");
+            } catch (javax.net.ssl.SSLHandshakeException | javax.net.ssl.SSLPeerUnverifiedException expected) {
+                // Conscrypt performs endpoint identification inside the
+                // handshake, so a name mismatch surfaces as SSLHandshakeException
+                // rather than SSLPeerUnverifiedException. Require the message to
+                // name the actual reason: a generic "connection closed" must not
+                // be counted as a hostname rejection.
+                String message = String.valueOf(expected.getMessage());
+                require(message.contains("subjectAltName") || message.contains("No name matching"),
+                        "failed for another reason: " + message);
+                return "rejected: " + message;
+            }
+        });
+        run("renewal_keeps_the_pin", () -> {
+            // Port 8769 serves a re-issued leaf under the same root. A device
+            // that only knows the root pin must keep working after a renewal.
+            String protocol = handshake(RENEWED_PORT, "TLSv1.3", trustingProbeCa());
+            String renewed = rootPin(RENEWED_PORT);
+            String pinned = pinOf(probeCa());
+            require(pinned.equals(renewed), "renewal changed the root pin: " + renewed);
+            return "same root " + renewed + ", handshake " + protocol;
+        });
+        run("reset_root_changes_the_pin", () -> {
+            // Port 8770 has a new root. Its pin must differ, and it must not be
+            // trusted: a silent acceptance here would mean the device kept
+            // talking to an identity the user never confirmed.
+            String rotated = pinOfRootOf(RESET_PORT);
+            String pinned = pinOf(probeCa());
+            require(!pinned.equals(rotated), "reset did not change the pin");
+            try {
+                handshake(RESET_PORT, "TLSv1.3", trustingProbeCa());
+                throw new AssertionError("handshake succeeded against a rotated root");
+            } catch (IOException expected) {
+                return "pin changed to " + rotated.substring(0, 8) + "…, rejected as untrusted";
+            }
         });
         run("cleartext_blocked", () -> {
             try {
@@ -205,24 +271,63 @@ public class MainActivity extends Activity {
         }
     }
 
-    private String leafPin() throws Exception {
+    /** SPKI pin of the last certificate the server presents (the root). */
+    private String rootPin(int port) throws Exception {
         SSLSocketFactory factory = trustingProbeCa().getSocketFactory();
         try (SSLSocket socket = (SSLSocket) factory.createSocket()) {
-            socket.connect(new InetSocketAddress(HOST, PORT), TIMEOUT_MS);
+            socket.connect(new InetSocketAddress(HOST, port), TIMEOUT_MS);
             socket.setSoTimeout(TIMEOUT_MS);
             socket.startHandshake();
-            X509Certificate leaf = (X509Certificate) socket.getSession().getPeerCertificates()[0];
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            return Base64.encodeToString(digest.digest(leaf.getPublicKey().getEncoded()), Base64.NO_WRAP);
+            java.security.cert.Certificate[] chain = socket.getSession().getPeerCertificates();
+            return pinOf((X509Certificate) chain[chain.length - 1]);
+        }
+    }
+
+    /** Root pin of a server this app does not trust (verification disabled on purpose). */
+    private String pinOfRootOf(int port) throws Exception {
+        SSLContext context = SSLContext.getInstance("TLS");
+        context.init(null, new javax.net.ssl.TrustManager[]{new javax.net.ssl.X509TrustManager() {
+            public void checkClientTrusted(X509Certificate[] chain, String authType) {}
+            public void checkServerTrusted(X509Certificate[] chain, String authType) {}
+            public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+        }}, null);
+        try (SSLSocket socket = (SSLSocket) context.getSocketFactory().createSocket()) {
+            socket.connect(new InetSocketAddress(HOST, port), TIMEOUT_MS);
+            socket.setSoTimeout(TIMEOUT_MS);
+            socket.startHandshake();
+            java.security.cert.Certificate[] chain = socket.getSession().getPeerCertificates();
+            return pinOf((X509Certificate) chain[chain.length - 1]);
+        }
+    }
+
+    private static String pinOf(X509Certificate certificate) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        return Base64.encodeToString(digest.digest(certificate.getPublicKey().getEncoded()), Base64.NO_WRAP);
+    }
+
+    /** Handshake where the peer host used for verification is not the address. */
+    private void handshakeWithHostname(int port, String hostname) throws Exception {
+        java.net.Socket plain = new java.net.Socket();
+        plain.connect(new InetSocketAddress(HOST, port), TIMEOUT_MS);
+        SSLSocketFactory factory = trustingProbeCa().getSocketFactory();
+        try (SSLSocket socket = (SSLSocket) factory.createSocket(plain, hostname, port, true)) {
+            socket.setSoTimeout(TIMEOUT_MS);
+            javax.net.ssl.SSLParameters parameters = socket.getSSLParameters();
+            parameters.setEndpointIdentificationAlgorithm("HTTPS");
+            socket.setSSLParameters(parameters);
+            socket.startHandshake();
+        }
+    }
+
+    private X509Certificate probeCa() throws Exception {
+        CertificateFactory factory = CertificateFactory.getInstance("X.509");
+        try (InputStream raw = getResources().openRawResource(R.raw.aicc_test_ca)) {
+            return (X509Certificate) factory.generateCertificate(new ByteArrayInputStream(readAll(raw)));
         }
     }
 
     private SSLContext trustingProbeCa() throws Exception {
-        CertificateFactory factory = CertificateFactory.getInstance("X.509");
-        X509Certificate ca;
-        try (InputStream raw = getResources().openRawResource(R.raw.aicc_test_ca)) {
-            ca = (X509Certificate) factory.generateCertificate(new ByteArrayInputStream(readAll(raw)));
-        }
+        X509Certificate ca = probeCa();
         KeyStore store = KeyStore.getInstance(KeyStore.getDefaultType());
         store.load(null, null);
         store.setCertificateEntry("aicc-test-ca", ca);

@@ -1,0 +1,30 @@
+# POKE4S / ECDSA P-256 真机记录（PR-B2.1）
+
+设备：Poke4S（Onyx）  系统 Android 11 / API 30  ABI arm64-v8a  屏幕 758x1024 @212dpi
+构建：2025-04-02_08-15_v4.0-rel_77d3ae190  连接：USB ADB（serial 46C8BEA3）+ adb reverse
+证书：由 account-worker `tls.ensure`（rcgen，ECDSA P-256）实际生成，**不是 openssl RSA**
+服务端：built bridge 的 Python 3.14.10 + OpenSSL 3.5.9
+
+三个端口对应三种身份状态：
+  8767  a = 首次生成（根 R1，叶 L1）          —— 正常连接
+  8769  b = 同一根 R1，叶被重新签发（L2）      —— 续期后 pin 必须不变
+  8770  c = `tls.reset` 后的新根 R2            —— 旧 pin 必须被拒
+  8768 -> 8770（同一台，用第二个端口验证“未知 CA”）
+
+屏幕截图说明：该设备的 screencap 返回的是旧帧（e-ink 未刷新），
+所以本记录以 logcat + 应用写出的 probe.txt 为准，没有附截图。
+
+CASE ecdsa_root_is_p256 => PASS: SHA256withECDSA, 256 bit
+CASE ecdsa_chain_verified => PASS: leaf chains to the pinned root (TLSv1.3)
+CASE tls12_handshake => PASS: TLSv1.2
+CASE tls13_handshake => PASS: TLSv1.3
+CASE https_health_200 => PASS: status 200
+CASE https_status_401_without_token => PASS: status 401
+CASE untrusted_server_rejected => PASS: rejected: SSLHandshakeException
+CASE root_pinning_match => PASS: IPpHOdBogidu7cws8POtcViGbrEpaXYrmWD6jQwd6CY=
+CASE wrong_pin_rejected => PASS: wrong pin does not match
+CASE wrong_hostname_rejected => PASS: rejected: No subjectAltNames on the certificate match
+CASE renewal_keeps_the_pin => PASS: same root IPpHOdBogidu7cws8POtcViGbrEpaXYrmWD6jQwd6CY=, handshake TLSv1.3
+CASE reset_root_changes_the_pin => PASS: pin changed to BMe7vQc/…, rejected as untrusted
+CASE cleartext_blocked => PASS: blocked: IOException
+SUMMARY pass=13 fail=0 elapsedMs=557

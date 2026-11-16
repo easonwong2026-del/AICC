@@ -6,7 +6,6 @@ import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
-import java.net.HttpURLConnection;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.Inet4Address;
@@ -22,8 +21,27 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+
+/**
+ * Finds AICC bridges on the LAN and talks to them over HTTPS only.
+ *
+ * Discovery itself is unauthenticated UDP: anything on the network can answer.
+ * The response therefore only *proposes* a server and its fingerprint — that
+ * fingerprint becomes a trust decision only after the user compares it with the
+ * Mac's settings screen, and only then is a pin stored.
+ *
+ * Cleartext is not an option here: every request goes through TLS with a pinned
+ * root, and a failed verification means no request is made at all (in
+ * particular the bearer token is never sent over an unverified connection).
+ */
 final class DiscoveryClient {
     private static final int DISCOVERY_PORT = 8766;
+    /** LAN devices speak TLS; plain HTTP is loopback-only on the Mac. */
+    static final int LAN_PORT = 8767;
+    /** Discovery payloads must carry at least this protocol version. */
+    static final int MIN_PROTOCOL_VERSION = 2;
     private static final byte[] REQUEST = "AI_EINK_DISCOVER".getBytes(StandardCharsets.UTF_8);
     private static final String TAG = "AICC Discovery";
 
@@ -33,25 +51,33 @@ final class DiscoveryClient {
         String hostname;
         String platform;
         String hostId;
+        /** Fingerprint of the root the server claims, shown to the user. */
+        String pin;
+        int protocolVersion;
         String statusBody;
         DashboardData data;
         boolean stale;
         boolean pairingRequired;
 
-        Candidate(String url) { this.url = url; }
+        Candidate(String url) {
+            this.url = url;
+        }
     }
 
     private DiscoveryClient() {}
 
+    /** Only HTTPS is accepted; a bare address means the LAN HTTPS port. */
     static String normaliseBaseUrl(String value) {
         if (value == null || value.trim().isEmpty()) return null;
         String input = value.trim();
-        if (!input.contains("://")) input = "http://" + input;
+        if (!input.contains("://")) input = "https://" + input;
         try {
             URL url = new URL(input);
-            if ((!"http".equals(url.getProtocol()) && !"https".equals(url.getProtocol()))
-                    || url.getUserInfo() != null || url.getQuery() != null || url.getRef() != null
-                    || !(url.getPath().isEmpty() || "/".equals(url.getPath()) || "/api/status".equals(url.getPath()))) return null;
+            if (!"https".equals(url.getProtocol())) return null;
+            if (url.getUserInfo() != null || url.getQuery() != null || url.getRef() != null) return null;
+            if (!(url.getPath().isEmpty() || "/".equals(url.getPath()) || "/api/status".equals(url.getPath()))) {
+                return null;
+            }
             String[] parts = url.getHost().split("\\.");
             if (parts.length != 4) return null;
             int[] octets = new int[4];
@@ -64,10 +90,12 @@ final class DiscoveryClient {
                     || (octets[0] == 192 && octets[1] == 168)
                     || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31)
                     || (octets[0] == 169 && octets[1] == 254);
-            int port = url.getPort() == -1 ? 8765 : url.getPort();
+            int port = url.getPort() == -1 ? LAN_PORT : url.getPort();
             if (!local || port < 1 || port > 65535) return null;
-            return url.getProtocol() + "://" + url.getHost() + ":" + port;
-        } catch (Exception error) { return null; }
+            return "https://" + url.getHost() + ":" + port;
+        } catch (Exception error) {
+            return null;
+        }
     }
 
     static List<Candidate> discover() {
@@ -102,7 +130,7 @@ final class DiscoveryClient {
                 }
                 long until = Math.min(deadline, sends < 3 ? nextSend : deadline) - elapsedMs();
                 socket.setSoTimeout((int) Math.max(1, until));
-                byte[] buffer = new byte[512];
+                byte[] buffer = new byte[2048];
                 DatagramPacket response = new DatagramPacket(buffer, buffer.length);
                 try {
                     socket.receive(response);
@@ -123,26 +151,26 @@ final class DiscoveryClient {
         return new ArrayList<>(candidates.values());
     }
 
+    /** Candidates for the UI: nothing is fetched until an identity is stored. */
     static List<Candidate> findServers() {
-        return verify(discover());
+        return discover();
     }
 
-    static List<Candidate> verify(List<Candidate> candidates) {
-        List<Candidate> healthy = new ArrayList<>();
-        for (Candidate candidate : candidates) {
-            Candidate checked = probe(candidate);
-            if (checked != null) healthy.add(checked);
+    /**
+     * Verify a server and fetch its snapshot.
+     *
+     * Without a stored identity there is nothing to verify against, so the
+     * candidate comes back as "pairing required" and no request is made — the
+     * user has to confirm the fingerprint first.
+     */
+    static Candidate probe(Candidate candidate, BridgeTls.Identity identity, String token, String pairedHostId) {
+        if (identity == null) {
+            candidate.pairingRequired = true;
+            return candidate;
         }
-        return healthy;
-    }
-
-    static Candidate probe(Candidate candidate) {
-        return probe(candidate, null, null);
-    }
-
-    static Candidate probe(Candidate candidate, String token, String pairedHostId) {
         try {
-            JSONObject health = new JSONObject(request(candidate.url + "/api/health/live"));
+            SSLContext context = BridgeTls.anchored(identity);
+            JSONObject health = new JSONObject(request(candidate.url + "/api/health/live", context, null, null, false));
             String protocol = health.optString("protocol", "");
             if (!health.optBoolean("ok") || !"live".equals(health.optString("status"))
                     || health.optString("version", "").isEmpty()
@@ -158,8 +186,9 @@ final class DiscoveryClient {
                 return candidate;
             }
             String body;
-            try { body = request(candidate.url + "/api/status", paired ? token : null, null, true); }
-            catch (Unauthorized error) {
+            try {
+                body = request(candidate.url + "/api/status", context, paired ? token : null, null, true);
+            } catch (Unauthorized error) {
                 candidate.pairingRequired = true;
                 return candidate;
             }
@@ -171,10 +200,6 @@ final class DiscoveryClient {
             }
             candidate.data = DashboardData.parse(body);
             candidate.statusBody = body;
-            // A candidate that discovery probed without a credential was marked
-            // pairing-required; this pass proved the stored token still works, so
-            // clear the mark.  It is read by MainActivity to decide whether the
-            // panel may show the data it just fetched.
             candidate.pairingRequired = false;
             JSONObject codex = status.optJSONObject("codex");
             candidate.stale = generic ? status.optBoolean("stale", true)
@@ -187,32 +212,32 @@ final class DiscoveryClient {
         }
     }
 
-    private static String request(String endpoint) throws Exception {
-        return request(endpoint, null, null);
-    }
-
-    static JSONObject pair(String base, String code) throws Exception {
-        if (!base.equals(normaliseBaseUrl(base))) throw new IllegalArgumentException("Local address required");
+    /**
+     * Pair using the fingerprint the user confirmed on this screen.
+     *
+     * The connection is not PKIX-validated (the anchor is what we are about to
+     * receive), but it must present exactly that fingerprint, so a machine that
+     * took over the address cannot collect the pairing code and token.
+     */
+    static JSONObject pair(String base, String code, String confirmedPin) throws Exception {
+        if (!base.equals(normaliseBaseUrl(base))) throw new IllegalArgumentException("LAN HTTPS address required");
+        SSLContext context = BridgeTls.bootstrap(confirmedPin);
         JSONObject document = new JSONObject();
         document.put("code", code);
-        return new JSONObject(request(base + "/api/pair", null, document.toString()));
+        return new JSONObject(request(base + "/api/pair", context, null, document.toString(), false));
     }
 
     private static final class Unauthorized extends Exception {}
 
-    private static String request(String endpoint, String token, String payload) throws Exception {
-        return request(endpoint, token, payload, false);
-    }
-
-    private static String request(String endpoint, String token, String payload, boolean status) throws Exception {
-        HttpURLConnection connection = (HttpURLConnection) new URL(endpoint).openConnection();
+    private static String request(String endpoint, SSLContext context, String token, String payload, boolean status)
+            throws Exception {
+        HttpsURLConnection connection = (HttpsURLConnection) new URL(endpoint).openConnection();
+        connection.setSSLSocketFactory(context.getSocketFactory());
         connection.setConnectTimeout(5000);
         connection.setReadTimeout(7000);
         connection.setUseCaches(false);
         connection.setInstanceFollowRedirects(false);
         connection.setRequestProperty("Accept", "application/json");
-        // Explicit version negotiation: the bridge answers schema 3 to callers
-        // that ask for it, and the older Codex-only shape to those that don't.
         if (status) connection.setRequestProperty("X-AICC-Schema", String.valueOf(DashboardData.SCHEMA_VERSION));
         if (token != null) connection.setRequestProperty("Authorization", "Bearer " + token);
         try {
@@ -225,7 +250,9 @@ final class DiscoveryClient {
                 }
             }
             if (connection.getResponseCode() == 401) throw new Unauthorized();
-            if (connection.getResponseCode() != 200) throw new IllegalStateException("HTTP " + connection.getResponseCode());
+            if (connection.getResponseCode() != 200) {
+                throw new IllegalStateException("HTTP " + connection.getResponseCode());
+            }
             StringBuilder body = new StringBuilder();
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(
                     connection.getInputStream(), StandardCharsets.UTF_8))) {
@@ -245,17 +272,30 @@ final class DiscoveryClient {
         if (!(response.getAddress() instanceof Inet4Address)) return null;
         JSONObject payload = new JSONObject(new String(
                 response.getData(), 0, response.getLength(), StandardCharsets.UTF_8));
-        String protocol = payload.optString("protocol", "");
-        if (!"aicc".equals(protocol)
-                && !(protocol.isEmpty() && "AICC Dashboard".equals(payload.optString("name")))) {
+        if (!"aicc".equals(payload.optString("protocol", ""))) return null;
+        int version = payload.optInt("protocol_version", 0);
+        if (version < MIN_PROTOCOL_VERSION) {
+            // A bridge that only speaks plain HTTP cannot be paired with safely,
+            // and silently falling back to it is exactly what we refuse to do.
+            Log.w(TAG, "Ignoring a bridge that does not offer HTTPS: " + response.getAddress().getHostAddress());
             return null;
         }
-        int port = payload.optInt("port", 8765);
+        JSONObject https = payload.optJSONObject("https");
+        String pin = https == null ? null : https.optString("spki", null);
+        if (pin == null || pin.length() != 44) return null;
+        int port = https == null ? LAN_PORT : https.optInt("port", LAN_PORT);
         if (port < 1 || port > 65535) return null;
-        Candidate candidate = new Candidate("http://" + response.getAddress().getHostAddress() + ":" + port);
+        Candidate candidate = new Candidate("https://" + response.getAddress().getHostAddress() + ":" + port);
         candidate.name = payload.optString("name", "AICC Dashboard");
         candidate.hostname = payload.optString("hostname", "");
         candidate.platform = payload.optString("platform", "");
+        candidate.hostId = payload.optString("host_id", "");
+        candidate.pin = pin;
+        candidate.protocolVersion = version;
+        // Nothing has been fetched or verified yet: a UDP answer only proposes a
+        // server. Treating it as "paired" is how an unverified candidate walked
+        // into the branch that assumes a snapshot exists.
+        candidate.pairingRequired = true;
         return candidate;
     }
 
@@ -290,5 +330,7 @@ final class DiscoveryClient {
         return verified.size() == 1 ? verified.get(0) : null;
     }
 
-    private static long elapsedMs() { return System.nanoTime() / 1_000_000L; }
+    private static long elapsedMs() {
+        return System.nanoTime() / 1_000_000L;
+    }
 }

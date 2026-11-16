@@ -114,8 +114,10 @@ GET /api/status       -> 401（无 Bearer，符合预期）
 
 ## 7. 打包与签名纪律
 
-- 放 `AICC.app/Contents/Frameworks/Python/`，**不放 `Contents/Resources/`**：`Resources` 被 bundle 校验当成"运行数据"，
-  且 `Contents/Frameworks` 才是嵌套组件签名的正确位置（与 `AICCWidget.appex`、`aicc-account-worker` 同级）。
+- 放 `AICC.app/Contents/Resources/Python/`。**实测**：放进 `Contents/Frameworks/` 时 `codesign` 会把
+  `lib/python3.14` 当嵌套 bundle 校验并拒绝封签（`bundle format unrecognized ... In subcomponent: lib/python3.14`），
+  换到 `Resources` 下就正常；两个 Mach-O 单独签完，`codesign --verify --deep --strict` 通过。
+  `Resources/Server/data` 那条限制只针对运行期写进 bundle 的数据，与运行时无关。
 - 签名由内到外：`.so`/`.dylib` → `Contents/Frameworks/Python`（`--deep` 对该目录）→ 主程序 → App bundle → Widget → DMG。
   本项目 ad-hoc 环境没有稳定证书，不能用带 entitlements 的 `codesign --deep` 一把过。
 - 好消息是嵌套组件少：裁剪后只有 **1 个 `.so`**，签名面比 python.org 路线小两个数量级。

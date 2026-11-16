@@ -120,9 +120,14 @@ done
 # validator proves the interpreter still runs, imports its extensions and
 # completes a TLS handshake without it.
 rm -f "$STAGE/python/lib/libpython3.14.dylib"
-# Pip's console scripts point at modules that no longer exist.
-rm -f "$STAGE/python/bin/pip3" "$STAGE/python/bin/pip3.14" "$STAGE/python/bin/pip" \
-      "$STAGE/python/bin/idle3" "$STAGE/python/bin/idle3.14" 2>/dev/null || true
+# Console scripts are dev conveniences, and every extra executable inside the
+# bundle is one more thing codesign has to walk (`pydoc3.14` is a shell script,
+# which `codesign --deep` refuses to seal). The bridge runs `python3 -B`, so none
+# of these are needed at runtime.
+rm -f "$STAGE/python/bin/pip" "$STAGE/python/bin/pip3" "$STAGE/python/bin/pip3.14" \
+      "$STAGE/python/bin/idle3" "$STAGE/python/bin/idle3.14" \
+      "$STAGE/python/bin/pydoc3" "$STAGE/python/bin/pydoc3.14" \
+      "$STAGE/python/bin/python3-config" "$STAGE/python/bin/python3.14-config" 2>/dev/null || true
 pruned=$(du -sk "$STAGE/python" | awk '{print $1}')
 
 mkdir -p "$(dirname "$DEST")"

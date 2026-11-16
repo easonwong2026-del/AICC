@@ -38,6 +38,9 @@ final class AccountWorkerManager: ObservableObject {
     /// 最近一次迁移 / 核验 / 回滚的结论。界面直接显示这句，不自己组织措辞。
     @Published private(set) var credentialMigrationNotice: String?
     @Published private(set) var credentialMigrationBusy = false
+    /// PR-B: the LAN bridge's TLS identity, as the worker reports it.
+    @Published private(set) var bridgeTls: BridgeTlsStatus?
+    @Published private(set) var bridgeTlsError: String?
 
     private var client: AccountWorkerClient?
     private var restartCount = 0
@@ -69,6 +72,52 @@ final class AccountWorkerManager: ObservableObject {
 
     var helperPathDescription: String {
         Self.locateHelper()?.path ?? "未找到（App 未内嵌助手）"
+    }
+
+    // MARK: - 局域网 TLS 身份（PR-B）
+
+    /// Create or reuse the certificate the LAN bridge serves.
+    ///
+    /// Called before the bridge restarts with LAN access on: without a
+    /// certificate the Python side refuses to open the TLS port (it never falls
+    /// back to plaintext), so "LAN enabled but no listener" would be the result.
+    @discardableResult
+    func ensureBridgeTls(sans: [String] = []) async -> Bool {
+        let params: [String: Any] = sans.isEmpty ? [:] : ["sans": sans]
+        return await callBridgeTls(method: "tls.ensure", params: params)
+    }
+
+    /// Replace the root. Every paired device must confirm the new fingerprint.
+    @discardableResult
+    func resetBridgeTls() async -> Bool {
+        await callBridgeTls(method: "tls.reset", params: [:])
+    }
+
+    private func callBridgeTls(method: String, params: [String: Any]) async -> Bool {
+        if client == nil || client?.isRunning != true {
+            guard startProcess() else {
+                bridgeTlsError = "助手未启动，无法准备局域网证书"
+                return false
+            }
+        }
+        guard let client else {
+            bridgeTlsError = "助手未启动，无法准备局域网证书"
+            return false
+        }
+        do {
+            let result = try await client.call(method, params: params, timeout: 30)
+            let parsed = BridgeTlsStatus.parse(result)
+            guard parsed.spki != nil else {
+                bridgeTlsError = "助手没有返回指纹"
+                return false
+            }
+            bridgeTls = parsed
+            bridgeTlsError = nil
+            return true
+        } catch {
+            bridgeTlsError = "证书准备失败：\(error.localizedDescription)"
+            return false
+        }
     }
 
     /// 启动并按需做一次健康检查。重复调用是安全的。

@@ -60,10 +60,14 @@ struct SettingsView: View {
                 Toggle("启用墨水屏桥接", isOn: $settings.bridgeEnabled)
                 if settings.bridgeEnabled {
                     LabeledContent("桥接状态", value: server.isServerRunning ? "运行中" : "等待连接")
+                    if let reason = server.runtimeError {
+                        // 内置运行时缺失时桥接不会启动，也不会退回系统 Python：
+                        // 界面必须说明原因，否则用户只看到"连不上"。
+                        Text(reason).font(.caption).foregroundStyle(.red)
+                    }
                     Toggle("允许局域网设备连接", isOn: $settings.bridgeLANEnabled)
                     if settings.bridgeLANEnabled {
-                        Text("会监听本机所有网卡并广播设备发现。同一网络里拿到配对码的设备可以读取额度；传输仍是未加密的 HTTP，公共网络下可能被监听。只在可信网络里打开。")
-                            .font(.caption).foregroundStyle(.orange)
+                        lanStatus
                     } else {
                         Text("默认只监听本机（127.0.0.1），墨水屏与 Android 连不上，只用小组件时够用。要让墨水屏连接，必须在这里显式打开。")
                             .font(.caption).foregroundStyle(.secondary)
@@ -180,11 +184,18 @@ struct SettingsView: View {
                 loginAtLaunch.setEnabled(false)
             }
         }
-        .onChange(of: settings.bridgeLANEnabled) { _, _ in
+        .onChange(of: settings.bridgeLANEnabled) { _, enabled in
             // 改监听范围必须真的重启进程：只改开关不动绑定，等于界面说"已关闭"
             // 而端口还开着。
             pairingCode = ""
-            if settings.bridgeEnabled { Task { _ = await server.restartServer() } }
+            guard settings.bridgeEnabled else { return }
+            Task {
+                if enabled {
+                    // 先有证书再有监听：桥接不会在没有证书时退回明文。
+                    _ = await accountWorker.ensureBridgeTls()
+                }
+                _ = await server.restartServer()
+            }
         }
         .onChange(of: settings.magpiePort) { _, _ in
             reloadWidgets()
@@ -297,6 +308,52 @@ struct SettingsView: View {
             widgetProviders = snapshot.providers
             settings.publishWidgetSettings(providers: snapshot.providers)
         } else { connection = "无法连接，请启动 Magpie 并检查端口。" }
+    }
+
+    /// The LAN section is its own view: the type checker gives up on the whole
+    /// settings body when all of this is inlined.
+    @ViewBuilder private var lanStatus: some View {
+        LabeledContent("HTTPS 服务", value: server.lanServing ? "运行中（TLS 1.3 优先）" : "未启动")
+        if let tls = accountWorker.bridgeTls, let expiry = tls.notAfter {
+            LabeledContent("证书有效期", value: expiry)
+        }
+        if let tls = accountWorker.bridgeTls, !tls.groupedFingerprint.isEmpty {
+            Text("Mac 证书指纹").font(.caption).foregroundStyle(.secondary)
+            Text(tls.groupedFingerprint)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+            Text("在墨水屏上配对时，它显示的指纹必须与上面这段完全一致。指纹来自根证书，叶证书续期不会改变它，因此不用重新配对。")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Button("复制指纹") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(tls.spki ?? "", forType: .string)
+                }
+                Button("重置证书身份", role: .destructive) { Task { await resetIdentity() } }
+            }
+            Text("重置会换掉根证书，所有已配对设备都必须重新确认新指纹；不重置就无法让旧设备失效。")
+                .font(.caption).foregroundStyle(.orange)
+        } else if let error = accountWorker.bridgeTlsError {
+            Text(error).font(.caption).foregroundStyle(.red)
+        }
+        if !server.lanServing {
+            Text("局域网已打开，但 HTTPS 监听没有起来（通常是证书还没准备好）。墨水屏此时连不上，也不会退回明文 HTTP。")
+                .font(.caption).foregroundStyle(.orange)
+        }
+    }
+
+    /// Replace the certificate root, then restart the listener so the port
+    /// actually serves the new identity — a reset that leaves the old
+    /// certificate running would look successful and change nothing.
+    private func resetIdentity() async {
+        busy = true
+        defer { busy = false }
+        let replaced = await accountWorker.resetBridgeTls()
+        guard replaced else { return }
+        pairingCode = ""
+        if !(await server.restartServer()) {
+            notice = "证书已重置，但桥接重启失败：端口上仍是旧证书，请手动重启 AICC"
+        }
     }
 
     private func pair() async {

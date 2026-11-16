@@ -12,6 +12,7 @@ import os
 import platform
 import secrets
 import socket
+import ssl
 import sys
 import threading
 import time
@@ -22,6 +23,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from collectors import magpie
+
+import bridge_tls
 
 ROOT = Path(__file__).resolve().parent
 SERVER_STARTED_AT = time.time()
@@ -48,6 +51,9 @@ _pair_deadline = 0
 _pair_failures = OrderedDict()
 _rates = OrderedDict()
 _rate_lock = threading.Lock()
+# 局域网 HTTPS 真的起来之后才有内容（端口、指纹、证书到期时间）；
+# 没起来就是 None，`bind` 与 `lan_serving` 都以此为准，不看环境变量。
+_lan_info = None
 
 
 def version():
@@ -55,37 +61,64 @@ def version():
 
 
 def host_id():
+    """Stable identity of this Mac, created once and never rewritten.
+
+    PR-B pairs devices against this id and a certificate, so a second value is
+    worse than a wrong one: two ids mean two devices believe they paired with
+    two different Macs.  Creation therefore happens under an advisory lock, and
+    the file is replaced atomically — a reader can never see a half-written id,
+    and a wedged empty file gets healed instead of being overwritten by every
+    caller in turn.
+    """
     path = DATA_PATH.parent / "host_id"
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        # 由**创建者**写完再返回。以前创建成功与失败之后都走同一条读路径，
-        # 两个线程同时进来时，输的一方会读到刚创建、还没写完的空文件，
-        # 于是把空 host_id 发给设备（两台机器被记成同一台）。
-        value = uuid.uuid4().hex
-        with path.open("x", encoding="utf-8") as output:
-            output.write(value)
-            output.flush()
-            os.fsync(output.fileno())
-        return value
-    except FileExistsError:
-        pass
+        guard = _host_id_lock(path)
     except OSError:
-        return uuid.uuid4().hex
-    # 读到空内容说明别人刚建还没落盘：短暂重试，仍然为空就自己写一份。
-    for _ in range(3):
+        guard = None
+    try:
         try:
             value = path.read_text(encoding="utf-8").strip()
         except (FileNotFoundError, OSError):
             value = ""
         if value:
             return value
-        time.sleep(0.02)
-    value = uuid.uuid4().hex
-    try:
-        path.write_text(value, encoding="utf-8")
-    except OSError:
-        pass
-    return value
+        value = uuid.uuid4().hex
+        temporary = path.with_name("host_id.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as output:
+                output.write(value)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, path)
+        except OSError:
+            return value
+        return value
+    finally:
+        if guard is not None:
+            guard.close()
+
+
+def _host_id_lock(path):
+    """Cross-process lock file; `close()` releases it."""
+    import fcntl
+
+    handle = os.open(str(path.with_name("host_id.lock")), os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    return _FdGuard(handle)
+
+
+class _FdGuard:
+    def __init__(self, descriptor):
+        self.descriptor = descriptor
+
+    def close(self):
+        import fcntl
+
+        try:
+            fcntl.flock(self.descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(self.descriptor)
 
 
 def requested_host():
@@ -142,13 +175,20 @@ def clear_pair_failures(address):
 
 
 def server_identity():
-    return {"protocol": "aicc", "companion": True, "version": version(), "host_id": host_id(),
-            "server_instance_id": SERVER_INSTANCE_ID, "hostname": socket.gethostname(),
-            "platform": "macOS" if platform.system() == "Darwin" else platform.system(),
-            # 监听范围要能被宿主校验：升级后如果旧进程还绑在 0.0.0.0，
-            # App 只看 version/build 会认它"兼容"而继续复用，局域网暴露就留在原地。
-            "bind": "lan" if lan_enabled() else "loopback",
-            "status_schema": magpie.SCHEMA_VERSION}
+    identity = {"protocol": "aicc", "companion": True, "version": version(), "host_id": host_id(),
+                "server_instance_id": SERVER_INSTANCE_ID, "hostname": socket.gethostname(),
+                "platform": "macOS" if platform.system() == "Darwin" else platform.system(),
+                # 监听范围要能被宿主校验：升级后如果旧进程还绑在 0.0.0.0，
+                # App 只看 version/build 会认它"兼容"而继续复用，局域网暴露就留在原地。
+                "bind": "lan" if lan_enabled() else "loopback",
+                # bind 说"想不想"，lan_serving 说"成没成"：证书缺失时两者不一致，
+                # 界面必须能把这件事说出来，而不是显示已开启却连不上。
+                "lan_serving": _lan_info is not None,
+                "protocol_version": bridge_tls.PROTOCOL_VERSION,
+                "status_schema": magpie.SCHEMA_VERSION}
+    if _lan_info is not None:
+        identity["https"] = _lan_info
+    return identity
 
 
 def live_health_payload():
@@ -342,28 +382,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path != "/api/pair":
             # Network devices never reach Magpie's refresh, account or routing APIs.
             return self.send_json({"error": "Read-only bridge"}, 403)
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-            if not 0 < length <= 256:
-                raise ValueError()
-            document = json.loads(self.rfile.read(length))
-            code = document.get("code")
-            if not isinstance(code, str) or len(code) != 8 or not code.isascii() or not code.isdigit():
-                raise ValueError()
-        except (ValueError, TypeError, AttributeError):
-            return self.send_json({"error": "Invalid pairing code"}, 400)
-        if pair_blocked(address):
-            return self.send_json({"error": "Too many attempts, wait a moment"}, 429)
-        with _lock:
-            valid = (_pair_code is not None and time.monotonic() < _pair_deadline
-                     and hmac.compare_digest(code, _pair_code))
-            if valid:
-                _pair_code = None
-        if not valid:
-            note_pair_failure(address)
-            return self.send_json({"error": "Pairing code expired or incorrect"}, 403)
-        clear_pair_failures(address)
-        return self.send_json({"token": _token, "host_id": host_id()})
+        return attempt_pairing(self)
 
     def send_json(self, payload, status=200, headers=None):
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
@@ -386,11 +405,103 @@ class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
 
 
-def start_discovery(http_port):
+def attempt_pairing(handler):
+    """POST /api/pair, shared by the loopback and the LAN listener.
+
+    The attempt counter is keyed on the source address either way, so a device
+    on the LAN cannot burn through the code any faster than one on the host.
+    """
+    global _pair_code
+    address = handler.client_address[0]
+    try:
+        length = int(handler.headers.get("Content-Length", "0"))
+        if not 0 < length <= 256:
+            raise ValueError()
+        document = json.loads(handler.rfile.read(length))
+        code = document.get("code")
+        if not isinstance(code, str) or len(code) != 8 or not code.isascii() or not code.isdigit():
+            raise ValueError()
+    except (ValueError, TypeError, AttributeError):
+        return handler.send_json({"error": "Invalid pairing code"}, 400)
+    if pair_blocked(address):
+        return handler.send_json({"error": "Too many attempts, wait a moment"}, 429)
+    with _lock:
+        valid = (_pair_code is not None and time.monotonic() < _pair_deadline
+                 and hmac.compare_digest(code, _pair_code))
+        if valid:
+            _pair_code = None
+    if not valid:
+        note_pair_failure(address)
+        return handler.send_json({"error": "Pairing code expired or incorrect"}, 403)
+    clear_pair_failures(address)
+    granted = {"token": _token, "host_id": host_id(), "protocol_version": bridge_tls.PROTOCOL_VERSION}
+    # 设备要能验证之后的每一次连接，就需要一个信任锚；自签根不在任何系统信任库里，
+    # 所以配对响应把根证书一起给它。这里的信任仍然来自用户人工核对过的指纹。
+    try:
+        granted.update(bridge_tls.pairing_material())
+    except bridge_tls.TlsUnavailable:
+        pass
+    return handler.send_json(granted)
+
+
+class LanHandler(DashboardHandler):
+    """What a network device may reach: health, pairing, read-only status.
+
+    This class deliberately lists its routes instead of inheriting the host's
+    routing table: `/api/pairing`, `/api/shutdown` and `/api/health/ready` are
+    loopback-only by design, and copying every HTTP route onto HTTPS is exactly
+    how an account-management endpoint ends up exposed to the whole subnet.
+    """
+
+    def is_local_request(self):
+        return False
+
+    def do_GET(self):
+        if not allow_request(self.client_address[0], "read", READ_LIMIT_PER_MINUTE):
+            return self.send_json({"error": "Too many requests"}, 429)
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/health/live":
+            return self.send_json(live_health_payload())
+        if parsed.path != "/api/status":
+            return self.send_json({"error": "Not available over LAN"}, 403)
+        if not self.authorized():
+            return self.send_json({"error": "Pair this device in AICC settings"}, 401)
+        schema = requested_schema(self, parse_qs(parsed.query))
+        return self.send_json(load_status(schema), headers={"X-AICC-Schema": str(schema)})
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        if not allow_request(self.client_address[0], "pair", PAIR_LIMIT_PER_MINUTE):
+            return self.send_json({"error": "Too many requests"}, 429)
+        if path != "/api/pair":
+            return self.send_json({"error": "Read-only bridge"}, 403)
+        return attempt_pairing(self)
+
+
+class LanServer(ThreadingHTTPServer):
+    """HTTPS-only listener; the socket is wrapped by bridge_tls, not here."""
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        # A device that aborts mid-handshake (wrong pin, plaintext probe, sleep)
+        # is an expected event on a network listener, not a server fault.
+        error = sys.exc_info()[1]
+        if isinstance(error, (ssl.SSLError, ConnectionResetError, BrokenPipeError, OSError)):
+            return
+        super().handle_error(request, client_address)
+
+
+def start_discovery(https_port):
     """UDP 发现只在「允许局域网 + 显式打开发现」时才跑。
 
     以前它无条件绑 `0.0.0.0:8766`，等于桥接开关关着也在局域网里应答；
     现在关掉局域网访问就连发现一起停，端口真正收回去。
+
+    广播本身没有认证能力，所以它只负责"这里有个服务器"，附带的 SPKI 指纹
+    只是**给人看**的候选值：设备必须让用户把它和 Mac 设置页上的完整指纹
+    对一遍才能建立信任，绝不能因为广播里带着指纹就自动接受（那是把信任
+    建立在一个谁都能伪造的 UDP 包上）。
     """
     if not discovery_enabled():
         return False
@@ -403,12 +514,53 @@ def start_discovery(http_port):
                 while True:
                     request, address = channel.recvfrom(512)
                     if request.strip() == DISCOVERY_MAGIC:
-                        payload = {"name": "AICC Companion", "port": http_port, **server_identity()}
+                        # 广播要小：设备侧一个 512 字节的包就该装得下。整份 identity
+                        # 带上 sans / TLS 诊断后会超过 MTU 上限，设备解析直接失败。
+                        identity = server_identity()
+                        payload = {
+                            "name": "AICC Companion",
+                            "port": https_port,
+                            "protocol": identity["protocol"],
+                            "protocol_version": identity["protocol_version"],
+                            "host_id": identity["host_id"],
+                            "hostname": identity["hostname"],
+                            "platform": identity["platform"],
+                            "version": identity["version"],
+                        }
+                        if _lan_info is not None:
+                            payload["https"] = {
+                                "port": https_port,
+                                "protocol_version": _lan_info["protocol_version"],
+                                "spki": _lan_info["spki"],
+                            }
                         channel.sendto(json.dumps(payload).encode(), address)
         except OSError:
             pass
     threading.Thread(target=serve, daemon=True).start()
     return True
+
+
+def lan_bootstrap():
+    """Load certificate material for the LAN listener.  Never raises.
+
+    Returning `(None, None)` is the fail-closed path: the caller then serves
+    loopback only.  There is deliberately no "continue in plaintext" branch.
+    """
+    global _lan_info
+    if not lan_enabled():
+        return None, None
+    try:
+        material = bridge_tls.load_identity()
+        context = bridge_tls.build_context(material)
+    except bridge_tls.TlsUnavailable as error:
+        # 失败必须"关"，不能退化成明文：用户以为开了局域网，
+        # 实际把额度数据摊在网段上，比连不上危险得多。
+        print(f"[bridge] LAN requested but TLS unavailable, keeping loopback only: {error}", file=sys.stderr)
+        return None, None
+    _lan_info = bridge_tls.summary(material, context)
+    print(f"[bridge] https {LAN_HOST}:{bridge_tls.LAN_PORT} "
+          f"{json.dumps(bridge_tls.diagnostics(context), sort_keys=True)}", file=sys.stderr)
+    return material, context
 
 
 def main():
@@ -418,10 +570,18 @@ def main():
         if len(supplied) < 32:
             raise SystemExit("Missing bridge credential")
         _token = supplied
-    host = requested_host()
-    server = DashboardServer((host, int(os.environ.get("EINK_PORT", "8765"))), DashboardHandler)
-    if host == LAN_HOST:
-        start_discovery(server.server_port)
+
+    # 本机管理接口永远是回环上的明文 HTTP：它只对本机进程有意义，
+    # 公网/局域网都不该看到它，也不需要证书。
+    loopback = DashboardServer((DEFAULT_HOST, int(os.environ.get("EINK_PORT", "8765"))), DashboardHandler)
+    lan_server = None
+
+    material, context = lan_bootstrap()
+    if context is not None:
+        lan_server = LanServer((LAN_HOST, bridge_tls.LAN_PORT), LanHandler)
+        lan_server.socket = context.wrap_socket(lan_server.socket, server_side=True)
+        threading.Thread(target=lan_server.serve_forever, daemon=True).start()
+        start_discovery(bridge_tls.LAN_PORT)
 
     def poll():
         while True:
@@ -441,11 +601,14 @@ def main():
     if os.environ.get("AICC_PARENT_PID"):
         threading.Thread(target=watchdog, daemon=True).start()
     try:
-        server.serve_forever()
+        loopback.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        server.server_close()
+        loopback.server_close()
+        if lan_server is not None:
+            lan_server.shutdown()
+            lan_server.server_close()
 
 
 if __name__ == "__main__":
