@@ -15,6 +15,11 @@ struct CredentialMigrationSummary: Equatable {
     /// 有迁移记录、且当前行仍是那次迁移产物的条数 —— 只有这些能回滚。
     var rollbackable: Int
     var total: Int
+    /// CRED-5：借用授权仍指着钥匙串（`keychain:` 引用）。
+    ///
+    /// 这类行**不迁移**（会把 Magpie 的 access 复制成明文文件），只做一次
+    /// 显式的重新关联：改引用、一个令牌都不搬。
+    var needsRelink: Int = 0
 
     static let empty = CredentialMigrationSummary(
         migratable: 0,
@@ -22,11 +27,12 @@ struct CredentialMigrationSummary: Equatable {
         magpie: 0,
         blocked: 0,
         rollbackable: 0,
-        total: 0
+        total: 0,
+        needsRelink: 0
     )
 
     /// 一条都不需要迁（含"全是 JSON / 只有 Magpie"）。
-    var needsAttention: Bool { migratable > 0 || blocked > 0 }
+    var needsAttention: Bool { migratable > 0 || blocked > 0 || needsRelink > 0 }
 }
 
 /// 盘点里的一条授权。
@@ -41,6 +47,9 @@ struct CredentialMigrationItem: Equatable, Identifiable {
     var migratable: Bool
     var rollbackable: Bool
     var blocked: String?
+    /// CRED-5：后端给出的下一步动作。目前只有 `relink`。
+    /// 界面按这个字段决定按钮，**不**去匹配 `blocked` 的字符串。
+    var action: String? = nil
 
     var id: String { "\(domain)/\(accountId)/\(source)" }
 
@@ -48,6 +57,7 @@ struct CredentialMigrationItem: Equatable, Identifiable {
         switch blocked {
         case "already_json": return "已经是本地 JSON"
         case "magpie_managed": return "由 Magpie 管理，不迁移"
+        case "needs_relink": return "借用授权仍指向钥匙串，需重新关联"
         case "reference_unusable": return "引用不可用"
         case nil: return nil
         default: return blocked
@@ -64,10 +74,28 @@ struct CredentialMigrationItem: Equatable, Identifiable {
     }
 }
 
+/// 旧键搬运（G4 时代：旧钥匙串键 → 新键）的状态。
+///
+/// 它是**另一套**状态机，和 `credential_migrations` 无关：`failed` 表示用户
+/// 拒绝过钥匙串授权，或者写入失败，**不会**被启动路径自动重试。
+struct CredentialKeyMigration: Equatable {
+    var failed: Int
+    var pending: Int
+
+    static let empty = CredentialKeyMigration(failed: 0, pending: 0)
+
+    /// 有失败行：给一个显式的"重试"按钮，写清楚会弹授权框。
+    var needsAttention: Bool { failed > 0 }
+}
+
 /// 一次盘点结果。
 struct CredentialMigrationState: Equatable {
     var summary: CredentialMigrationSummary
     var items: [CredentialMigrationItem]
+    /// 库里有迁移记录的条数（含后来被重新授权、记录已不再描述当前行的）。
+    var migratedRecords: Int = 0
+    /// 旧键搬运的失败 / 待处理条数。
+    var keyMigration: CredentialKeyMigration = .empty
 
     static let empty = CredentialMigrationState(summary: .empty, items: [])
 
@@ -84,7 +112,8 @@ struct CredentialMigrationState: Equatable {
                 reference: raw["reference"] as? String,
                 migratable: raw["migratable"] as? Bool ?? false,
                 rollbackable: raw["rollbackable"] as? Bool ?? false,
-                blocked: raw["blocked"] as? String
+                blocked: raw["blocked"] as? String,
+                action: raw["action"] as? String
             )
         }
         return CredentialMigrationState(
@@ -94,9 +123,18 @@ struct CredentialMigrationState: Equatable {
                 magpie: summary["magpie"] as? Int ?? 0,
                 blocked: summary["blocked"] as? Int ?? 0,
                 rollbackable: summary["rollbackable"] as? Int ?? 0,
-                total: summary["total"] as? Int ?? 0
+                total: summary["total"] as? Int ?? 0,
+                needsRelink: summary["needsRelink"] as? Int ?? 0
             ),
-            items: items
+            items: items,
+            migratedRecords: json["migratedRecords"] as? Int ?? 0,
+            keyMigration: {
+                guard let raw = json["keyMigration"] as? [String: Any] else { return .empty }
+                return CredentialKeyMigration(
+                    failed: raw["failed"] as? Int ?? 0,
+                    pending: raw["pending"] as? Int ?? 0
+                )
+            }()
         )
     }
 }
@@ -110,6 +148,8 @@ struct CredentialVerifyReport: Equatable {
     var brokenFiles: Int
     /// 回滚过、但副本文件没删掉的份数。**不是故障**：记录还在，下次回滚会重试。
     var pendingCleanup: Int
+    /// CRED-5：借用授权还指着钥匙串（可重新关联，不属于"待迁移"）。
+    var needsRelink: Int = 0
 
     /// 有需要人处理的问题（异常条目 / 孤儿文件 / 坏文件）。
     ///
@@ -124,7 +164,8 @@ struct CredentialVerifyReport: Equatable {
             pendingKeychain: json["pendingKeychain"] as? Int ?? 0,
             orphanCount: (json["orphans"] as? [Any])?.count ?? 0,
             brokenFiles: json["brokenFiles"] as? Int ?? 0,
-            pendingCleanup: (json["pendingCleanup"] as? [Any])?.count ?? 0
+            pendingCleanup: (json["pendingCleanup"] as? [Any])?.count ?? 0,
+            needsRelink: json["needsRelink"] as? Int ?? 0
         )
     }
 }

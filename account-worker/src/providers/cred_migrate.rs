@@ -69,6 +69,14 @@ pub const DOMAIN_QODER: &str = "qoder";
 const BLOCKED_ALREADY_JSON: &str = "already_json";
 const BLOCKED_MAGPIE: &str = "magpie_managed";
 const BLOCKED_REF_UNUSABLE: &str = "reference_unusable";
+/// CRED-5：借用授权仍写着 `keychain:` 引用。
+///
+/// 这类行**不能**按旧凭据迁移（那会把 Magpie 的 access 复制成本机明文文件，
+/// 违反 PRD §3「借用授权的 access 每次现读、不持久化」），也**不能**当成
+/// `magpie_managed`（它不是"已经关联好了"，而是每次读取都会去敲钥匙串，
+/// 正是弹窗与 RPC 阻塞的真正来源）。它们只需要一次显式的重新关联，
+/// 把引用换成 `magpie:v1:<source_key>` —— 一个令牌都不搬。
+const BLOCKED_NEEDS_RELINK: &str = "needs_relink";
 
 /// 迁移范围。
 ///
@@ -164,6 +172,11 @@ impl Entry {
         self.blocked.is_none() && self.storage == STORAGE_KEYCHAIN
     }
 
+    /// 唯一一种"可修复但不迁移"的状态：改引用即可，不动任何令牌。
+    fn needs_relink(&self) -> bool {
+        self.blocked == Some(BLOCKED_NEEDS_RELINK)
+    }
+
     fn to_json(&self) -> Value {
         json!({
             "domain": self.domain,
@@ -177,6 +190,8 @@ impl Entry {
             "migratable": self.migratable(),
             "rollbackable": self.rollbackable,
             "blocked": self.blocked,
+            // 界面据此决定给不给"重新关联"按钮，不做 blocked 字符串匹配。
+            "action": if self.needs_relink() { Some("relink") } else { None },
         })
     }
 }
@@ -220,7 +235,15 @@ fn collect(app: &App) -> RpcResult<Vec<Entry>> {
         };
         let storage = StorageView::of(&row.access_ref);
         let blocked = if row.kind != ids::KIND_OWN {
-            Some(BLOCKED_MAGPIE)
+            // CRED-5：借用的旧行要看**引用**，不能只看 kind。
+            // * `keychain:` → 每次读取都敲钥匙串，必须显式重新关联；
+            // * `magpie:v1:` → 真的由 Magpie 管理，什么都不用做；
+            // * 其它（`unknown:` / 裸键 / 空）→ 引用坏了，是异常，不能报"已管理"。
+            match storage {
+                STORAGE_KEYCHAIN => Some(BLOCKED_NEEDS_RELINK),
+                STORAGE_MAGPIE => Some(BLOCKED_MAGPIE),
+                _ => Some(BLOCKED_REF_UNUSABLE),
+            }
         } else if storage == STORAGE_LOCALJSON {
             Some(BLOCKED_ALREADY_JSON)
         } else if storage == STORAGE_MAGPIE {
@@ -402,21 +425,21 @@ fn digest_matches(stored: &str, bytes: &[u8]) -> bool {
     }
 }
 
-/// 引用前缀 → 存储种类。**不做猜测**：未知前缀单独一类。
+/// 引用 → 存储种类。**用严格解析器判定，不做前缀猜测。**
+///
+/// 前缀判断会把 `magpie:v1:`（来源键为空）、`unknown:v9:x` 这类坏引用算成
+/// "Magpie" / "Keychain"，盘点显示得好像没问题，而真正读取时的
+/// `CredentialRef::parse` 会直接拒绝它。两个界面的结论必须来自同一个判据。
 struct StorageView;
 
 impl StorageView {
     fn of(reference: &str) -> &'static str {
-        if reference.is_empty() {
-            "unusable"
-        } else if reference.starts_with(reference::LOCAL_JSON_PREFIX) {
-            STORAGE_LOCALJSON
-        } else if reference.starts_with(reference::KEYCHAIN_PREFIX) {
-            STORAGE_KEYCHAIN
-        } else if reference.starts_with("magpie:") {
-            STORAGE_MAGPIE
-        } else {
-            "unusable"
+        match reference::CredentialRef::parse(reference) {
+            Ok(reference::CredentialRef::Keychain { .. }) => STORAGE_KEYCHAIN,
+            Ok(reference::CredentialRef::LocalJson { .. }) => STORAGE_LOCALJSON,
+            Ok(reference::CredentialRef::Magpie { .. }) => STORAGE_MAGPIE,
+            // 空串、未知前缀、缺来源键 —— 都是"引用不可用"。
+            Err(_) => "unusable",
         }
     }
 }
@@ -427,11 +450,16 @@ fn summary_json(entries: &[Entry]) -> Value {
     let mut magpie = 0;
     let mut blocked = 0;
     let mut rollbackable = 0;
+    let mut needs_relink = 0;
     for entry in entries {
         if entry.rollbackable {
             rollbackable += 1;
         }
-        if entry.migratable() {
+        // `needs_relink` 单独一档：它既不是"可迁移"，也不是"引用异常"，
+        // 更不是"已经由 Magpie 管理"。混进任何一个都会让界面给出错误的下一步。
+        if entry.needs_relink() {
+            needs_relink += 1;
+        } else if entry.migratable() {
             migratable += 1;
         } else if entry.storage == STORAGE_LOCALJSON {
             already_json += 1;
@@ -445,6 +473,7 @@ fn summary_json(entries: &[Entry]) -> Value {
         "migratable": migratable,
         "alreadyJson": already_json,
         "magpie": magpie,
+        "needsRelink": needs_relink,
         "blocked": blocked,
         "rollbackable": rollbackable,
         "total": entries.len(),
@@ -453,11 +482,68 @@ fn summary_json(entries: &[Entry]) -> Value {
 
 pub fn inventory(app: &App) -> RpcResult<Value> {
     let entries = collect(app)?;
+    // "已迁移"只认记录数：CRED-3 之后原生新建的 JSON 授权不是迁移来的。
+    let migrated_records = app
+        .with_db(|db| db.credential_migration_record_count())
+        .unwrap_or(0);
+    // 旧键搬运（G4 时代）是另一套状态机，单独报：失败的行**不会**被自动重试，
+    // 面板要给出数量和一个显式重试按钮（CRED-5 复核 P0-1）。
+    let key_failed = app
+        .with_db(|db| db.authorizations_failed_key_migration())
+        .map(|rows| rows.len())
+        .unwrap_or(0);
+    let key_pending = app
+        .with_db(|db| db.authorizations_pending_key_migration())
+        .map(|rows| rows.len())
+        .unwrap_or(0);
     Ok(json!({
         "generatedAt": crate::clock::now_rfc3339(),
         "summary": summary_json(&entries),
+        "migratedRecords": migrated_records,
+        "keyMigration": { "failed": key_failed, "pending": key_pending },
         "items": entries.iter().map(Entry::to_json).collect::<Vec<_>>(),
         "note": "只盘点有授权行的凭据；没有任何授权行的旧钥匙串条目不在范围内（没有引用可依，无法安全迁移）",
+    }))
+}
+
+/// CRED-5：把仍指向钥匙串的**借用授权**改成 Magpie 动态关联。
+///
+/// 与 `credentials.migration.run` 的分工必须说清楚：
+///
+/// * 迁移：把 AICC **自有**令牌复制成本机 JSON（有明文风险，要同意）；
+/// * 重新关联：只把 `keychain:<key>` 换成 `magpie:v1:<source_key>`，
+///   **一个令牌都不读、不写、不复制**，所以不需要明文同意，
+///   也不会创建任何 `secrets/v1/*.json`。旧钥匙串条目照旧保留。
+///
+/// 这才是"借用授权不再弹窗"的正解：弹窗源头是读钥匙串，换成现读 Magpie
+/// 文件之后这条路就断了；而把它迁移到 JSON 反而违反 PRD §3 的
+/// 「借用授权的 access 每次现读、不持久化」。
+pub fn relink(app: &App, params: &Value) -> RpcResult<Value> {
+    let scope = Scope::parse(params)?;
+    if scope
+        .domain
+        .as_deref()
+        .is_some_and(|domain| domain != DOMAIN_WORKBUDDY)
+    {
+        return Err(RpcError::invalid_params(
+            "重新关联只适用于 WorkBuddy 的借用授权（Qoder 有自己的授权流程）",
+        ));
+    }
+
+    // 锁在 `relink_pending` 内部（两个入口共用同一处），这里不再重复加锁。
+    let report = crate::auth::relink::relink_pending(app, scope.account_id.as_deref())?;
+
+    // 改完之后立刻重新盘点，界面只发一次请求就能拿到最新状态。
+    let entries = collect(app)?;
+    Ok(json!({
+        "relinked": report.get("relinked").cloned().unwrap_or(json!(0)),
+        "failed": report.get("failed").cloned().unwrap_or(json!(0)),
+        "pending": report.get("pending").cloned().unwrap_or(json!(0)),
+        "skipped": report.get("skipped").cloned().unwrap_or(json!([])),
+        "items": report.get("items").cloned().unwrap_or(json!([])),
+        // 旧钥匙串条目刻意保留：这是回滚与排查的唯一依据。
+        "legacyKeysKept": true,
+        "summary": summary_json(&entries),
     }))
 }
 
@@ -1319,6 +1405,8 @@ pub fn verify(app: &App) -> RpcResult<Value> {
     let mut ok = 0usize;
     let mut broken = 0usize;
     let mut pending = 0usize;
+    // 借用授权还指着钥匙串：不是"待迁移"，而是"待重新关联"。
+    let mut needs_relink = 0usize;
 
     for entry in &entries {
         let record = migrations.iter().find(|record| {
@@ -1349,15 +1437,53 @@ pub fn verify(app: &App) -> RpcResult<Value> {
                 }
             },
             STORAGE_KEYCHAIN => {
-                pending += 1;
+                // 同一条 `keychain:` 引用，三种完全不同的处境。混成一个
+                // "pending_keychain" 会让用户以为"还有 7 条要迁移"，其实只有一部分需要动手，
+                // 另一部分根本不该迁移（借用的 access 不持久化）。
+                match entry.blocked {
+                    Some(BLOCKED_NEEDS_RELINK) => {
+                        needs_relink += 1;
+                        items.push(json!({
+                            "domain": entry.domain,
+                            "accountId": entry.account_id,
+                            "source": entry.source,
+                            "state": "needs_relink",
+                        }));
+                    }
+                    Some(BLOCKED_MAGPIE) => {
+                        items.push(json!({
+                            "domain": entry.domain,
+                            "accountId": entry.account_id,
+                            "source": entry.source,
+                            "state": "magpie_managed",
+                        }));
+                    }
+                    _ => {
+                        pending += 1;
+                        items.push(json!({
+                            "domain": entry.domain,
+                            "accountId": entry.account_id,
+                            "source": entry.source,
+                            "state": "pending_keychain",
+                        }));
+                    }
+                }
+            }
+            // 动态关联由 Magpie 文件负责，这里不比对本机文件，也不算异常。
+            STORAGE_MAGPIE => {}
+            // 其它都说明**引用本身坏了**（空串、未知前缀、`magpie:v1:` 缺来源键、
+            // 引用种类与授权种类不匹配）。以前这里静默跳过，核验会漏报：
+            // 盘点报 "unusable"，核验却说"全正常"。
+            _ => {
+                broken += 1;
                 items.push(json!({
                     "domain": entry.domain,
                     "accountId": entry.account_id,
                     "source": entry.source,
-                    "state": "pending_keychain",
+                    "state": "broken",
+                    "reason": "reference_unusable",
                 }));
             }
-            _ => {}
         }
     }
 
@@ -1436,6 +1562,7 @@ pub fn verify(app: &App) -> RpcResult<Value> {
         "ok": ok,
         "broken": broken,
         "pendingKeychain": pending,
+        "needsRelink": needs_relink,
         "rollbackable": entries.iter().filter(|entry| entry.rollbackable).count(),
         "staleRecords": stale_records,
         "pendingCleanup": cleanup_pending,
@@ -1766,6 +1893,226 @@ mod tests {
         let text = value.to_string();
         assert!(!text.contains("WB-TOKEN"), "盘点不许回显令牌");
         assert!(!text.contains("WB-REFRESH"));
+    }
+
+    /// CRED-5：借用授权还写着 `keychain:` 引用时，**不是**"由 Magpie 管理"，
+    /// 也不是可迁移项 —— 它需要一次显式重新关联。
+    ///
+    /// 误判的代价很具体：标成 `magpie_managed` 会让用户以为"已经好了"，
+    /// 而每次读取其实仍在敲钥匙串；标成 `migratable` 则会把 Magpie 的 access
+    /// 复制成本机明文文件，违反 PRD §3。
+    #[test]
+    fn a_legacy_magpie_row_is_needs_relink_not_migratable_nor_managed() {
+        let (app, _dir) = app_with(SecureStore::memory());
+        let acc = account(&app, "uid-relink");
+        let key = ids::access_key(&acc.id, ids::KIND_MAGPIE);
+        app.secure.set(&key, b"BORROWED-TOKEN").unwrap();
+        let row = AuthorizationRecord {
+            id: ids::auth_id(&acc.id, ids::KIND_MAGPIE),
+            account_id: acc.id.clone(),
+            kind: ids::KIND_MAGPIE.to_string(),
+            access_ref: ids::keychain_ref(&key),
+            refresh_ref: None,
+            auth_domain: None,
+            token_expires_at: None,
+            status: "valid".to_string(),
+            version: 1,
+            key_migration_state: KEY_STATE_READY.to_string(),
+            source_key: None,
+            last_used_at: None,
+            last_error: None,
+            created_at: "2026-11-01T00:00:00Z".to_string(),
+            updated_at: "2026-11-01T00:00:00Z".to_string(),
+        };
+        app.with_db(|db| db.insert_authorization_if_absent(&row))
+            .unwrap();
+
+        let value = inventory(&app).unwrap();
+        assert_eq!(value["summary"]["needsRelink"], 1, "{value}");
+        assert_eq!(value["summary"]["migratable"], 0, "借用授权不许迁移");
+        assert_eq!(value["summary"]["magpie"], 0, "还没关联，不能算已管理");
+        assert_eq!(value["summary"]["blocked"], 0, "可修复的项不算引用异常");
+        let item = &value["items"][0];
+        assert_eq!(item["blocked"], "needs_relink");
+        assert_eq!(item["action"], "relink");
+        assert_eq!(item["migratable"], false);
+        assert!(
+            !value.to_string().contains("BORROWED-TOKEN"),
+            "盘点不许回显令牌"
+        );
+
+        // 迁移即使被调用也不会碰它。
+        let migrated = run(&app, &json!({})).unwrap_err();
+        assert!(
+            migrated.message.contains("还没有启用本地 JSON"),
+            "没有明文同意时迁移整体拒绝：{}",
+            migrated.message
+        );
+        let after = app
+            .with_db(|db| db.find_authorization(&acc.id, ids::KIND_MAGPIE))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.access_ref,
+            ids::keychain_ref(&key),
+            "引用一个字节都没动"
+        );
+    }
+
+    /// 非法引用必须报成"异常"，不能混成"由 Magpie 管理"。
+    ///
+    /// 一条写着 `unknown:` 的借用授权，界面若显示"由 Magpie 管理，不迁移"，
+    /// 用户就会以为一切正常，而读取时它其实是坏的。
+    #[test]
+    fn an_unusable_reference_on_a_magpie_row_is_broken_not_managed() {
+        let (app, _dir) = app_with(SecureStore::memory());
+        let acc = account(&app, "uid-badref");
+        let row = AuthorizationRecord {
+            id: ids::auth_id(&acc.id, ids::KIND_MAGPIE),
+            account_id: acc.id.clone(),
+            kind: ids::KIND_MAGPIE.to_string(),
+            access_ref: "unknown:v9:something".to_string(),
+            refresh_ref: None,
+            auth_domain: None,
+            token_expires_at: None,
+            status: "valid".to_string(),
+            version: 1,
+            key_migration_state: KEY_STATE_READY.to_string(),
+            source_key: None,
+            last_used_at: None,
+            last_error: None,
+            created_at: "2026-11-01T00:00:00Z".to_string(),
+            updated_at: "2026-11-01T00:00:00Z".to_string(),
+        };
+        app.with_db(|db| db.insert_authorization_if_absent(&row))
+            .unwrap();
+
+        let value = inventory(&app).unwrap();
+        assert_eq!(value["summary"]["blocked"], 1, "{value}");
+        assert_eq!(value["summary"]["needsRelink"], 0, "{value}");
+        assert_eq!(value["summary"]["magpie"], 0, "坏引用不能算已管理");
+        assert_eq!(value["summary"]["migratable"], 0, "{value}");
+        assert_eq!(value["items"][0]["blocked"], "reference_unusable");
+        assert_eq!(value["items"][0]["storage"], "unusable");
+        assert!(
+            value["items"][0]["action"].is_null(),
+            "坏引用没有可点的动作"
+        );
+    }
+
+    /// 新旧混装：同一台机器上四行四种状态，各归各的档，不许互相污染。
+    #[test]
+    fn old_and_new_rows_are_classified_one_by_one() {
+        let (app, _dir) = json_app();
+
+        // 1) 老的自有授权，还在钥匙串 → 可迁移
+        let legacy = account(&app, "uid-mix-old");
+        keychain_row(&app, &legacy);
+
+        // 2) 新的自有授权，已经是 JSON → 不迁移
+        let modern = account(&app, "uid-mix-new");
+        let modern_row = AuthorizationRecord {
+            id: ids::auth_id(&modern.id, ids::KIND_OWN),
+            account_id: modern.id.clone(),
+            kind: ids::KIND_OWN.to_string(),
+            access_ref: "localjson:v1:2f1a4c66-0000-4000-8000-000000000001".to_string(),
+            refresh_ref: Some("localjson:v1:2f1a4c66-0000-4000-8000-000000000001".to_string()),
+            auth_domain: None,
+            token_expires_at: None,
+            status: "valid".to_string(),
+            version: 2,
+            key_migration_state: KEY_STATE_READY.to_string(),
+            source_key: None,
+            last_used_at: None,
+            last_error: None,
+            created_at: "2026-11-01T00:00:00Z".to_string(),
+            updated_at: "2026-11-01T00:00:00Z".to_string(),
+        };
+        app.with_db(|db| db.insert_authorization_if_absent(&modern_row))
+            .unwrap();
+
+        // 3) 借用授权还指着钥匙串 → 重新关联
+        let borrowed = account(&app, "uid-mix-borrowed");
+        let borrowed_key = ids::access_key(&borrowed.id, ids::KIND_MAGPIE);
+        app.secure.set(&borrowed_key, b"BORROWED").unwrap();
+        app.with_db(|db| {
+            db.insert_authorization_if_absent(&AuthorizationRecord {
+                id: ids::auth_id(&borrowed.id, ids::KIND_MAGPIE),
+                account_id: borrowed.id.clone(),
+                kind: ids::KIND_MAGPIE.to_string(),
+                access_ref: ids::keychain_ref(&borrowed_key),
+                refresh_ref: None,
+                auth_domain: None,
+                token_expires_at: None,
+                status: "valid".to_string(),
+                version: 1,
+                key_migration_state: KEY_STATE_READY.to_string(),
+                source_key: None,
+                last_used_at: None,
+                last_error: None,
+                created_at: "2026-11-01T00:00:00Z".to_string(),
+                updated_at: "2026-11-01T00:00:00Z".to_string(),
+            })
+        })
+        .unwrap();
+
+        let value = inventory(&app).unwrap();
+        assert_eq!(value["summary"]["migratable"], 1, "{value}");
+        assert_eq!(value["summary"]["alreadyJson"], 1, "{value}");
+        assert_eq!(value["summary"]["needsRelink"], 1, "{value}");
+        assert_eq!(value["summary"]["blocked"], 0, "{value}");
+        assert_eq!(value["summary"]["total"], 3, "{value}");
+    }
+
+    /// 复审第二轮 #3：核验也要把坏引用算成异常。
+    ///
+    /// `magpie:v1:`（来源键为空）前缀看着像 Magpie，真正读取时
+    /// `CredentialRef::parse` 会拒绝它。以前 verify 的兜底分支是 `_ => {}`，
+    /// 于是盘点说"引用不可用"，核验说"0 条异常"。
+    #[test]
+    fn verify_counts_an_unparsable_reference_as_broken() {
+        let (app, _dir) = json_app();
+        for (uid, reference) in [
+            ("uid-empty-magpie-key", "magpie:v1:"),
+            ("uid-unknown-prefix", "unknown:v9:broken"),
+        ] {
+            let acc = account(&app, uid);
+            app.with_db(|db| {
+                db.insert_authorization_if_absent(&AuthorizationRecord {
+                    id: ids::auth_id(&acc.id, ids::KIND_MAGPIE),
+                    account_id: acc.id.clone(),
+                    kind: ids::KIND_MAGPIE.to_string(),
+                    access_ref: reference.to_string(),
+                    refresh_ref: None,
+                    auth_domain: None,
+                    token_expires_at: None,
+                    status: "valid".to_string(),
+                    version: 1,
+                    key_migration_state: KEY_STATE_READY.to_string(),
+                    source_key: None,
+                    last_used_at: None,
+                    last_error: None,
+                    created_at: "2026-11-01T00:00:00Z".to_string(),
+                    updated_at: "2026-11-01T00:00:00Z".to_string(),
+                })
+            })
+            .unwrap();
+        }
+
+        let value = inventory(&app).unwrap();
+        assert_eq!(value["summary"]["blocked"], 2, "{value}");
+        assert_eq!(value["summary"]["magpie"], 0, "坏引用不能算 Magpie");
+        assert_eq!(value["summary"]["needsRelink"], 0, "也不该提示重新关联");
+
+        let report = verify(&app).unwrap();
+        assert_eq!(report["broken"], 2, "核验必须报出来：{report}");
+        let broken_states = report["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["state"] == "broken")
+            .count();
+        assert_eq!(broken_states, 2, "{report}");
     }
 
     #[test]

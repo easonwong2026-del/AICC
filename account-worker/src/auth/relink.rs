@@ -25,7 +25,24 @@ use crate::storage::AuthorizationRecord;
 use super::magpie_link::{self, LinkProblem};
 
 /// 一次重新关联的结果：改了几行、还剩几行、每行为什么没改。
+///
+/// 逐条提交，**不是**一个事务：单行失败（CAS 被抢、数据库报错）只影响这一行，
+/// 后面的照常处理，返回值里逐条写清 `ok` / `reason`。批量中途整体报错会丢掉
+/// 已经改成功的那些行，界面就再也说不清到底改了几条（CRED-5 复核 S4）。
 pub fn relink_pending(app: &App, only_account: Option<&str>) -> RpcResult<Value> {
+    relink_pending_with(app, only_account, |_| Ok(()))
+}
+
+/// `before_write` 是确定性的故障注入点：拿到即将改写的行，返回 `Err` 就跳过它。
+pub(crate) fn relink_pending_with(
+    app: &App,
+    only_account: Option<&str>,
+    mut before_write: impl FnMut(&AuthorizationRecord) -> RpcResult<()>,
+) -> RpcResult<Value> {
+    // 与迁移、登录共用同一道锁（CRED-5 复核：两个入口必须落在同一锁域）。
+    // 放在这里而不是各个 RPC 入口各写一遍，后来新增的调用方也不会漏。
+    let _txn = crate::providers::qoder_secret::begin(app)?;
+
     let rows = app.with_db(|db| db.authorizations_pending_magpie_relink())?;
 
     // 文件读不了是环境问题，不是"这些账号没授权"：整体记一次原因，逐行回同一个值。
@@ -34,6 +51,8 @@ pub fn relink_pending(app: &App, only_account: Option<&str>) -> RpcResult<Value>
 
     let mut relinked: Vec<Value> = Vec::new();
     let mut skipped: Vec<Value> = Vec::new();
+    let mut items: Vec<Value> = Vec::new();
+    let mut failed = 0usize;
     let mut pending = 0usize;
 
     for row in rows {
@@ -49,8 +68,36 @@ pub fn relink_pending(app: &App, only_account: Option<&str>) -> RpcResult<Value>
                 "accountId": row.account_id,
                 "reason": "account_missing",
             }));
+            items.push(json!({
+                "authorizationId": row.id,
+                "accountId": row.account_id,
+                "ok": false,
+                "reason": "account_missing",
+            }));
             continue;
         };
+
+        // 只处理**严格可解析**的 `keychain:` 引用。`keychain:` 后面为空、
+        // 或者别的坏引用，一律不动 —— 盘点已经把它们报成 `reference_unusable`，
+        // 这里顺手改写只会让两个界面的结论互相矛盾。
+        match reference::CredentialRef::parse(&row.access_ref) {
+            Ok(reference::CredentialRef::Keychain { .. }) => {}
+            _ => {
+                skipped.push(json!({
+                    "authorizationId": row.id,
+                    "accountId": row.account_id,
+                    "reason": "reference_unusable",
+                    "message": "这一行的凭据引用无法解析，已跳过（不猜测、不改写）",
+                }));
+                items.push(json!({
+                    "authorizationId": row.id,
+                    "accountId": row.account_id,
+                    "ok": false,
+                    "reason": "reference_unusable",
+                }));
+                continue;
+            }
+        }
 
         let target = match &logins {
             Err(err) => Err(("magpie_unavailable".to_string(), Some(err.message()))),
@@ -62,10 +109,30 @@ pub fn relink_pending(app: &App, only_account: Option<&str>) -> RpcResult<Value>
 
         match target {
             Ok(source_key) => {
+                // 故障注入：模拟"写到这一行时数据库出错"。
+                if let Err(err) = before_write(&row) {
+                    failed += 1;
+                    skipped.push(json!({
+                        "authorizationId": row.id,
+                        "accountId": row.account_id,
+                        "reason": "write_failed",
+                        "message": err.message,
+                    }));
+                    items.push(json!({
+                        "authorizationId": row.id,
+                        "accountId": row.account_id,
+                        "ok": false,
+                        "reason": "write_failed",
+                        "message": err.message,
+                    }));
+                    continue;
+                }
+
                 let reference = reference::magpie_ref(&source_key)
                     .map_err(|err| crate::rpc::RpcError::internal(err.message))?;
                 // CAS：只在这一行还是"我读到的那个版本 + 那个引用"时才写。
-                let changed = app.with_db(|db| {
+                // 写失败**不中止批量**：前面已经改成功的行必须如实报出来。
+                let changed = match app.with_db(|db| {
                     db.rebind_authorization_ref(
                         &row.id,
                         row.version,
@@ -74,7 +141,26 @@ pub fn relink_pending(app: &App, only_account: Option<&str>) -> RpcResult<Value>
                         STORAGE_MAGPIE,
                         Some(&source_key),
                     )
-                })?;
+                }) {
+                    Ok(changed) => changed,
+                    Err(err) => {
+                        failed += 1;
+                        skipped.push(json!({
+                            "authorizationId": row.id,
+                            "accountId": row.account_id,
+                            "reason": "write_failed",
+                            "message": err.message,
+                        }));
+                        items.push(json!({
+                            "authorizationId": row.id,
+                            "accountId": row.account_id,
+                            "ok": false,
+                            "reason": "write_failed",
+                            "message": err.message,
+                        }));
+                        continue;
+                    }
+                };
                 if changed {
                     pending -= 1;
                     relinked.push(json!({
@@ -83,6 +169,12 @@ pub fn relink_pending(app: &App, only_account: Option<&str>) -> RpcResult<Value>
                         "sourceKey": source_key,
                         "accessRef": reference,
                     }));
+                    items.push(json!({
+                        "authorizationId": row.id,
+                        "accountId": row.account_id,
+                        "ok": true,
+                        "sourceKey": source_key,
+                    }));
                 } else {
                     // 有人先改过了（重新导入 / 另一个 Worker）：不重试、不盲写。
                     skipped.push(json!({
@@ -90,6 +182,12 @@ pub fn relink_pending(app: &App, only_account: Option<&str>) -> RpcResult<Value>
                         "accountId": row.account_id,
                         "reason": "superseded",
                         "message": "这一行在重新关联期间被其他流程更新过，已放弃",
+                    }));
+                    items.push(json!({
+                        "authorizationId": row.id,
+                        "accountId": row.account_id,
+                        "ok": false,
+                        "reason": "superseded",
                     }));
                 }
             }
@@ -100,14 +198,23 @@ pub fn relink_pending(app: &App, only_account: Option<&str>) -> RpcResult<Value>
                     "reason": reason,
                     "message": detail,
                 }));
+                items.push(json!({
+                    "authorizationId": row.id,
+                    "accountId": row.account_id,
+                    "ok": false,
+                    "reason": reason,
+                }));
             }
         }
     }
 
     Ok(json!({
         "relinked": relinked.len(),
+        "failed": failed,
         "pending": pending,
         "skipped": skipped,
+        // 逐条结果：界面要能列出**全部**失败原因，而不是只报第一条。
+        "items": items,
         // 旧钥匙串条目刻意保留：迁移期要能回滚，清理交给后续的显式操作。
         "legacyKeysKept": true,
     }))

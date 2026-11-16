@@ -45,7 +45,16 @@ enum Copy {
 }
 
 /// 跑一轮搬运。已经 `ready` 的行不会再被读到，所以重复调用是廉价的。
+///
+/// **`failed` 不在输入里**（CRED-5 复核 P0-1）：自动路径只搬 `pending` /
+/// `migrating`（上次崩在途中的）。失败意味着用户拒绝过钥匙串授权，再自动读一次
+/// 就是再弹一次系统框、再卡一次 RPC 队列。要重试必须显式调用 [`retry_failed`]。
 pub fn run(app: &App) -> RpcResult<Report> {
+    // 引用已经不在钥匙串上的 `failed` 行先收敛掉：它们既不该被报成"待重试"，
+    // 也不该被重试（`move_one` 找不到钥匙串目标键只会再失败一次）。
+    // 这一步只写库、不读钥匙串，幂等。
+    app.with_db(|db| db.settle_obsolete_key_migration_failures())?;
+
     let pending = app.with_db(|db| db.authorizations_pending_key_migration())?;
     let mut report = Report::default();
 
@@ -76,6 +85,23 @@ pub fn run(app: &App) -> RpcResult<Report> {
         }
     }
     Ok(report)
+}
+
+/// 用户显式要求重试：把 `failed` 放回 `pending`，然后立刻跑一轮。
+///
+/// 这是 `failed` **唯一**的回到自动流程的入口。界面必须把它做成一个按钮，
+/// 并且写清楚"会读一次钥匙串，可能弹系统授权框"。
+pub fn retry_failed(app: &App) -> RpcResult<(usize, Report)> {
+    let reset = app.with_db(|db| db.reset_failed_key_migrations())?;
+    let report = run(app)?;
+    Ok((reset, report))
+}
+
+/// 失败行计数，给面板显示用。**不读钥匙串**，只查库。
+pub fn failed_count(app: &App) -> RpcResult<usize> {
+    Ok(app
+        .with_db(|db| db.authorizations_failed_key_migration())?
+        .len())
 }
 
 /// 搬一份授权：access 必搬，refresh 只搬 own 的。
@@ -379,10 +405,13 @@ mod tests {
     }
 
     /// 读被拒（用户点了不允许）必须失败并保持可重试，不能标 ready。
+    ///
+    /// "可重试"是**用户显式重试**，不是下次启动自动再来（CRED-5 复核 P0-1）：
+    /// 自动重试等于每次开 App 弹一次系统授权框。
     #[test]
     fn denied_read_marks_failed_and_stays_retryable() {
         let (app, _dir) = test_app(SecureStore::faulty_on_read());
-        let account = seed_legacy_account(&app, "uid-denied", "own");
+        let account = seed_legacy_account(&app, "uid-denied-read", "own");
         let (legacy_access, _) = ids::legacy_keys(&account.uid);
         app.secure.set(&legacy_access, b"a").unwrap();
         app.secure.arm();
@@ -393,9 +422,15 @@ mod tests {
         let id = ids::auth_id(&account.id, "own");
         assert_eq!(state_of(&app, &id), "failed");
 
-        // 解除注入后再跑一轮：应当自己恢复
+        // 解除注入后再"启动"一次：不该自己恢复，也不该再读一次钥匙串。
         app.secure.disarm();
-        let report = run(&app).expect("retry");
+        let automatic = run(&app).expect("run again");
+        assert_eq!(automatic.moved + automatic.failed, 0, "{automatic:?}");
+        assert_eq!(state_of(&app, &id), "failed");
+
+        // 用户点"重试旧键搬运"之后才恢复。
+        let (reset, report) = retry_failed(&app).expect("retry");
+        assert_eq!(reset, 1);
         assert_eq!(report.failed, 0, "{report:?}");
         assert_eq!(state_of(&app, &id), "ready");
     }
@@ -596,5 +631,91 @@ mod tests {
         // 整个报告里不该出现凭据键或令牌
         let text = after.to_string();
         assert!(!text.contains("workbuddy/"), "{text}");
+    }
+
+    /// CRED-5 复核 P0-1：`failed` 不许被任何自动路径再碰一次。
+    ///
+    /// 失败意味着用户拒绝过钥匙串授权。启动（`main.rs`）与 `storage.init` 走的都是
+    /// [`run`]；只要它还会选中 `failed`，每次开 App 就弹一次系统授权框，
+    /// 而 worker 是单线程处理 RPC 的，弹框会把整个队列一起卡住。
+    #[test]
+    fn a_failed_migration_is_not_retried_until_the_user_asks() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let account = seed_legacy_account(&app, "uid-denied", "own");
+        let (legacy_access, _) = ids::legacy_keys(&account.uid);
+        app.secure.set(&legacy_access, b"access-1").unwrap();
+
+        let id = ids::auth_id(&account.id, "own");
+        app.with_db(|db| {
+            db.set_key_migration_state(&id, KEY_STATE_FAILED, Some("钥匙串授权被拒绝"))
+        })
+        .unwrap();
+
+        // 自动路径：一条都不该被选中。
+        let report = run(&app).expect("run");
+        assert_eq!(report.moved, 0, "{report:?}");
+        assert_eq!(report.failed, 0, "失败行不许被自动重试：{report:?}");
+        assert_eq!(state_of(&app, &id), KEY_STATE_FAILED, "状态也不能被改掉");
+        assert_eq!(
+            app.secure.get(&ids::access_key(&account.id, "own")).ok(),
+            None,
+            "自动路径连目标键都不该碰"
+        );
+
+        // 第二次启动同样不许碰（幂等，不累积弹框次数）。
+        let again = run(&app).expect("run again");
+        assert_eq!(again.moved + again.failed, 0, "{again:?}");
+
+        // 显式重试：唯一的入口。
+        let (reset, retried) = retry_failed(&app).expect("retry");
+        assert_eq!(reset, 1, "只有这一行该被放回 pending");
+        assert_eq!(retried.moved, 1, "{retried:?}");
+        assert_eq!(state_of(&app, &id), KEY_STATE_READY);
+        assert_eq!(
+            app.secure
+                .get(&ids::access_key(&account.id, "own"))
+                .unwrap(),
+            b"access-1"
+        );
+    }
+
+    /// 新旧混装：一个已 ready 的老行、一个 failed、一个 pending。
+    /// 自动路径只处理 pending，另外两个原样不动。
+    #[test]
+    fn the_automatic_path_touches_only_pending_and_migrating_rows() {
+        let (app, _dir) = test_app(SecureStore::memory());
+
+        let ready = seed_legacy_account(&app, "uid-ready", "own");
+        let ready_id = ids::auth_id(&ready.id, "own");
+        app.secure
+            .set(&ids::legacy_keys(&ready.uid).0, b"r-access")
+            .unwrap();
+        app.with_db(|db| db.set_key_migration_state(&ready_id, KEY_STATE_READY, None))
+            .unwrap();
+
+        let failed = seed_legacy_account(&app, "uid-failed", "own");
+        let failed_id = ids::auth_id(&failed.id, "own");
+        app.secure
+            .set(&ids::legacy_keys(&failed.uid).0, b"f-access")
+            .unwrap();
+        app.with_db(|db| db.set_key_migration_state(&failed_id, KEY_STATE_FAILED, Some("denied")))
+            .unwrap();
+
+        let pending = seed_legacy_account(&app, "uid-pending", "own");
+        let pending_id = ids::auth_id(&pending.id, "own");
+        app.secure
+            .set(&ids::legacy_keys(&pending.uid).0, b"p-access")
+            .unwrap();
+
+        let report = run(&app).expect("run");
+        assert_eq!(report.moved, 1, "只搬 pending 那一条：{report:?}");
+        assert_eq!(report.failed, 0, "{report:?}");
+        assert_eq!(state_of(&app, &pending_id), KEY_STATE_READY);
+        assert_eq!(
+            state_of(&app, &failed_id),
+            KEY_STATE_FAILED,
+            "失败行不许被改"
+        );
+        assert_eq!(state_of(&app, &ready_id), KEY_STATE_READY);
     }
 }
