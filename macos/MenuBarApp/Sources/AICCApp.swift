@@ -112,6 +112,11 @@ final class ServerManager: ObservableObject {
         env["EINK_ACCESS_LOG"] = AppSettings.shared.debugMode ? "1" : "0"
         // The shipped App uses the fixed product port; EINK_PORT remains for direct/dev server runs.
         env.removeValue(forKey: "EINK_PORT")
+        // 监听范围由设置决定，不继承外部环境：默认只听回环，局域网与设备发现
+        // 都必须由用户在设置里明确打开（关闭时连 UDP 发现一起停）。
+        let lanAccess = AppSettings.shared.bridgeLANEnabled
+        env["EINK_HOST"] = lanAccess ? "0.0.0.0" : "127.0.0.1"
+        env["EINK_DISCOVERY"] = lanAccess ? "1" : "0"
         let hostBuild = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !hostBuild.isEmpty {
@@ -242,6 +247,9 @@ final class ServerManager: ObservableObject {
         let ppid: Int?
         let serverInstanceID: String?
         let companion: Bool?
+        /// 当前进程的监听范围（`loopback` / `lan`）。旧版本不返回，按不兼容处理：
+        /// 否则升级之后那个绑在 `0.0.0.0` 的旧进程会被当成"兼容"继续复用。
+        let bind: String?
 
         enum CodingKeys: String, CodingKey {
             case ok
@@ -252,6 +260,7 @@ final class ServerManager: ObservableObject {
             case ppid
             case serverInstanceID = "server_instance_id"
             case companion
+            case bind
         }
     }
 
@@ -278,11 +287,15 @@ final class ServerManager: ObservableObject {
 
             let versionMatch = currentVersion == nil || currentVersion?.isEmpty == true || health.version == currentVersion
             let buildMatch = currentBuild != nil && !currentBuild!.isEmpty && health.build == currentBuild
+            // 监听范围也必须一致：用户关掉"允许局域网设备连接"之后，
+            // 旧进程还在 0.0.0.0 上服务的话，界面说的和实际就不是一回事。
+            let expectedBind = AppSettings.shared.bridgeLANEnabled ? "lan" : "loopback"
+            let bindMatch = health.bind == expectedBind
             let trusted = health.pid ?? 0 > 1
                 && health.serverInstanceID.flatMap(UUID.init(uuidString:)) != nil
             let isOrphan = trusted && health.ppid == 1
 
-            return (true, trusted && versionMatch && buildMatch && health.companion == true, trusted, isOrphan, health.pid)
+            return (true, trusted && versionMatch && buildMatch && bindMatch && health.companion == true, trusted, isOrphan, health.pid)
         } catch {
             return (false, false, false, false, nil)
         }

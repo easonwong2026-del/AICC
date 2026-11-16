@@ -25,6 +25,7 @@ class BridgeTests(unittest.TestCase):
         server._rates.clear()
         server._snapshot = None
         server._pair_code = None
+        server._pair_failures.clear()
         self.http = server.DashboardServer(("127.0.0.1", 0), server.DashboardHandler)
         self.worker = threading.Thread(target=self.http.serve_forever, daemon=True)
         self.worker.start()
@@ -72,13 +73,105 @@ class BridgeTests(unittest.TestCase):
         code = self.request("POST", "/api/pairing")[1]["code"]
         server._pair_deadline = time.monotonic() - 1
         self.assertEqual(self.request("POST", "/api/pair", {"code": code})[0], 403)
+
+        # 同一来源连续猜错，被限速（429）—— 但配对码本身没作废。
         code = self.request("POST", "/api/pairing")[1]["code"]
-        server._pair_attempts = 5
-        self.assertEqual(self.request("POST", "/api/pair", {"code": code})[0], 403)
+        wrong = "00000000" if code != "00000000" else "11111111"
+        for _ in range(server.PAIR_FAILURES_PER_WINDOW):
+            self.assertEqual(self.request("POST", "/api/pair", {"code": wrong})[0], 403)
+        self.assertEqual(self.request("POST", "/api/pair", {"code": code})[0], 429)
+
+        # 重新生成码 = 新一轮，失败计数清零，合法设备立刻能配上。
+        # 这里同时清掉分钟级请求计数：本条测的是"失败计数"，不是"每分钟请求数"，
+        # 否则会被 10 次/分钟的通用限流挡在前面。
+        server._rates.clear()
+        code = self.request("POST", "/api/pairing")[1]["code"]
+        self.assertEqual(self.request("POST", "/api/pair", {"code": code})[0], 200)
+
         for code in (None, [], "１２３４５６７８", "123", "<secret>"):
             self.assertEqual(self.request("POST", "/api/pair", {"code": code})[0], 400)
         with patch.object(server, "_token", "rotated-credential"):
             self.assertEqual(self.request("GET", "/api/status", headers={"Authorization": "Bearer old"})[0], 401)
+
+    def test_pair_failures_are_counted_per_source_ip(self):
+        """别的设备猜错，不该让合法设备的配对码失效。"""
+        for _ in range(server.PAIR_FAILURES_PER_WINDOW):
+            server.note_pair_failure("10.0.0.5")
+        self.assertTrue(server.pair_blocked("10.0.0.5"))
+        self.assertFalse(
+            server.pair_blocked("10.0.0.6"),
+            "另一个来源必须还能配对",
+        )
+
+        # 窗口过期后自动放开，不需要人工清表。
+        server._pair_failures["10.0.0.5"] = (
+            time.monotonic() - server.PAIR_FAILURE_WINDOW_SECONDS - 1,
+            server.PAIR_FAILURES_PER_WINDOW,
+        )
+        self.assertFalse(server.pair_blocked("10.0.0.5"))
+
+        # 成功配对清掉自己的计数。
+        server.note_pair_failure("10.0.0.7")
+        server.clear_pair_failures("10.0.0.7")
+        self.assertFalse(server.pair_blocked("10.0.0.7"))
+
+    def test_bridge_listens_on_loopback_unless_lan_is_explicitly_enabled(self):
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(server.requested_host(), "127.0.0.1")
+            self.assertFalse(server.lan_enabled())
+            self.assertFalse(server.discovery_enabled(), "默认连发现都不开")
+
+        with patch.dict("os.environ", {"EINK_HOST": "0.0.0.0"}):
+            self.assertEqual(server.requested_host(), "0.0.0.0")
+            self.assertTrue(server.lan_enabled())
+            self.assertFalse(server.discovery_enabled(), "局域网开着也要显式打开发现")
+
+        with patch.dict("os.environ", {"EINK_HOST": "0.0.0.0", "EINK_DISCOVERY": "1"}):
+            self.assertTrue(server.discovery_enabled())
+
+        # 拼错的值一律按回环处理：宁可连不上，也别绑到意料之外的网卡。
+        for wrong in ("localhost", "192.168.1.5", "", "0.0.0.0.0", "::"):
+            with patch.dict("os.environ", {"EINK_HOST": wrong}, clear=True):
+                self.assertEqual(server.requested_host(), "127.0.0.1", repr(wrong))
+
+    def test_host_id_survives_concurrent_first_creation(self):
+        path = Path(self.directory.name) / "host_id"
+        results = []
+        barrier = threading.Barrier(8)
+
+        def worker():
+            barrier.wait()
+            results.append(server.host_id())
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(len(results), 8)
+        self.assertEqual(len(set(results)), 1, f"并发创建必须收敛到同一个 id：{results}")
+        self.assertTrue(results[0], "不许返回空 host_id")
+        self.assertEqual(results[0], path.read_text(encoding="utf-8").strip())
+
+    def test_legacy_view_skips_a_cached_card_without_id_or_label(self):
+        """缓存来自旧版本时，缺字段的卡片要被跳过，而不是让 /api/status 变成 500。"""
+        server._snapshot = {
+            "state": "Connected",
+            "stale": False,
+            "accounts": [
+                {"provider": "codex", "kind": "subscription", "id": "a1", "account_label": "Main",
+                 "items": [{"name": "7 days", "remaining": 50, "reset": None}]},
+                {"provider": "codex", "kind": "subscription",
+                 "items": [{"name": "7 days", "remaining": 1}]},
+                {"provider": "codex", "kind": "subscription", "id": "a3",
+                 "items": [{"name": "5 hours", "remaining": 10}]},
+            ],
+        }
+        status, legacy = self.request("GET", "/api/status?format=2", headers=self.paired_headers())
+        self.assertEqual(status, 200)
+        ids = [account["id"] for account in legacy["codex"]["accounts"]]
+        self.assertEqual(ids, ["a1"], f"只有完整的卡片能被展示：{legacy}")
 
     def test_status_is_the_generic_snapshot(self):
         server._snapshot = magpie.parse_report(FIXTURE, time.time())

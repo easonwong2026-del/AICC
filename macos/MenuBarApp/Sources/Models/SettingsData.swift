@@ -5,6 +5,13 @@ class AppSettings: ObservableObject {
     @Published var bridgeEnabled: Bool {
         didSet { UserDefaults.standard.set(bridgeEnabled, forKey: "bridgeEnabled") }
     }
+    /// 允许局域网设备连桥接。**默认关**：打开它会把额度数据暴露给同网段。
+    ///
+    /// 升级语义：老版本没有这个键，`bool(forKey:)` 返回 false，所以已经开着桥接的
+    /// 用户升级后也只会回到"仅本机"，必须自己再点一次 —— 不能静默授予新的网络权限。
+    @Published var bridgeLANEnabled: Bool {
+        didSet { UserDefaults.standard.set(bridgeLANEnabled, forKey: "bridgeLANEnabled") }
+    }
     @Published var magpiePort: Int {
         didSet {
             UserDefaults.standard.set(magpiePort, forKey: "magpiePort")
@@ -70,6 +77,8 @@ class AppSettings: ObservableObject {
     private init() {
         let defaults = UserDefaults.standard
         bridgeEnabled = defaults.bool(forKey: "bridgeEnabled")
+        // 不存在的键 → false。老安装升级后不会自动获得局域网访问权限。
+        bridgeLANEnabled = defaults.bool(forKey: "bridgeLANEnabled")
         let port = defaults.integer(forKey: "magpiePort")
         magpiePort = (1...65535).contains(port) ? port : 3425
         // `widgetAccounts` is the pre-3.0 key for the same choice.
