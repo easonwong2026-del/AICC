@@ -209,7 +209,7 @@ frozen  ─(人工核对)─▶ confirmed / rejected / failed(verified)
 **次数上限只约束"再发一次"，绝不约束只读回查**（复审 P1-1）：否则第 3 次发送之后
 结果就永远查不到，记录会一直悬在 `sent` 上。
 
-### 7.1 存储边界（复审 P1-3）
+### 7.1 存储边界（复审 P1-3 + 终审收尾）
 
 `resolve_reward_op` 不信任调用方，三件事在存储层强制：
 
@@ -218,8 +218,21 @@ frozen  ─(人工核对)─▶ confirmed / rejected / failed(verified)
 | `detail` | `rpc::sanitize` 脱敏 + 截断 200 字 |
 | `grant` / `server_state` | 只接受 **JSON 对象**；只保留扁平标量（数字/布尔/短字符串） |
 | 嵌套对象 / 数组 / null | 丢弃 —— 原始响应不属于账本 |
-| 键名 | ≤32 字符、ASCII；含 `token`/`secret`/`password`/`cookie`/`authorization`/`bearer`/`refresh`/`access` 一律丢弃 |
+| **键名** | **正向白名单**（见下）—— 没在表里的字段一律丢 |
 | 值长度 | 字符串截断 64 字符；整体超过 512 字节就丢字段 |
+
+**白名单而不是黑名单。** 黑名单永远漏：`api_key` / `session` / `credential` /
+`private_key` 既不含 `token`/`secret` 这类关键词，值又短到躲开 `rpc::sanitize` 的
+长令牌检测。所以两张表各自只认已定义的字段：
+
+| 表 | 允许的键 |
+| --- | --- |
+| `grant`（到账回执） | `credit(s)`、`credit(s)_granted`、`energy(_granted)`、`cards(_granted)`、`chances(_granted)`、`prize`、`prize_name`、`need_address`、`require_address`、`already(_claimed)` |
+| `server_state`（回查快照） | `chances`、`balance`、`days`、`streak_days`、`makeup_cards(_balance)`、`status`、`tier`、`today`、`date`、`checked_in`、`daily_checkin`、`tier_{7,14,28}d_status`、`starter/advanced/legendary_status` |
+
+比对大小写不敏感（`prizeName` 命中 `prize_name`）。**尚未拿到 A 级证据的字段先不保存**：
+新增一行之前，先有一次真实响应。嵌套形态（`makeup_cards: {balance}`）由调用方拍平成
+`makeup_cards_balance` 再传进来，嵌套结构在存储层被整段丢弃。
 
 ### 7.2 账号删除与重新导入（复审 P1-2）
 
@@ -264,7 +277,7 @@ WorkBuddy 账号 id 是 `(platform, uid)` 的确定性哈希，删号后用同�
 | P0-2 | 未知 403 被当终态，风控被反复触发 | `Outcome::terminal()` 不再包含 `Forbidden`；`ledger_phase()` 映射到 `frozen`；`requires_attention()` 只给 `Forbidden` | `an_unknown_403_is_frozen_rather_than_retried`、`a_frozen_operation_keeps_the_target_and_blocks_new_tokens` |
 | P1-1 | 次数上限挡住回查 | `plan()` 先判 `sent`/`unknown` → `Recheck`，上限只作用于 `ready` 的重发 | `the_attempt_cap_blocks_sending_but_never_blocks_a_recheck`、`a_ready_operation_resends_with_the_same_token_until_the_cap` |
 | P1-2 | 删号不清账本，同 UID 重导入继承旧记录 | `delete_account` 在一个事务里清 `quota_snapshots` + `reward_operations` + `accounts` | `deleting_an_account_purges_its_reward_ledger`、`a_reimported_account_starts_with_a_clean_ledger` |
-| P1-3 | `detail` 未在存储层脱敏，回执可存原始响应 | 存储边界强制脱敏/截断；`grant`/`server_state` 只收扁平标量，凭据键与嵌套结构丢弃 | `detail_is_sanitised_and_truncated_at_the_storage_boundary`、`raw_server_payloads_cannot_be_stored`、`a_payload_that_is_not_an_object_is_dropped_instead_of_stored_raw` |
+| P1-3 | `detail` 未在存储层脱敏，回执可存原始响应 | 存储边界强制脱敏/截断；`grant`/`server_state` 只收扁平标量，**键名走正向白名单**（终审收尾：黑名单会漏 `api_key`/`session`/`credential`/`private_key` 这类短值字段） | `detail_is_sanitised_and_truncated_at_the_storage_boundary`、`raw_server_payloads_cannot_be_stored`、`credential_shaped_fields_never_reach_the_ledger`、`the_two_payload_kinds_do_not_share_a_whitelist`、`a_payload_that_is_not_an_object_is_dropped_instead_of_stored_raw` |
 
 新增 `ready` 阶段的理由：404 / tier 参数错这两种"服务端明确没执行"的情况必须允许
 用**同一个 token** 再发一次（换前缀、换写法是正常协议行为）。它仍然占着目标，

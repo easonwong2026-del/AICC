@@ -146,18 +146,72 @@ fn sanitize_detail(detail: Option<&str>) -> Option<String> {
     Some(trimmed.chars().take(MAX_DETAIL_CHARS).collect())
 }
 
-/// 结构化回执的清洗：只保留扁平标量，丢掉疑似凭据的键，整体有字节上限。
+/// `grant`（到账回执）允许入库的字段：**只有已定义的业务数值与奖品信息**。
+///
+/// 正向白名单，不是黑名单：没在表里的字段一律丢，包括还没拿到 A 级证据的那些。
+/// 新增字段要先有真实响应证据，再往这里加一行 —— 这条约束是 P1-3 的落点。
+const GRANT_KEYS: &[&str] = &[
+    // 到账数值。`*_granted` 是兑换/抽奖的实发字段，裸名是领奖的字段。
+    "credit",
+    "credits",
+    "credit_granted",
+    "credits_granted",
+    "energy",
+    "energy_granted",
+    "cards",
+    "cards_granted",
+    "chances",
+    "chances_granted",
+    // 奖品与实物奖提示。
+    "prize",
+    "prize_name",
+    "prizename",
+    "need_address",
+    "needaddress",
+    "require_address",
+    "requireaddress",
+    // 幂等回执的标记，界面靠它区分"新领到"与"早就领过"。
+    "already_claimed",
+    "already",
+];
+
+/// `server_state`（回查快照）允许入库的字段：只放核验与展示必需的那几个。
+///
+/// 服务端返回嵌套（`makeup_cards: {balance}`）时，调用方要先拍平成
+/// `makeup_cards_balance` 再传进来 —— 嵌套结构在存储层被整段丢弃。
+const SERVER_STATE_KEYS: &[&str] = &[
+    "chances",
+    "balance",
+    "days",
+    "streak_days",
+    "makeup_cards",
+    "makeup_cards_balance",
+    "status",
+    "tier",
+    "today",
+    "date",
+    "checked_in",
+    "daily_checkin",
+    "tier_7d_status",
+    "tier_14d_status",
+    "tier_28d_status",
+    "starter_status",
+    "advanced_status",
+    "legendary_status",
+];
+
+/// 结构化回执的清洗：**按白名单留字段**，只保留扁平标量，整体有字节上限。
 ///
 /// 原始服务端响应不属于账本：它可能带令牌、带整棵活动配置、几百个字段。
-/// 账本只需要"这次到账多少、服务端当时怎么看"，所以这里白名单化到扁平行。
-fn sanitize_payload(value: Option<&Value>) -> Option<String> {
+/// 账本只需要"这次到账多少、服务端当时怎么看"，所以这里只认业务字段表。
+fn sanitize_payload(value: Option<&Value>, allowed: &[&str]) -> Option<String> {
     let object = value?.as_object()?;
     let mut kept = serde_json::Map::new();
     for (key, raw) in object.iter() {
         if kept.len() >= MAX_PAYLOAD_KEYS {
             break;
         }
-        if !payable_key(key) {
+        if !payable_key(key, allowed) {
             continue;
         }
         let scalar = match raw {
@@ -191,8 +245,12 @@ fn sanitize_payload(value: Option<&Value>) -> Option<String> {
     serde_json::to_string(&kept).ok()
 }
 
-/// 可以进账本的键：短、ASCII、且不像是凭据字段。
-fn payable_key(key: &str) -> bool {
+/// 可以进账本的键：**必须在白名单里**，且是个正常的短键名。
+///
+/// 白名单比对用小写，所以 `prizeName` 与 `prizename` 都命中 `prize_name` 那一类；
+/// `api_key`、`session`、`credential`、`private_key` 这类字段没有对应业务含义，
+/// 无论值多短都进不来（黑名单永远漏，白名单才收得住）。
+fn payable_key(key: &str, allowed: &[&str]) -> bool {
     if key.is_empty() || key.len() > 32 {
         return false;
     }
@@ -203,17 +261,7 @@ fn payable_key(key: &str) -> bool {
         return false;
     }
     let lowered = key.to_lowercase();
-    const SUSPICIOUS: [&str; 8] = [
-        "token",
-        "secret",
-        "password",
-        "cookie",
-        "authorization",
-        "bearer",
-        "refresh",
-        "access",
-    ];
-    !SUSPICIOUS.iter().any(|bad| lowered.contains(bad))
+    allowed.contains(&lowered.as_str())
 }
 
 const COLUMNS: &str = "id, account_id, action, target, client_token, phase, attempt, outcome,
@@ -329,8 +377,8 @@ impl Db {
         }
         let now = now_rfc3339();
         let verified_at = res.verified.then(|| now.clone());
-        let grant = sanitize_payload(res.grant);
-        let server_state = sanitize_payload(res.server_state);
+        let grant = sanitize_payload(res.grant, GRANT_KEYS);
+        let server_state = sanitize_payload(res.server_state, SERVER_STATE_KEYS);
         let detail = sanitize_detail(res.detail);
         let changed = self.conn.execute(
             "UPDATE reward_operations
@@ -890,7 +938,8 @@ mod tests {
             "nested": { "raw": "整个响应" },
             "list": [1, 2, 3],
             "access_token": "should-not-be-here",
-            "note": "x".repeat(500)
+            // 白名单内的字段才允许出现，长值仍然要截断。
+            "prize_name": "x".repeat(500)
         });
         let state = json!({ "chances": 0, "days": 14 });
         db.resolve_reward_op(
@@ -914,9 +963,10 @@ mod tests {
         assert!(stored.get("list").is_none(), "数组不许进账本");
         assert!(stored.get("access_token").is_none(), "凭据字段不许进账本");
         assert!(
-            stored["note"].as_str().unwrap().chars().count() <= MAX_PAYLOAD_VALUE_CHARS,
+            stored["prize_name"].as_str().unwrap().chars().count() <= MAX_PAYLOAD_VALUE_CHARS,
             "长字符串必须截断"
         );
+        assert!(stored.get("note").is_none(), "白名单外的字段一律不进");
         assert!(
             op.grant_json.as_deref().unwrap().len() <= MAX_PAYLOAD_BYTES,
             "整体必须有字节上限"
@@ -925,6 +975,109 @@ mod tests {
         let state: Value = serde_json::from_str(op.server_state.as_deref().unwrap()).unwrap();
         assert_eq!(state["chances"], 0);
         assert_eq!(state["days"], 14);
+    }
+
+    /// P1-3 终审：黑名单会漏，**白名单才收得住**。
+    ///
+    /// 这些字段名都不含 token/secret 之类的关键词，值也很短（绕不过
+    /// `rpc::sanitize` 的长令牌检测），但它们都不是业务字段 —— 一个都不许落盘。
+    #[test]
+    fn credential_shaped_fields_never_reach_the_ledger() {
+        let (mut db, _dir) = temp_db();
+        let id = open_then_send(&mut db, "acc", "u-1");
+        let grant = json!({
+            "credits": 50,
+            "api_key": "short-secret",
+            "session": "session123",
+            "credential": "abc123",
+            "private_key": "pk-1",
+            "user": "someone",
+            "device_id": "d-1"
+        });
+        let state = json!({
+            "chances": 1,
+            "api_key": "short-secret",
+            "session": "session123",
+            "credential": "abc123",
+            "private_key": "pk-1",
+            "cookie_jar": "c=1",
+            "auth_headers": "Bearer x"
+        });
+        db.resolve_reward_op(
+            &id,
+            &Resolution {
+                phase: "confirmed",
+                outcome: "granted",
+                grant: Some(&grant),
+                server_state: Some(&state),
+                detail: None,
+                verified: true,
+            },
+        )
+        .unwrap();
+
+        let op = db.reward_op(&id).unwrap().unwrap();
+        let grant: Value = serde_json::from_str(op.grant_json.as_deref().unwrap()).unwrap();
+        assert_eq!(grant["credits"], 50, "业务字段要留下来");
+        for banned in [
+            "api_key",
+            "session",
+            "credential",
+            "private_key",
+            "user",
+            "device_id",
+        ] {
+            assert!(
+                grant.get(banned).is_none(),
+                "{banned} 不是业务字段，不许进账本：{grant}"
+            );
+        }
+
+        let state: Value = serde_json::from_str(op.server_state.as_deref().unwrap()).unwrap();
+        assert_eq!(state["chances"], 1, "核验要用的状态字段要留下来");
+        for banned in [
+            "api_key",
+            "session",
+            "credential",
+            "private_key",
+            "cookie_jar",
+            "auth_headers",
+        ] {
+            assert!(
+                state.get(banned).is_none(),
+                "{banned} 不是状态字段，不许进账本：{state}"
+            );
+        }
+    }
+
+    /// 白名单是**逐张表**的：`grant` 的字段不能混进 `server_state`，反之亦然。
+    #[test]
+    fn the_two_payload_kinds_do_not_share_a_whitelist() {
+        let (mut db, _dir) = temp_db();
+        let id = open_then_send(&mut db, "acc", "u-1");
+        let grant = json!({ "credits": 5, "chances": 1, "days": 7 });
+        let state = json!({ "chances": 1, "credits": 5, "days": 7 });
+        db.resolve_reward_op(
+            &id,
+            &Resolution {
+                phase: "confirmed",
+                outcome: "granted",
+                grant: Some(&grant),
+                server_state: Some(&state),
+                detail: None,
+                verified: true,
+            },
+        )
+        .unwrap();
+
+        let op = db.reward_op(&id).unwrap().unwrap();
+        let grant: Value = serde_json::from_str(op.grant_json.as_deref().unwrap()).unwrap();
+        assert_eq!(grant["chances"], 1, "抽奖次数是到账字段");
+        assert!(grant.get("days").is_none(), "连登天数是状态，不是到账");
+
+        let state: Value = serde_json::from_str(op.server_state.as_deref().unwrap()).unwrap();
+        assert_eq!(state["days"], 7);
+        assert!(state.get("credits").is_none(), "积分是到账，不是回查状态");
     }
 
     #[test]
