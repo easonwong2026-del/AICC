@@ -259,11 +259,18 @@ pub fn judge_lottery(balance: Option<i64>) -> Readiness {
             observed: None,
             reason: Some("抽奖次数为 0，不发送"),
         },
-        Some(value) => Readiness {
+        Some(value) if value > 0 => Readiness {
             ready: true,
             balance: Some(value),
             observed: None,
             reason: None,
+        },
+        // 负数一样是不可发送：服务端不可能给我们负次数，出现就是读错了。
+        Some(value) => Readiness {
+            ready: false,
+            balance: Some(value),
+            observed: None,
+            reason: Some("余额为负，按异常处理，不发送"),
         },
         None => Readiness {
             ready: false,
@@ -315,11 +322,18 @@ pub fn judge_makeup(balance: Option<i64>) -> Readiness {
             observed: None,
             reason: Some("补签卡为 0，不发送"),
         },
-        Some(value) => Readiness {
+        Some(value) if value > 0 => Readiness {
             ready: true,
             balance: Some(value),
             observed: None,
             reason: None,
+        },
+        // 负数一样是不可发送：服务端不可能给我们负次数，出现就是读错了。
+        Some(value) => Readiness {
+            ready: false,
+            balance: Some(value),
+            observed: None,
+            reason: Some("余额为负，按异常处理，不发送"),
         },
         None => Readiness {
             ready: false,

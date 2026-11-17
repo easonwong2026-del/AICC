@@ -296,7 +296,8 @@ struct RewardAccountState: Identifiable, Equatable {
     /// 这里必须把话说清楚，否则用户会以为"签到失败"或"界面坏了"。
     var streakNote: String? {
         guard streakDays == 0 else { return nil }
-        return "服务端返回连登 0 天：成长中心的活跃累计与每日签到是两套判定，签到成功不会让它 +1"
+        // 只陈述服务端事实，不断言因果：签到是否计入成长活跃，目前没有证据。
+        return "服务端返回连登 0 天；每日签到与成长中心活跃是否为同一计数，尚无确证"
     }
 
     /// 账本读不到时的提示。这与"没有未核验操作"是两件事。

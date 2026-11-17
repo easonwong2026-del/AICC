@@ -276,7 +276,7 @@ pub async fn recheck(
             "服务端状态与发送前一致，仍无法确认结果，继续保持待核验"
         };
         app.with_db(|db| {
-            db.resolve_reward_op(
+            db.resolve_reward_op_recheck(
                 &op.id,
                 &Resolution {
                     phase: verdict.phase(),
