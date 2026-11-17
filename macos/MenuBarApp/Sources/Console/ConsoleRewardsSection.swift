@@ -289,7 +289,7 @@ struct ConsoleRewardsBlock: View {
                     if let date = state.makeup.candidates.first { onPreview(.makeup, date) }
                 }
                 .buttonStyle(ConsoleSecondaryButtonStyle())
-                .disabled(acting || state.makeup.candidates.isEmpty)
+                .disabled(acting || !RewardAction.makeup.isEnabled(for: state))
                 if needsRecheck {
                     Button(checking ? "回查中…" : "回查结果") { onRecheck() }
                         .buttonStyle(ConsoleSecondaryButtonStyle())

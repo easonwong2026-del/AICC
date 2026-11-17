@@ -245,6 +245,29 @@ final class RewardModelsTests: XCTestCase {
         XCTAssertNil(state.streakNote)
     }
 
+    /// 守门：三个按钮都必须调用 `isEnabled(for:)`。
+    ///
+    /// 纯函数测试全绿、View 忘了接入，上一轮就是这样漏掉的（补签按钮还留着
+    /// 旧条件）。这条直接读源码，漏接就红。
+    func testEveryRewardButtonUsesTheSharedEnableRule() throws {
+        let here = URL(fileURLWithPath: #filePath)
+        let view = here
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/Console/ConsoleRewardsSection.swift")
+        let source = try String(contentsOf: view, encoding: .utf8)
+        for action in ["draw", "redeem", "makeup"] {
+            XCTAssertTrue(
+                source.contains("RewardAction.\(action).isEnabled(for: state)"),
+                "\(action) 按钮没有接统一启用规则"
+            )
+        }
+        XCTAssertFalse(
+            source.contains("state.makeup.candidates.isEmpty)"),
+            "补签按钮不该再写自己的条件"
+        )
+    }
+
     // MARK: - 按钮门禁（回归：曾出现"说改了但提交里没有"）
 
     func testMakeupNeedsBothABrokenDayAndACard() {
