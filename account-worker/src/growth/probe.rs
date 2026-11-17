@@ -217,6 +217,13 @@ pub trait ProbeSender {
     ) -> impl std::future::Future<Output = Result<Value, super::api::GrowthError>>;
 }
 
+/// 让 `&T` 也能当发送器用：测试里需要"发完之后还要数次数"。
+impl<T: ProbeSender + ?Sized> ProbeSender for &T {
+    async fn send(&self, suffix: &str, body: Value) -> Result<Value, super::api::GrowthError> {
+        (**self).send(suffix, body).await
+    }
+}
+
 /// 真实发送器：**固定前缀、只发一次**（`post_exact`，不做 404 退让）。
 pub struct HttpSender {
     pub payload: Value,
@@ -289,7 +296,8 @@ pub fn judge_tier(status: Option<&str>) -> Readiness {
         Some("available") | Some("ready") | Some("claimable") | Some("unlocked") => Readiness {
             ready: true,
             balance: None,
-            observed: None,
+            // 可兑换时的状态也要作为基线：兑换成功后它会变成 claimed。
+            observed: observed.clone(),
             reason: None,
         },
         Some("claimed") => Readiness {
@@ -307,7 +315,7 @@ pub fn judge_tier(status: Option<&str>) -> Readiness {
         _ => Readiness {
             ready: false,
             balance: None,
-            observed: None,
+            observed: observed.clone(),
             reason: Some("档位状态不明确，不发送"),
         },
     }
@@ -986,5 +994,156 @@ mod tests {
             super::super::streak_rewards::Rejection::NoChance,
         ));
         assert_eq!(rejected, Verdict::Rejected);
+    }
+
+    // ------------------------------------------------------------------
+    // 三条动作的 Mock 闭环（不触网）
+    // ------------------------------------------------------------------
+
+    struct CountingSender {
+        suffix: std::sync::Mutex<Vec<String>>,
+        timeout: bool,
+    }
+
+    impl CountingSender {
+        fn ok() -> Self {
+            Self {
+                suffix: Default::default(),
+                timeout: false,
+            }
+        }
+        fn timeout() -> Self {
+            Self {
+                suffix: Default::default(),
+                timeout: true,
+            }
+        }
+        fn calls(&self) -> usize {
+            self.suffix.lock().unwrap().len()
+        }
+    }
+
+    impl super::ProbeSender for CountingSender {
+        async fn send(
+            &self,
+            suffix: &str,
+            _body: Value,
+        ) -> Result<Value, crate::growth::api::GrowthError> {
+            self.suffix.lock().unwrap().push(suffix.to_string());
+            if self.timeout {
+                Err(crate::growth::api::GrowthError {
+                    kind: crate::growth::api::ErrorKind::Network,
+                    http: None,
+                    code: None,
+                    message: "请求超时（15s）".into(),
+                })
+            } else {
+                Ok(json!({ "code": 0, "data": {} }))
+            }
+        }
+    }
+
+    fn mock_app() -> (std::sync::Arc<crate::app::App>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data = dir.path().to_path_buf();
+        let paths = crate::paths::Paths {
+            db_path: data.join("accounts.sqlite"),
+            backups_dir: data.join("backups"),
+            logs_dir: data.join("logs"),
+            wb_switch_home: data.join("wb"),
+            data_dir: data.clone(),
+            wb_home_owned: true,
+        };
+        (
+            std::sync::Arc::new(crate::app::App::with_secure(
+                paths,
+                crate::securestore::SecureStore::memory(),
+            )),
+            dir,
+        )
+    }
+
+    fn mock_account(app: &std::sync::Arc<crate::app::App>, uid: &str) -> String {
+        app.with_db(|db| {
+            db.upsert_account(&crate::storage::AccountInput {
+                platform: "workbuddy".into(),
+                uid: uid.into(),
+                nickname: Some("mock".into()),
+                email: None,
+                group_id: None,
+                auth_ref: None,
+                profile_ref: None,
+                auth_status: None,
+                checkin_enabled: None,
+                token_expires_at: None,
+                auth_domain: None,
+                auth_source: None,
+                travel_enabled: None,
+                provider: None,
+            })
+        })
+        .unwrap()
+        .id
+    }
+
+    #[tokio::test]
+    async fn the_three_actions_each_send_exactly_one_post() {
+        let (app, _dir) = mock_app();
+        for (command, ready) in [
+            (Command::LotteryDraw, judge_lottery(Some(1))),
+            (Command::Redeem(Tier::Days7), judge_tier(Some("available"))),
+            (
+                Command::MakeupCard {
+                    target_date: "2026-11-10".into(),
+                },
+                judge_makeup(Some(2)),
+            ),
+        ] {
+            let account = mock_account(&app, &format!("uid-{}", command.action().as_str()));
+            let sender = CountingSender::ok();
+            let out = run_with(&app, &account, &command, &ready, &sender)
+                .await
+                .expect("run");
+            assert_eq!(
+                sender.calls(),
+                1,
+                "{} 只许发一次",
+                command.action().as_str()
+            );
+            let expected = streak_rewards::call(&command, "t").unwrap().suffix;
+            assert_eq!(sender.suffix.lock().unwrap()[0], expected);
+            assert_eq!(out["sent"], json!(true));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_timeout_sends_once_then_reports_unknown_and_never_resends() {
+        let (app, _dir) = mock_app();
+        let account = mock_account(&app, "uid-timeout");
+        let sender = CountingSender::timeout();
+        let first = run_with(
+            &app,
+            &account,
+            &Command::LotteryDraw,
+            &judge_lottery(Some(1)),
+            &sender,
+        )
+        .await
+        .expect("run");
+        assert_eq!(sender.calls(), 1);
+        assert_eq!(first["phase"], json!("unknown"));
+
+        let again = CountingSender::ok();
+        let second = run_with(
+            &app,
+            &account,
+            &Command::LotteryDraw,
+            &judge_lottery(Some(1)),
+            &again,
+        )
+        .await
+        .expect("run");
+        assert_eq!(again.calls(), 0, "未知结果不许自动重发");
+        assert_eq!(second["decision"], json!("recheck"));
     }
 }
