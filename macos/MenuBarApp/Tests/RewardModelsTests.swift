@@ -234,8 +234,10 @@ final class RewardModelsTests: XCTestCase {
         let state = RewardAccountState(json: account(overrides: ["streakDays": 0]))
         let note = state.streakNote
         XCTAssertNotNil(note)
-        XCTAssertTrue(note?.contains("两套判定") == true)
-        XCTAssertTrue(note?.contains("签到成功") == true)
+        // 只陈述服务端事实 + 未确证，不再断言"签到不会增加连登"。
+        XCTAssertTrue(note?.contains("连登 0 天") == true)
+        XCTAssertTrue(note?.contains("尚无确证") == true)
+        XCTAssertFalse(note?.contains("不会让它") == true, "不许断言因果")
     }
 
     func testANonZeroStreakHasNoExplanation() {
