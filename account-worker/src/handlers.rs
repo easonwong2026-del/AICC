@@ -125,6 +125,7 @@ pub const METHODS: &[&str] = &[
     "growth.rewards.draw",
     "growth.rewards.redeem",
     "growth.rewards.makeup",
+    "growth.rewards.recheck",
     // ---- WorkBuddy 每日签到（PR #69）----
     "checkin.status",
     "checkin.run",
@@ -1124,6 +1125,15 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                 confirm,
             )
             .await
+        }
+
+        // 回查：把 unknown 的记录拿服务端当前状态比一次，能收敛就收敛。
+        // 只读服务端（GET），只写本地账本。
+        "growth.rewards.recheck" => {
+            let _gate = crate::credentials::gate::begin(app)?;
+            let account_id = require_str(params, "accountId")?;
+            let op_id = params.get("opId").and_then(Value::as_str);
+            crate::growth::rewards_write::recheck(app, &account_id, op_id).await
         }
 
         // ---- WorkBuddy 每日签到（PR #69）----

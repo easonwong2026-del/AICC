@@ -102,11 +102,7 @@ pub enum ProbeDecision {
 ///
 /// 顺序与正式接线一致：先 `open_reward_op`（落盘 / 复用），再 `plan()`。
 /// `plan` 说 `Recheck` 或 `Blocked` 时，这里绝不返回 `Send`。
-pub fn decide(
-    db: &mut Db,
-    account_id: &str,
-    command: &Command,
-) -> RpcResult<ProbeDecision> {
+pub fn decide(db: &mut Db, account_id: &str, command: &Command) -> RpcResult<ProbeDecision> {
     decide_with(db, account_id, command, true)
 }
 
@@ -125,9 +121,10 @@ pub fn decide_with(
     //
     // 注意只拦"已结束"的情形：还开着的记录要继续走同一个 attempt（回查或重发），
     // 那是同一次操作，不是第二次消耗。
-    if db
-        .open_reward_op_for(account_id, action, &target)?
-        .is_none()
+    if one_shot
+        && db
+            .open_reward_op_for(account_id, action, &target)?
+            .is_none()
         && db.has_any_reward_op(account_id, action, &target)?
     {
         return Ok(ProbeDecision::Blocked {
@@ -245,6 +242,8 @@ pub async fn send_once<S: ProbeSender>(
 pub struct Readiness {
     pub ready: bool,
     pub balance: Option<i64>,
+    /// 服务端当前的状态字符串（档位用），用于回查对比。
+    pub observed: Option<String>,
     pub reason: Option<&'static str>,
 }
 
@@ -257,16 +256,19 @@ pub fn judge_lottery(balance: Option<i64>) -> Readiness {
         Some(0) => Readiness {
             ready: false,
             balance: Some(0),
+            observed: None,
             reason: Some("抽奖次数为 0，不发送"),
         },
         Some(value) => Readiness {
             ready: true,
             balance: Some(value),
+            observed: None,
             reason: None,
         },
         None => Readiness {
             ready: false,
             balance: None,
+            observed: None,
             reason: Some("查不到抽奖次数，不发送"),
         },
     }
@@ -275,25 +277,30 @@ pub fn judge_lottery(balance: Option<i64>) -> Readiness {
 /// 档位状态的判断（纯函数）。
 pub fn judge_tier(status: Option<&str>) -> Readiness {
     let lowered = status.map(|text| text.trim().to_lowercase());
+    let observed = lowered.clone();
     match lowered.as_deref() {
         Some("available") | Some("ready") | Some("claimable") | Some("unlocked") => Readiness {
             ready: true,
             balance: None,
+            observed: None,
             reason: None,
         },
         Some("claimed") => Readiness {
             ready: false,
             balance: None,
+            observed: None,
             reason: Some("该档位已经领过"),
         },
         Some("locked") => Readiness {
             ready: false,
             balance: None,
+            observed: None,
             reason: Some("该档位还没达成"),
         },
         _ => Readiness {
             ready: false,
             balance: None,
+            observed: None,
             reason: Some("档位状态不明确，不发送"),
         },
     }
@@ -305,16 +312,19 @@ pub fn judge_makeup(balance: Option<i64>) -> Readiness {
         Some(0) => Readiness {
             ready: false,
             balance: Some(0),
+            observed: None,
             reason: Some("补签卡为 0，不发送"),
         },
         Some(value) => Readiness {
             ready: true,
             balance: Some(value),
+            observed: None,
             reason: None,
         },
         None => Readiness {
             ready: false,
             balance: None,
+            observed: None,
             reason: Some("查不到补签卡余额，不发送"),
         },
     }
@@ -350,14 +360,37 @@ pub async fn readiness(access: &str, uid: &str, domain: &str, command: &Command)
             }
             Err(_) => judge_tier(None),
         },
-        Command::MakeupCard { .. } => match endpoints.streak().await {
-            Ok((body, _)) => {
-                let node = body.get("data").unwrap_or(&body);
-                let balance = super::scanner::read_makeup_cards(Some(node));
-                judge_makeup(balance)
+        Command::MakeupCard { target_date } => {
+            let (streak, heatmap) = tokio::join!(endpoints.streak(), endpoints.heatmap());
+            let Ok((streak_body, _)) = streak else {
+                return judge_makeup(None);
+            };
+            let node = streak_body.get("data").unwrap_or(&streak_body);
+            let balance = super::scanner::read_makeup_cards(Some(node));
+            let mut readiness = judge_makeup(balance);
+            if !readiness.ready {
+                return readiness;
             }
-            Err(_) => judge_makeup(None),
-        },
+            // 日期必须真的在"可补签候选"里：RPC 层只校验格式，资格要问服务端。
+            let Ok((heatmap_body, _)) = heatmap else {
+                readiness.ready = false;
+                readiness.reason = Some("查不到活跃日历，不发送");
+                return readiness;
+            };
+            match super::rewards_state::makeup_candidates(&streak_body, &heatmap_body) {
+                Ok(days) => {
+                    if !days.iter().any(|day| day == target_date) {
+                        readiness.ready = false;
+                        readiness.reason = Some("这一天不在可补签候选里，不发送");
+                    }
+                }
+                Err(_) => {
+                    readiness.ready = false;
+                    readiness.reason = Some("活跃日历异常，无法确认补签资格");
+                }
+            }
+            readiness
+        }
     }
 }
 
@@ -779,6 +812,42 @@ mod tests {
             1,
             "也不能偷偷建新记录"
         );
+    }
+
+    /// P0 回归：**正式路径不受一次性守卫限制** —— 抽过一次之后还能再抽。
+    ///
+    /// 这是 `decide_with(one_shot=false)` 存在的全部意义；参数没接上时，
+    /// 第二次抽奖会被永久 Blocked。
+    #[test]
+    fn the_product_path_may_repeat_a_finished_draw() {
+        let (mut db, _dir) = temp_db();
+        let account = add_account(&mut db, "uid-1");
+        let ProbeDecision::Send { op_id, .. } =
+            decide_with(&mut db, &account, &Command::LotteryDraw, false).unwrap()
+        else {
+            panic!("第一次应为 Send");
+        };
+        db.mark_reward_op_sent(&op_id).unwrap();
+        db.resolve_reward_op(
+            &op_id,
+            &Resolution {
+                phase: "confirmed",
+                outcome: "granted",
+                grant: None,
+                server_state: None,
+                detail: None,
+                verified: true,
+            },
+        )
+        .unwrap();
+
+        let again = decide_with(&mut db, &account, &Command::LotteryDraw, false).unwrap();
+        assert!(
+            matches!(again, ProbeDecision::Send { .. }),
+            "正式路径必须允许再次抽奖，实际 {again:?}"
+        );
+        // 此刻账本里多了一条新的未决记录：探针会接着处理这一条（不是直接 Blocked），
+        // 但一次性守卫在它结束后依旧生效 —— 见 `a_completed_probe_blocks_a_second_one`。
     }
 
     /// 别的动作不受一次性限制影响。

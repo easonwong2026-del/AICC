@@ -473,6 +473,20 @@ impl Db {
         Ok(out)
     }
 
+    /// 记下发送前的服务端基线（余额/档位状态），回查时用来判断"变没变"。
+    ///
+    /// 只允许写一次：第一次发送前的快照才是比较基准，重发不能覆盖它。
+    pub fn set_reward_op_baseline(&mut self, id: &str, baseline: &Value) -> RpcResult<()> {
+        let text = serde_json::to_string(baseline).unwrap_or_else(|_| "{}".to_string());
+        let now = now_rfc3339();
+        self.conn.execute(
+            "UPDATE reward_operations SET server_state = ?2, updated_at = ?3
+              WHERE id = ?1 AND server_state IS NULL",
+            params![id, text, now],
+        )?;
+        Ok(())
+    }
+
     /// 这个 `(账号, 动作, 目标)` 有没有**任何**记录（含已结束的）。
     ///
     /// 一次性探针用它判断"这次机会是不是已经用掉了"—— 只看未决记录不够，

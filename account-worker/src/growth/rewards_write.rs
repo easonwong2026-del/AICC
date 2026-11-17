@@ -117,6 +117,12 @@ pub async fn run(
     };
 
     app.with_db(|db| db.mark_reward_op_sent(&op_id))?;
+    // 发送前基线：回查时靠它判断"变没变"。写失败不影响发送（最坏是回查更保守）。
+    let baseline = json!({
+        "balance": readiness.balance,
+        "observed": readiness.observed,
+    });
+    let _ = app.with_db(|db| db.set_reward_op_baseline(&op_id, &baseline));
 
     let sender = probe::HttpSender {
         payload: json!({
@@ -146,9 +152,7 @@ pub async fn run(
 
     let (verdict, label) = probe::resolution_for(&outcome);
     let grant_value = match &outcome {
-        Outcome::Granted { grant, .. } => {
-            serde_json::to_value(grant).unwrap_or(Value::Null)
-        }
+        Outcome::Granted { grant, .. } => serde_json::to_value(grant).unwrap_or(Value::Null),
         _ => Value::Null,
     };
     let detail = match &outcome {
@@ -181,6 +185,113 @@ pub async fn run(
         "message": message_for(verdict.phase(), &outcome),
         "response": raw.as_ref().map(super::evidence::sanitize_json),
     }))
+}
+
+/// 回查闭环：把 `unknown` 的记录拿服务端当前状态比一次，能收敛就收敛。
+///
+/// 判据只有一条：**基线变了才算生效**。余额没变、档位状态没变，一律当作"仍未知"，
+/// 继续占着目标 —— 与 `verdict()` 的语义一致，绝不因为"看起来没动"就释放。
+pub async fn recheck(
+    app: &std::sync::Arc<crate::app::App>,
+    account_id: &str,
+    op_id: Option<&str>,
+) -> RpcResult<Value> {
+    let account = app
+        .with_db(|db| db.get_account(account_id))?
+        .ok_or_else(|| RpcError::new(crate::rpc::E_NOT_FOUND, "账号不存在"))?;
+    let ops = app.with_db(|db| match op_id {
+        Some(id) => Ok(db.reward_op(id)?.into_iter().collect::<Vec<_>>()),
+        None => db.reward_ops_awaiting_verification(account_id),
+    })?;
+    if ops.is_empty() {
+        return Ok(json!({ "checked": 0, "results": [], "note": "没有待核验的操作" }));
+    }
+    let resolved = match crate::auth::broker::resolve(app, &account) {
+        Ok(crate::auth::broker::Outcome::Resolved(resolved)) => resolved,
+        Ok(crate::auth::broker::Outcome::Unavailable { reason, detail }) => {
+            return Err(RpcError::new(
+                crate::rpc::E_AUTH,
+                format!("没有可用凭据（{reason}）：{detail}"),
+            ))
+        }
+        Err(err) => return Err(err),
+    };
+
+    let mut results = Vec::new();
+    for op in ops {
+        let Some(action) = ProbeAction::parse(&op.action) else {
+            continue;
+        };
+        let target = (!op.target.is_empty()).then_some(op.target.as_str());
+        let Ok(command) = build_command(action, target) else {
+            continue;
+        };
+        let now = probe::readiness(
+            &resolved.access,
+            &account.uid,
+            account.auth_domain.as_deref().unwrap_or_default(),
+            &command,
+        )
+        .await;
+
+        let baseline: Value = op
+            .server_state
+            .as_deref()
+            .and_then(|text| serde_json::from_str(text).ok())
+            .unwrap_or(Value::Null);
+        let base_balance = baseline.get("balance").and_then(Value::as_i64);
+        let base_observed = baseline.get("observed").and_then(Value::as_str);
+
+        let moved = match (base_balance, now.balance) {
+            (Some(before), Some(after)) => after < before,
+            _ => false,
+        } || match (base_observed, now.observed.as_deref()) {
+            (Some(before), Some(after)) => !before.eq_ignore_ascii_case(after),
+            _ => false,
+        };
+
+        let verdict = if moved {
+            reward_ledger_verdict(true)
+        } else {
+            reward_ledger_verdict(false)
+        };
+        app.with_db(|db| {
+            db.resolve_reward_op(
+                &op.id,
+                &Resolution {
+                    phase: verdict.phase(),
+                    outcome: if moved { "granted" } else { "indeterminate" },
+                    grant: None,
+                    server_state: None,
+                    detail: Some(verdict.describe()),
+                    verified: verdict.verified(),
+                },
+            )
+        })?;
+        results.push(json!({
+            "opId": op.id,
+            "action": op.action,
+            "target": op.target,
+            "moved": moved,
+            "phase": verdict.phase(),
+            "message": verdict.describe(),
+        }));
+    }
+
+    Ok(json!({
+        "checked": results.len(),
+        "results": results,
+    }))
+}
+
+/// 生效 → confirmed；否则仍是 unknown（不释放目标）。
+fn reward_ledger_verdict(moved: bool) -> super::reward_ledger::Verdict {
+    use super::reward_ledger::{verdict, Observation};
+    verdict(if moved {
+        Observation::Applied
+    } else {
+        Observation::Unchanged
+    })
 }
 
 /// 四种状态给界面用：成功 / 被拒 / 未定 / 冻结。
@@ -245,13 +356,28 @@ mod tests {
         assert!(!unknown.contains("失败"));
         assert!(unknown.contains("不会重发"));
 
-        let frozen = message_for("frozen", &Outcome::Forbidden { message: "risk control".into() });
+        let frozen = message_for(
+            "frozen",
+            &Outcome::Forbidden {
+                message: "risk control".into(),
+            },
+        );
         assert!(frozen.contains("冻结"));
     }
 
     #[test]
     fn rejection_wording_distinguishes_already_claimed() {
         assert!(message_for("rejected", &Outcome::AlreadyClaimed).contains("已经领过"));
+    }
+
+    /// 回查判据：只有基线变了才算生效，没变仍是 unknown。
+    #[test]
+    fn recheck_only_closes_when_the_baseline_moved() {
+        let moved = reward_ledger_verdict(true);
+        assert_eq!(moved.phase(), "confirmed");
+        let still = reward_ledger_verdict(false);
+        assert_eq!(still.phase(), "unknown", "没变化不能关账");
+        assert!(!still.verified());
     }
 
     #[test]

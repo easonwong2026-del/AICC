@@ -90,3 +90,15 @@ Swift：新增写结果四态、`needsAttention`、预览不算已发送、连�
 
 - ad-hoc 签名，换构建会丢小组件实例（需重新添加）。
 - 本包来自 `feat/rewards-actions`（#101），不是 main。
+
+## 九、复审 P0/P1 修复（2026-11-17 第二轮）
+
+| 编号 | 问题 | 修复 |
+| --- | --- | --- |
+| P0 | `decide_with(one_shot=false)` 里守卫条件没带 `one_shot`，正式抽奖一次后会被永久 Blocked | 条件补上 `one_shot &&`；回归测试 `the_product_path_may_repeat_a_finished_draw`（正式路径第二次是 Send，探针仍是 Blocked） |
+| P0 | `pending` 没有真正的回查闭环 | 新增 `growth.rewards.recheck`：发送前把基线（余额/档位状态）写进账本 `server_state`；回查时 GET 当前状态对比，**只有基线变了**才 `confirmed`，没变保持 `unknown` |
+| P1 | 补签日期只校验格式 | `readiness()` 对补签改为同时取 `/streak` + `/heatmap`，用 `makeup_candidates` 校验目标日期**确实在候选里**，不在就不发 |
+| P1 | 确认框用旧缓存余额 | **未完成**：RPC 侧每次发送前都会重查（权威判断在服务端），但确认框显示的数字仍来自上一次刷新 |
+| — | `cargo fmt --check` 失败 | 已 `cargo fmt`，`--check` 通过 |
+
+回查语义与 `verdict()` 一致：看不动就不关账。测试 `recheck_only_closes_when_the_baseline_moved`。
