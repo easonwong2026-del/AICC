@@ -245,6 +245,40 @@ final class RewardModelsTests: XCTestCase {
         XCTAssertNil(state.streakNote)
     }
 
+    // MARK: - 按钮门禁（回归：曾出现"说改了但提交里没有"）
+
+    func testMakeupNeedsBothABrokenDayAndACard() {
+        func state(balance: Any?, candidates: [String]) -> RewardAccountState {
+            RewardAccountState(json: account(overrides: [
+                "makeup": ["balance": balance ?? NSNull(), "candidates": candidates],
+            ]))
+        }
+        let day = ["2026-11-16"]
+        XCTAssertTrue(RewardAction.makeup.isEnabled(for: state(balance: 2, candidates: day)))
+        XCTAssertFalse(RewardAction.makeup.isEnabled(for: state(balance: 0, candidates: day)))
+        XCTAssertFalse(RewardAction.makeup.isEnabled(for: state(balance: -1, candidates: day)))
+        XCTAssertFalse(RewardAction.makeup.isEnabled(for: state(balance: nil, candidates: day)), "余额未知不许点")
+        XCTAssertFalse(RewardAction.makeup.isEnabled(for: state(balance: 2, candidates: [])), "没断签日不许点")
+    }
+
+    func testDrawNeedsAKnownPositiveChanceCount() {
+        func state(chances: Any?) -> RewardAccountState {
+            RewardAccountState(json: account(overrides: ["lotteryChances": chances ?? NSNull()]))
+        }
+        XCTAssertTrue(RewardAction.draw.isEnabled(for: state(chances: 1)))
+        XCTAssertFalse(RewardAction.draw.isEnabled(for: state(chances: 0)))
+        XCTAssertFalse(RewardAction.draw.isEnabled(for: state(chances: -2)))
+        XCTAssertFalse(RewardAction.draw.isEnabled(for: state(chances: nil)))
+    }
+
+    func testRedeemNeedsAClaimableTier() {
+        XCTAssertTrue(RewardAction.redeem.isEnabled(for: RewardAccountState(json: account())))
+        let none = RewardAccountState(json: account(overrides: [
+            "tiers": [["tier": "7d", "days": 7, "state": "claimed", "claimable": false]],
+        ]))
+        XCTAssertFalse(RewardAction.redeem.isEnabled(for: none))
+    }
+
     // MARK: - 动作映射（P0-A 回归）
 
     func testActionRawValuesAreTheProtocolStrings() {

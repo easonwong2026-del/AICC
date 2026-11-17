@@ -349,6 +349,18 @@ enum RewardAction: String, Identifiable, CaseIterable {
         }
     }
 
+    /// 这个动作现在能不能点。**纯函数**，所以有单测；界面只调用它，不再各写一套条件。
+    func isEnabled(for state: RewardAccountState) -> Bool {
+        switch self {
+        case .draw:
+            return (state.lotteryChances ?? 0) > 0
+        case .redeem:
+            return !state.claimableTiers.isEmpty
+        case .makeup:
+            return !state.makeup.candidates.isEmpty && (state.makeup.balance ?? 0) > 0
+        }
+    }
+
     var cost: String {
         switch self {
         case .draw: return "消耗 1 次抽奖机会"

@@ -279,12 +279,12 @@ struct ConsoleRewardsBlock: View {
                 Button("抽奖") { onPreview(.draw, nil) }
                     .buttonStyle(ConsoleSecondaryButtonStyle())
                     // 余额未知（nil）也要禁用：不能拿"不知道"当"有次数"。
-                    .disabled(acting || (state.lotteryChances ?? 0) <= 0)
+                    .disabled(acting || !RewardAction.draw.isEnabled(for: state))
                 Button(redeemTitle) {
                     if let tier = claimable?.tier { onPreview(.redeem, tier) }
                 }
                 .buttonStyle(ConsoleSecondaryButtonStyle())
-                .disabled(acting || claimable == nil)
+                .disabled(acting || !RewardAction.redeem.isEnabled(for: state))
                 Button("补签") {
                     if let date = state.makeup.candidates.first { onPreview(.makeup, date) }
                 }

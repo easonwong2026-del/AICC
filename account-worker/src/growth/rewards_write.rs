@@ -15,7 +15,7 @@
 use serde_json::{json, Value};
 
 use super::probe::{self, command as build_command, ProbeAction, ProbeDecision};
-use super::streak_rewards::{Outcome, Tier};
+use super::streak_rewards::{Command, Outcome, Tier};
 use crate::rpc::{RpcError, RpcResult};
 use crate::storage::reward_ops::Resolution;
 
@@ -88,6 +88,35 @@ pub async fn run(
     }
 
     // 正式路径**不**走一次性守卫，但仍共用同一套账本决策。
+    let sender = probe::HttpSender {
+        payload: json!({
+            "access_token": resolved.access,
+            "uid": account.uid,
+            "domain": account.auth_domain.clone().unwrap_or_default(),
+            "variant": "cn",
+        }),
+    };
+    execute_prepared(app, account_id, &command, &readiness, sender).await
+}
+
+/// 走完"决策 → 写账本 → 发一次 → 落结论"这一段。**不联网**：sender 由调用方给，
+/// 所以正式链路的每一步都能在测试里用替身跑一遍。
+pub async fn execute_prepared<S: probe::ProbeSender>(
+    app: &std::sync::Arc<crate::app::App>,
+    account_id: &str,
+    command: &Command,
+    readiness: &probe::Readiness,
+    sender: S,
+) -> RpcResult<Value> {
+    let sender = &sender;
+    // 门禁也放在这一段里：任何入口（RPC / 测试 / 将来的批量）都绕不过去。
+    if !readiness.ready {
+        return Ok(json!({
+            "sent": false,
+            "decision": "not_ready",
+            "reason": readiness.reason.unwrap_or("当前不满足发送条件"),
+        }));
+    }
     let decision = app.with_db(|db| probe::decide_with(db, account_id, &command, false))?;
     let (op_id, suffix, body) = match decision {
         ProbeDecision::Send {
@@ -125,16 +154,7 @@ pub async fn run(
     app.with_db(|db| db.set_reward_op_baseline(&op_id, &baseline))?;
     app.with_db(|db| db.mark_reward_op_sent(&op_id))?;
 
-    let sender = probe::HttpSender {
-        payload: json!({
-            "access_token": resolved.access,
-            "uid": account.uid,
-            "domain": account.auth_domain.clone().unwrap_or_default(),
-            "variant": "cn",
-        }),
-    };
-
-    let (outcome, raw, http_status) = match probe::send_once(&sender, suffix, body).await {
+    let (outcome, raw, http_status) = match sender.send(suffix, body).await {
         Ok(response) => (
             super::streak_rewards::classify(&command, 200, &response),
             Some(response),
@@ -408,5 +428,173 @@ mod tests {
         assert!(cost_text(ProbeAction::LotteryDraw).contains("抽奖机会"));
         assert!(cost_text(ProbeAction::Redeem).contains("档位"));
         assert!(cost_text(ProbeAction::MakeupCard).contains("补签卡"));
+    }
+
+    // ------------------------------------------------------------------
+    // 正式业务链（不是探针）：预览不发送、只发一次、超时不重发
+    // ------------------------------------------------------------------
+
+    struct ChainSender {
+        calls: std::sync::Mutex<Vec<String>>,
+        timeout: bool,
+    }
+
+    impl ChainSender {
+        fn ok() -> Self {
+            Self {
+                calls: Default::default(),
+                timeout: false,
+            }
+        }
+        fn timeout() -> Self {
+            Self {
+                calls: Default::default(),
+                timeout: true,
+            }
+        }
+        fn calls(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+    }
+
+    impl super::probe::ProbeSender for ChainSender {
+        async fn send(
+            &self,
+            suffix: &str,
+            _body: Value,
+        ) -> Result<Value, crate::growth::api::GrowthError> {
+            self.calls.lock().unwrap().push(suffix.to_string());
+            if self.timeout {
+                Err(crate::growth::api::GrowthError {
+                    kind: crate::growth::api::ErrorKind::Network,
+                    http: None,
+                    code: None,
+                    message: "请求超时（15s）".into(),
+                })
+            } else {
+                Ok(json!({ "code": 0, "data": {} }))
+            }
+        }
+    }
+
+    fn chain_app() -> (std::sync::Arc<crate::app::App>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data = dir.path().to_path_buf();
+        let paths = crate::paths::Paths {
+            db_path: data.join("accounts.sqlite"),
+            backups_dir: data.join("backups"),
+            logs_dir: data.join("logs"),
+            wb_switch_home: data.join("wb"),
+            data_dir: data.clone(),
+            wb_home_owned: true,
+        };
+        (
+            std::sync::Arc::new(crate::app::App::with_secure(
+                paths,
+                crate::securestore::SecureStore::memory(),
+            )),
+            dir,
+        )
+    }
+
+    fn chain_account(app: &std::sync::Arc<crate::app::App>, uid: &str) -> String {
+        app.with_db(|db| {
+            db.upsert_account(&crate::storage::AccountInput {
+                platform: "workbuddy".into(),
+                uid: uid.into(),
+                nickname: Some("chain".into()),
+                email: None,
+                group_id: None,
+                auth_ref: None,
+                profile_ref: None,
+                auth_status: None,
+                checkin_enabled: None,
+                token_expires_at: None,
+                auth_domain: None,
+                auth_source: None,
+                travel_enabled: None,
+                provider: None,
+            })
+        })
+        .unwrap()
+        .id
+    }
+
+    /// 资格不满足 → 一次都不发（预览/门禁这条链的第一步）。
+    #[tokio::test]
+    async fn an_ineligible_request_sends_nothing() {
+        let (app, _dir) = chain_app();
+        let account = chain_account(&app, "uid-gate");
+        let sender = ChainSender::ok();
+        let out = execute_prepared(
+            &app,
+            &account,
+            &Command::LotteryDraw,
+            &super::probe::judge_lottery(Some(0)),
+            &sender,
+        )
+        .await
+        .expect("run");
+        assert_eq!(sender.calls(), 0);
+        assert_eq!(out["decision"], json!("not_ready"));
+    }
+
+    /// 三种动作各发一次，且落到各自的 suffix。
+    #[tokio::test]
+    async fn the_product_chain_sends_each_action_once() {
+        let (app, _dir) = chain_app();
+        for (command, ready) in [
+            (Command::LotteryDraw, super::probe::judge_lottery(Some(1))),
+            (
+                Command::Redeem(Tier::Days7),
+                super::probe::judge_tier(Some("available")),
+            ),
+            (
+                Command::MakeupCard {
+                    target_date: "2026-11-10".into(),
+                },
+                super::probe::judge_makeup(Some(2)),
+            ),
+        ] {
+            let account = chain_account(&app, &format!("uid-{}", command.action().as_str()));
+            let sender = ChainSender::ok();
+            let out = execute_prepared(&app, &account, &command, &ready, &sender)
+                .await
+                .expect("run");
+            assert_eq!(sender.calls(), 1, "{}", command.action().as_str());
+            assert_eq!(out["sent"], json!(true));
+        }
+    }
+
+    /// 超时 → unknown → 再点只回查，不再发。
+    #[tokio::test]
+    async fn a_timeout_stays_unknown_and_a_second_attempt_sends_nothing() {
+        let (app, _dir) = chain_app();
+        let account = chain_account(&app, "uid-timeout-chain");
+        let slow = ChainSender::timeout();
+        let first = execute_prepared(
+            &app,
+            &account,
+            &Command::LotteryDraw,
+            &super::probe::judge_lottery(Some(1)),
+            &slow,
+        )
+        .await
+        .expect("run");
+        assert_eq!(slow.calls(), 1);
+        assert_eq!(first["phase"], json!("unknown"));
+
+        let again = ChainSender::ok();
+        let second = execute_prepared(
+            &app,
+            &account,
+            &Command::LotteryDraw,
+            &super::probe::judge_lottery(Some(1)),
+            &again,
+        )
+        .await
+        .expect("run");
+        assert_eq!(again.calls(), 0, "未知结果不许重发");
+        assert_eq!(second["decision"], json!("recheck"));
     }
 }
