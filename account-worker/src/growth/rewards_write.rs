@@ -205,7 +205,15 @@ pub async fn recheck(
             let op = db.reward_op(id)?;
             // 指定 opId 时必须确认它属于这个账号，否则能借回查别人的记录。
             match op {
-                Some(op) if op.account_id == account_id => Ok(vec![op]),
+                Some(op)
+                    if op.account_id == account_id
+                        && matches!(op.phase.as_str(), "sent" | "unknown") =>
+                {
+                    Ok(vec![op])
+                }
+                Some(op) if op.account_id == account_id => Err(RpcError::invalid_params(
+                    "这条操作不在待核验阶段（只有 sent/unknown 可以回查）",
+                )),
                 Some(_) => Err(RpcError::invalid_params("这条操作不属于该账号")),
                 None => Err(RpcError::new(crate::rpc::E_NOT_FOUND, "操作不存在")),
             }

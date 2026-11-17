@@ -154,7 +154,8 @@ struct RewardOperationRow: Identifiable, Equatable {
         }
     }
 
-    var needsAttention: Bool { open }
+    // 只有 sent/unknown 才值得回查；pending/ready 还没发，frozen 等人工，不该被回查改写。
+    var needsAttention: Bool { phase == "sent" || phase == "unknown" }
 
     init(json: [String: Any]) {
         id = json["id"] as? String ?? UUID().uuidString
@@ -331,9 +332,11 @@ struct RewardRefreshNotice: Equatable {
 
 /// 三个写操作。
 enum RewardAction: String, Identifiable, CaseIterable {
-    case draw
-    case redeem
-    case makeup
+    // rawValue 必须等于后端 `action` 字段（lottery_draw / redeem / makeup_card），
+    // 否则 `RewardAction(rawValue: preview.action)` 得到 nil，确认按钮点了没反应。
+    case draw = "lottery_draw"
+    case redeem = "redeem"
+    case makeup = "makeup_card"
 
     var id: String { rawValue }
 

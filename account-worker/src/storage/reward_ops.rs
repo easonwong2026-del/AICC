@@ -405,7 +405,7 @@ impl Db {
         let detail = sanitize_detail(res.detail);
         let changed = self.conn.execute(
             "UPDATE reward_operations
-                SET phase = ?2, outcome = ?3, grant_json = ?4, server_state = ?5,
+                SET phase = ?2, outcome = ?3, grant_json = ?4, server_state = COALESCE(?5, server_state),
                     detail = ?6, updated_at = ?7, verified_at = ?8
               WHERE id = ?1 AND phase IN ('pending','ready','sent','unknown','frozen')",
             params![
