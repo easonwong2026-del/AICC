@@ -200,6 +200,48 @@ final class RewardModelsTests: XCTestCase {
         XCTAssertEqual(notice?.hasReadAt, false)
     }
 
+    // MARK: - 写操作结果
+
+    func testTheFourWriteStatesAreKeptApart() {
+        XCTAssertEqual(RewardActionResult(json: ["sent": true, "state": "succeeded"]).state, "succeeded")
+        XCTAssertEqual(RewardActionResult(json: ["sent": true, "state": "rejected"]).state, "rejected")
+        XCTAssertEqual(RewardActionResult(json: ["sent": true, "state": "pending"]).state, "pending")
+        XCTAssertEqual(RewardActionResult(json: ["sent": true, "state": "frozen"]).state, "frozen")
+    }
+
+    func testUnknownAndFrozenAreFlaggedForAttentionNotAsFailure() {
+        XCTAssertTrue(RewardActionResult(json: ["state": "pending"]).needsAttention)
+        XCTAssertTrue(RewardActionResult(json: ["state": "frozen"]).needsAttention)
+        XCTAssertFalse(RewardActionResult(json: ["state": "rejected"]).needsAttention)
+        XCTAssertFalse(RewardActionResult(json: ["state": "succeeded"]).needsAttention)
+    }
+
+    func testAPreviewIsNotReportedAsSent() {
+        let preview = RewardActionResult(json: ["decision": "preview", "note": "这只是预览"])
+        XCTAssertFalse(preview.sent)
+        XCTAssertEqual(preview.state, "preview")
+    }
+
+    func testActionResultFallsBackToReasonThenNote() {
+        XCTAssertEqual(RewardActionResult(json: ["decision": "not_ready", "reason": "抽奖次数为 0"]).message, "抽奖次数为 0")
+        XCTAssertEqual(RewardActionResult(json: ["decision": "preview", "note": "预览"]).message, "预览")
+    }
+
+    // MARK: - 连登为 0 的解释
+
+    func testASeroStreakExplainsThatCheckinIsADifferentSignal() {
+        let state = RewardAccountState(json: account(overrides: ["streakDays": 0]))
+        let note = state.streakNote
+        XCTAssertNotNil(note)
+        XCTAssertTrue(note?.contains("两套判定") == true)
+        XCTAssertTrue(note?.contains("签到成功") == true)
+    }
+
+    func testANonZeroStreakHasNoExplanation() {
+        let state = RewardAccountState(json: account())  // streakDays: 16
+        XCTAssertNil(state.streakNote)
+    }
+
     // MARK: - 整包与 Mock
 
     func testResultLooksUpByAccountId() {

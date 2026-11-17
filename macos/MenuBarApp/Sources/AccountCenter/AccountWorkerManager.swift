@@ -843,6 +843,35 @@ final class AccountWorkerManager: ObservableObject {
         return try await client.call("growth.rewards.status", params: params, timeout: 60)
     }
 
+    /// 正式写操作（PR #101）：抽奖 / 兑换 / 补签。
+    ///
+    /// `confirm: false` 只返回预览（账号、动作、余额、预计消耗），**不发请求**。
+    /// 三个动作分三个方法，日志里能直接看出用户点了什么。
+    func rewardDraw(accountId: String, confirm: Bool) async throws -> [String: Any] {
+        try await rewardWrite("growth.rewards.draw", accountId: accountId, target: nil, confirm: confirm)
+    }
+
+    func rewardRedeem(accountId: String, tier: String, confirm: Bool) async throws -> [String: Any] {
+        try await rewardWrite("growth.rewards.redeem", accountId: accountId, target: tier, confirm: confirm)
+    }
+
+    func rewardMakeup(accountId: String, date: String, confirm: Bool) async throws -> [String: Any] {
+        try await rewardWrite("growth.rewards.makeup", accountId: accountId, target: date, confirm: confirm)
+    }
+
+    private func rewardWrite(
+        _ method: String,
+        accountId: String,
+        target: String?,
+        confirm: Bool
+    ) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        var params: [String: Any] = ["accountId": accountId, "confirm": confirm]
+        if let target { params["target"] = target }
+        return try await client.call(method, params: params, timeout: 60)
+    }
+
     // MARK: - 每日签到（PR #69）
 
     /// 查今日签到状态。默认会真的问一次服务端（只读 POST）；`cached` 时不联网。

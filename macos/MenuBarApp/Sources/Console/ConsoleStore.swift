@@ -766,6 +766,42 @@ final class ConsoleStore: ObservableObject {
         }
     }
 
+    /// 写操作的结果（按账号）。四种状态都留在这里，界面按 state 上色。
+    @Published private(set) var rewardActions: [String: RewardActionResult] = [:]
+    @Published private(set) var rewardActing: Set<String> = []
+
+    /// 执行一次奖励写操作。**调用方必须先让用户确认**（界面里有 confirmationDialog）。
+    func performReward(accountId: String, action: RewardAction, target: String? = nil) async {
+        guard !rewardActing.contains(accountId) else { return }
+        rewardActing.insert(accountId)
+        defer { rewardActing.remove(accountId) }
+        guard await ensureWorkerReady() else {
+            rewardActions[accountId] = RewardActionResult(json: ["state": "failed", "message": workerFailureText])
+            return
+        }
+        do {
+            let json: [String: Any]
+            switch action {
+            case .draw:
+                json = try await worker.rewardDraw(accountId: accountId, confirm: true)
+            case .redeem:
+                json = try await worker.rewardRedeem(accountId: accountId, tier: target ?? "", confirm: true)
+            case .makeup:
+                json = try await worker.rewardMakeup(accountId: accountId, date: target ?? "", confirm: true)
+            }
+            rewardActions[accountId] = RewardActionResult(json: json)
+            // 无论结果如何都重读一次状态：成功要看新余额，未知要看账本提示。
+            await loadReward(accountId: accountId)
+        } catch {
+            rewardActions[accountId] = RewardActionResult(json: [
+                "state": "failed",
+                "message": (error as? LocalizedError)?.errorDescription ?? error.localizedDescription,
+            ])
+        }
+    }
+
+    func clearRewardAction(accountId: String) { rewardActions[accountId] = nil }
+
     /// 读一个账号的奖励状态。**只读**：worker 侧没有抽奖、兑换、补签的写入口。
     ///
     /// 失败不清空上一次结果：界面上的「上次读到」和「这次失败」是两件事，

@@ -121,6 +121,10 @@ pub const METHODS: &[&str] = &[
     "growth.runs",
     // ---- 奖励状态（PR #96：只读；三个写动作仍未接线）----
     "growth.rewards.status",
+    // ---- 正式奖励写操作（PR #101）----
+    "growth.rewards.draw",
+    "growth.rewards.redeem",
+    "growth.rewards.makeup",
     // ---- WorkBuddy 每日签到（PR #69）----
     "checkin.status",
     "checkin.run",
@@ -1062,6 +1066,64 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
             } else {
                 crate::growth::probe::preview(app, &account_id, &command).await
             }
+        }
+
+        // ---- 正式奖励写操作（PR #101）----
+        //
+        // 三个动作三个方法，而不是一个 `growth.rewards.execute`：审计日志一眼能看出
+        // 用户点了什么。共同点：`confirm` 不为 true 时只返回预览（账号、动作、余额、
+        // 预计消耗），不会写账本也不会发请求。
+        "growth.rewards.draw" => {
+            let _gate = crate::credentials::gate::begin(app)?;
+            let account_id = require_str(params, "accountId")?;
+            let confirm = params
+                .get("confirm")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            crate::growth::rewards_write::run(
+                app,
+                &account_id,
+                crate::growth::probe::ProbeAction::LotteryDraw,
+                None,
+                confirm,
+            )
+            .await
+        }
+
+        "growth.rewards.redeem" => {
+            let _gate = crate::credentials::gate::begin(app)?;
+            let account_id = require_str(params, "accountId")?;
+            let tier = require_str(params, "target")?;
+            let confirm = params
+                .get("confirm")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            crate::growth::rewards_write::run(
+                app,
+                &account_id,
+                crate::growth::probe::ProbeAction::Redeem,
+                Some(&tier),
+                confirm,
+            )
+            .await
+        }
+
+        "growth.rewards.makeup" => {
+            let _gate = crate::credentials::gate::begin(app)?;
+            let account_id = require_str(params, "accountId")?;
+            let date = require_str(params, "target")?;
+            let confirm = params
+                .get("confirm")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            crate::growth::rewards_write::run(
+                app,
+                &account_id,
+                crate::growth::probe::ProbeAction::MakeupCard,
+                Some(&date),
+                confirm,
+            )
+            .await
         }
 
         // ---- WorkBuddy 每日签到（PR #69）----

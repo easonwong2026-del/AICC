@@ -598,7 +598,13 @@ struct ConsoleAccountsView: View {
                         state: store.rewardStates[account.id],
                         loading: store.rewardLoading.contains(account.id),
                         failure: store.rewardFailures[account.id],
-                        onRefresh: { Task { await store.loadReward(accountId: account.id) } }
+                        result: store.rewardActions[account.id],
+                        acting: store.rewardActing.contains(account.id),
+                        onRefresh: { Task { await store.loadReward(accountId: account.id) } },
+                        onPerform: { action, target in
+                            Task { await store.performReward(accountId: account.id, action: action, target: target) }
+                        },
+                        onDismissResult: { store.clearRewardAction(accountId: account.id) }
                     )
                 }
             }

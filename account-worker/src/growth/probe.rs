@@ -102,7 +102,21 @@ pub enum ProbeDecision {
 ///
 /// 顺序与正式接线一致：先 `open_reward_op`（落盘 / 复用），再 `plan()`。
 /// `plan` 说 `Recheck` 或 `Blocked` 时，这里绝不返回 `Send`。
-pub fn decide(db: &mut Db, account_id: &str, command: &Command) -> RpcResult<ProbeDecision> {
+pub fn decide(
+    db: &mut Db,
+    account_id: &str,
+    command: &Command,
+) -> RpcResult<ProbeDecision> {
+    decide_with(db, account_id, command, true)
+}
+
+/// `one_shot`：取证探针只许一次；正式功能允许多次（每次仍要重新确认余额）。
+pub fn decide_with(
+    db: &mut Db,
+    account_id: &str,
+    command: &Command,
+    one_shot: bool,
+) -> RpcResult<ProbeDecision> {
     let action = command.action().as_str();
     let target = command.target();
     let needs_token = !matches!(command, Command::MakeupCard { .. });
@@ -215,6 +229,15 @@ impl ProbeSender for HttpSender {
     async fn send(&self, suffix: &str, body: Value) -> Result<Value, super::api::GrowthError> {
         super::api::post_exact(&self.payload, suffix, body).await
     }
+}
+
+/// 发一次。封装在这里，让正式写路径与探针共用同一条"只发一次"的实现。
+pub async fn send_once<S: ProbeSender>(
+    sender: &S,
+    suffix: &str,
+    body: Value,
+) -> Result<Value, super::api::GrowthError> {
+    sender.send(suffix, body).await
 }
 
 /// 发送前的只读检查结果。**余额/可领性为 0 时不许发**。
@@ -342,7 +365,7 @@ pub async fn readiness(access: &str, uid: &str, domain: &str, command: &Command)
 ///
 /// 超时/连接断必须是 **0**：`classify` 把 0 认成"没有响应"，
 /// 也就是 `Indeterminate → unknown`。给它编一个 500 会让人误以为服务端拒绝了。
-fn status_for_error(err: &super::api::GrowthError) -> u16 {
+pub fn status_for_error(err: &super::api::GrowthError) -> u16 {
     if let Some(http) = err.http {
         return http as u16;
     }

@@ -288,6 +288,16 @@ struct RewardAccountState: Identifiable, Equatable {
         }
     }
 
+    /// 连登为 0 时的解释。
+    ///
+    /// 实测（docs/evidence/）：服务端对三个账号返回的就是 `streak.days = 0`，
+    /// 而它们的每日签到是成功的。两套判定：签到成功不等于成长中心活跃 +1。
+    /// 这里必须把话说清楚，否则用户会以为"签到失败"或"界面坏了"。
+    var streakNote: String? {
+        guard streakDays == 0 else { return nil }
+        return "服务端返回连登 0 天：成长中心的活跃累计与每日签到是两套判定，签到成功不会让它 +1"
+    }
+
     /// 账本读不到时的提示。这与"没有未核验操作"是两件事。
     var ledgerUnreadableText: String? {
         awaitingVerification == nil ? "本地奖励账本读取失败，无法确认有没有未核验的操作" : nil
@@ -317,6 +327,58 @@ struct RewardRefreshNotice: Equatable {
 
     /// 有没有一个可显示的时间。格式化交给界面层（模型层不依赖 Console）。
     var hasReadAt: Bool { !readAt.isEmpty }
+}
+
+/// 三个写操作。
+enum RewardAction: String, Identifiable, CaseIterable {
+    case draw
+    case redeem
+    case makeup
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .draw: return "抽奖"
+        case .redeem: return "兑换连登奖励"
+        case .makeup: return "补签"
+        }
+    }
+
+    var cost: String {
+        switch self {
+        case .draw: return "消耗 1 次抽奖机会"
+        case .redeem: return "消耗 1 个连登档位"
+        case .makeup: return "消耗 1 张补签卡"
+        }
+    }
+}
+
+// MARK: - 写操作结果
+
+/// 抽奖 / 兑换 / 补签 的一次结果。四种状态必须分开，**不能都叫"失败"**：
+/// `pending` 是"可能已经执行、还没确认"，`frozen` 是"等人工"。
+struct RewardActionResult: Equatable {
+    /// 是否真的发了请求。
+    let sent: Bool
+    /// `succeeded` / `rejected` / `pending` / `frozen` / `failed` / `preview` / `blocked`
+    let state: String
+    let message: String
+    let phase: String?
+
+    init(json: [String: Any]) {
+        sent = json["sent"] as? Bool ?? false
+        state = json["state"] as? String
+            ?? (json["decision"] as? String)
+            ?? "failed"
+        message = json["message"] as? String
+            ?? (json["reason"] as? String)
+            ?? (json["note"] as? String)
+            ?? "—"
+        phase = json["phase"] as? String
+    }
+
+    var needsAttention: Bool { state == "pending" || state == "frozen" }
 }
 
 // MARK: - 一次查询的结果

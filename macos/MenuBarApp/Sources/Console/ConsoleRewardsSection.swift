@@ -13,7 +13,14 @@ struct ConsoleRewardsBlock: View {
     let state: RewardAccountState?
     let loading: Bool
     let failure: String?
+    /// 上一次写操作的结果（成功/拒绝/未定/冻结）。
+    var result: RewardActionResult? = nil
+    var acting: Bool = false
     let onRefresh: () -> Void
+    var onPerform: (RewardAction, String?) -> Void = { _, _ in }
+    var onDismissResult: () -> Void = {}
+
+    @State private var intent: RewardIntent?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -22,6 +29,7 @@ struct ConsoleRewardsBlock: View {
                 if let notice = RewardRefreshNotice.make(state: state, failure: failure) {
                     staleBanner(notice)
                 }
+                if let result { resultBanner(result) }
                 tierRow(state)
                 metricsRow(state)
                 makeupRow(state)
@@ -106,6 +114,12 @@ struct ConsoleRewardsBlock: View {
     private func metricsRow(_ state: RewardAccountState) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             ConsoleInfoRow(label: "连登天数", value: state.streakDays.map { "\($0) 天" } ?? "—")
+            if let note = state.streakNote {
+                Text(note)
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             ConsoleInfoRow(label: "抽奖次数", value: state.lotteryChances.map { "\($0) 次" } ?? "—")
             ConsoleInfoRow(label: "补签卡", value: state.makeup.balanceText)
             if let today = state.makeup.today {
@@ -253,31 +267,77 @@ struct ConsoleRewardsBlock: View {
     // MARK: - 操作
 
     private func actions(_ state: RewardAccountState) -> some View {
-        let claimable = state.claimableTiers
-        let redeemTitle = claimable.isEmpty
-            ? "兑换连登奖励"
-            : "兑换连登奖励（\(claimable.map(\.tier).joined(separator: " / "))）"
+        let claimable = state.claimableTiers.first
+        let redeemTitle = claimable.map { "兑换连登奖励（\($0.tier)）" } ?? "兑换连登奖励"
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                Button("抽奖") {}
+                Button("抽奖") { intent = .draw(state) }
                     .buttonStyle(ConsoleSecondaryButtonStyle())
-                    .disabled(true)
-                    .help("抽奖接口还没拿到 A 级证据，未接线")
-                Button(redeemTitle) {}
-                    .buttonStyle(ConsoleSecondaryButtonStyle())
-                    .disabled(true)
-                    .help("兑换接口还没拿到 A 级证据，未接线")
-                Button("补签") {}
-                    .buttonStyle(ConsoleSecondaryButtonStyle())
-                    .disabled(true)
-                    .help("补签接口还没拿到 A 级证据，未接线")
+                    .disabled(acting || state.lotteryChances == 0)
+                    .help("会先重查余额，再让你确认")
+                Button(redeemTitle) {
+                    if let tier = claimable?.tier { intent = .redeem(state, tier: tier) }
+                }
+                .buttonStyle(ConsoleSecondaryButtonStyle())
+                .disabled(acting || claimable == nil)
+                .help(claimable == nil ? "当前没有可领取的档位" : "会先重查档位状态，再让你确认")
+                Button("补签") {
+                    if let date = state.makeup.candidates.first { intent = .makeup(state, date: date) }
+                }
+                .buttonStyle(ConsoleSecondaryButtonStyle())
+                .disabled(acting || state.makeup.candidates.isEmpty)
+                .help(state.makeup.candidates.isEmpty ? "没有可补签的断签日" : "会先重查补签卡，再让你确认")
                 Spacer(minLength: 0)
             }
-            Text("这三个动作会消耗次数或补签卡，接口证据到位前保持禁用；接好后每一次都会先记本地账本、再回查服务端。")
+            Text("每次操作都会：先重查余额 → 你确认 → 写本地账本 → 只发一次请求 → 结果回查。未知结果不会自动重发。")
                 .font(ConsoleType.caption)
                 .foregroundStyle(ConsoleTheme.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .confirmationDialog(
+            intent?.title ?? "",
+            isPresented: Binding(get: { intent != nil }, set: { if !$0 { intent = nil } }),
+            titleVisibility: .visible
+        ) {
+            if let intent {
+                Button("确认（\(intent.costShort)）") {
+                    onPerform(intent.action, intent.target)
+                    self.intent = nil
+                }
+                Button("取消", role: .cancel) { self.intent = nil }
+            }
+        } message: {
+            if let intent {
+                Text(intent.detail)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func resultBanner(_ result: RewardActionResult) -> some View {
+        let tone: Color = {
+            switch result.state {
+            case "succeeded": return ConsoleTheme.success
+            case "rejected": return ConsoleTheme.secondaryText
+            case "pending", "frozen": return ConsoleTheme.warning
+            default: return ConsoleTheme.danger
+            }
+        }()
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(result.message)
+                .font(ConsoleType.caption)
+                .foregroundStyle(tone)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button("知道了") { onDismissResult() }
+                .buttonStyle(.plain)
+                .font(ConsoleType.caption)
+                .foregroundStyle(ConsoleTheme.tertiaryText)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tone.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: - 配色
@@ -302,5 +362,50 @@ struct ConsoleRewardsBlock: View {
         case "ended": return ConsoleTheme.tertiaryText
         default: return ConsoleTheme.warning
         }
+    }
+}
+
+// MARK: - 二次确认的内容
+
+/// 一次待确认的操作：**把要花掉什么、还剩多少写在确认框里**，
+/// 用户不必回看上面的小字。
+struct RewardIntent {
+    let action: RewardAction
+    let target: String?
+    let title: String
+    let detail: String
+    let costShort: String
+
+    static func draw(_ state: RewardAccountState) -> RewardIntent {
+        RewardIntent(
+            action: .draw,
+            target: nil,
+            title: "确认抽奖",
+            detail: "账号：\(state.nickname)\n当前抽奖次数：\(state.lotteryChances.map { "\($0)" } ?? "—")\n"
+                + "预计消耗：1 次\n\n发送前会再查一次余额；结果为「未定」时不会重发。",
+            costShort: "消耗 1 次·不可撤销"
+        )
+    }
+
+    static func redeem(_ state: RewardAccountState, tier: String) -> RewardIntent {
+        RewardIntent(
+            action: .redeem,
+            target: tier,
+            title: "确认兑换 \(tier) 连登奖励",
+            detail: "账号：\(state.nickname)\n档位：\(tier)\n"
+                + "预计消耗：1 个档位（领过就不会再有）\n\n发送前会再查一次档位状态。",
+            costShort: "兑换 \(tier)·不可撤销"
+        )
+    }
+
+    static func makeup(_ state: RewardAccountState, date: String) -> RewardIntent {
+        RewardIntent(
+            action: .makeup,
+            target: date,
+            title: "确认补签 \(date)",
+            detail: "账号：\(state.nickname)\n日期：\(date)\n"
+                + "当前补签卡：\(state.makeup.balanceText)\n预计消耗：1 张\n\n发送前会再查一次卡数。",
+            costShort: "补签 \(date)·消耗 1 张"
+        )
     }
 }
