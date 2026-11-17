@@ -254,7 +254,7 @@ WorkBuddy 账号 id 是 `(platform, uid)` 的确定性哈希，删号后用同�
 | 补签成功响应的余额字段 | C | 一次真实补签 |
 | 429 / 5xx 的服务端原话 | D | 不制造；按 `retryable` 分类处理 |
 | `/lottery/summary` 是否存在 | C | 只读探测，可与 `/lottery/chances` 对账 |
-| `/redeem/summary` 的 `starter_status` 与 `tier_7d_status` 是否同时存在 | A（两者分别被实测过，但没见过同一次响应） | 一次只读 GET 对账 |
+| ~~`/redeem/summary` 的 `starter_status` 与 `tier_7d_status` 是否同时存在~~ | **已解决（PR #100）** | 实测同一次采集里两者同时存在且值一致；另发现 `redemption_status.tiers[]` 是奖励说明表而非回执 |
 
 ## 九、代码对应
 

@@ -112,7 +112,7 @@ impl GrowthError {
     }
 }
 
-fn code_of(response: &Value) -> Option<i64> {
+pub(crate) fn code_of(response: &Value) -> Option<i64> {
     let raw = response
         .get("code")
         .or_else(|| response.get("errno"))
@@ -265,6 +265,19 @@ async fn send(
 /// 线上出问题时不用再猜一遍。
 pub async fn get(payload: &Value, suffix: &str) -> Result<(Value, &'static str), GrowthError> {
     send(payload, suffix, "GET", None).await
+}
+
+/// 已验证的前缀。写接口只走这一条 —— 见 [`post_exact`]。
+pub const VERIFIED_PREFIX: &str = "/v2/activity/growth";
+
+/// POST 一次，**不做 404 前缀退让**。
+///
+/// `post()` 会为了兼容旧路径在 404 时换一种前缀再发一次，对读接口没问题，
+/// 但对"会消耗一次机会"的写接口就意味着**可能两次 POST**。取证探针与将来的正式
+/// 写路径都必须用这个：只打已验证的前缀，一次就是一发。
+pub async fn post_exact(payload: &Value, suffix: &str, body: Value) -> Result<Value, GrowthError> {
+    guard_token(payload)?;
+    send_once(payload, VERIFIED_PREFIX, suffix, "POST", Some(body)).await
 }
 
 /// POST 一个成长中心写接口。

@@ -357,7 +357,9 @@ impl Db {
         let changed = self.conn.execute(
             "UPDATE reward_operations
                 SET phase = 'sent', attempt = attempt + 1, updated_at = ?2
-              WHERE id = ?1 AND phase IN ('pending','ready') AND attempt < ?3",
+              WHERE id = ?1 AND phase IN ('pending','ready') AND attempt < ?3
+                AND (action = 'makeup_card'
+                     OR (client_token IS NOT NULL AND client_token <> ''))",
             params![id, now, MAX_SEND_ATTEMPTS],
         )?;
         if changed != 1 {
@@ -469,6 +471,25 @@ impl Db {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// 这个 `(账号, 动作, 目标)` 有没有**任何**记录（含已结束的）。
+    ///
+    /// 一次性探针用它判断"这次机会是不是已经用掉了"—— 只看未决记录不够，
+    /// `confirmed` 是终态，不占唯一索引，会被当成"从没做过"。
+    pub fn has_any_reward_op(
+        &self,
+        account_id: &str,
+        action: &str,
+        target: &str,
+    ) -> RpcResult<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM reward_operations
+              WHERE account_id = ?1 AND action = ?2 AND target = ?3",
+            params![account_id, action, target],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     /// 最近的操作记录（界面上的"执行历史"）。
@@ -787,6 +808,53 @@ mod tests {
         let op = db.reward_op(&id).unwrap().unwrap();
         assert_eq!(op.phase, "ready", "被拒之后状态不能被改成 sent");
         assert_eq!(op.attempt, MAX_SEND_ATTEMPTS);
+    }
+
+    /// 没有幂等键的抽奖/兑换记录**不许标记发送**：那是"用空 token 发请求"的入口。
+    #[test]
+    fn a_tokenless_draw_cannot_be_marked_as_sent() {
+        let (mut db, _dir) = temp_db();
+        let opened = db.open_reward_op(&new_op("acc", None)).unwrap();
+        let id = opened.op().id.clone();
+        let refused = db.mark_reward_op_sent(&id);
+        assert!(refused.is_err(), "没有 token 的抽奖记录不许发");
+        assert_eq!(db.reward_op(&id).unwrap().unwrap().phase, "pending");
+
+        // 建行时就带 token 的那条可以发。
+        let ok = db.open_reward_op(&new_op("acc2", Some("u-1"))).unwrap();
+        assert!(db.mark_reward_op_sent(ok.op().id.as_str()).is_ok());
+    }
+
+    /// 补签没有幂等键（键是日期本身），不受上面那条约束。
+    #[test]
+    fn a_makeup_operation_may_send_without_a_token() {
+        let (mut db, _dir) = temp_db();
+        let opened = db
+            .open_reward_op(&NewRewardOp {
+                account_id: "acc",
+                action: "makeup_card",
+                target: "2026-11-10",
+                client_token: None,
+            })
+            .unwrap();
+        assert!(db.mark_reward_op_sent(opened.op().id.as_str()).is_ok());
+    }
+
+    /// 一次性探针的判据：**任何一条已结束的记录**都算用掉了这次机会。
+    #[test]
+    fn a_closed_operation_is_visible_to_the_one_shot_guard() {
+        let (mut db, _dir) = temp_db();
+        assert!(!db.has_any_reward_op("acc", "lottery_draw", "").unwrap());
+        let id = open_then_send(&mut db, "acc", "u-1");
+        assert!(db.has_any_reward_op("acc", "lottery_draw", "").unwrap());
+        db.resolve_reward_op(&id, &conclude("confirmed", true))
+            .unwrap();
+        assert!(
+            db.has_any_reward_op("acc", "lottery_draw", "").unwrap(),
+            "confirmed 之后仍然算已用过"
+        );
+        // 别的动作不受影响。
+        assert!(!db.has_any_reward_op("acc", "redeem", "").unwrap());
     }
 
     /// 服务端明确没执行（404 / tier 不认识）→ `ready`：允许用同一 token 再发一次。

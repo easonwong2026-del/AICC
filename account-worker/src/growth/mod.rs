@@ -8,8 +8,10 @@
 
 pub mod api;
 pub mod catalog;
+pub mod evidence;
 pub mod manager;
 pub mod models;
+pub mod probe;
 pub mod reward_ledger;
 pub mod rewards;
 pub mod rewards_state;
@@ -343,4 +345,40 @@ mod tests {
         assert_eq!(state.state, "unauthorized");
         assert_eq!(state.awaiting_verification, None);
     }
+}
+
+/// 只读取证：四个 GET 抓下来，脱敏后返回（PR #100）。
+///
+/// 与 `reward_state` 共用凭据解析；**没有任何写接口**参与。
+pub async fn capture_evidence(
+    app: &Arc<App>,
+    account_id: &str,
+) -> crate::rpc::RpcResult<evidence::EvidenceReport> {
+    let account = app
+        .with_db(|db| db.get_account(account_id))?
+        .ok_or_else(|| crate::rpc::RpcError::new(crate::rpc::E_NOT_FOUND, "账号不存在"))?;
+    if !account.supports_workbuddy_cn_apis() {
+        return Err(crate::rpc::RpcError::invalid_params(
+            "国际版没有成长中心，不做取证",
+        ));
+    }
+    let resolved = match broker::resolve(app, &account) {
+        Ok(broker::Outcome::Resolved(resolved)) => resolved,
+        Ok(broker::Outcome::Unavailable { reason, detail }) => {
+            return Err(crate::rpc::RpcError::new(
+                crate::rpc::E_AUTH,
+                format!("没有可用凭据（{reason}）：{detail}"),
+            ))
+        }
+        Err(err) => return Err(err),
+    };
+
+    let mut report = evidence::capture(
+        &resolved.access,
+        &account.uid,
+        account.auth_domain.as_deref().unwrap_or_default(),
+    )
+    .await;
+    report.account_id = account.id;
+    Ok(report)
 }
