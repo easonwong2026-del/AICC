@@ -136,7 +136,8 @@ final class RewardModelsTests: XCTestCase {
         let state = RewardAccountState(json: account(overrides: ["recentOperations": rows]))
         XCTAssertEqual(state.recentOperations.map(\.actionLabel), ["抽奖", "连登兑换", "补签", "连登兑换"])
         XCTAssertEqual(state.recentOperations.map(\.phaseLabel), ["待核验", "已到账", "已冻结", "确认未执行"])
-        XCTAssertEqual(state.recentOperations.filter(\.needsAttention).count, 2)
+        // 只有 unknown 需要回查；frozen 等人工，不该出现回查按钮。
+        XCTAssertEqual(state.recentOperations.filter(\.needsAttention).count, 1)
     }
 
     // MARK: - 汇总
