@@ -23,14 +23,21 @@ changes (ubuntu, ~10s)  ← 唯一的分类器
 | 改动路径 | 触发 |
 | --- | --- |
 | `server.py` `bridge_tls.py` `collectors/**` `tests/**` `scripts/smoke-test-bundled-server.sh` | `test` `lint` `macos-build`（包内嵌 Python，必须验一次打包） |
-| `account-worker/**` `scripts/smoke-test-account-worker.sh` `scripts/validate-account-worker-bundle.sh` | `rust` |
-| `macos/**` `VERSION` `scripts/{smoke-test-widget*,smoke-test-board-visual,smoke-test-console-visual,smoke-test-dashboard-visual,smoke-test-display-snapshot,validate-widget-bundle,validate-version,fetch-python-runtime,build-widget-preview}.sh` | `swift-test` `macos-build` |
+| `account-worker/**` `scripts/smoke-test-account-worker.sh` | `rust` |
+| `macos/**` `VERSION` `scripts/{smoke-test-widget*,smoke-test-board-visual,smoke-test-console-visual,smoke-test-dashboard-visual,smoke-test-display-snapshot,validate-widget-bundle,validate-version,validate-python-runtime,validate-account-worker-bundle,fetch-python-runtime,build-widget-preview}.sh` | `swift-test` `macos-build` |
 | `android/**` `scripts/smoke-test-android-visual.sh` | `android` `android-visual` |
 | `.github/workflows/**` | **全量**（改 CI 自身必须整条验证一遍，否则门控改坏了也永远是绿） |
 | 其它（`docs/**` `README*` `CHANGELOG*` `*.md` …） | 无（`changes` 之外全 skip） |
 
-规则的可执行版本：`scripts/ci-filter-selftest.py`。改过滤规则后先本地跑一遍，
-它会用真实历史提交回归分类结果。
+两条**校验脚本**（`validate-python-runtime.sh`、`validate-account-worker-bundle.sh`）挂在
+`swift` 上，而不是"它们是谁的周边"：这两个脚本只被 macOS 侧调用（前者由
+`fetch-python-runtime.sh` / `build-aicc-swiftui.sh` 调，后者只在打包产物上跑），
+如果让它们落到一个不跑 macOS 构建的分类里，就等于"改了闸门却从不通电"。
+
+规则的可执行版本：`scripts/ci-filter-selftest.py`。它**直接解析 ci.yml 里的 filters 块**，
+不另存一份规则，因此不会出现"自测和生产的规则各自漂移"。除分类回归外还做一项
+**覆盖断言**：把每个 job 会执行的文件（含脚本之间的传递调用）求闭包，要求每个文件
+至少能触发一个真正执行它的 job。`changes` job 里跑 `--check`，漏了就红。
 
 ## 3. 三个刻意的设计决定
 
@@ -55,9 +62,15 @@ job 被 `if` 跳过时结论是 **skipped**，分支保护按通过处理，不�
 ### 3.3 DMG 与"编译校验"分离
 
 `macos-build` 只做编译 + 产物校验（worker / widget bundle / 内嵌 server smoke），
-约 9.6 min → **7.4 min**。DMG 打包（`hdiutil create` + verify + 挂载校验）
-搬到 `macos-dmg`，条件 `github.event_name != 'pull_request'`，只在 main、手动运行、
-发版流程出现。
+**9.6 min → 5.9 min（-38%）**。DMG 打包（`hdiutil create` + verify + 挂载校验）
+搬到 `macos-dmg`，条件：
+
+```
+github.event_name != 'pull_request' && needs.macos-build.result == 'success'
+```
+
+即"只在 main / 手动运行 / 发版出现"，且**前置构建失败时不再重复编译一遍**去打包一个
+注定坏的产物。
 
 `macos-dmg` 内部仍调用 `macos/build-dmg.sh`，而该脚本会重新编译一次 App。
 这是刻意保留的：发版链路上的打包脚本一行不改，代价是 main 上多编译一次
@@ -67,13 +80,21 @@ job 被 `if` 跳过时结论是 **skipped**，分支保护按通过处理，不�
 
 ```yaml
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: true
 ```
 
-`github.ref` 在 PR 上是 `refs/pull/<n>/merge`，天然按 PR 隔离：同一个 PR 推新提交
-会取消它自己上一次的运行，**不会**影响其它 PR。`push` / `workflow_dispatch` 不取消
-（`cancel-in-progress` 为 false），避免 main 上的运行被后来的运行打断。
+组名用假三元：PR 走 `CI-pr-<编号>`，push / dispatch 走 `CI-run-<run_id>`（天然唯一，
+永远不同组）。于是 `cancel-in-progress: true` 的作用范围恰好是"同一个 PR 的上一次运行"：
+新提交取消它自己的旧运行，**不会**碰到别的 PR，也不会打断 main 上的运行。
+
+**为什么不用看起来更直观的写法**：`group: ${{ github.workflow }}-${{ github.ref }}` +
+`cancel-in-progress: ${{ github.event_name == 'pull_request' }}` 在本仓库实测**没有生效**——
+新运行一直挂在 `pending`，旧运行照跑（`refs/pull/<n>/merge` 的组名是对的，但取消动作没发生）。
+
+**另一个坑**：取消是延迟生效的。job 还停在 runner 队列里等 macOS 的时候，
+`POST /runs/{id}/cancel` 返回 202，但状态会一直是 `queued`，要等能分配到 runner 才真正变
+`cancelled`。所以"排队 + 取消"会叠加，别把这个误判成配置写错。
 
 ## 5. 手动全量
 
@@ -94,8 +115,10 @@ concurrency:
 - **Python TLS / 凭据**：`tests/test_bridge_tls.py`、`tests/test_bridge.py`、`tests/test_magpie.py`
   仍在 `test` job 里 `unittest discover` 全量执行；`bridge_tls.py` 与 `collectors/**` 都挂在触发路径上。
 - **打包完整性**：`validate-account-worker-bundle.sh`（签名 / 权限）、
+  `validate-python-runtime.sh`（内嵌 CPython 版本 / OpenSSL / TLS 1.3+1.2 双重握手）、
   `smoke-test-widget-bundle.sh`（Widget 沙箱）、`smoke-test-bundled-server.sh`
-  （内嵌 CPython + TLS 1.3）仍然每个 macOS 构建都跑。
+  （内嵌 CPython + TLS 1.3）仍然每个 macOS 构建都跑，且这两个 validate 脚本本身
+  也在 `swift` 触发路径上——改校验脚本不会静默跳过校验。
 - **视觉回归**：五套离屏渲染脚本一张图都没少，只是整体跟随 `macos/**` 与
   `scripts/smoke-test-*visual*.sh` 触发。
 
@@ -107,8 +130,8 @@ concurrency:
    写一遍要处理 fork、rename、首个 push、force push 等边界，收益不抵风险；该 action
    是事实标准，固定主版本号，与仓库已有的 `Swatinem/rust-cache`、`gradle/actions` 同类。
 3. **非测试类脚本不在任何 job 的触发路径里**（如 `scripts/release-publish.sh`、
-   `scripts/measure-resources.sh`）。它们本来就没有自动化覆盖，只是不再"顺便"被
-   macOS 构建里的 `bash -n` 顺带检查——所以 `Validate macOS scripts` 那步仍留在
+   `scripts/measure-resources.sh`）。它们本来就没有任何 job 会执行，所以覆盖断言也不管它们
+   ——断言只对"确实被某个 job 执行的文件"负责。`Validate macOS scripts` 那步仍留在
    `macos-build` 内，任何 `scripts/*.sh` 的语法仍会在 Swift/python 改动时被检查到。
 4. **视觉验收图 artifact 只在 macOS 变更时才产出**。需要看某一版的图，改一下
    `macos/**` 或用 `run_mode: full` 手动跑。
@@ -156,18 +179,23 @@ DMG 那 134 s 整体搬走；剩下的是编译 + 三套产物校验 + 内嵌 se
 
 ### 附：过滤逻辑的本地回归
 
-`python3 scripts/ci-filter-selftest.py` 会用真实历史提交跑一遍分类：
+`python3 scripts/ci-filter-selftest.py` 直接解析 ci.yml 的 filters 块跑分类，并做覆盖断言：
 
 ```
-Rust-only     python=skip rust=run  swift=skip android=skip macos=skip
-Swift-only    python=skip rust=skip swift=run  android=skip macos=run
-Android-only  python=skip rust=skip swift=skip android=run  macos=skip
-Python-only   python=run  rust=skip swift=skip android=skip macos=run
-Docs-only     全部 skip
-CI 自身        全部 run（强制全量）
+场景                     python rust  swift android macos
+Rust-only              skip   run    skip   skip   skip
+Swift-only             skip   skip   run    skip   run
+Android-only           skip   skip   skip   run    skip
+Python-only            run    skip   skip   skip   run
+Python runtime 校验脚本  skip   skip   run    skip   run
+Docs-only              skip   skip   skip   skip   skip
+Rust+Swift             skip   run    run    skip   run
+CI 自身                  run    run    run    run    run
+
+覆盖断言通过：每个 job 执行的文件都在对应的触发路径里。
 ```
 
-
+`--check` 只跑覆盖断言，`changes` job 里用这个模式；不带参数时额外打印历史提交的分类结果。
 
 ### 复现方式
 
