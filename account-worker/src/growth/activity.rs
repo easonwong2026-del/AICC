@@ -1314,4 +1314,155 @@ mod tests {
         assert_eq!(first.today_active, second.today_active);
         assert_eq!(first.next_tier_remaining, second.next_tier_remaining);
     }
+
+    // -----------------------------------------------------------------------
+    // PR-ACT-3：可靠性。跨日 / 离线 / 授权失效 / 未知 / 不本地造连登
+    // -----------------------------------------------------------------------
+
+    /// 诊断矩阵：任何组合都不许"没有活跃证据却报 active"。
+    #[test]
+    fn the_diagnosis_matrix_never_claims_activity_without_evidence() {
+        let actives = [None, Some(true), Some(false)];
+        let checkins = [None, Some("success"), Some("already")];
+        let updates = [
+            None,
+            Some("2026-11-17T21:00:00+08:00"),
+            Some("2026-10-01T00:00:00+08:00"),
+        ];
+        for active in actives {
+            for checkin in checkins {
+                for updated in updates {
+                    let diagnosis = diagnose(active, Some("2026-11-17"), updated, checkin);
+                    if active != Some(true) {
+                        assert_ne!(
+                            diagnosis.code, "active",
+                            "没有 is_active=true 就不能报已活跃：{active:?}/{checkin:?}/{updated:?}"
+                        );
+                    }
+                    if active.is_none() {
+                        assert_eq!(diagnosis.code, "unknown");
+                        assert!(!diagnosis.needs_action, "未知不该催用户做事");
+                    }
+                    if active == Some(false) && checkin.is_none() {
+                        assert_eq!(
+                            diagnosis.code, "checkin_missing",
+                            "签到缺失优先于活跃未做，两者的动作完全不同"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// 跨日：同一条本地签到记录，服务端日期翻到第二天之后就不能再算今天。
+    #[test]
+    fn a_rollover_to_the_next_day_invalidates_yesterdays_checkin() {
+        let heat = heatmap(
+            "2026-11-18",
+            false,
+            0,
+            "2026-11-17T23:50:00+08:00",
+            json!([]),
+        );
+        let out = assemble(
+            "acc",
+            "高亮",
+            Some(&heat),
+            Some(&streak(0, "7d", 7, 0)),
+            Some(&record("2026-11-17", "already")),
+        );
+        assert_eq!(out.server_today.as_deref(), Some("2026-11-18"));
+        assert!(out.checkin.is_none(), "昨天的 already 不能挂到今天");
+        assert_eq!(out.diagnosis.code, "checkin_missing");
+    }
+
+    /// 离线：两个接口都没回来时是 unknown，不是"未活跃"；下一次读到就恢复。
+    #[test]
+    fn an_offline_read_is_unknown_and_recovers_on_the_next_attempt() {
+        let offline = assemble("acc", "高亮", None, None, None);
+        assert_eq!(offline.state, "failed");
+        assert_eq!(offline.diagnosis.code, "unknown");
+        assert_eq!(offline.today_active, None);
+        assert!(offline.errors.is_empty(), "纯拼装不做判断，错误由采集层填");
+
+        let heat = heatmap(
+            "2026-11-17",
+            true,
+            80,
+            "2026-11-17T22:00:00+08:00",
+            json!([{ "date": "2026-11-17", "score": 80 }]),
+        );
+        let back = assemble(
+            "acc",
+            "高亮",
+            Some(&heat),
+            Some(&streak(1, "7d", 6, 1)),
+            Some(&record("2026-11-17", "success")),
+        );
+        assert_eq!(back.state, "ok");
+        assert_eq!(back.diagnosis.code, "active");
+        assert_eq!(back.streak_days, Some(1));
+    }
+
+    /// 401 必须被标成授权问题，而不是"没活跃"。
+    #[test]
+    fn a_401_is_reported_as_an_authorization_problem() {
+        let err = super::super::api::GrowthError {
+            kind: ErrorKind::Unauthorized,
+            http: Some(401),
+            code: Some(401),
+            message: "unauthorized".to_string(),
+        };
+        let field = field_error("heatmap", &err);
+        assert_eq!(field.kind, "unauthorized");
+        assert_eq!(field.http, Some(401));
+        assert_eq!(field.field, "heatmap");
+    }
+
+    /// 连登只能来自 `/streak`。热力图里数出 30 天也不许自己加。
+    #[test]
+    fn streak_is_never_counted_locally_from_the_heatmap() {
+        let cells = json!([
+            { "date": "2026-11-15", "score": 10 },
+            { "date": "2026-11-16", "score": 20 },
+            { "date": "2026-11-17", "score": 30 }
+        ]);
+        let heat = heatmap("2026-11-17", true, 30, "2026-11-17T22:00:00+08:00", cells);
+        let out = assemble("acc", "卡里", Some(&heat), None, None);
+        assert_eq!(out.today_active, Some(true));
+        assert_eq!(out.active_days_7, Some(3), "热力图只用来数最近 7 天");
+        assert_eq!(out.streak_days, None, "连登没读到就是没读到，不推算");
+        assert!(out.tiers.is_empty());
+    }
+
+    /// 同一份授权连续读两次必须给出同一结论（本身没有写操作，也就没有副作用）。
+    #[test]
+    fn reading_twice_is_idempotent() {
+        let heat = heatmap(
+            "2026-11-17",
+            false,
+            0,
+            "2026-11-13T17:11:53+08:00",
+            json!([{ "date": "2026-11-13", "score": 57 }]),
+        );
+        let streak_body = streak(0, "7d", 6, 1);
+        let checkin = record("2026-11-17", "already");
+        let first = assemble(
+            "acc",
+            "SAMSUNG",
+            Some(&heat),
+            Some(&streak_body),
+            Some(&checkin),
+        );
+        let second = assemble(
+            "acc",
+            "SAMSUNG",
+            Some(&heat),
+            Some(&streak_body),
+            Some(&checkin),
+        );
+        assert_eq!(first.diagnosis, second.diagnosis);
+        assert_eq!(first.today_active, second.today_active);
+        assert_eq!(first.next_tier_remaining, second.next_tier_remaining);
+    }
 }
