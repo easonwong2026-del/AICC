@@ -267,6 +267,19 @@ pub async fn get(payload: &Value, suffix: &str) -> Result<(Value, &'static str),
     send(payload, suffix, "GET", None).await
 }
 
+/// 已验证的前缀。写接口只走这一条 —— 见 [`post_exact`]。
+pub const VERIFIED_PREFIX: &str = "/v2/activity/growth";
+
+/// POST 一次，**不做 404 前缀退让**。
+///
+/// `post()` 会为了兼容旧路径在 404 时换一种前缀再发一次，对读接口没问题，
+/// 但对"会消耗一次机会"的写接口就意味着**可能两次 POST**。取证探针与将来的正式
+/// 写路径都必须用这个：只打已验证的前缀，一次就是一发。
+pub async fn post_exact(payload: &Value, suffix: &str, body: Value) -> Result<Value, GrowthError> {
+    guard_token(payload)?;
+    send_once(payload, VERIFIED_PREFIX, suffix, "POST", Some(body)).await
+}
+
 /// POST 一个成长中心写接口。
 ///
 /// 会改服务端状态，所以调用方必须自己保证幂等：**不要在这里重试**。

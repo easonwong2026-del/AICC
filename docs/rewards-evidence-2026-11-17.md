@@ -37,19 +37,18 @@
 
 以「卡里」（`1d32cc97c9a3ec26`，连登 16 天）那次采集为例：
 
-| 想知道 | 真实位置 | 类型 | 样例 | 等级 |
-| --- | --- | --- | --- | --- |
-| 抽奖次数 | `lotteryChances:data.balance` | number | `1` | **A** |
-| 积分 | `streak:data.redemption_status.tiers[].credit` | number | `0` | **A** |
-| 能量 | `streak:data.redemption_status.tiers[].energy` | number | `2` | **A** |
-| 补签卡 | `streak:data.makeup_cards` | object | `{"balance":4,"max":4}` | **A** |
-| 补签卡余额 | `streak:data.makeup_cards.balance` | number | `4` | **A** |
-| 7 天档位状态 | `streak:data.redemption_status.tier_7d_status` **与** `redeemSummary:data.starter_status` | string | `claimed`（两边一致） | **A** |
-| 14 天档位状态 | `tier_14d_status` / `advanced_status` | string | `claimed` | **A** |
-| 28 天档位状态 | `tier_28d_status` / `legendary_status` | string | `locked` | **A** |
-| 服务端日期 | `heatmap:data.today` | **object** `{date,is_active,score,…}` | `2026-11-17` | **A** |
-| 活动上线日 | `streak:data.launch_date` | string | `2026-06-17` | **A** |
-| 热力图格子 | `heatmap:data.cells[]`（365 条，`2025-11-18`→`2026-11-17`） | array | `{"date":"2026-11-17","score":44,"has_new_buddy":false}` | **A** |
+| 想知道 | 真实位置 | 角色 | 类型 | 样例 | 等级 |
+| --- | --- | --- | --- | --- | --- |
+| 抽奖**余额** | `lotteryChances:data.balance` | balance | number | `1` | **A** |
+| 档位配置·积分 | `streak:data.redemption_status.tiers[].credit` | **configuration** | number | `0` | **A** |
+| 档位配置·能量 | `streak:data.redemption_status.tiers[].energy` | **configuration** | number | `2` | **A** |
+| 补签卡 | `streak:data.makeup_cards.balance` / `.max` | balance | number | `4` / `4` | **A** |
+| 7 天档位状态 | `streak:data.redemption_status.tier_7d_status` **与** `redeemSummary:data.starter_status` | status | string | `claimed`（两边一致） | **A** |
+| 14 天档位状态 | `tier_14d_status` / `advanced_status` | status | string | `claimed` | **A** |
+| 28 天档位状态 | `tier_28d_status` / `legendary_status` | status | string | `locked` | **A** |
+| 服务端日期 | `heatmap:data.today.date` | date | string | `2026-11-17` | **A** |
+| 活动上线日 | `streak:data.launch_date` | date | string | `2026-06-17` | **A** |
+| 热力图格子 | `heatmap:data.cells[]`（365 条，`2025-11-18`→`2026-11-17`） | calendar | array | `{"date":"2026-11-17","score":44,"has_new_buddy":false}` | **A** |
 
 ## 四、这轮取证改写了三个假设
 
@@ -112,7 +111,7 @@
 | 探针秩序 | 第一次 `Send` 且 token 已钉入账本；第二次 `Recheck`；超时后 `Recheck`；并发只有一个线程能把发送记进账本 |
 | 幂等键 | 只能钉一次 |
 
-全量：**866 单测 + 30 集成**（本轮 +16：证据 7 + 探针 9）。
+全量：**877 单测 + 30 集成**。
 
 ## 七、还没验证的（仍是 C 级）
 
@@ -129,3 +128,52 @@
 2. 我用 `growth.rewards.probe` 跑一次 `lottery_draw`，把脱敏响应归档；
 3. 按响应把 `GRANT_KEYS` 补齐，再接正式 UI 按钮；
 4. 兑换、补签各自独立授权一次。
+
+## 九、复审 P0 修复（2026-11-17 第二轮）
+
+### P0-1 取证改为**权威路径**取值
+
+原来按字段名全局搜索，所以先命中了 `streak:...tiers[].chances`（档位奖励配置），
+把**余额 0 次**的账号显示成"还有 1 次"。现在每条 finding 声明 `source = 接口:路径`，
+只按这条链取值（`lookup_path`，`[]` 才穿透数组），并新增 `role` 区分语义：
+
+| role | 含义 | 例子 |
+| --- | --- | --- |
+| `balance` | 账号当前余额 | `lotteryChances:data.balance` |
+| `configuration` | 档位奖励配置（每档发什么） | `streak:data.redemption_status.tiers[].chances` |
+| `status` / `date` / `calendar` | 状态、日期、日历 | `...tier_7d_status`、`data.today.date`、`data.cells[]` |
+
+**真实数据验证**：`d3de2ea3626c2b44` 现在 `balance=0`（配置仍为 1），不再误判。
+回归测试：`a_tier_configuration_value_never_counts_as_the_balance`、
+`a_finding_only_looks_at_its_authoritative_path`、`a_missing_path_does_not_borrow_another_endpoints_value`。
+
+### P0-2 探针只发一次 POST
+
+新增 `api::post_exact()`：固定 `VERIFIED_PREFIX = /v2/activity/growth`，走 `send_once`，
+**没有 `for prefix in PREFIXES` 的 404 退让**。探针只调它。
+源码守门测试 `the_probe_post_never_falls_back_to_the_other_prefix` 盯住"别改回 `post()`"。
+
+### P0-3 幂等键原子化
+
+- token 在 `open_reward_op` **之前**生成、随 INSERT 一起写入 —— 不存在"行已落盘、token 还没写"的窗口；
+- 删除了 `set_reward_op_token`（分两步提交正是并发空窗的来源）；
+- `mark_reward_op_sent` 增加 `AND (action='makeup_card' OR client_token 非空)`：缺 token 的抽奖/兑换**在存储层就发不出去**。
+- 测试：`a_tokenless_draw_cannot_be_marked_as_sent`、`a_makeup_operation_may_send_without_a_token`、
+  并发测试 `concurrent_probes_cannot_both_mark_the_send`。
+
+### P0-4 探针一次性
+
+`decide()` 先查这个目标**有没有已结束的记录**：有就 `Blocked`，绝不新建。
+仍开着的记录继续走同一个 attempt（回查/重发），那是同一次操作。
+测试：`a_completed_probe_blocks_a_second_one`（confirmed 后再调必须 blocked，且不新建记录）、
+`the_one_shot_guard_is_scoped_to_its_own_target`。正式 UI 将来的多次抽奖不走这条路径。
+
+### 附加保护
+
+| 保护 | 实现 |
+| --- | --- |
+| 发送前重新 GET 余额 | `preview()` / `execute()` 先跑 `readiness()`；`judge_lottery` / `judge_tier` / `judge_makeup` 三个纯函数决定"发不发" |
+| 余额 0 不发送 | `judge_*(Some(0))` 与 `judge_*(None)` 都是 `ready=false` |
+| 展示再授权 | `confirm` 不为 true 时只返回预览：账号、动作、余额、预计消耗，`sent=false` |
+| 取证 RPC 只在 dev | `the_dev_only_rpcs_stay_behind_debug_assertions` 检查两条 RPC 前必须有 `#[cfg(debug_assertions)]` |
+| 证据文件隐私扫描 | `committed_evidence_files_carry_no_credentials` 扫 `docs/evidence/*.json` |

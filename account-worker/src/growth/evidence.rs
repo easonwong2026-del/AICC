@@ -61,6 +61,14 @@ pub struct CapturedEndpoint {
 pub struct FieldFinding {
     /// 我们想找的语义名，例如 `lottery_chances`。
     pub field: &'static str,
+    /// 这条字段的**语义角色**：`balance`（账号当前余额）/ `configuration`（档位奖励配置）/
+    /// `receipt`（到账回执）/ `status` / `date` / `calendar`。
+    ///
+    /// 角色是硬约束：`configuration` 永远不能拿去当余额用 —— 复审就是在这里抓到的
+    /// "没机会的账号看起来还有 1 次"。
+    pub role: &'static str,
+    /// 权威位置：`接口:路径`，只按这个路径取值。
+    pub source: String,
     /// 命中的 JSON 路径（点号分隔，数组用 `[]`）。没找到就是空。
     pub paths: Vec<String>,
     /// 第一个命中值的类型：`number` / `string` / `bool` / `object` / `array`。
@@ -180,6 +188,45 @@ fn sanitize_at(value: &Value, depth: usize) -> Value {
 // 字段定位
 // ---------------------------------------------------------------------------
 
+/// 按**完整路径**取值。路径里的 `[]` 表示"遍历这一层数组"。
+///
+/// 例如 `data.redemption_status.tiers[].chances`：只认这条链，不做全局同名搜索。
+pub fn lookup_path(root: &Value, path: &str) -> Vec<(String, Value)> {
+    let mut current: Vec<(String, Value)> = vec![(String::new(), root.clone())];
+    for segment in path.split('.') {
+        let (name, walks) = match segment.strip_suffix("[]") {
+            Some(name) => (name, true),
+            None => (segment, false),
+        };
+        let mut next = Vec::new();
+        for (prefix, node) in current {
+            let Some(child) = node.get(name) else {
+                continue;
+            };
+            let label = if prefix.is_empty() {
+                name.to_string()
+            } else {
+                format!("{prefix}.{name}")
+            };
+            if walks {
+                let Some(items) = child.as_array() else {
+                    continue;
+                };
+                for item in items {
+                    next.push((format!("{label}[]"), item.clone()));
+                }
+            } else {
+                next.push((label, child.clone()));
+            }
+        }
+        current = next;
+        if current.is_empty() {
+            break;
+        }
+    }
+    current
+}
+
 /// 在 JSON 里找某个键，返回所有路径（点号分隔，数组用 `[]`）。
 pub fn find_paths(value: &Value, key: &str) -> Vec<(String, Value)> {
     let mut out = Vec::new();
@@ -226,22 +273,27 @@ fn kind_of(value: &Value) -> &'static str {
     }
 }
 
+/// 按权威位置取一条字段。**只在指定接口的指定路径上取值**。
+///
+/// 找不到就是 `missing`，等级留在 C —— 不做"全局同名搜索"来凑一个命中。
 fn finding(
     corpus: &[(String, Value)],
     field: &'static str,
-    keys: &[&str],
+    role: &'static str,
+    endpoint: &str,
+    path: &str,
     note: &'static str,
 ) -> FieldFinding {
     let mut paths = Vec::new();
     let mut sample = None;
     let mut kind = None;
-    for key in keys {
-        for (path, value) in find_paths_in(corpus, key) {
+    if let Some((_, body)) = corpus.iter().find(|(name, _)| name == endpoint) {
+        for (hit, value) in lookup_path(body, path) {
             if sample.is_none() {
                 sample = Some(sanitize_json(&value));
                 kind = Some(kind_of(&value));
             }
-            paths.push(path);
+            paths.push(format!("{endpoint}:{hit}"));
         }
     }
     let verdict = if paths.is_empty() {
@@ -251,6 +303,8 @@ fn finding(
     };
     FieldFinding {
         field,
+        role,
+        source: format!("{endpoint}:{path}"),
         paths,
         kind,
         sample,
@@ -323,66 +377,121 @@ pub async fn capture(access: &str, uid: &str, domain: &str) -> EvidenceReport {
     }
 
     let findings = vec![
+        // ---- 账号当前余额：只认权威接口 ----
         finding(
             &corpus,
             "lottery_chances",
-            &["chances", "balance", "lottery_chances"],
-            "抽奖次数的真实字段名与层级；决定界面读哪个键",
+            "balance",
+            "lotteryChances",
+            "data.balance",
+            "抽奖次数的**余额**。只看 /lottery/chances，不看档位奖励表",
         ),
         finding(
             &corpus,
-            "credits",
-            &["credit", "credits", "reward_credit"],
-            "积分字段是否存在（成长中心的档案接口没有积分）",
-        ),
-        finding(&corpus, "energy", &["energy", "energies"], "能量字段的位置"),
-        finding(
-            &corpus,
-            "makeup_cards",
-            &["makeup_cards"],
-            "补签卡余额是对象还是裸数字",
+            "makeup_cards_balance",
+            "balance",
+            "streak",
+            "data.makeup_cards.balance",
+            "补签卡余额；与 `max` 一起返回",
         ),
         finding(
             &corpus,
-            "makeup_balance",
-            &["balance", "count"],
-            "`balance` 到底属于哪个对象：抽奖次数还是补签卡",
+            "makeup_cards_max",
+            "balance",
+            "streak",
+            "data.makeup_cards.max",
+            "补签卡上限",
         ),
+        // ---- 档位奖励配置：这是"每档发什么"，不是余额 ----
+        finding(
+            &corpus,
+            "tier_config_credit",
+            "configuration",
+            "streak",
+            "data.redemption_status.tiers[].credit",
+            "档位奖励配置里的积分；**不是**账号积分余额",
+        ),
+        finding(
+            &corpus,
+            "tier_config_energy",
+            "configuration",
+            "streak",
+            "data.redemption_status.tiers[].energy",
+            "档位奖励配置里的能量；不是余额",
+        ),
+        finding(
+            &corpus,
+            "tier_config_cards",
+            "configuration",
+            "streak",
+            "data.redemption_status.tiers[].cards",
+            "档位奖励配置里的补签卡数；不是余额",
+        ),
+        finding(
+            &corpus,
+            "tier_config_chances",
+            "configuration",
+            "streak",
+            "data.redemption_status.tiers[].chances",
+            "档位奖励配置里的抽奖次数；**与余额同名但不是一回事**",
+        ),
+        // ---- 档位状态 ----
         finding(
             &corpus,
             "tier_7d_status",
-            &["tier_7d_status", "starter_status"],
-            "7 天档位状态键名（两种写法都可能出现）",
+            "status",
+            "streak",
+            "data.redemption_status.tier_7d_status",
+            "7 天档位状态（/streak）",
+        ),
+        finding(
+            &corpus,
+            "tier_7d_status_summary",
+            "status",
+            "redeemSummary",
+            "data.starter_status",
+            "同一状态的另一种写法（/redeem/summary），用于交叉校验",
         ),
         finding(
             &corpus,
             "tier_14d_status",
-            &["tier_14d_status", "advanced_status"],
-            "14 天档位状态键名",
+            "status",
+            "streak",
+            "data.redemption_status.tier_14d_status",
+            "14 天档位状态",
         ),
         finding(
             &corpus,
             "tier_28d_status",
-            &["tier_28d_status", "legendary_status"],
-            "28 天档位状态键名",
+            "status",
+            "streak",
+            "data.redemption_status.tier_28d_status",
+            "28 天档位状态",
         ),
+        // ---- 日期与日历 ----
         finding(
             &corpus,
-            "today",
-            &["today"],
-            "服务端日期字段：`today` 是字符串还是 `{date}` 对象",
+            "today_date",
+            "date",
+            "heatmap",
+            "data.today.date",
+            "服务端日期；`today` 是对象，必须取 `.date`",
         ),
         finding(
             &corpus,
             "launch_date",
-            &["launch_date"],
-            "活动上线日期，补签窗口的下限",
+            "date",
+            "streak",
+            "data.launch_date",
+            "活动上线日期，补签窗口下限",
         ),
         finding(
             &corpus,
             "cells",
-            &["cells"],
-            "热力图格子：字段名与 `score` 的位置",
+            "calendar",
+            "heatmap",
+            "data.cells[]",
+            "热力图格子：每格 `{date, score, has_new_buddy}`",
         ),
     ];
 
@@ -468,36 +577,143 @@ mod tests {
     }
 
     #[test]
-    fn a_finding_without_hits_is_marked_missing_not_guessed() {
-        let report_hit = finding(
-            &[("streak".into(), json!({ "chances": 3 }))],
+    fn a_finding_only_looks_at_its_authoritative_path() {
+        let corpus = vec![(
+            "lotteryChances".to_string(),
+            json!({ "data": { "balance": 0 } }),
+        )];
+        let hit = finding(
+            &corpus,
             "lottery_chances",
-            &["chances"],
+            "balance",
+            "lotteryChances",
+            "data.balance",
             "x",
         );
-        assert_eq!(report_hit.verdict, "confirmed");
-        assert_eq!(report_hit.grade, "A");
-        assert_eq!(report_hit.kind, Some("number"));
-        assert_eq!(report_hit.paths, vec!["streak:chances".to_string()]);
+        assert_eq!(hit.verdict, "confirmed");
+        assert_eq!(hit.grade, "A");
+        assert_eq!(hit.kind, Some("number"));
+        assert_eq!(hit.paths, vec!["lotteryChances:data.balance".to_string()]);
+        assert_eq!(hit.sample, Some(json!(0)));
+        assert_eq!(hit.role, "balance");
+    }
 
-        let missing = finding(&[], "lottery_chances", &["chances"], "x");
+    /// 复审 P0-1 回归：余额 0 + 档位奖励配置里 chances=1，**不许把配置当余额**。
+    #[test]
+    fn a_tier_configuration_value_never_counts_as_the_balance() {
+        let corpus = vec![
+            (
+                "lotteryChances".to_string(),
+                json!({ "data": { "balance": 0 } }),
+            ),
+            (
+                "streak".to_string(),
+                json!({ "data": { "redemption_status": { "tiers": [
+                    { "tier": "7d", "chances": 1, "credit": 0, "energy": 2, "cards": 1 }
+                ] } } }),
+            ),
+        ];
+
+        let balance = finding(
+            &corpus,
+            "lottery_chances",
+            "balance",
+            "lotteryChances",
+            "data.balance",
+            "x",
+        );
+        assert_eq!(balance.sample, Some(json!(0)), "余额必须是 0");
+        assert_eq!(balance.role, "balance");
+
+        let configured = finding(
+            &corpus,
+            "tier_config_chances",
+            "configuration",
+            "streak",
+            "data.redemption_status.tiers[].chances",
+            "x",
+        );
+        assert_eq!(configured.sample, Some(json!(1)));
+        assert_eq!(configured.role, "configuration");
+        assert_ne!(configured.role, "balance", "配置不能混成余额");
+    }
+
+    #[test]
+    fn a_missing_path_does_not_borrow_another_endpoints_value() {
+        // 只有 streak 里有 chances，但权威位置是 lotteryChances → 必须 missing。
+        let corpus = vec![("streak".to_string(), json!({ "data": { "chances": 5 } }))];
+        let missing = finding(
+            &corpus,
+            "lottery_chances",
+            "balance",
+            "lotteryChances",
+            "data.balance",
+            "x",
+        );
         assert_eq!(missing.verdict, "missing");
         assert_eq!(missing.grade, "C", "没抓到就不能升等级");
         assert!(missing.paths.is_empty());
+    }
+
+    /// 仓库里的证据文件也要过一遍：提交前抓一次，避免手滑把带凭据的响应贴进去。
+    #[test]
+    fn committed_evidence_files_carry_no_credentials() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/evidence");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return; // 没有证据目录就不检查
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("读取证据文件");
+            let lowered = text.to_lowercase();
+            for banned in [
+                "access_token\"",
+                "refresh_token",
+                "\"password\"",
+                "bearer ",
+                "authorization\": \"bearer",
+            ] {
+                assert!(
+                    !lowered.contains(banned),
+                    "{} 里出现了疑似凭据：{banned}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lookup_path_walks_arrays_only_where_the_path_says_so() {
+        let body = json!({
+            "data": { "redemption_status": { "tiers": [
+                { "chances": 1 }, { "chances": 2 }
+            ] } }
+        });
+        let hits = lookup_path(&body, "data.redemption_status.tiers[].chances");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[1].1, json!(2));
+
+        // 路径里没有 `[]` 就不会穿透数组。
+        assert!(lookup_path(&body, "data.redemption_status.tiers.chances").is_empty());
     }
 
     #[test]
     fn finding_samples_are_sanitised_too() {
         let finding = finding(
             &[(
-                "streak".into(),
-                json!({ "makeup_cards": { "balance": 2, "x": "secret" } }),
+                "streak".to_string(),
+                json!({ "data": { "makeup_cards": { "balance": 2, "x": "secret" } } }),
             )],
-            "makeup_cards",
-            &["makeup_cards"],
+            "makeup_cards_balance",
+            "balance",
+            "streak",
+            "data.makeup_cards.balance",
             "x",
         );
         let sample = finding.sample.unwrap();
-        assert_eq!(sample["balance"], 2);
+        assert_eq!(sample, json!(2));
     }
 }

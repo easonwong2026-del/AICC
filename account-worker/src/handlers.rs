@@ -1042,11 +1042,6 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
         #[cfg(debug_assertions)]
         "growth.rewards.probe" => {
             let _gate = crate::credentials::gate::begin(app)?;
-            if !require_bool(params, "confirm")? {
-                return Err(RpcError::invalid_params(
-                    "confirm 必须为 true：这会消耗一次真实机会或一张补签卡",
-                ));
-            }
             let account_id = require_str(params, "accountId")?;
             let action_raw = require_str(params, "action")?;
             let action =
@@ -1055,7 +1050,18 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                 })?;
             let target = params.get("target").and_then(Value::as_str);
             let command = crate::growth::probe::command(action, target)?;
-            crate::growth::probe::execute(app, &account_id, &command).await
+
+            // `confirm` 不是布尔就当没确认；没确认**只给预览**，绝不下手。
+            // 预览本身也是只读的：账号、动作、当前余额、预计消耗。
+            let confirmed = params
+                .get("confirm")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if confirmed {
+                crate::growth::probe::execute(app, &account_id, &command).await
+            } else {
+                crate::growth::probe::preview(app, &account_id, &command).await
+            }
         }
 
         // ---- WorkBuddy 每日签到（PR #69）----
