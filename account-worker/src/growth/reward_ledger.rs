@@ -49,7 +49,11 @@ pub const PHASE_UNKNOWN: &str = "unknown";
 pub const PHASE_FROZEN: &str = "frozen";
 
 /// 一个目标最多发三次。超过就冻结 —— 继续重试只会让"到底扣了几次"更难说清。
-pub const MAX_SEND_ATTEMPTS: i64 = 3;
+///
+/// **真正的闸门在存储层**（`storage::reward_ops::MAX_SEND_ATTEMPTS` 写进
+/// `mark_reward_op_sent` 的原子 `UPDATE ... AND attempt < ?`）。这里这份只是让
+/// `plan()` 提前给出 `Blocked`，不能替代存储层 —— 调用方可以不问 `plan()` 就发（PR #96）。
+pub const MAX_SEND_ATTEMPTS: i64 = crate::storage::reward_ops::MAX_SEND_ATTEMPTS;
 
 /// 未决阶段：同一账号同一目标，物理上只允许有一条。
 pub const OPEN_PHASES: [&str; 5] = [
@@ -200,6 +204,91 @@ pub fn plan(existing: Option<&Open>, needs_token: bool) -> Next {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 回查：只读判定（PR #96）
+// ---------------------------------------------------------------------------
+
+/// 回查时**观察到的事实**。它不是"请求成功了吗"，而是"服务端现在长什么样"。
+///
+/// #96 只负责把观察结果翻成结论；真正去 GET 的编排在 #97。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Observation {
+    /// 目标变成"已完成"：抽奖次数少了 / 档位变 claimed / 补签日期进了 makeup_dates。
+    Applied,
+    /// **前后一致**。注意这不等于"没执行"：写请求可能还在排队、读接口可能有缓存、
+    /// 也可能别的客户端同时改了状态。只凭它关账就是把"不知道"当成"没发生"。
+    Unchanged,
+    /// 服务端给出**明确的未执行证据**：例如按 `client_token` 查不到这条操作、
+    /// 服务端直接答复"该请求未受理"。这是唯一允许落 `failed` 的观察。
+    ProvablyNotExecuted,
+    /// 服务端明确拒绝（活动结束、不再满足条件）。
+    Rejected,
+    /// 看不出来：查询失败、字段缺失、状态自相矛盾。
+    Inconclusive,
+}
+
+/// 回查结论。`phase` 直接就是账本要落的阶段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// 真的生效了。
+    Confirmed,
+    /// 服务端明确表示这条请求没有执行 —— 这是唯一允许落 `failed` 的路径
+    /// （并且必须带 verified）。"状态没变化"不在此列。
+    NotApplied,
+    /// 服务端明确拒绝。
+    Rejected,
+    /// 查不清（含"状态没变化"）：继续 `unknown`，继续占着目标。
+    StillUnknown,
+}
+
+impl Verdict {
+    pub fn phase(self) -> &'static str {
+        match self {
+            Self::Confirmed => PHASE_CONFIRMED,
+            Self::NotApplied => PHASE_FAILED,
+            Self::Rejected => PHASE_REJECTED,
+            Self::StillUnknown => PHASE_UNKNOWN,
+        }
+    }
+
+    /// 落盘时要不要带 `verified`。`failed` 必须带，否则存储层直接拒绝。
+    pub fn verified(self) -> bool {
+        !matches!(self, Self::StillUnknown)
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Confirmed => "服务端状态显示这次操作已生效",
+            Self::NotApplied => "服务端明确表示这条请求没有执行",
+            Self::Rejected => "服务端明确拒绝",
+            Self::StillUnknown => "回查仍无法确认，保持占用并等待下一次回查",
+        }
+    }
+}
+
+/// 把观察结果翻成结论。两条都不能省：
+///
+/// 1. **"没变化"不是"没执行"。** 写请求发出后本机超时，随后 GET 到的次数与原值相同，
+///    完全可能是响应还在路上、读接口走了缓存、或另一个客户端刚好补了一次。把这种
+///    情况判成 `failed` 会释放目标，下一轮生成新的 `client_token` —— 一次用户意图扣两次。
+///    所以 `Unchanged` 只能 → `StillUnknown`。
+/// 2. **"看不出来"更不是"没执行"。** `Inconclusive` 同样只能 → `StillUnknown`。
+///
+/// 只有服务端亲口说"没这条操作 / 未受理"（`ProvablyNotExecuted`）才允许落 `failed`。
+pub fn verdict(observation: Observation) -> Verdict {
+    match observation {
+        Observation::Applied => Verdict::Confirmed,
+        Observation::Rejected => Verdict::Rejected,
+        Observation::ProvablyNotExecuted => Verdict::NotApplied,
+        Observation::Unchanged | Observation::Inconclusive => Verdict::StillUnknown,
+    }
+}
+
+/// 这个账号现在能不能对某个目标发写请求（只读判断，不发送）。
+pub fn may_send_now(existing: Option<&Open>, needs_token: bool) -> Next {
+    plan(existing, needs_token)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,5 +421,49 @@ mod tests {
                 Next::Recheck { .. } | Next::Blocked { .. } => {}
             }
         }
+    }
+
+    // --- 回查判定 -----------------------------------------------------------
+
+    #[test]
+    fn only_applied_observations_close_as_confirmed() {
+        assert_eq!(verdict(Observation::Applied), Verdict::Confirmed);
+        assert_eq!(verdict(Observation::Applied).phase(), "confirmed");
+        assert!(verdict(Observation::Applied).verified());
+    }
+
+    #[test]
+    fn an_inconclusive_recheck_never_claims_the_request_did_not_happen() {
+        // 这是整条回查链上最危险的一次"猜"：猜成没生效就释放目标，下一轮会重发。
+        assert_eq!(verdict(Observation::Inconclusive), Verdict::StillUnknown);
+        assert_eq!(verdict(Observation::Inconclusive).phase(), "unknown");
+        assert!(!verdict(Observation::Inconclusive).verified(), "没核实过");
+    }
+
+    #[test]
+    fn an_unchanged_state_is_still_unknown_not_failed() {
+        // P0 回归：超时后 GET 到的次数与原值相同，不等于服务端没执行。
+        let unchanged = verdict(Observation::Unchanged);
+        assert_eq!(unchanged, Verdict::StillUnknown);
+        assert_eq!(unchanged.phase(), "unknown");
+        assert!(!unchanged.verified(), "没有核实过，不许带 verified");
+    }
+
+    /// 只有服务端明确的"未执行"证据才允许落 failed，并且必须带 verified。
+    #[test]
+    fn only_provable_non_execution_lands_on_failed() {
+        let provable = verdict(Observation::ProvablyNotExecuted);
+        assert_eq!(provable.phase(), "failed");
+        assert!(
+            provable.verified(),
+            "failed 必须带 verified，否则存储层拒绝"
+        );
+    }
+
+    #[test]
+    fn a_rejected_recheck_closes_the_target() {
+        let rejected = verdict(Observation::Rejected);
+        assert_eq!(rejected.phase(), "rejected");
+        assert!(rejected.verified());
     }
 }

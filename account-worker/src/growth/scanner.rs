@@ -92,7 +92,7 @@ pub struct Counts {
 ///
 /// 服务端字段名不稳定（`credit` / `total_credit` / `credits` 都见过），
 /// 与其逐接口写分支，不如把候选列清楚。
-fn dig_i64(data: Option<&Value>, paths: &[&[&str]]) -> Option<i64> {
+pub(crate) fn dig_i64(data: Option<&Value>, paths: &[&[&str]]) -> Option<i64> {
     let data = data?;
     for path in paths {
         let mut cursor = data;

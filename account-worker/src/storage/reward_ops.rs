@@ -34,6 +34,13 @@ use super::Db;
 /// 一个目标同时只允许一条未决记录。SQL 里重复写了一遍，改动时同步两处。
 pub const OPEN_PHASES_SQL: &str = "'pending','ready','sent','unknown','frozen'";
 
+/// 同一个目标最多发三次。
+///
+/// **这个数字在这里，不在调用方**：`plan()` 只是提前劝一句，真正拦住"第四次发送"的
+/// 是 [`Db::mark_reward_op_sent`] 里那条 `AND attempt < ?3` 的原子更新 —— 调用方
+/// 绕过 `plan()` 也发不出去（PR #96）。
+pub const MAX_SEND_ATTEMPTS: i64 = 3;
+
 /// `detail` 的字符上限（`rpc::sanitize` 之后再截）。
 pub const MAX_DETAIL_CHARS: usize = 200;
 /// 结构化回执的字节上限。超过就丢字段，绝不留一整份服务端响应。
@@ -350,12 +357,26 @@ impl Db {
         let changed = self.conn.execute(
             "UPDATE reward_operations
                 SET phase = 'sent', attempt = attempt + 1, updated_at = ?2
-              WHERE id = ?1 AND phase IN ('pending','ready')",
-            params![id, now],
+              WHERE id = ?1 AND phase IN ('pending','ready') AND attempt < ?3",
+            params![id, now, MAX_SEND_ATTEMPTS],
         )?;
         if changed != 1 {
-            // 状态已经不是 pending/ready：另一个进程或另一轮已经动过它。不发。
-            return Err(RpcError::internal("这条操作不在待发送状态，已停止发送"));
+            // 两种可能，都不发：状态已经被动过，或者次数用尽。
+            // 次数检查放在**同一条 UPDATE** 里，不先读后写：两次并发发送不可能都成功。
+            let exhausted: Option<i64> = self
+                .conn
+                .query_row(
+                    "SELECT attempt FROM reward_operations WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            return match exhausted {
+                Some(attempt) if attempt >= MAX_SEND_ATTEMPTS => Err(RpcError::internal(
+                    "这条操作已经发满次数，停止发送；需要人工核对服务端状态",
+                )),
+                _ => Err(RpcError::internal("这条操作不在待发送状态，已停止发送")),
+            };
         }
         let attempt: i64 = self.conn.query_row(
             "SELECT attempt FROM reward_operations WHERE id = ?1",
@@ -738,6 +759,34 @@ mod tests {
             reward_ledger::plan(Some(&view), true),
             Next::Blocked { .. }
         ));
+    }
+
+    /// PR #96：发送次数上限是**数据库约束**，不是 `plan()` 的建议。
+    /// 调用方不问 `plan()` 直接反复 `mark_sent`，第四次也会被这条 UPDATE 拦住。
+    #[test]
+    fn the_send_cap_is_enforced_by_the_update_itself() {
+        let (mut db, _dir) = temp_db();
+        let id = open_then_send(&mut db, "acc", "u-1");
+        assert_eq!(db.reward_op(&id).unwrap().unwrap().attempt, 1);
+
+        // 想再发，必须先落一个"服务端明确没执行"的结论。
+        for expected in 2..=MAX_SEND_ATTEMPTS {
+            db.resolve_reward_op(&id, &conclude("ready", false))
+                .unwrap();
+            assert_eq!(db.mark_reward_op_sent(&id).unwrap(), expected);
+        }
+
+        db.resolve_reward_op(&id, &conclude("ready", false))
+            .unwrap();
+        let refused = db.mark_reward_op_sent(&id);
+        assert!(refused.is_err(), "第 4 次发送必须被拒");
+        assert!(
+            refused.unwrap_err().message.contains("发满次数"),
+            "错误要说清是次数用尽"
+        );
+        let op = db.reward_op(&id).unwrap().unwrap();
+        assert_eq!(op.phase, "ready", "被拒之后状态不能被改成 sent");
+        assert_eq!(op.attempt, MAX_SEND_ATTEMPTS);
     }
 
     /// 服务端明确没执行（404 / tier 不认识）→ `ready`：允许用同一 token 再发一次。

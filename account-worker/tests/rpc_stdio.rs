@@ -763,6 +763,69 @@ fn checkin_tick_without_enabled_accounts_is_idle() {
     session.call(3, "worker.shutdown", json!({}));
 }
 
+/// PR #96：奖励状态查询必须是只读的，没有账号时返回空列表而不是报错，
+/// 也不许向任何接口发请求（这里连账号都没有，任何网络调用都会暴露成失败）。
+#[test]
+fn rewards_status_is_read_only_and_empty_without_accounts() {
+    let mut session = Session::start();
+    let reply = session.call(1, "growth.rewards.status", json!({}));
+    assert_eq!(reply["result"]["readOnly"], json!(true), "{reply}");
+    assert_eq!(reply["result"]["accounts"], json!([]), "{reply}");
+    assert!(reply["result"]["queriedAt"].is_string(), "{reply}");
+    session.call(2, "worker.shutdown", json!({}));
+}
+
+/// 这个 RPC 不接受写参数：传什么都没用，返回的东西里没有任何"已执行"字段。
+#[test]
+fn rewards_status_ignores_write_shaped_parameters() {
+    let mut session = Session::start();
+    let reply = session.call(
+        1,
+        "growth.rewards.status",
+        json!({"accountIds": ["nobody"], "draw": true, "redeem": "7d"}),
+    );
+    assert_eq!(reply["result"]["accounts"], json!([]), "{reply}");
+    assert_eq!(reply["result"]["readOnly"], json!(true), "{reply}");
+    session.call(2, "worker.shutdown", json!({}));
+}
+
+/// `accountIds` 类型不对必须报参数错误，不能静默当成"全部账号"。
+///
+/// 静默把它当空数组，等于用户只想查一个账号、结果扫了整个账号库；
+/// 日志看起来还像"没指定账号"。
+#[test]
+fn rewards_status_rejects_malformed_account_ids() {
+    let mut session = Session::start();
+    for (index, bad) in [json!("all"), json!([1, 2]), json!({"a": 1})]
+        .into_iter()
+        .enumerate()
+    {
+        let reply = session.call(
+            index as i64 + 1,
+            "growth.rewards.status",
+            json!({"accountIds": bad}),
+        );
+        assert_eq!(
+            reply["error"]["code"],
+            json!(-32602),
+            "accountIds 类型不对必须报 INVALID_PARAMS：{reply}"
+        );
+    }
+    // null 与缺省仍然表示"全部账号"。
+    let ok = session.call(9, "growth.rewards.status", json!({"accountIds": null}));
+    assert_eq!(ok["result"]["readOnly"], json!(true), "{ok}");
+    session.call(10, "worker.shutdown", json!({}));
+}
+
+/// `growth.scan` 用同一个解析器，同样不接受错误类型。
+#[test]
+fn growth_scan_rejects_malformed_account_ids() {
+    let mut session = Session::start();
+    let reply = session.call(1, "growth.scan", json!({"accountIds": "abc"}));
+    assert_eq!(reply["error"]["code"], json!(-32602), "{reply}");
+    session.call(2, "worker.shutdown", json!({}));
+}
+
 /// 签到记录是空的就返回空数组，不编造历史。
 #[test]
 fn checkin_records_start_empty() {

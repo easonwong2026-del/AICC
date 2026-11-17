@@ -12,6 +12,7 @@ pub mod manager;
 pub mod models;
 pub mod reward_ledger;
 pub mod rewards;
+pub mod rewards_state;
 pub mod scanner;
 pub mod scheduler;
 pub mod streak_rewards;
@@ -151,4 +152,195 @@ pub fn overview(scans: &[AccountScan]) -> serde_json::Value {
         "tasksTotal": tasks_total,
         "needsAuth": needs_auth,
     })
+}
+
+// ---------------------------------------------------------------------------
+// 奖励状态（PR #96，只读）
+// ---------------------------------------------------------------------------
+
+/// 一个账号的奖励状态。**这里没有任何 POST**：三个写动作仍未接线。
+///
+/// 与 `scan_account` 共用同一套凭据解析与"国际版不支持"的判定，避免两处规则漂移。
+pub async fn reward_state(app: &Arc<App>, account: &AccountRecord) -> rewards_state::RewardState {
+    let mut state = rewards_state::RewardState::empty(&account.id, &account.nickname);
+
+    if !account.supports_workbuddy_cn_apis() {
+        state.state = "unsupported";
+        state.errors.push(FieldError {
+            field: "provider",
+            kind: "unsupported_provider".to_string(),
+            http: None,
+            code: None,
+            message: "WorkBuddy 国际版没有成长中心；没有向任何接口发送请求".to_string(),
+        });
+        return attach_ledger(app, account, state);
+    }
+
+    let resolved = match broker::resolve(app, account) {
+        Ok(broker::Outcome::Resolved(resolved)) => resolved,
+        Ok(broker::Outcome::Unavailable { reason, detail }) => {
+            state.state = "missing_credential";
+            state.errors.push(FieldError {
+                field: "credential",
+                kind: reason,
+                http: None,
+                code: None,
+                message: detail,
+            });
+            return attach_ledger(app, account, state);
+        }
+        Err(err) => {
+            state.state = "missing_credential";
+            state.errors.push(FieldError {
+                field: "credential",
+                kind: "error".to_string(),
+                http: None,
+                code: None,
+                message: err.message,
+            });
+            return attach_ledger(app, account, state);
+        }
+    };
+
+    let domain = account.auth_domain.clone().unwrap_or_default();
+    let (fetched, _unauthorized) =
+        rewards_state::fetch(&resolved.access, &account.uid, &domain).await;
+    state = fetched;
+    state.account_id = account.id.clone();
+    state.nickname = account.nickname.clone();
+    attach_ledger(app, account, state)
+}
+
+/// 账本部分只读本地库：**它不代表服务端状态**，只回答"有没有一条没核验完的操作"。
+/// 把本地账本信息贴到状态上。**读不到就说读不到**：
+///
+/// - `awaitingVerification` 留 `None`（JSON `null`），不是 0；
+/// - 同时压一条 `field="ledger"` 的错误，`state` 因此降级成 `partial`。
+///
+/// 这条路径一定跑得通，所以抽成纯函数：`Err` 分支必须有测试，否则哪天数据库
+/// 打不开，界面会安静地显示"没有未核验记录"——那是错误结论，不是保守结论。
+fn apply_ledger(
+    mut state: rewards_state::RewardState,
+    ledger: crate::rpc::RpcResult<(
+        Vec<crate::storage::reward_ops::RewardOp>,
+        Vec<crate::storage::reward_ops::RewardOp>,
+    )>,
+) -> rewards_state::RewardState {
+    match ledger {
+        Ok((awaiting, recent)) => {
+            state.awaiting_verification = Some(awaiting.len());
+            state.recent_operations = recent.iter().map(rewards_state::operation_view).collect();
+        }
+        Err(err) => {
+            state.awaiting_verification = None;
+            state.errors.push(FieldError {
+                field: "ledger",
+                kind: "storage".to_string(),
+                http: None,
+                code: Some(err.code),
+                message: format!("本地奖励账本读取失败：{}", err.message),
+            });
+            if state.state == "ok" {
+                state.state = "partial";
+            }
+        }
+    }
+    state
+}
+
+fn attach_ledger(
+    app: &Arc<App>,
+    account: &AccountRecord,
+    state: rewards_state::RewardState,
+) -> rewards_state::RewardState {
+    let ledger = app.with_db(|db| {
+        Ok((
+            db.reward_ops_awaiting_verification(&account.id)?,
+            db.reward_ops(&account.id, 5)?,
+        ))
+    });
+    apply_ledger(state, ledger)
+}
+
+/// 全部账号（或指定账号）的奖励状态，账号之间串行。
+///
+/// **账号列表读不到就返回错误**，不能返回空数组：空数组意味着"你没有账号"，
+/// 而真实情况是"我们读不到账号"。两者在界面上完全不同。
+pub async fn reward_states(
+    app: &Arc<App>,
+    ids: &[String],
+) -> crate::rpc::RpcResult<Vec<rewards_state::RewardState>> {
+    let accounts = app.with_db(|db| db.list_accounts(&Default::default()))?;
+    let mut out = Vec::new();
+    for account in accounts {
+        // 国际版没有成长中心：不扫描、也不出现在结果里（`scan_fleet` 同样的规则）。
+        if !account.supports_workbuddy_cn_apis() {
+            continue;
+        }
+        if !ids.is_empty() && !ids.contains(&account.id) {
+            continue;
+        }
+        out.push(reward_state(app, &account).await);
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rpc::{RpcError, E_STORAGE};
+
+    fn empty_state() -> rewards_state::RewardState {
+        rewards_state::RewardState::empty("acc", "昵称")
+    }
+
+    #[test]
+    fn a_working_ledger_reports_the_real_awaiting_count() {
+        let state = apply_ledger(empty_state(), Ok((Vec::new(), Vec::new())));
+        assert_eq!(state.awaiting_verification, Some(0));
+        assert!(state.errors.is_empty());
+        assert_eq!(
+            state.state, "failed",
+            "空状态原样保留，不会因为账本正常而变 ok"
+        );
+    }
+
+    /// P1 回归：本地账本读不到时**不许显示成 0**。
+    ///
+    /// 0 的意思是"一切都结算完了"，而真实情况是"我们没读到账本"。界面上这两句话
+    /// 完全不同，静默默认 0 会让用户以为没有待核验的操作。
+    #[test]
+    fn an_unreadable_ledger_is_unknown_not_zero() {
+        let state = apply_ledger(
+            empty_state(),
+            Err(RpcError::new(E_STORAGE, "database is locked")),
+        );
+        assert_eq!(state.awaiting_verification, None, "读不到就是 null，不是 0");
+        assert_eq!(state.recent_operations.len(), 0);
+        let ledger_error = state
+            .errors
+            .iter()
+            .find(|error| error.field == "ledger")
+            .expect("必须留下一条 ledger 错误");
+        assert_eq!(ledger_error.kind, "storage");
+        assert!(ledger_error.message.contains("database is locked"));
+    }
+
+    #[test]
+    fn an_unreadable_ledger_degrades_an_otherwise_ok_state() {
+        let mut state = empty_state();
+        state.state = "ok";
+        let state = apply_ledger(state, Err(RpcError::new(E_STORAGE, "io")));
+        assert_eq!(state.state, "partial", "有错误就不能再报 ok");
+    }
+
+    #[test]
+    fn an_unreadable_ledger_does_not_mask_a_more_specific_state() {
+        // 已经 unauthorized 的账号，不该被账本错误改写成 partial。
+        let mut state = empty_state();
+        state.state = "unauthorized";
+        let state = apply_ledger(state, Err(RpcError::new(E_STORAGE, "io")));
+        assert_eq!(state.state, "unauthorized");
+        assert_eq!(state.awaiting_verification, None);
+    }
 }
