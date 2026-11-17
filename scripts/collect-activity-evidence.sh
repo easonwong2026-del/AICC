@@ -66,35 +66,81 @@ done
 # 3) 一张表说清四个账号现在的状态。
 python3 - "$TMP" "$OUT_DIR" "$STAMP" <<'PY'
 import json, os, sys
+from datetime import date, timedelta
 
 tmp, out_dir, stamp = sys.argv[1], sys.argv[2], sys.argv[3]
 
 rows = []
 saved = []
 for name in sorted(os.listdir(tmp)):
-    if name in ("accounts.json",) or not name.endswith(".json"):
+    if name == "accounts.json" or not name.endswith(".json"):
         continue
     payload = json.load(open(os.path.join(tmp, name)))
-    report = (payload.get("result") or {})
+    report = payload.get("result") or {}
     if payload.get("error"):
-        rows.append((name[:-5], "error", payload["error"].get("message", "")[:40], "", "", "", ""))
+        rows.append((name[:-5][:16], "error", "—", "—", "—", "—", "—"))
         continue
     endpoints = {e["name"]: e for e in report.get("endpoints", [])}
+
+    def data(key):
+        return ((endpoints.get(key) or {}).get("body") or {}).get("data") or {}
+
+    today = data("heatmap").get("today") or {}
+    cells = data("heatmap").get("cells") or []
+    streak = data("streak").get("streak") or {}
+    cards = data("streak").get("makeup_cards") or {}
+    redemption = {
+        key: value
+        for key, value in (data("streak").get("redemption_status") or {}).items()
+        if key != "tiers"
+    }
+
+    # 只落"判定需要"的字段：365 天逐日轨迹属于个人使用轨迹，不进仓库。
+    active_days = [cell for cell in cells if (cell.get("score") or 0) > 0]
+    window_start = (date.fromisoformat(today["date"]) - timedelta(days=6)).isoformat() if today.get("date") else None
+    summary = {
+        "_note": "只保留判定所需字段；逐日轨迹不落库。",
+        "accountId": report.get("accountId"),
+        "capturedAt": report.get("capturedAt"),
+        "today": {
+            "date": today.get("date"),
+            "isActive": today.get("is_active"),
+            "score": today.get("score"),
+            "statusText": today.get("status_text"),
+        },
+        "heatmapMeta": {
+            "rangeDays": (data("heatmap").get("range") or {}).get("days"),
+            "endDate": (data("heatmap").get("range") or {}).get("end_date"),
+            "updatedAt": data("heatmap").get("updated_at"),
+        },
+        "cellsSummary": {
+            "cellCount": len(cells),
+            "activeDays": len(active_days),
+            "lastActiveDate": active_days[-1]["date"] if active_days else None,
+            "activeDaysLast7": sum(
+                1 for cell in active_days
+                if window_start and cell["date"] >= window_start and cell["date"] <= today["date"]
+            ),
+        },
+        "streak": {
+            "days": streak.get("days"),
+            "nextTier": streak.get("next_tier"),
+            "nextTierRemaining": streak.get("next_tier_remaining"),
+            "monthTotalDays": streak.get("month_total_days"),
+            "launchDate": data("streak").get("launch_date"),
+            "timezone": data("streak").get("timezone"),
+            "makeupCards": cards,
+            "redemptionStatus": redemption,
+        },
+    }
     path = os.path.join(out_dir, f"activity-{stamp}-{name[:-5]}.json")
     with open(path, "w") as fh:
-        json.dump(report, fh, ensure_ascii=False, indent=1)
+        json.dump(summary, fh, ensure_ascii=False, indent=1)
     saved.append(path)
 
-    def body(key):
-        entry = endpoints.get(key) or {}
-        return entry.get("body") or {}
-
-    streak = ((body("streak").get("data") or {}).get("streak") or {})
-    today = ((body("heatmap").get("data") or {}).get("today") or {})
-    cards = ((body("streak").get("data") or {}).get("makeup_cards") or {})
     rows.append((
         name[:-5][:16],
-        today.get("date", "—"),
+        str(today.get("date", "—")),
         "是" if today.get("is_active") else "否",
         str(today.get("score", "—")),
         str(streak.get("days", "—")),
@@ -111,6 +157,6 @@ print("-" * (sum(widths) + 2 * (len(widths) - 1)))
 for row in rows:
     print(fmt.format(*row))
 print()
-print(f"原始响应：{out_dir}/activity-{stamp}-<account>.json（共 {len(saved)} 份，已脱敏）")
+print(f"摘要：{out_dir}/activity-{stamp}-<account>.json（共 {len(saved)} 份，只含判定所需字段）")
 print("注意：'活跃=否' 只代表服务端热力墙今天没被点亮，不代表签到失败。")
 PY

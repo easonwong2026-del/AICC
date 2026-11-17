@@ -1,0 +1,43 @@
+{
+ "_note": "只保留判定所需字段；逐日轨迹不落库。",
+ "accountId": "ab809e1e7cf247c6",
+ "capturedAt": "2026-11-17T18:43:10Z",
+ "today": {
+  "date": "2026-11-18",
+  "isActive": false,
+  "score": 0,
+  "statusText": "开始使用以点亮今日热力墙"
+ },
+ "heatmapMeta": {
+  "rangeDays": 365,
+  "endDate": "2026-11-18",
+  "updatedAt": "2026-11-14T17:11:53+08:00"
+ },
+ "cellsSummary": {
+  "cellCount": 365,
+  "activeDays": 79,
+  "lastActiveDate": "2026-11-13",
+  "activeDaysLast7": 1
+ },
+ "streak": {
+  "days": 0,
+  "nextTier": "7d",
+  "nextTierRemaining": 6,
+  "monthTotalDays": 1,
+  "launchDate": "2026-06-17",
+  "timezone": "Asia/Shanghai",
+  "makeupCards": {
+   "balance": 0,
+   "max": 4
+  },
+  "redemptionStatus": {
+   "remaining_days": 1,
+   "tier_14d_count": 0,
+   "tier_14d_status": "locked",
+   "tier_28d_count": 0,
+   "tier_28d_status": "locked",
+   "tier_7d_count": 0,
+   "tier_7d_status": "locked"
+  }
+ }
+}
