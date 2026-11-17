@@ -146,6 +146,9 @@ final class RewardModelsTests: XCTestCase {
             "streakDays": NSNull(),
             "lotteryChances": 0,
             "makeup": ["balance": NSNull(), "candidates": []],
+            // 三档也必须是"没有可领的"，否则摘要里会出现 "1 档可领"，
+            // 这条测试要验的是"没有数值可写时只剩 —"。
+            "tiers": [["tier": "7d", "days": 7, "state": "unknown", "claimable": false]],
         ]))
         XCTAssertEqual(state.summaryText, "—", "查不到的项不出现，也不写 0")
     }
