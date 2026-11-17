@@ -136,7 +136,8 @@ final class RewardModelsTests: XCTestCase {
         let state = RewardAccountState(json: account(overrides: ["recentOperations": rows]))
         XCTAssertEqual(state.recentOperations.map(\.actionLabel), ["抽奖", "连登兑换", "补签", "连登兑换"])
         XCTAssertEqual(state.recentOperations.map(\.phaseLabel), ["待核验", "已到账", "已冻结", "确认未执行"])
-        XCTAssertEqual(state.recentOperations.filter(\.needsAttention).count, 2)
+        // 只有 unknown 需要回查；frozen 等人工，不该出现回查按钮。
+        XCTAssertEqual(state.recentOperations.filter(\.needsAttention).count, 1)
     }
 
     // MARK: - 汇总
@@ -198,6 +199,144 @@ final class RewardModelsTests: XCTestCase {
         let state = RewardAccountState(json: account(overrides: ["scannedAt": ""]))
         let notice = RewardRefreshNotice.make(state: state, failure: "timeout")
         XCTAssertEqual(notice?.hasReadAt, false)
+    }
+
+    // MARK: - 写操作结果
+
+    func testTheFourWriteStatesAreKeptApart() {
+        XCTAssertEqual(RewardActionResult(json: ["sent": true, "state": "succeeded"]).state, "succeeded")
+        XCTAssertEqual(RewardActionResult(json: ["sent": true, "state": "rejected"]).state, "rejected")
+        XCTAssertEqual(RewardActionResult(json: ["sent": true, "state": "pending"]).state, "pending")
+        XCTAssertEqual(RewardActionResult(json: ["sent": true, "state": "frozen"]).state, "frozen")
+    }
+
+    func testUnknownAndFrozenAreFlaggedForAttentionNotAsFailure() {
+        XCTAssertTrue(RewardActionResult(json: ["state": "pending"]).needsAttention)
+        XCTAssertTrue(RewardActionResult(json: ["state": "frozen"]).needsAttention)
+        XCTAssertFalse(RewardActionResult(json: ["state": "rejected"]).needsAttention)
+        XCTAssertFalse(RewardActionResult(json: ["state": "succeeded"]).needsAttention)
+    }
+
+    func testAPreviewIsNotReportedAsSent() {
+        let preview = RewardActionResult(json: ["decision": "preview", "note": "这只是预览"])
+        XCTAssertFalse(preview.sent)
+        XCTAssertEqual(preview.state, "preview")
+    }
+
+    func testActionResultFallsBackToReasonThenNote() {
+        XCTAssertEqual(RewardActionResult(json: ["decision": "not_ready", "reason": "抽奖次数为 0"]).message, "抽奖次数为 0")
+        XCTAssertEqual(RewardActionResult(json: ["decision": "preview", "note": "预览"]).message, "预览")
+    }
+
+    // MARK: - 连登为 0 的解释
+
+    func testASeroStreakExplainsThatCheckinIsADifferentSignal() {
+        let state = RewardAccountState(json: account(overrides: ["streakDays": 0]))
+        let note = state.streakNote
+        XCTAssertNotNil(note)
+        // 只陈述服务端事实 + 未确证，不再断言"签到不会增加连登"。
+        XCTAssertTrue(note?.contains("连登 0 天") == true)
+        XCTAssertTrue(note?.contains("尚无确证") == true)
+        XCTAssertFalse(note?.contains("不会让它") == true, "不许断言因果")
+    }
+
+    func testANonZeroStreakHasNoExplanation() {
+        let state = RewardAccountState(json: account())  // streakDays: 16
+        XCTAssertNil(state.streakNote)
+    }
+
+    /// 守门：三个按钮都必须调用 `isEnabled(for:)`。
+    ///
+    /// 纯函数测试全绿、View 忘了接入，上一轮就是这样漏掉的（补签按钮还留着
+    /// 旧条件）。这条直接读源码，漏接就红。
+    func testEveryRewardButtonUsesTheSharedEnableRule() throws {
+        let here = URL(fileURLWithPath: #filePath)
+        let view = here
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/Console/ConsoleRewardsSection.swift")
+        let source = try String(contentsOf: view, encoding: .utf8)
+        for action in ["draw", "redeem", "makeup"] {
+            XCTAssertTrue(
+                source.contains("RewardAction.\(action).isEnabled(for: state)"),
+                "\(action) 按钮没有接统一启用规则"
+            )
+        }
+        XCTAssertFalse(
+            source.contains("state.makeup.candidates.isEmpty)"),
+            "补签按钮不该再写自己的条件"
+        )
+    }
+
+    // MARK: - 按钮门禁（回归：曾出现"说改了但提交里没有"）
+
+    func testMakeupNeedsBothABrokenDayAndACard() {
+        func state(balance: Any?, candidates: [String]) -> RewardAccountState {
+            RewardAccountState(json: account(overrides: [
+                "makeup": ["balance": balance ?? NSNull(), "candidates": candidates],
+            ]))
+        }
+        let day = ["2026-11-16"]
+        XCTAssertTrue(RewardAction.makeup.isEnabled(for: state(balance: 2, candidates: day)))
+        XCTAssertFalse(RewardAction.makeup.isEnabled(for: state(balance: 0, candidates: day)))
+        XCTAssertFalse(RewardAction.makeup.isEnabled(for: state(balance: -1, candidates: day)))
+        XCTAssertFalse(RewardAction.makeup.isEnabled(for: state(balance: nil, candidates: day)), "余额未知不许点")
+        XCTAssertFalse(RewardAction.makeup.isEnabled(for: state(balance: 2, candidates: [])), "没断签日不许点")
+    }
+
+    func testDrawNeedsAKnownPositiveChanceCount() {
+        func state(chances: Any?) -> RewardAccountState {
+            RewardAccountState(json: account(overrides: ["lotteryChances": chances ?? NSNull()]))
+        }
+        XCTAssertTrue(RewardAction.draw.isEnabled(for: state(chances: 1)))
+        XCTAssertFalse(RewardAction.draw.isEnabled(for: state(chances: 0)))
+        XCTAssertFalse(RewardAction.draw.isEnabled(for: state(chances: -2)))
+        XCTAssertFalse(RewardAction.draw.isEnabled(for: state(chances: nil)))
+    }
+
+    func testRedeemNeedsAClaimableTier() {
+        XCTAssertTrue(RewardAction.redeem.isEnabled(for: RewardAccountState(json: account())))
+        let none = RewardAccountState(json: account(overrides: [
+            "tiers": [["tier": "7d", "days": 7, "state": "claimed", "claimable": false]],
+        ]))
+        XCTAssertFalse(RewardAction.redeem.isEnabled(for: none))
+    }
+
+    // MARK: - 动作映射（P0-A 回归）
+
+    func testActionRawValuesAreTheProtocolStrings() {
+        XCTAssertEqual(RewardAction.draw.rawValue, "lottery_draw")
+        XCTAssertEqual(RewardAction.redeem.rawValue, "redeem")
+        XCTAssertEqual(RewardAction.makeup.rawValue, "makeup_card")
+        // 反向也必须解得回来，否则确认按钮点了没反应。
+        for action in RewardAction.allCases {
+            XCTAssertEqual(RewardAction(rawValue: action.rawValue), action)
+        }
+        XCTAssertNil(RewardAction(rawValue: "lottery"), "未知动作不许 fallback")
+    }
+
+    func testPreviewsDecodeToTheMatchingAction() {
+        for (raw, expected) in [
+            ("lottery_draw", RewardAction.draw),
+            ("redeem", RewardAction.redeem),
+            ("makeup_card", RewardAction.makeup),
+        ] {
+            let preview = RewardPreview(json: [
+                "preview": ["accountId": "a", "action": raw, "balance": 1, "balancedReady": true, "cost": "消耗 1 次"],
+            ])
+            XCTAssertEqual(RewardAction(rawValue: preview?.action ?? ""), expected, raw)
+        }
+    }
+
+    func testNeedsAttentionCoversOnlySentAndUnknown() {
+        for (phase, expected) in [
+            ("sent", true), ("unknown", true),
+            ("pending", false), ("ready", false), ("frozen", false),
+            ("confirmed", false), ("rejected", false),
+        ] {
+            let row = RewardOperationRow(json: ["id": "1", "action": "lottery_draw", "phase": phase, "open": true])
+            XCTAssertEqual(row.needsAttention, expected, phase)
+        }
     }
 
     // MARK: - 整包与 Mock

@@ -766,6 +766,108 @@ final class ConsoleStore: ObservableObject {
         }
     }
 
+    /// 写操作的结果（按账号）。四种状态都留在这里，界面按 state 上色。
+    @Published private(set) var rewardActions: [String: RewardActionResult] = [:]
+    @Published private(set) var rewardActing: Set<String> = []
+    /// 点按钮时现拉的预览（不是缓存）：确认框只显示这里的数字。
+    @Published private(set) var rewardPreviews: [String: RewardPreview] = [:]
+    @Published private(set) var rewardChecking: Set<String> = []
+
+    /// 执行一次奖励写操作。**调用方必须先让用户确认**（界面里有 confirmationDialog）。
+    func performReward(accountId: String, action: RewardAction, target: String? = nil) async {
+        guard !rewardActing.contains(accountId) else { return }
+        rewardActing.insert(accountId)
+        defer { rewardActing.remove(accountId) }
+        guard await ensureWorkerReady() else {
+            rewardActions[accountId] = RewardActionResult(json: ["state": "failed", "message": workerFailureText])
+            return
+        }
+        do {
+            let json: [String: Any]
+            switch action {
+            case .draw:
+                json = try await worker.rewardDraw(accountId: accountId, confirm: true)
+            case .redeem:
+                json = try await worker.rewardRedeem(accountId: accountId, tier: target ?? "", confirm: true)
+            case .makeup:
+                json = try await worker.rewardMakeup(accountId: accountId, date: target ?? "", confirm: true)
+            }
+            rewardActions[accountId] = RewardActionResult(json: json)
+            // 无论结果如何都重读一次状态：成功要看新余额，未知要看账本提示。
+            await loadReward(accountId: accountId)
+        } catch {
+            rewardActions[accountId] = RewardActionResult(json: [
+                "state": "failed",
+                "message": (error as? LocalizedError)?.errorDescription ?? error.localizedDescription,
+            ])
+        }
+    }
+
+    func clearRewardAction(accountId: String) { rewardActions[accountId] = nil }
+
+    /// 打开确认框之前先拉一次实时预览。失败或资格不足 → 不弹框，直接报原因。
+    func previewReward(accountId: String, action: RewardAction, target: String? = nil) async {
+        guard !rewardActing.contains(accountId) else { return }
+        rewardActing.insert(accountId)
+        defer { rewardActing.remove(accountId) }
+        do {
+            let json = try await worker.rewardPreview(accountId: accountId, action: action, target: target)
+            guard let preview = RewardPreview(json: json) else {
+                rewardActions[accountId] = RewardActionResult(json: [
+                    "state": "failed", "message": "预览返回无法解析，已取消操作",
+                ])
+                return
+            }
+            guard preview.ready else {
+                // 资格不足：不弹确认框，直接说明原因。
+                rewardActions[accountId] = RewardActionResult(json: [
+                    "state": "rejected",
+                    "message": preview.reason ?? "当前不满足执行条件，未发送",
+                ])
+                return
+            }
+            rewardPreviews[accountId] = preview
+        } catch {
+            rewardActions[accountId] = RewardActionResult(json: [
+                "state": "failed",
+                "message": (error as? LocalizedError)?.errorDescription ?? error.localizedDescription,
+            ])
+        }
+    }
+
+    func clearRewardPreview(accountId: String) { rewardPreviews[accountId] = nil }
+
+    /// 回查：只读，不重发。收敛后刷新余额与历史。
+    func recheckRewards(accountId: String) async {
+        guard !rewardChecking.contains(accountId) else { return }
+        rewardChecking.insert(accountId)
+        defer { rewardChecking.remove(accountId) }
+        do {
+            let json = try await worker.rewardRecheck(accountId: accountId)
+            let checked = (json["checked"] as? NSNumber)?.intValue ?? 0
+            let results = json["results"] as? [[String: Any]] ?? []
+            let moved = results.contains { ($0["moved"] as? Bool) == true }
+            let message: String
+            if checked == 0 {
+                message = "没有待核验的操作"
+            } else if moved {
+                message = "回查完成：服务端状态有变化，但无法归属到本次请求，仍标记为待核验"
+            } else {
+                message = "回查完成：服务端状态没有变化，仍无法确认结果，继续待核验"
+            }
+            rewardActions[accountId] = RewardActionResult(json: [
+                "state": moved ? "pending" : "pending",
+                "message": message,
+            ])
+            await loadReward(accountId: accountId)
+        } catch {
+            rewardActions[accountId] = RewardActionResult(json: [
+                "state": "failed",
+                "message": (error as? LocalizedError)?.errorDescription ?? error.localizedDescription,
+            ])
+        }
+    }
+
     /// 读一个账号的奖励状态。**只读**：worker 侧没有抽奖、兑换、补签的写入口。
     ///
     /// 失败不清空上一次结果：界面上的「上次读到」和「这次失败」是两件事，

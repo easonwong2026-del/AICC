@@ -189,6 +189,7 @@ const GRANT_KEYS: &[&str] = &[
 const SERVER_STATE_KEYS: &[&str] = &[
     "chances",
     "balance",
+    "observed",
     "days",
     "streak_days",
     "makeup_cards",
@@ -388,6 +389,44 @@ impl Db {
         Ok(attempt)
     }
 
+    /// 回查专用：**只有 sent/unknown 能落结论**。
+    ///
+    /// 与 `resolve_reward_op` 的区别在 UPDATE 的 WHERE：读的时候是 unknown，
+    /// 等网络回来时可能已经被别处写成 `frozen`（或已 confirmed）—— 这条旧回查
+    /// 不得覆盖它们。判断和写入在同一条 SQL 里，没有 TOCTOU 窗口。
+    pub fn resolve_reward_op_recheck(&mut self, id: &str, res: &Resolution<'_>) -> RpcResult<()> {
+        if !matches!(res.phase, "confirmed" | "unknown" | "rejected") {
+            return Err(RpcError::invalid_params(
+                "回查只能落 confirmed/unknown/rejected",
+            ));
+        }
+        let now = now_rfc3339();
+        let verified_at = res.verified.then(|| now.clone());
+        let server_state = sanitize_payload(res.server_state, SERVER_STATE_KEYS);
+        let detail = sanitize_detail(res.detail);
+        let changed = self.conn.execute(
+            "UPDATE reward_operations
+                SET phase = ?2, outcome = ?3, server_state = COALESCE(?4, server_state),
+                    detail = ?5, updated_at = ?6, verified_at = ?7
+              WHERE id = ?1 AND phase IN ('sent','unknown')",
+            params![
+                id,
+                res.phase,
+                res.outcome,
+                server_state,
+                detail,
+                now,
+                verified_at
+            ],
+        )?;
+        if changed != 1 {
+            return Err(RpcError::internal(
+                "这条操作已被别的流程改写（可能已冻结或已确认），本次回查不覆盖它",
+            ));
+        }
+        Ok(())
+    }
+
     /// 落结论。只允许改未决记录 —— 已经结束的记录不能被后来的回查覆盖。
     ///
     /// 三条边界都在这里强制（不依赖调用方自觉）：
@@ -405,9 +444,10 @@ impl Db {
         let detail = sanitize_detail(res.detail);
         let changed = self.conn.execute(
             "UPDATE reward_operations
-                SET phase = ?2, outcome = ?3, grant_json = ?4, server_state = ?5,
+                SET phase = ?2, outcome = ?3, grant_json = ?4, server_state = COALESCE(?5, server_state),
                     detail = ?6, updated_at = ?7, verified_at = ?8
-              WHERE id = ?1 AND phase IN ('pending','ready','sent','unknown','frozen')",
+              WHERE id = ?1 AND phase IN ('pending','ready','sent','unknown','frozen')
+                AND NOT (phase = 'frozen' AND ?2 = 'unknown')",
             params![
                 id,
                 res.phase,
@@ -471,6 +511,20 @@ impl Db {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// 记下发送前的服务端基线（余额/档位状态），回查时用来判断"变没变"。
+    ///
+    /// 只允许写一次：第一次发送前的快照才是比较基准，重发不能覆盖它。
+    pub fn set_reward_op_baseline(&mut self, id: &str, baseline: &Value) -> RpcResult<()> {
+        let text = serde_json::to_string(baseline).unwrap_or_else(|_| "{}".to_string());
+        let now = now_rfc3339();
+        self.conn.execute(
+            "UPDATE reward_operations SET server_state = ?2, updated_at = ?3
+              WHERE id = ?1 AND server_state IS NULL",
+            params![id, text, now],
+        )?;
+        Ok(())
     }
 
     /// 这个 `(账号, 动作, 目标)` 有没有**任何**记录（含已结束的）。
@@ -808,6 +862,49 @@ mod tests {
         let op = db.reward_op(&id).unwrap().unwrap();
         assert_eq!(op.phase, "ready", "被拒之后状态不能被改成 sent");
         assert_eq!(op.attempt, MAX_SEND_ATTEMPTS);
+    }
+
+    /// TOCTOU：读时 unknown、等网络期间被改成 frozen，旧回查不得覆盖。
+    #[test]
+    fn a_recheck_that_lost_the_race_cannot_overwrite_a_frozen_row() {
+        let (mut db, _dir) = temp_db();
+        let id = open_then_send(&mut db, "acc", "u-1");
+        db.resolve_reward_op(&id, &conclude("unknown", false))
+            .unwrap();
+        // 另一个流程在回查等待期间把它定性为冻结。
+        db.resolve_reward_op(&id, &conclude("frozen", true))
+            .unwrap();
+        let stale = Resolution {
+            phase: "unknown",
+            outcome: "indeterminate",
+            grant: None,
+            server_state: None,
+            detail: Some("stale recheck"),
+            verified: false,
+        };
+        assert!(db.resolve_reward_op_recheck(&id, &stale).is_err());
+        assert_eq!(db.reward_op(&id).unwrap().unwrap().phase, "frozen");
+    }
+
+    /// 冻结态不能被回查降级为 unknown：并发下先被定性冻结的记录，
+    /// 后来那次回查只应"看得到"，不能改写它。
+    #[test]
+    fn a_frozen_operation_cannot_be_downgraded_by_a_late_recheck() {
+        let (mut db, _dir) = temp_db();
+        let id = open_then_send(&mut db, "acc", "u-1");
+        db.resolve_reward_op(&id, &conclude("frozen", true))
+            .unwrap();
+        let late = Resolution {
+            phase: "unknown",
+            outcome: "indeterminate",
+            grant: None,
+            server_state: None,
+            detail: Some("late recheck"),
+            verified: false,
+        };
+        let changed = db.resolve_reward_op(&id, &late);
+        assert!(changed.is_err() || db.reward_op(&id).unwrap().unwrap().phase == "frozen");
+        assert_eq!(db.reward_op(&id).unwrap().unwrap().phase, "frozen");
     }
 
     /// 没有幂等键的抽奖/兑换记录**不许标记发送**：那是"用空 token 发请求"的入口。

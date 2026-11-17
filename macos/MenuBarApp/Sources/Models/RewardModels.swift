@@ -154,7 +154,8 @@ struct RewardOperationRow: Identifiable, Equatable {
         }
     }
 
-    var needsAttention: Bool { open }
+    // 只有 sent/unknown 才值得回查；pending/ready 还没发，frozen 等人工，不该被回查改写。
+    var needsAttention: Bool { phase == "sent" || phase == "unknown" }
 
     init(json: [String: Any]) {
         id = json["id"] as? String ?? UUID().uuidString
@@ -288,6 +289,17 @@ struct RewardAccountState: Identifiable, Equatable {
         }
     }
 
+    /// 连登为 0 时的解释。
+    ///
+    /// 实测（docs/evidence/）：服务端对三个账号返回的就是 `streak.days = 0`，
+    /// 而它们的每日签到是成功的。两套判定：签到成功不等于成长中心活跃 +1。
+    /// 这里必须把话说清楚，否则用户会以为"签到失败"或"界面坏了"。
+    var streakNote: String? {
+        guard streakDays == 0 else { return nil }
+        // 只陈述服务端事实，不断言因果：签到是否计入成长活跃，目前没有证据。
+        return "服务端返回连登 0 天；每日签到与成长中心活跃是否为同一计数，尚无确证"
+    }
+
     /// 账本读不到时的提示。这与"没有未核验操作"是两件事。
     var ledgerUnreadableText: String? {
         awaitingVerification == nil ? "本地奖励账本读取失败，无法确认有没有未核验的操作" : nil
@@ -317,6 +329,98 @@ struct RewardRefreshNotice: Equatable {
 
     /// 有没有一个可显示的时间。格式化交给界面层（模型层不依赖 Console）。
     var hasReadAt: Bool { !readAt.isEmpty }
+}
+
+/// 三个写操作。
+enum RewardAction: String, Identifiable, CaseIterable {
+    // rawValue 必须等于后端 `action` 字段（lottery_draw / redeem / makeup_card），
+    // 否则 `RewardAction(rawValue: preview.action)` 得到 nil，确认按钮点了没反应。
+    case draw = "lottery_draw"
+    case redeem = "redeem"
+    case makeup = "makeup_card"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .draw: return "抽奖"
+        case .redeem: return "兑换连登奖励"
+        case .makeup: return "补签"
+        }
+    }
+
+    /// 这个动作现在能不能点。**纯函数**，所以有单测；界面只调用它，不再各写一套条件。
+    func isEnabled(for state: RewardAccountState) -> Bool {
+        switch self {
+        case .draw:
+            return (state.lotteryChances ?? 0) > 0
+        case .redeem:
+            return !state.claimableTiers.isEmpty
+        case .makeup:
+            return !state.makeup.candidates.isEmpty && (state.makeup.balance ?? 0) > 0
+        }
+    }
+
+    var cost: String {
+        switch self {
+        case .draw: return "消耗 1 次抽奖机会"
+        case .redeem: return "消耗 1 个连登档位"
+        case .makeup: return "消耗 1 张补签卡"
+        }
+    }
+}
+
+/// 实时预览：点按钮时现拉的，**不是缓存**。
+struct RewardPreview: Equatable {
+    let accountId: String
+    let action: String
+    let target: String?
+    let balance: Int?
+    let ready: Bool
+    let reason: String?
+    let cost: String
+    let nickname: String
+
+    init?(json: [String: Any]) {
+        guard let preview = json["preview"] as? [String: Any] else { return nil }
+        accountId = preview["accountId"] as? String ?? ""
+        action = preview["action"] as? String ?? ""
+        target = (preview["target"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        balance = (preview["balance"] as? NSNumber)?.intValue
+        ready = preview["balancedReady"] as? Bool ?? false
+        reason = preview["reason"] as? String
+        cost = preview["cost"] as? String ?? ""
+        nickname = preview["nickname"] as? String ?? ""
+    }
+
+    var balanceText: String { balance.map { "\($0)" } ?? "—" }
+}
+
+// MARK: - 写操作结果
+
+/// 抽奖 / 兑换 / 补签 的一次结果。四种状态必须分开，**不能都叫"失败"**：
+/// `pending` 是"可能已经执行、还没确认"，`frozen` 是"等人工"。
+struct RewardActionResult: Equatable {
+    /// 是否真的发了请求。
+    let sent: Bool
+    /// `succeeded` / `rejected` / `pending` / `frozen` / `failed` / `preview` / `blocked`
+    let state: String
+    let message: String
+    let phase: String?
+
+    init(json: [String: Any]) {
+        sent = json["sent"] as? Bool ?? false
+        state = json["state"] as? String
+            ?? (json["decision"] as? String)
+            ?? "failed"
+        message = json["message"] as? String
+            ?? (json["reason"] as? String)
+            ?? (json["note"] as? String)
+            ?? "—"
+        phase = json["phase"] as? String
+    }
+
+    var needsAttention: Bool { state == "pending" || state == "frozen" }
 }
 
 // MARK: - 一次查询的结果

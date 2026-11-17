@@ -13,7 +13,18 @@ struct ConsoleRewardsBlock: View {
     let state: RewardAccountState?
     let loading: Bool
     let failure: String?
+    /// 上一次写操作的结果（成功/拒绝/未定/冻结）。
+    var result: RewardActionResult? = nil
+    var acting: Bool = false
+    /// 点按钮后现拉的预览；只有它到达才弹确认框。
+    var preview: RewardPreview? = nil
+    var checking: Bool = false
     let onRefresh: () -> Void
+    var onPreview: (RewardAction, String?) -> Void = { _, _ in }
+    var onConfirmPreview: () -> Void = {}
+    var onCancelPreview: () -> Void = {}
+    var onRecheck: () -> Void = {}
+    var onDismissResult: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -22,6 +33,7 @@ struct ConsoleRewardsBlock: View {
                 if let notice = RewardRefreshNotice.make(state: state, failure: failure) {
                     staleBanner(notice)
                 }
+                if let result { resultBanner(result) }
                 tierRow(state)
                 metricsRow(state)
                 makeupRow(state)
@@ -106,6 +118,12 @@ struct ConsoleRewardsBlock: View {
     private func metricsRow(_ state: RewardAccountState) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             ConsoleInfoRow(label: "连登天数", value: state.streakDays.map { "\($0) 天" } ?? "—")
+            if let note = state.streakNote {
+                Text(note)
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             ConsoleInfoRow(label: "抽奖次数", value: state.lotteryChances.map { "\($0) 次" } ?? "—")
             ConsoleInfoRow(label: "补签卡", value: state.makeup.balanceText)
             if let today = state.makeup.today {
@@ -253,31 +271,102 @@ struct ConsoleRewardsBlock: View {
     // MARK: - 操作
 
     private func actions(_ state: RewardAccountState) -> some View {
-        let claimable = state.claimableTiers
-        let redeemTitle = claimable.isEmpty
-            ? "兑换连登奖励"
-            : "兑换连登奖励（\(claimable.map(\.tier).joined(separator: " / "))）"
+        let claimable = state.claimableTiers.first
+        let redeemTitle = claimable.map { "兑换连登奖励（\($0.tier)）" } ?? "兑换连登奖励"
+        let needsRecheck = state.recentOperations.contains { $0.needsAttention }
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                Button("抽奖") {}
+                Button("抽奖") { onPreview(.draw, nil) }
                     .buttonStyle(ConsoleSecondaryButtonStyle())
-                    .disabled(true)
-                    .help("抽奖接口还没拿到 A 级证据，未接线")
-                Button(redeemTitle) {}
-                    .buttonStyle(ConsoleSecondaryButtonStyle())
-                    .disabled(true)
-                    .help("兑换接口还没拿到 A 级证据，未接线")
-                Button("补签") {}
-                    .buttonStyle(ConsoleSecondaryButtonStyle())
-                    .disabled(true)
-                    .help("补签接口还没拿到 A 级证据，未接线")
+                    // 余额未知（nil）也要禁用：不能拿"不知道"当"有次数"。
+                    .disabled(acting || !RewardAction.draw.isEnabled(for: state))
+                Button(redeemTitle) {
+                    if let tier = claimable?.tier { onPreview(.redeem, tier) }
+                }
+                .buttonStyle(ConsoleSecondaryButtonStyle())
+                .disabled(acting || !RewardAction.redeem.isEnabled(for: state))
+                Button("补签") {
+                    if let date = state.makeup.candidates.first { onPreview(.makeup, date) }
+                }
+                .buttonStyle(ConsoleSecondaryButtonStyle())
+                .disabled(acting || !RewardAction.makeup.isEnabled(for: state))
+                if needsRecheck {
+                    Button(checking ? "回查中…" : "回查结果") { onRecheck() }
+                        .buttonStyle(ConsoleSecondaryButtonStyle())
+                        .disabled(checking || acting)
+                        .help("只读：向服务端确认上一次请求的结果，不会重发")
+                }
                 Spacer(minLength: 0)
             }
-            Text("这三个动作会消耗次数或补签卡，接口证据到位前保持禁用；接好后每一次都会先记本地账本、再回查服务端。")
+            Text("点击后先拉一次实时余额，再让你确认；确认后写账本、只发一次请求。未知结果只能回查，不会自动重发。")
                 .font(ConsoleType.caption)
                 .foregroundStyle(ConsoleTheme.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .confirmationDialog(
+            dialogTitle,
+            isPresented: Binding(get: { preview != nil }, set: { if !$0 { onCancelPreview() } }),
+            titleVisibility: .visible
+        ) {
+            if preview != nil {
+                Button("确认（\(preview?.cost ?? "")）") { onConfirmPreview() }
+                Button("取消", role: .cancel) { onCancelPreview() }
+            }
+        } message: {
+            if let preview {
+                Text(detail(for: preview))
+            }
+        }
+    }
+
+    /// 标题走解析后的枚举，不在这里再写一套三元表达式。
+    private var dialogTitle: String {
+        guard let preview, let action = RewardAction(rawValue: preview.action) else {
+            return "确认操作"
+        }
+        return "确认\(action.title)"
+    }
+
+    private func detail(for preview: RewardPreview) -> String {
+        var lines = ["账号：\(preview.nickname)"]
+        if RewardAction(rawValue: preview.action) == .redeem {
+            // 兑换没有"余额"这个概念，写"实时余额 —"会误导。
+            lines.append("实时资格：可兑换")
+        } else {
+            lines.append("实时余额：\(preview.balanceText)")
+        }
+        lines.append("预计消耗：\(preview.cost)")
+        if let target = preview.target { lines.insert("目标：\(target)", at: 1) }
+        lines.append("")
+        lines.append("确认后服务端还会再校验一次；结果未定时不会重发。")
+        return lines.joined(separator: "\n")
+    }
+
+    @ViewBuilder
+    private func resultBanner(_ result: RewardActionResult) -> some View {
+        let tone: Color = {
+            switch result.state {
+            case "succeeded": return ConsoleTheme.success
+            case "rejected": return ConsoleTheme.secondaryText
+            case "pending", "frozen": return ConsoleTheme.warning
+            default: return ConsoleTheme.danger
+            }
+        }()
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(result.message)
+                .font(ConsoleType.caption)
+                .foregroundStyle(tone)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button("知道了") { onDismissResult() }
+                .buttonStyle(.plain)
+                .font(ConsoleType.caption)
+                .foregroundStyle(ConsoleTheme.tertiaryText)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tone.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: - 配色

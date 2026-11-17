@@ -103,6 +103,16 @@ pub enum ProbeDecision {
 /// 顺序与正式接线一致：先 `open_reward_op`（落盘 / 复用），再 `plan()`。
 /// `plan` 说 `Recheck` 或 `Blocked` 时，这里绝不返回 `Send`。
 pub fn decide(db: &mut Db, account_id: &str, command: &Command) -> RpcResult<ProbeDecision> {
+    decide_with(db, account_id, command, true)
+}
+
+/// `one_shot`：取证探针只许一次；正式功能允许多次（每次仍要重新确认余额）。
+pub fn decide_with(
+    db: &mut Db,
+    account_id: &str,
+    command: &Command,
+    one_shot: bool,
+) -> RpcResult<ProbeDecision> {
     let action = command.action().as_str();
     let target = command.target();
     let needs_token = !matches!(command, Command::MakeupCard { .. });
@@ -111,9 +121,10 @@ pub fn decide(db: &mut Db, account_id: &str, command: &Command) -> RpcResult<Pro
     //
     // 注意只拦"已结束"的情形：还开着的记录要继续走同一个 attempt（回查或重发），
     // 那是同一次操作，不是第二次消耗。
-    if db
-        .open_reward_op_for(account_id, action, &target)?
-        .is_none()
+    if one_shot
+        && db
+            .open_reward_op_for(account_id, action, &target)?
+            .is_none()
         && db.has_any_reward_op(account_id, action, &target)?
     {
         return Ok(ProbeDecision::Blocked {
@@ -206,6 +217,13 @@ pub trait ProbeSender {
     ) -> impl std::future::Future<Output = Result<Value, super::api::GrowthError>>;
 }
 
+/// 让 `&T` 也能当发送器用：测试里需要"发完之后还要数次数"。
+impl<T: ProbeSender + ?Sized> ProbeSender for &T {
+    async fn send(&self, suffix: &str, body: Value) -> Result<Value, super::api::GrowthError> {
+        (**self).send(suffix, body).await
+    }
+}
+
 /// 真实发送器：**固定前缀、只发一次**（`post_exact`，不做 404 退让）。
 pub struct HttpSender {
     pub payload: Value,
@@ -217,11 +235,22 @@ impl ProbeSender for HttpSender {
     }
 }
 
+/// 发一次。封装在这里，让正式写路径与探针共用同一条"只发一次"的实现。
+pub async fn send_once<S: ProbeSender>(
+    sender: &S,
+    suffix: &str,
+    body: Value,
+) -> Result<Value, super::api::GrowthError> {
+    sender.send(suffix, body).await
+}
+
 /// 发送前的只读检查结果。**余额/可领性为 0 时不许发**。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Readiness {
     pub ready: bool,
     pub balance: Option<i64>,
+    /// 服务端当前的状态字符串（档位用），用于回查对比。
+    pub observed: Option<String>,
     pub reason: Option<&'static str>,
 }
 
@@ -234,16 +263,26 @@ pub fn judge_lottery(balance: Option<i64>) -> Readiness {
         Some(0) => Readiness {
             ready: false,
             balance: Some(0),
+            observed: None,
             reason: Some("抽奖次数为 0，不发送"),
         },
-        Some(value) => Readiness {
+        Some(value) if value > 0 => Readiness {
             ready: true,
             balance: Some(value),
+            observed: None,
             reason: None,
+        },
+        // 负数一样是不可发送：服务端不可能给我们负次数，出现就是读错了。
+        Some(value) => Readiness {
+            ready: false,
+            balance: Some(value),
+            observed: None,
+            reason: Some("余额为负，按异常处理，不发送"),
         },
         None => Readiness {
             ready: false,
             balance: None,
+            observed: None,
             reason: Some("查不到抽奖次数，不发送"),
         },
     }
@@ -252,25 +291,31 @@ pub fn judge_lottery(balance: Option<i64>) -> Readiness {
 /// 档位状态的判断（纯函数）。
 pub fn judge_tier(status: Option<&str>) -> Readiness {
     let lowered = status.map(|text| text.trim().to_lowercase());
+    let observed = lowered.clone();
     match lowered.as_deref() {
         Some("available") | Some("ready") | Some("claimable") | Some("unlocked") => Readiness {
             ready: true,
             balance: None,
+            // 可兑换时的状态也要作为基线：兑换成功后它会变成 claimed。
+            observed: observed.clone(),
             reason: None,
         },
         Some("claimed") => Readiness {
             ready: false,
             balance: None,
+            observed: observed.clone(),
             reason: Some("该档位已经领过"),
         },
         Some("locked") => Readiness {
             ready: false,
             balance: None,
+            observed: observed.clone(),
             reason: Some("该档位还没达成"),
         },
         _ => Readiness {
             ready: false,
             balance: None,
+            observed: observed.clone(),
             reason: Some("档位状态不明确，不发送"),
         },
     }
@@ -282,16 +327,26 @@ pub fn judge_makeup(balance: Option<i64>) -> Readiness {
         Some(0) => Readiness {
             ready: false,
             balance: Some(0),
+            observed: None,
             reason: Some("补签卡为 0，不发送"),
         },
-        Some(value) => Readiness {
+        Some(value) if value > 0 => Readiness {
             ready: true,
             balance: Some(value),
+            observed: None,
             reason: None,
+        },
+        // 负数一样是不可发送：服务端不可能给我们负次数，出现就是读错了。
+        Some(value) => Readiness {
+            ready: false,
+            balance: Some(value),
+            observed: None,
+            reason: Some("余额为负，按异常处理，不发送"),
         },
         None => Readiness {
             ready: false,
             balance: None,
+            observed: None,
             reason: Some("查不到补签卡余额，不发送"),
         },
     }
@@ -327,14 +382,37 @@ pub async fn readiness(access: &str, uid: &str, domain: &str, command: &Command)
             }
             Err(_) => judge_tier(None),
         },
-        Command::MakeupCard { .. } => match endpoints.streak().await {
-            Ok((body, _)) => {
-                let node = body.get("data").unwrap_or(&body);
-                let balance = super::scanner::read_makeup_cards(Some(node));
-                judge_makeup(balance)
+        Command::MakeupCard { target_date } => {
+            let (streak, heatmap) = tokio::join!(endpoints.streak(), endpoints.heatmap());
+            let Ok((streak_body, _)) = streak else {
+                return judge_makeup(None);
+            };
+            let node = streak_body.get("data").unwrap_or(&streak_body);
+            let balance = super::scanner::read_makeup_cards(Some(node));
+            let mut readiness = judge_makeup(balance);
+            if !readiness.ready {
+                return readiness;
             }
-            Err(_) => judge_makeup(None),
-        },
+            // 日期必须真的在"可补签候选"里：RPC 层只校验格式，资格要问服务端。
+            let Ok((heatmap_body, _)) = heatmap else {
+                readiness.ready = false;
+                readiness.reason = Some("查不到活跃日历，不发送");
+                return readiness;
+            };
+            match super::rewards_state::makeup_candidates(&streak_body, &heatmap_body) {
+                Ok(days) => {
+                    if !days.iter().any(|day| day == target_date) {
+                        readiness.ready = false;
+                        readiness.reason = Some("这一天不在可补签候选里，不发送");
+                    }
+                }
+                Err(_) => {
+                    readiness.ready = false;
+                    readiness.reason = Some("活跃日历异常，无法确认补签资格");
+                }
+            }
+            readiness
+        }
     }
 }
 
@@ -342,7 +420,7 @@ pub async fn readiness(access: &str, uid: &str, domain: &str, command: &Command)
 ///
 /// 超时/连接断必须是 **0**：`classify` 把 0 认成"没有响应"，
 /// 也就是 `Indeterminate → unknown`。给它编一个 500 会让人误以为服务端拒绝了。
-fn status_for_error(err: &super::api::GrowthError) -> u16 {
+pub fn status_for_error(err: &super::api::GrowthError) -> u16 {
     if let Some(http) = err.http {
         return http as u16;
     }
@@ -758,6 +836,42 @@ mod tests {
         );
     }
 
+    /// P0 回归：**正式路径不受一次性守卫限制** —— 抽过一次之后还能再抽。
+    ///
+    /// 这是 `decide_with(one_shot=false)` 存在的全部意义；参数没接上时，
+    /// 第二次抽奖会被永久 Blocked。
+    #[test]
+    fn the_product_path_may_repeat_a_finished_draw() {
+        let (mut db, _dir) = temp_db();
+        let account = add_account(&mut db, "uid-1");
+        let ProbeDecision::Send { op_id, .. } =
+            decide_with(&mut db, &account, &Command::LotteryDraw, false).unwrap()
+        else {
+            panic!("第一次应为 Send");
+        };
+        db.mark_reward_op_sent(&op_id).unwrap();
+        db.resolve_reward_op(
+            &op_id,
+            &Resolution {
+                phase: "confirmed",
+                outcome: "granted",
+                grant: None,
+                server_state: None,
+                detail: None,
+                verified: true,
+            },
+        )
+        .unwrap();
+
+        let again = decide_with(&mut db, &account, &Command::LotteryDraw, false).unwrap();
+        assert!(
+            matches!(again, ProbeDecision::Send { .. }),
+            "正式路径必须允许再次抽奖，实际 {again:?}"
+        );
+        // 此刻账本里多了一条新的未决记录：探针会接着处理这一条（不是直接 Blocked），
+        // 但一次性守卫在它结束后依旧生效 —— 见 `a_completed_probe_blocks_a_second_one`。
+    }
+
     /// 别的动作不受一次性限制影响。
     #[test]
     fn the_one_shot_guard_is_scoped_to_its_own_target() {
@@ -880,5 +994,156 @@ mod tests {
             super::super::streak_rewards::Rejection::NoChance,
         ));
         assert_eq!(rejected, Verdict::Rejected);
+    }
+
+    // ------------------------------------------------------------------
+    // 三条动作的 Mock 闭环（不触网）
+    // ------------------------------------------------------------------
+
+    struct CountingSender {
+        suffix: std::sync::Mutex<Vec<String>>,
+        timeout: bool,
+    }
+
+    impl CountingSender {
+        fn ok() -> Self {
+            Self {
+                suffix: Default::default(),
+                timeout: false,
+            }
+        }
+        fn timeout() -> Self {
+            Self {
+                suffix: Default::default(),
+                timeout: true,
+            }
+        }
+        fn calls(&self) -> usize {
+            self.suffix.lock().unwrap().len()
+        }
+    }
+
+    impl super::ProbeSender for CountingSender {
+        async fn send(
+            &self,
+            suffix: &str,
+            _body: Value,
+        ) -> Result<Value, crate::growth::api::GrowthError> {
+            self.suffix.lock().unwrap().push(suffix.to_string());
+            if self.timeout {
+                Err(crate::growth::api::GrowthError {
+                    kind: crate::growth::api::ErrorKind::Network,
+                    http: None,
+                    code: None,
+                    message: "请求超时（15s）".into(),
+                })
+            } else {
+                Ok(json!({ "code": 0, "data": {} }))
+            }
+        }
+    }
+
+    fn mock_app() -> (std::sync::Arc<crate::app::App>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data = dir.path().to_path_buf();
+        let paths = crate::paths::Paths {
+            db_path: data.join("accounts.sqlite"),
+            backups_dir: data.join("backups"),
+            logs_dir: data.join("logs"),
+            wb_switch_home: data.join("wb"),
+            data_dir: data.clone(),
+            wb_home_owned: true,
+        };
+        (
+            std::sync::Arc::new(crate::app::App::with_secure(
+                paths,
+                crate::securestore::SecureStore::memory(),
+            )),
+            dir,
+        )
+    }
+
+    fn mock_account(app: &std::sync::Arc<crate::app::App>, uid: &str) -> String {
+        app.with_db(|db| {
+            db.upsert_account(&crate::storage::AccountInput {
+                platform: "workbuddy".into(),
+                uid: uid.into(),
+                nickname: Some("mock".into()),
+                email: None,
+                group_id: None,
+                auth_ref: None,
+                profile_ref: None,
+                auth_status: None,
+                checkin_enabled: None,
+                token_expires_at: None,
+                auth_domain: None,
+                auth_source: None,
+                travel_enabled: None,
+                provider: None,
+            })
+        })
+        .unwrap()
+        .id
+    }
+
+    #[tokio::test]
+    async fn the_three_actions_each_send_exactly_one_post() {
+        let (app, _dir) = mock_app();
+        for (command, ready) in [
+            (Command::LotteryDraw, judge_lottery(Some(1))),
+            (Command::Redeem(Tier::Days7), judge_tier(Some("available"))),
+            (
+                Command::MakeupCard {
+                    target_date: "2026-11-10".into(),
+                },
+                judge_makeup(Some(2)),
+            ),
+        ] {
+            let account = mock_account(&app, &format!("uid-{}", command.action().as_str()));
+            let sender = CountingSender::ok();
+            let out = run_with(&app, &account, &command, &ready, &sender)
+                .await
+                .expect("run");
+            assert_eq!(
+                sender.calls(),
+                1,
+                "{} 只许发一次",
+                command.action().as_str()
+            );
+            let expected = streak_rewards::call(&command, "t").unwrap().suffix;
+            assert_eq!(sender.suffix.lock().unwrap()[0], expected);
+            assert_eq!(out["sent"], json!(true));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_timeout_sends_once_then_reports_unknown_and_never_resends() {
+        let (app, _dir) = mock_app();
+        let account = mock_account(&app, "uid-timeout");
+        let sender = CountingSender::timeout();
+        let first = run_with(
+            &app,
+            &account,
+            &Command::LotteryDraw,
+            &judge_lottery(Some(1)),
+            &sender,
+        )
+        .await
+        .expect("run");
+        assert_eq!(sender.calls(), 1);
+        assert_eq!(first["phase"], json!("unknown"));
+
+        let again = CountingSender::ok();
+        let second = run_with(
+            &app,
+            &account,
+            &Command::LotteryDraw,
+            &judge_lottery(Some(1)),
+            &again,
+        )
+        .await
+        .expect("run");
+        assert_eq!(again.calls(), 0, "未知结果不许自动重发");
+        assert_eq!(second["decision"], json!("recheck"));
     }
 }

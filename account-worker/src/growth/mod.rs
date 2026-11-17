@@ -15,6 +15,7 @@ pub mod probe;
 pub mod reward_ledger;
 pub mod rewards;
 pub mod rewards_state;
+pub mod rewards_write;
 pub mod scanner;
 pub mod scheduler;
 pub mod streak_rewards;

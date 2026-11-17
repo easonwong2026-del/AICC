@@ -592,13 +592,42 @@ struct ConsoleAccountsView: View {
             if account.supportsCNTasks {
                 ConsoleDetailGroup(
                     title: "奖励",
-                    detail: "只读 · 不会消耗抽奖次数或补签卡"
+                    detail: "写操作需二次确认 · 每次只发一次请求"
                 ) {
                     ConsoleRewardsBlock(
                         state: store.rewardStates[account.id],
                         loading: store.rewardLoading.contains(account.id),
                         failure: store.rewardFailures[account.id],
-                        onRefresh: { Task { await store.loadReward(accountId: account.id) } }
+                        result: store.rewardActions[account.id],
+                        acting: store.rewardActing.contains(account.id),
+                        preview: store.rewardPreviews[account.id],
+                        checking: store.rewardChecking.contains(account.id),
+                        onRefresh: { Task { await store.loadReward(accountId: account.id) } },
+                        onPreview: { action, target in
+                            Task {
+                                await store.previewReward(
+                                    accountId: account.id,
+                                    action: action,
+                                    target: target
+                                )
+                            }
+                        },
+                        onConfirmPreview: {
+                            guard let preview = store.rewardPreviews[account.id] else { return }
+                            let action = RewardAction(rawValue: preview.action)
+                            store.clearRewardPreview(accountId: account.id)
+                            guard let action else { return }
+                            Task {
+                                await store.performReward(
+                                    accountId: account.id,
+                                    action: action,
+                                    target: preview.target
+                                )
+                            }
+                        },
+                        onCancelPreview: { store.clearRewardPreview(accountId: account.id) },
+                        onRecheck: { Task { await store.recheckRewards(accountId: account.id) } },
+                        onDismissResult: { store.clearRewardAction(accountId: account.id) }
                     )
                 }
             }
