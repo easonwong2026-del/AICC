@@ -386,6 +386,22 @@ impl Db {
         Ok(attempt)
     }
 
+    /// 把幂等键钉到记录上。**只允许从 NULL 写一次**：已经有 token 的行再写会失败，
+    /// 因为换 token 等于换了一次新操作（重复消耗的入口）。
+    pub fn set_reward_op_token(&mut self, id: &str, token: &str) -> RpcResult<()> {
+        let now = now_rfc3339();
+        let changed = self.conn.execute(
+            "UPDATE reward_operations
+                SET client_token = ?2, updated_at = ?3
+              WHERE id = ?1 AND client_token IS NULL AND phase = 'pending'",
+            params![id, token, now],
+        )?;
+        if changed != 1 {
+            return Err(RpcError::internal("这条操作的幂等键已经存在，不能替换"));
+        }
+        Ok(())
+    }
+
     /// 落结论。只允许改未决记录 —— 已经结束的记录不能被后来的回查覆盖。
     ///
     /// 三条边界都在这里强制（不依赖调用方自觉）：
@@ -787,6 +803,20 @@ mod tests {
         let op = db.reward_op(&id).unwrap().unwrap();
         assert_eq!(op.phase, "ready", "被拒之后状态不能被改成 sent");
         assert_eq!(op.attempt, MAX_SEND_ATTEMPTS);
+    }
+
+    /// 幂等键只能钉一次；再钉一次等于换了一次新操作。
+    #[test]
+    fn the_idempotency_key_can_only_be_pinned_once() {
+        let (mut db, _dir) = temp_db();
+        let opened = db.open_reward_op(&new_op("acc", None)).unwrap();
+        let id = opened.op().id.clone();
+        assert!(db.set_reward_op_token(&id, "u-first").is_ok());
+        assert!(db.set_reward_op_token(&id, "u-second").is_err());
+        assert_eq!(
+            db.reward_op(&id).unwrap().unwrap().client_token.as_deref(),
+            Some("u-first")
+        );
     }
 
     /// 服务端明确没执行（404 / tier 不认识）→ `ready`：允许用同一 token 再发一次。

@@ -112,7 +112,7 @@ impl GrowthError {
     }
 }
 
-fn code_of(response: &Value) -> Option<i64> {
+pub(crate) fn code_of(response: &Value) -> Option<i64> {
     let raw = response
         .get("code")
         .or_else(|| response.get("errno"))

@@ -1021,6 +1021,43 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
             }))
         }
 
+        // ---- 奖励取证（PR #100，dev-only）----
+        //
+        // 只在 debug 构建里存在：release 的 match 里没有这两条，调用方拿到的是
+        // "未知方法"。probe 会发真实 POST，所以额外要求 confirm=true ——
+        // 它不是"又一个写入口"，账本、凭据门禁、plan() 全都走同一套。
+        #[cfg(debug_assertions)]
+        "growth.rewards.evidence" => {
+            let _gate = crate::credentials::gate::begin(app)?;
+            if !require_bool(params, "confirm")? {
+                return Err(RpcError::invalid_params(
+                    "confirm 必须为 true：这会真的向服务端发 4 个只读请求",
+                ));
+            }
+            let account_id = require_str(params, "accountId")?;
+            let report = crate::growth::capture_evidence(app, &account_id).await?;
+            Ok(serde_json::to_value(report).unwrap_or(Value::Null))
+        }
+
+        #[cfg(debug_assertions)]
+        "growth.rewards.probe" => {
+            let _gate = crate::credentials::gate::begin(app)?;
+            if !require_bool(params, "confirm")? {
+                return Err(RpcError::invalid_params(
+                    "confirm 必须为 true：这会消耗一次真实机会或一张补签卡",
+                ));
+            }
+            let account_id = require_str(params, "accountId")?;
+            let action_raw = require_str(params, "action")?;
+            let action =
+                crate::growth::probe::ProbeAction::parse(&action_raw).ok_or_else(|| {
+                    RpcError::invalid_params("action 只能是 lottery_draw / redeem / makeup_card")
+                })?;
+            let target = params.get("target").and_then(Value::as_str);
+            let command = crate::growth::probe::command(action, target)?;
+            crate::growth::probe::execute(app, &account_id, &command).await
+        }
+
         // ---- WorkBuddy 每日签到（PR #69）----
         //
         // 三个只读、三个显式写、一个调度。规则：
@@ -1215,7 +1252,18 @@ fn health(app: &App) -> Value {
     health["credentials"] = crate::auth::consent::status(app);
     health["authorizations"] = authorization_fleet(app);
     health["providers"] = json!({ "workbuddy": workbuddy, "qoder": qoder });
-    health["methods"] = json!(METHODS);
+    #[cfg(debug_assertions)]
+    {
+        // dev-only 的两条 RPC：正式构建不注册，也不出现在这里。
+        let mut methods: Vec<&str> = METHODS.to_vec();
+        methods.push("growth.rewards.evidence");
+        methods.push("growth.rewards.probe");
+        health["methods"] = json!(methods);
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        health["methods"] = json!(METHODS);
+    }
     health
 }
 

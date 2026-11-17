@@ -1,0 +1,3942 @@
+{
+  "accountId": "1d32cc97c9a3ec26",
+  "capturedAt": "2026-11-17T04:03:11Z",
+  "endpoints": [
+    {
+      "body": {
+        "code": 0,
+        "data": {
+          "launch_date": "2026-06-17",
+          "makeup_cards": {
+            "balance": 4,
+            "max": 4
+          },
+          "redemption_status": {
+            "remaining_days": 17,
+            "tier_14d_count": 1,
+            "tier_14d_status": "claimed",
+            "tier_28d_count": 0,
+            "tier_28d_status": "locked",
+            "tier_7d_count": 1,
+            "tier_7d_status": "claimed",
+            "tiers": [
+              {
+                "cards": 1,
+                "chances": 1,
+                "credit": 0,
+                "days": 7,
+                "energy": 2,
+                "tier": "7d"
+              },
+              {
+                "cards": 1,
+                "chances": 1,
+                "credit": 50,
+                "days": 14,
+                "energy": 3,
+                "tier": "14d"
+              },
+              {
+                "cards": 1,
+                "chances": 1,
+                "credit": 150,
+                "days": 28,
+                "energy": 5,
+                "tier": "28d"
+              }
+            ]
+          },
+          "streak": {
+            "days": 17,
+            "makeup_dates": [],
+            "month_consumed_days": 0,
+            "month_total_days": 17,
+            "next_tier": "28d",
+            "next_tier_remaining": 11
+          },
+          "timezone": "Asia/Shanghai"
+        },
+        "msg": "OK",
+        "requestId": "<redacted>"
+      },
+      "code": 0,
+      "error": null,
+      "httpStatus": null,
+      "method": "GET",
+      "name": "streak",
+      "path": "/streak",
+      "prefix": "/v2/activity/growth"
+    },
+    {
+      "body": {
+        "code": 0,
+        "data": {
+          "advanced_count": 1,
+          "advanced_status": "claimed",
+          "legendary_count": 0,
+          "legendary_status": "locked",
+          "month_total_days": 17,
+          "remaining_days": 17,
+          "starter_count": 1,
+          "starter_status": "claimed",
+          "total_consumed": 0
+        },
+        "msg": "OK",
+        "requestId": "<redacted>"
+      },
+      "code": 0,
+      "error": null,
+      "httpStatus": null,
+      "method": "GET",
+      "name": "redeemSummary",
+      "path": "/redeem/summary",
+      "prefix": "/v2/activity/growth"
+    },
+    {
+      "body": {
+        "code": 0,
+        "data": {
+          "cells": [
+            {
+              "date": "2025-11-18",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-11-19",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-11-20",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-11-21",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-11-22",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-11-23",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-11-24",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-11-25",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-11-26",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-11-27",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-11-28",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-11-29",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-11-30",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-01",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-02",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-03",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-04",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-05",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-06",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-07",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-08",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-09",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-10",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-11",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-12",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-13",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-14",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-15",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-16",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-17",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-18",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-19",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-20",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-21",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-22",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-23",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-24",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-25",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-26",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-27",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-28",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-29",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-30",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2025-12-31",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-01",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-02",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-03",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-04",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-05",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-06",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-07",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-08",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-09",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-10",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-11",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-12",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-13",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-14",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-15",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-16",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-17",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-18",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-19",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-20",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-21",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-22",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-23",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-24",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-25",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-26",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-27",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-28",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-29",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-30",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-01-31",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-01",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-02",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-03",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-04",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-05",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-06",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-07",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-08",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-09",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-10",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-11",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-12",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-13",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-14",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-15",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-16",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-17",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-18",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-19",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-20",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-21",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-22",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-23",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-24",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-25",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-26",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-27",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-02-28",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-01",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-02",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-03",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-04",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-05",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-06",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-07",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-08",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-09",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-10",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-11",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-12",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-13",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-14",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-15",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-16",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-17",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-18",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-19",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-20",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-21",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-22",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-23",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-24",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-25",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-26",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-27",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-28",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-29",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-30",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-03-31",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-01",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-02",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-03",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-04",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-05",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-06",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-07",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-08",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-09",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-10",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-11",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-12",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-13",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-14",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-15",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-16",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-17",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-18",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-19",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-20",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-21",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-22",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-23",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-24",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-25",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-26",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-27",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-28",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-29",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-04-30",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-01",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-02",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-03",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-04",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-05",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-06",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-07",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-08",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-09",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-10",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-11",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-12",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-13",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-14",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-15",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-16",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-17",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-18",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-19",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-20",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-21",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-22",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-23",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-24",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-25",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-26",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-27",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-28",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-29",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-30",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-05-31",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-01",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-02",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-03",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-04",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-05",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-06",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-07",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-08",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-09",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-10",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-11",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-12",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-13",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-14",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-15",
+              "has_new_buddy": true,
+              "score": 86
+            },
+            {
+              "date": "2026-06-16",
+              "has_new_buddy": true,
+              "score": 120
+            },
+            {
+              "date": "2026-06-17",
+              "has_new_buddy": false,
+              "score": 114
+            },
+            {
+              "date": "2026-06-18",
+              "has_new_buddy": true,
+              "score": 12
+            },
+            {
+              "date": "2026-06-19",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-20",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-21",
+              "has_new_buddy": false,
+              "score": 45
+            },
+            {
+              "date": "2026-06-22",
+              "has_new_buddy": false,
+              "score": 12
+            },
+            {
+              "date": "2026-06-23",
+              "has_new_buddy": false,
+              "score": 11
+            },
+            {
+              "date": "2026-06-24",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-25",
+              "has_new_buddy": false,
+              "score": 33
+            },
+            {
+              "date": "2026-06-26",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-27",
+              "has_new_buddy": false,
+              "score": 24
+            },
+            {
+              "date": "2026-06-28",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-29",
+              "has_new_buddy": false,
+              "score": 0
+            },
+            {
+              "date": "2026-06-30",
+              "has_new_buddy": false,
+              "score": 71
+            },
+            {
+              "date": "2026-07-01",
+              "has_new_buddy": true,
+              "score": 52
+            },
+            {
+              "date": "2026-07-02",
+              "has_new_buddy": false,
+              "score": 40
+            },
+            {
+              "date": "2026-07-03",
+              "has_new_buddy": false,
+              "score": 24
+            },
+            {
+              "date": "2026-07-04",
+              "has_new_buddy": false,
+              "score": 10
+            },
+            {
+              "date": "2026-07-05",
+              "has_new_buddy": false,
+              "score": 38
+            },
+            {
+              "date": "2026-07-06",
+              "has_new_buddy": false,
+              "score": 56
+            },
+            {
+              "date": "2026-07-07",
+              "has_new_buddy": false,
+              "score": 51
+            },
+            {
+              "date": "2026-07-08",
+              "has_new_buddy": false,
+              "score": 93
+            },
+            {
+              "date": "2026-07-09",
+              "has_new_buddy": false,
+              "score": 12
+            },
+            {
+              "date": "2026-07-10",
+              "has_new_buddy": false,
+              "score": 34
+            },
+            {
+              "date": "2026-07-11",
+              "has_new_buddy": false,
+              "score": 4
+            },
+            {
+              "date": "2026-07-12",
+              "has_new_buddy": false,
+              "score": 10
+            },
+            {
+              "date": "2026-07-13",
+              "has_new_buddy": false,
+              "score": 32
+            },
+            {
+              "date": "2026-07-14",
+              "has_new_buddy": false,
+              "score": 40
+            },
+            {
+              "date": "2026-07-15",
+              "has_new_buddy": false,
+              "score": 45
+            },
+            {
+              "date": "2026-07-16",
+              "has_new_buddy": false,
+              "score": 13
+            },
+            {
+              "date": "2026-07-17",
+              "has_new_buddy": false,
+              "score": 8
+            },
+            {
+              "date": "2026-07-18",
+              "has_new_buddy": false,
+              "score": 10
+            },
+            {
+              "date": "2026-07-19",
+              "has_new_buddy": false,
+              "score": 28
+            },
+            {
+              "date": "2026-07-20",
+              "has_new_buddy": false,
+              "score": 64
+            },
+            {
+              "date": "2026-07-21",
+              "has_new_buddy": false,
+              "score": 65
+            },
+            {
+              "date": "2026-07-22",
+              "has_new_buddy": false,
+              "score": 58
+            },
+            {
+              "date": "2026-07-23",
+              "has_new_buddy": false,
+              "score": 21
+            },
+            {
+              "date": "2026-07-24",
+              "has_new_buddy": false,
+              "score": 22
+            },
+            {
+              "date": "2026-07-25",
+              "has_new_buddy": false,
+              "score": 6
+            },
+            {
+              "date": "2026-07-26",
+              "has_new_buddy": false,
+              "score": 10
+            },
+            {
+              "date": "2026-07-27",
+              "has_new_buddy": false,
+              "score": 21
+            },
+            {
+              "date": "2026-07-28",
+              "has_new_buddy": true,
+              "score": 23
+            },
+            {
+              "date": "2026-07-29",
+              "has_new_buddy": true,
+              "score": 47
+            },
+            {
+              "date": "2026-07-30",
+              "has_new_buddy": false,
+              "score": 132
+            },
+            {
+              "date": "2026-07-31",
+              "has_new_buddy": false,
+              "score": 23
+            },
+            {
+              "date": "2026-08-01",
+              "has_new_buddy": false,
+              "score": 35
+            },
+            {
+              "date": "2026-08-02",
+              "has_new_buddy": false,
+              "score": 19
+            },
+            {
+              "date": "2026-08-03",
+              "has_new_buddy": false,
+              "score": 11
+            },
+            {
+              "date": "2026-08-04",
+              "has_new_buddy": false,
+              "score": 10
+            },
+            {
+              "date": "2026-08-05",
+              "has_new_buddy": false,
+              "score": 754
+            },
+            {
+              "date": "2026-08-06",
+              "has_new_buddy": false,
+              "score": 149
+            },
+            {
+              "date": "2026-08-07",
+              "has_new_buddy": false,
+              "score": 186
+            },
+            {
+              "date": "2026-08-08",
+              "has_new_buddy": false,
+              "score": 403
+            },
+            {
+              "date": "2026-08-09",
+              "has_new_buddy": false,
+              "score": 94
+            },
+            {
+              "date": "2026-08-10",
+              "has_new_buddy": true,
+              "score": 80
+            },
+            {
+              "date": "2026-08-11",
+              "has_new_buddy": false,
+              "score": 102
+            },
+            {
+              "date": "2026-08-12",
+              "has_new_buddy": false,
+              "score": 144
+            },
+            {
+              "date": "2026-08-13",
+              "has_new_buddy": false,
+              "score": 48
+            },
+            {
+              "date": "2026-08-14",
+              "has_new_buddy": false,
+              "score": 120
+            },
+            {
+              "date": "2026-08-15",
+              "has_new_buddy": true,
+              "score": 140
+            },
+            {
+              "date": "2026-08-16",
+              "has_new_buddy": false,
+              "score": 129
+            },
+            {
+              "date": "2026-08-17",
+              "has_new_buddy": false,
+              "score": 30
+            },
+            {
+              "date": "2026-08-18",
+              "has_new_buddy": false,
+              "score": 43
+            },
+            {
+              "date": "2026-08-19",
+              "has_new_buddy": false,
+              "score": 14
+            },
+            {
+              "date": "2026-08-20",
+              "has_new_buddy": false,
+              "score": 10
+            },
+            {
+              "date": "2026-08-21",
+              "has_new_buddy": false,
+              "score": 17
+            },
+            {
+              "date": "2026-08-22",
+              "has_new_buddy": false,
+              "score": 44
+            },
+            {
+              "date": "2026-08-23",
+              "has_new_buddy": false,
+              "score": 10
+            },
+            {
+              "date": "2026-08-24",
+              "has_new_buddy": false,
+              "score": 10
+            },
+            {
+              "date": "2026-08-25",
+              "has_new_buddy": false,
+              "score": 26
+            },
+            {
+              "date": "2026-08-26",
+              "has_new_buddy": false,
+              "score": 18
+            },
+            {
+              "date": "2026-08-27",
+              "has_new_buddy": false,
+              "score": 32
+            },
+            {
+              "date": "2026-08-28",
+              "has_new_buddy": false,
+              "score": 15
+            },
+            {
+              "date": "2026-08-29",
+              "has_new_buddy": false,
+              "score": 10
+            },
+            {
+              "date": "2026-08-30",
+              "has_new_buddy": false,
+              "score": 5
+            },
+            {
+              "date": "2026-08-31",
+              "has_new_buddy": true,
+              "score": 21
+            },
+            {
+              "date": "2026-09-01",
+              "has_new_buddy": false,
+              "score": 26
+            },
+            {
+              "date": "2026-09-02",
+              "has_new_buddy": false,
+              "score": 57
+            },
+            {
+              "date": "2026-09-03",
+              "has_new_buddy": false,
+              "score": 10
+            },
+            {
+              "date": "2026-09-04",
+              "has_new_buddy": false,
+              "score": 18
+            },
+            {
+              "date": "2026-09-05",
+              "has_new_buddy": false,
+              "score": 17
+            },
+            {
+              "date": "2026-09-06",
+              "has_new_buddy": false,
+              "score": 6
+            },
+            {
+              "date": "2026-09-07",
+              "has_new_buddy": false,
+              "score": 10
+            },
+            {
+              "date": "2026-09-08",
+              "has_new_buddy": false,
+              "score": 36
+            },
+            {
+              "date": "2026-09-09",
+              "has_new_buddy": false,
+              "score": 36
+            },
+            {
+              "date": "2026-09-10",
+              "has_new_buddy": false,
+              "score": 26
+            },
+            {
+              "date": "2026-09-11",
+              "has_new_buddy": false,
+              "score": 29
+            },
+            {
+              "date": "2026-09-12",
+              "has_new_buddy": false,
+              "score": 133
+            },
+            {
+              "date": "2026-09-13",
+              "has_new_buddy": false,
+              "score": 55
+            },
+            {
+              "date": "2026-09-14",
+              "has_new_buddy": false,
+              "score": 5
+            },
+            {
+              "date": "2026-09-15",
+              "has_new_buddy": true,
+              "score": 44
+            },
+            {
+              "date": "2026-09-16",
+              "has_new_buddy": false,
+              "score": 5
+            },
+            {
+              "date": "2026-09-17",
+              "has_new_buddy": false,
+              "score": 2
+            },
+            {
+              "date": "2026-09-18",
+              "has_new_buddy": false,
+              "score": 11
+            },
+            {
+              "date": "2026-09-19",
+              "has_new_buddy": false,
+              "score": 2
+            },
+            {
+              "date": "2026-09-20",
+              "has_new_buddy": false,
+              "score": 12
+            },
+            {
+              "date": "2026-09-21",
+              "has_new_buddy": false,
+              "score": 32
+            },
+            {
+              "date": "2026-09-22",
+              "has_new_buddy": false,
+              "score": 8
+            },
+            {
+              "date": "2026-09-23",
+              "has_new_buddy": false,
+              "score": 48
+            },
+            {
+              "date": "2026-09-24",
+              "has_new_buddy": false,
+              "score": 2
+            },
+            {
+              "date": "2026-09-25",
+              "has_new_buddy": false,
+              "score": 2
+            },
+            {
+              "date": "2026-09-26",
+              "has_new_buddy": false,
+              "score": 12
+            },
+            {
+              "date": "2026-09-27",
+              "has_new_buddy": false,
+              "score": 2
+            },
+            {
+              "date": "2026-09-28",
+              "has_new_buddy": false,
+              "score": 21
+            },
+            {
+              "date": "2026-09-29",
+              "has_new_buddy": false,
+              "score": 14
+            },
+            {
+              "date": "2026-09-30",
+              "has_new_buddy": false,
+              "score": 16
+            },
+            {
+              "date": "2026-10-01",
+              "has_new_buddy": false,
+              "score": 6
+            },
+            {
+              "date": "2026-10-02",
+              "has_new_buddy": false,
+              "score": 2
+            },
+            {
+              "date": "2026-10-03",
+              "has_new_buddy": false,
+              "score": 2
+            },
+            {
+              "date": "2026-10-04",
+              "has_new_buddy": false,
+              "score": 4
+            },
+            {
+              "date": "2026-10-05",
+              "has_new_buddy": false,
+              "score": 4
+            },
+            {
+              "date": "2026-10-06",
+              "has_new_buddy": false,
+              "score": 16
+            },
+            {
+              "date": "2026-10-07",
+              "has_new_buddy": false,
+              "score": 6
+            },
+            {
+              "date": "2026-10-08",
+              "has_new_buddy": false,
+              "score": 6
+            },
+            {
+              "date": "2026-10-09",
+              "has_new_buddy": false,
+              "score": 6
+            },
+            {
+              "date": "2026-10-10",
+              "has_new_buddy": false,
+              "score": 15
+            },
+            {
+              "date": "2026-10-11",
+              "has_new_buddy": false,
+              "score": 6
+            },
+            {
+              "date": "2026-10-12",
+              "has_new_buddy": false,
+              "score": 51
+            },
+            {
+              "date": "2026-10-13",
+              "has_new_buddy": false,
+              "score": 17
+            },
+            {
+              "date": "2026-10-14",
+              "has_new_buddy": false,
+              "score": 41
+            },
+            {
+              "date": "2026-10-15",
+              "has_new_buddy": true,
+              "score": 64
+            },
+            {
+              "date": "2026-10-16",
+              "has_new_buddy": false,
+              "score": 24
+            },
+            {
+              "date": "2026-10-17",
+              "has_new_buddy": false,
+              "score": 18
+            },
+            {
+              "date": "2026-10-18",
+              "has_new_buddy": false,
+              "score": 21
+            },
+            {
+              "date": "2026-10-19",
+              "has_new_buddy": false,
+              "score": 34
+            },
+            {
+              "date": "2026-10-20",
+              "has_new_buddy": false,
+              "score": 24
+            },
+            {
+              "date": "2026-10-21",
+              "has_new_buddy": false,
+              "score": 49
+            },
+            {
+              "date": "2026-10-22",
+              "has_new_buddy": false,
+              "score": 46
+            },
+            {
+              "date": "2026-10-23",
+              "has_new_buddy": false,
+              "score": 41
+            },
+            {
+              "date": "2026-10-24",
+              "has_new_buddy": false,
+              "score": 48
+            },
+            {
+              "date": "2026-10-25",
+              "has_new_buddy": true,
+              "score": 78
+            },
+            {
+              "date": "2026-10-26",
+              "has_new_buddy": false,
+              "score": 123
+            },
+            {
+              "date": "2026-10-27",
+              "has_new_buddy": false,
+              "score": 146
+            },
+            {
+              "date": "2026-10-28",
+              "has_new_buddy": false,
+              "score": 77
+            },
+            {
+              "date": "2026-10-29",
+              "has_new_buddy": false,
+              "score": 37
+            },
+            {
+              "date": "2026-10-30",
+              "has_new_buddy": false,
+              "score": 52
+            },
+            {
+              "date": "2026-10-31",
+              "has_new_buddy": false,
+              "score": 21
+            },
+            {
+              "date": "2026-11-01",
+              "has_new_buddy": false,
+              "score": 10
+            },
+            {
+              "date": "2026-11-02",
+              "has_new_buddy": false,
+              "score": 105
+            },
+            {
+              "date": "2026-11-03",
+              "has_new_buddy": false,
+              "score": 92
+            },
+            {
+              "date": "2026-11-04",
+              "has_new_buddy": false,
+              "score": 57
+            },
+            {
+              "date": "2026-11-05",
+              "has_new_buddy": false,
+              "score": 100
+            },
+            {
+              "date": "2026-11-06",
+              "has_new_buddy": false,
+              "score": 214
+            },
+            {
+              "date": "2026-11-07",
+              "has_new_buddy": false,
+              "score": 101
+            },
+            {
+              "date": "2026-11-08",
+              "has_new_buddy": false,
+              "score": 85
+            },
+            {
+              "date": "2026-11-09",
+              "has_new_buddy": false,
+              "score": 93
+            },
+            {
+              "date": "2026-11-10",
+              "has_new_buddy": false,
+              "score": 71
+            },
+            {
+              "date": "2026-11-11",
+              "has_new_buddy": false,
+              "score": 78
+            },
+            {
+              "date": "2026-11-12",
+              "has_new_buddy": true,
+              "score": 66
+            },
+            {
+              "date": "2026-11-13",
+              "has_new_buddy": true,
+              "score": 72
+            },
+            {
+              "date": "2026-11-14",
+              "has_new_buddy": false,
+              "score": 125
+            },
+            {
+              "date": "2026-11-15",
+              "has_new_buddy": false,
+              "score": 126
+            },
+            {
+              "date": "2026-11-16",
+              "has_new_buddy": false,
+              "score": 121
+            },
+            {
+              "date": "2026-11-17",
+              "has_new_buddy": false,
+              "score": 44
+            }
+          ],
+          "range": {
+            "days": 365,
+            "end_date": "2026-11-17",
+            "start_date": "2025-11-18"
+          },
+          "today": {
+            "date": "2026-11-17",
+            "is_active": true,
+            "score": 44,
+            "status_text": "今日已活跃，继续点亮成长热力墙"
+          },
+          "updated_at": "2026-11-17T11:59:11+08:00"
+        },
+        "msg": "OK",
+        "requestId": "<redacted>"
+      },
+      "code": 0,
+      "error": null,
+      "httpStatus": null,
+      "method": "GET",
+      "name": "heatmap",
+      "path": "/heatmap",
+      "prefix": "/v2/activity/growth"
+    },
+    {
+      "body": {
+        "code": 0,
+        "data": {
+          "balance": 1
+        },
+        "msg": "OK",
+        "requestId": "<redacted>"
+      },
+      "code": 0,
+      "error": null,
+      "httpStatus": null,
+      "method": "GET",
+      "name": "lotteryChances",
+      "path": "/lottery/chances",
+      "prefix": "/v2/activity/growth"
+    }
+  ],
+  "findings": [
+    {
+      "field": "lottery_chances",
+      "grade": "A",
+      "kind": "number",
+      "note": "抽奖次数的真实字段名与层级；决定界面读哪个键",
+      "paths": [
+        "streak:data.redemption_status.tiers[].chances",
+        "streak:data.redemption_status.tiers[].chances",
+        "streak:data.redemption_status.tiers[].chances",
+        "streak:data.makeup_cards.balance",
+        "lotteryChances:data.balance"
+      ],
+      "sample": 1,
+      "verdict": "confirmed"
+    },
+    {
+      "field": "credits",
+      "grade": "A",
+      "kind": "number",
+      "note": "积分字段是否存在（成长中心的档案接口没有积分）",
+      "paths": [
+        "streak:data.redemption_status.tiers[].credit",
+        "streak:data.redemption_status.tiers[].credit",
+        "streak:data.redemption_status.tiers[].credit"
+      ],
+      "sample": 0,
+      "verdict": "confirmed"
+    },
+    {
+      "field": "energy",
+      "grade": "A",
+      "kind": "number",
+      "note": "能量字段的位置",
+      "paths": [
+        "streak:data.redemption_status.tiers[].energy",
+        "streak:data.redemption_status.tiers[].energy",
+        "streak:data.redemption_status.tiers[].energy"
+      ],
+      "sample": 2,
+      "verdict": "confirmed"
+    },
+    {
+      "field": "makeup_cards",
+      "grade": "A",
+      "kind": "object",
+      "note": "补签卡余额是对象还是裸数字",
+      "paths": [
+        "streak:data.makeup_cards"
+      ],
+      "sample": {
+        "balance": 4,
+        "max": 4
+      },
+      "verdict": "confirmed"
+    },
+    {
+      "field": "makeup_balance",
+      "grade": "A",
+      "kind": "number",
+      "note": "`balance` 到底属于哪个对象：抽奖次数还是补签卡",
+      "paths": [
+        "streak:data.makeup_cards.balance",
+        "lotteryChances:data.balance"
+      ],
+      "sample": 4,
+      "verdict": "confirmed"
+    },
+    {
+      "field": "tier_7d_status",
+      "grade": "A",
+      "kind": "string",
+      "note": "7 天档位状态键名（两种写法都可能出现）",
+      "paths": [
+        "streak:data.redemption_status.tier_7d_status",
+        "redeemSummary:data.starter_status"
+      ],
+      "sample": "claimed",
+      "verdict": "confirmed"
+    },
+    {
+      "field": "tier_14d_status",
+      "grade": "A",
+      "kind": "string",
+      "note": "14 天档位状态键名",
+      "paths": [
+        "streak:data.redemption_status.tier_14d_status",
+        "redeemSummary:data.advanced_status"
+      ],
+      "sample": "claimed",
+      "verdict": "confirmed"
+    },
+    {
+      "field": "tier_28d_status",
+      "grade": "A",
+      "kind": "string",
+      "note": "28 天档位状态键名",
+      "paths": [
+        "streak:data.redemption_status.tier_28d_status",
+        "redeemSummary:data.legendary_status"
+      ],
+      "sample": "locked",
+      "verdict": "confirmed"
+    },
+    {
+      "field": "today",
+      "grade": "A",
+      "kind": "object",
+      "note": "服务端日期字段：`today` 是字符串还是 `{date}` 对象",
+      "paths": [
+        "heatmap:data.today"
+      ],
+      "sample": {
+        "date": "2026-11-17",
+        "is_active": true,
+        "score": 44,
+        "status_text": "今日已活跃，继续点亮成长热力墙"
+      },
+      "verdict": "confirmed"
+    },
+    {
+      "field": "launch_date",
+      "grade": "A",
+      "kind": "string",
+      "note": "活动上线日期，补签窗口的下限",
+      "paths": [
+        "streak:data.launch_date"
+      ],
+      "sample": "2026-06-17",
+      "verdict": "confirmed"
+    },
+    {
+      "field": "cells",
+      "grade": "A",
+      "kind": "array",
+      "note": "热力图格子：字段名与 `score` 的位置",
+      "paths": [
+        "heatmap:data.cells"
+      ],
+      "sample": [
+        {
+          "date": "2025-11-18",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-11-19",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-11-20",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-11-21",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-11-22",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-11-23",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-11-24",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-11-25",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-11-26",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-11-27",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-11-28",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-11-29",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-11-30",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-01",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-02",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-03",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-04",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-05",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-06",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-07",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-08",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-09",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-10",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-11",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-12",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-13",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-14",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-15",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-16",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-17",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-18",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-19",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-20",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-21",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-22",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-23",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-24",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-25",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-26",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-27",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-28",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-29",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-30",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2025-12-31",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-01",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-02",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-03",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-04",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-05",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-06",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-07",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-08",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-09",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-10",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-11",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-12",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-13",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-14",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-15",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-16",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-17",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-18",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-19",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-20",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-21",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-22",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-23",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-24",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-25",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-26",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-27",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-28",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-29",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-30",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-01-31",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-01",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-02",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-03",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-04",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-05",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-06",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-07",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-08",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-09",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-10",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-11",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-12",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-13",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-14",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-15",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-16",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-17",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-18",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-19",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-20",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-21",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-22",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-23",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-24",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-25",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-26",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-27",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-02-28",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-01",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-02",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-03",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-04",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-05",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-06",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-07",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-08",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-09",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-10",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-11",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-12",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-13",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-14",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-15",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-16",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-17",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-18",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-19",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-20",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-21",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-22",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-23",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-24",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-25",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-26",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-27",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-28",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-29",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-30",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-03-31",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-01",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-02",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-03",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-04",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-05",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-06",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-07",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-08",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-09",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-10",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-11",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-12",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-13",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-14",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-15",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-16",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-17",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-18",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-19",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-20",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-21",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-22",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-23",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-24",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-25",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-26",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-27",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-28",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-29",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-04-30",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-01",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-02",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-03",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-04",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-05",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-06",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-07",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-08",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-09",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-10",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-11",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-12",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-13",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-14",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-15",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-16",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-17",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-18",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-19",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-20",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-21",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-22",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-23",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-24",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-25",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-26",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-27",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-28",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-29",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-30",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-05-31",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-01",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-02",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-03",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-04",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-05",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-06",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-07",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-08",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-09",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-10",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-11",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-12",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-13",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-14",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-15",
+          "has_new_buddy": true,
+          "score": 86
+        },
+        {
+          "date": "2026-06-16",
+          "has_new_buddy": true,
+          "score": 120
+        },
+        {
+          "date": "2026-06-17",
+          "has_new_buddy": false,
+          "score": 114
+        },
+        {
+          "date": "2026-06-18",
+          "has_new_buddy": true,
+          "score": 12
+        },
+        {
+          "date": "2026-06-19",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-20",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-21",
+          "has_new_buddy": false,
+          "score": 45
+        },
+        {
+          "date": "2026-06-22",
+          "has_new_buddy": false,
+          "score": 12
+        },
+        {
+          "date": "2026-06-23",
+          "has_new_buddy": false,
+          "score": 11
+        },
+        {
+          "date": "2026-06-24",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-25",
+          "has_new_buddy": false,
+          "score": 33
+        },
+        {
+          "date": "2026-06-26",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-27",
+          "has_new_buddy": false,
+          "score": 24
+        },
+        {
+          "date": "2026-06-28",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-29",
+          "has_new_buddy": false,
+          "score": 0
+        },
+        {
+          "date": "2026-06-30",
+          "has_new_buddy": false,
+          "score": 71
+        },
+        {
+          "date": "2026-07-01",
+          "has_new_buddy": true,
+          "score": 52
+        },
+        {
+          "date": "2026-07-02",
+          "has_new_buddy": false,
+          "score": 40
+        },
+        {
+          "date": "2026-07-03",
+          "has_new_buddy": false,
+          "score": 24
+        },
+        {
+          "date": "2026-07-04",
+          "has_new_buddy": false,
+          "score": 10
+        },
+        {
+          "date": "2026-07-05",
+          "has_new_buddy": false,
+          "score": 38
+        },
+        {
+          "date": "2026-07-06",
+          "has_new_buddy": false,
+          "score": 56
+        },
+        {
+          "date": "2026-07-07",
+          "has_new_buddy": false,
+          "score": 51
+        },
+        {
+          "date": "2026-07-08",
+          "has_new_buddy": false,
+          "score": 93
+        },
+        {
+          "date": "2026-07-09",
+          "has_new_buddy": false,
+          "score": 12
+        },
+        {
+          "date": "2026-07-10",
+          "has_new_buddy": false,
+          "score": 34
+        },
+        {
+          "date": "2026-07-11",
+          "has_new_buddy": false,
+          "score": 4
+        },
+        {
+          "date": "2026-07-12",
+          "has_new_buddy": false,
+          "score": 10
+        },
+        {
+          "date": "2026-07-13",
+          "has_new_buddy": false,
+          "score": 32
+        },
+        {
+          "date": "2026-07-14",
+          "has_new_buddy": false,
+          "score": 40
+        },
+        {
+          "date": "2026-07-15",
+          "has_new_buddy": false,
+          "score": 45
+        },
+        {
+          "date": "2026-07-16",
+          "has_new_buddy": false,
+          "score": 13
+        },
+        {
+          "date": "2026-07-17",
+          "has_new_buddy": false,
+          "score": 8
+        },
+        {
+          "date": "2026-07-18",
+          "has_new_buddy": false,
+          "score": 10
+        },
+        {
+          "date": "2026-07-19",
+          "has_new_buddy": false,
+          "score": 28
+        },
+        {
+          "date": "2026-07-20",
+          "has_new_buddy": false,
+          "score": 64
+        },
+        {
+          "date": "2026-07-21",
+          "has_new_buddy": false,
+          "score": 65
+        },
+        {
+          "date": "2026-07-22",
+          "has_new_buddy": false,
+          "score": 58
+        },
+        {
+          "date": "2026-07-23",
+          "has_new_buddy": false,
+          "score": 21
+        },
+        {
+          "date": "2026-07-24",
+          "has_new_buddy": false,
+          "score": 22
+        },
+        {
+          "date": "2026-07-25",
+          "has_new_buddy": false,
+          "score": 6
+        },
+        {
+          "date": "2026-07-26",
+          "has_new_buddy": false,
+          "score": 10
+        },
+        {
+          "date": "2026-07-27",
+          "has_new_buddy": false,
+          "score": 21
+        },
+        {
+          "date": "2026-07-28",
+          "has_new_buddy": true,
+          "score": 23
+        },
+        {
+          "date": "2026-07-29",
+          "has_new_buddy": true,
+          "score": 47
+        },
+        {
+          "date": "2026-07-30",
+          "has_new_buddy": false,
+          "score": 132
+        },
+        {
+          "date": "2026-07-31",
+          "has_new_buddy": false,
+          "score": 23
+        },
+        {
+          "date": "2026-08-01",
+          "has_new_buddy": false,
+          "score": 35
+        },
+        {
+          "date": "2026-08-02",
+          "has_new_buddy": false,
+          "score": 19
+        },
+        {
+          "date": "2026-08-03",
+          "has_new_buddy": false,
+          "score": 11
+        },
+        {
+          "date": "2026-08-04",
+          "has_new_buddy": false,
+          "score": 10
+        },
+        {
+          "date": "2026-08-05",
+          "has_new_buddy": false,
+          "score": 754
+        },
+        {
+          "date": "2026-08-06",
+          "has_new_buddy": false,
+          "score": 149
+        },
+        {
+          "date": "2026-08-07",
+          "has_new_buddy": false,
+          "score": 186
+        },
+        {
+          "date": "2026-08-08",
+          "has_new_buddy": false,
+          "score": 403
+        },
+        {
+          "date": "2026-08-09",
+          "has_new_buddy": false,
+          "score": 94
+        },
+        {
+          "date": "2026-08-10",
+          "has_new_buddy": true,
+          "score": 80
+        },
+        {
+          "date": "2026-08-11",
+          "has_new_buddy": false,
+          "score": 102
+        },
+        {
+          "date": "2026-08-12",
+          "has_new_buddy": false,
+          "score": 144
+        },
+        {
+          "date": "2026-08-13",
+          "has_new_buddy": false,
+          "score": 48
+        },
+        {
+          "date": "2026-08-14",
+          "has_new_buddy": false,
+          "score": 120
+        },
+        {
+          "date": "2026-08-15",
+          "has_new_buddy": true,
+          "score": 140
+        },
+        {
+          "date": "2026-08-16",
+          "has_new_buddy": false,
+          "score": 129
+        },
+        {
+          "date": "2026-08-17",
+          "has_new_buddy": false,
+          "score": 30
+        },
+        {
+          "date": "2026-08-18",
+          "has_new_buddy": false,
+          "score": 43
+        },
+        {
+          "date": "2026-08-19",
+          "has_new_buddy": false,
+          "score": 14
+        },
+        {
+          "date": "2026-08-20",
+          "has_new_buddy": false,
+          "score": 10
+        },
+        {
+          "date": "2026-08-21",
+          "has_new_buddy": false,
+          "score": 17
+        },
+        {
+          "date": "2026-08-22",
+          "has_new_buddy": false,
+          "score": 44
+        },
+        {
+          "date": "2026-08-23",
+          "has_new_buddy": false,
+          "score": 10
+        },
+        {
+          "date": "2026-08-24",
+          "has_new_buddy": false,
+          "score": 10
+        },
+        {
+          "date": "2026-08-25",
+          "has_new_buddy": false,
+          "score": 26
+        },
+        {
+          "date": "2026-08-26",
+          "has_new_buddy": false,
+          "score": 18
+        },
+        {
+          "date": "2026-08-27",
+          "has_new_buddy": false,
+          "score": 32
+        },
+        {
+          "date": "2026-08-28",
+          "has_new_buddy": false,
+          "score": 15
+        },
+        {
+          "date": "2026-08-29",
+          "has_new_buddy": false,
+          "score": 10
+        },
+        {
+          "date": "2026-08-30",
+          "has_new_buddy": false,
+          "score": 5
+        },
+        {
+          "date": "2026-08-31",
+          "has_new_buddy": true,
+          "score": 21
+        },
+        {
+          "date": "2026-09-01",
+          "has_new_buddy": false,
+          "score": 26
+        },
+        {
+          "date": "2026-09-02",
+          "has_new_buddy": false,
+          "score": 57
+        },
+        {
+          "date": "2026-09-03",
+          "has_new_buddy": false,
+          "score": 10
+        },
+        {
+          "date": "2026-09-04",
+          "has_new_buddy": false,
+          "score": 18
+        },
+        {
+          "date": "2026-09-05",
+          "has_new_buddy": false,
+          "score": 17
+        },
+        {
+          "date": "2026-09-06",
+          "has_new_buddy": false,
+          "score": 6
+        },
+        {
+          "date": "2026-09-07",
+          "has_new_buddy": false,
+          "score": 10
+        },
+        {
+          "date": "2026-09-08",
+          "has_new_buddy": false,
+          "score": 36
+        },
+        {
+          "date": "2026-09-09",
+          "has_new_buddy": false,
+          "score": 36
+        },
+        {
+          "date": "2026-09-10",
+          "has_new_buddy": false,
+          "score": 26
+        },
+        {
+          "date": "2026-09-11",
+          "has_new_buddy": false,
+          "score": 29
+        },
+        {
+          "date": "2026-09-12",
+          "has_new_buddy": false,
+          "score": 133
+        },
+        {
+          "date": "2026-09-13",
+          "has_new_buddy": false,
+          "score": 55
+        },
+        {
+          "date": "2026-09-14",
+          "has_new_buddy": false,
+          "score": 5
+        },
+        {
+          "date": "2026-09-15",
+          "has_new_buddy": true,
+          "score": 44
+        },
+        {
+          "date": "2026-09-16",
+          "has_new_buddy": false,
+          "score": 5
+        },
+        {
+          "date": "2026-09-17",
+          "has_new_buddy": false,
+          "score": 2
+        },
+        {
+          "date": "2026-09-18",
+          "has_new_buddy": false,
+          "score": 11
+        },
+        {
+          "date": "2026-09-19",
+          "has_new_buddy": false,
+          "score": 2
+        },
+        {
+          "date": "2026-09-20",
+          "has_new_buddy": false,
+          "score": 12
+        },
+        {
+          "date": "2026-09-21",
+          "has_new_buddy": false,
+          "score": 32
+        },
+        {
+          "date": "2026-09-22",
+          "has_new_buddy": false,
+          "score": 8
+        },
+        {
+          "date": "2026-09-23",
+          "has_new_buddy": false,
+          "score": 48
+        },
+        {
+          "date": "2026-09-24",
+          "has_new_buddy": false,
+          "score": 2
+        },
+        {
+          "date": "2026-09-25",
+          "has_new_buddy": false,
+          "score": 2
+        },
+        {
+          "date": "2026-09-26",
+          "has_new_buddy": false,
+          "score": 12
+        },
+        {
+          "date": "2026-09-27",
+          "has_new_buddy": false,
+          "score": 2
+        },
+        {
+          "date": "2026-09-28",
+          "has_new_buddy": false,
+          "score": 21
+        },
+        {
+          "date": "2026-09-29",
+          "has_new_buddy": false,
+          "score": 14
+        },
+        {
+          "date": "2026-09-30",
+          "has_new_buddy": false,
+          "score": 16
+        },
+        {
+          "date": "2026-10-01",
+          "has_new_buddy": false,
+          "score": 6
+        },
+        {
+          "date": "2026-10-02",
+          "has_new_buddy": false,
+          "score": 2
+        },
+        {
+          "date": "2026-10-03",
+          "has_new_buddy": false,
+          "score": 2
+        },
+        {
+          "date": "2026-10-04",
+          "has_new_buddy": false,
+          "score": 4
+        },
+        {
+          "date": "2026-10-05",
+          "has_new_buddy": false,
+          "score": 4
+        },
+        {
+          "date": "2026-10-06",
+          "has_new_buddy": false,
+          "score": 16
+        },
+        {
+          "date": "2026-10-07",
+          "has_new_buddy": false,
+          "score": 6
+        },
+        {
+          "date": "2026-10-08",
+          "has_new_buddy": false,
+          "score": 6
+        },
+        {
+          "date": "2026-10-09",
+          "has_new_buddy": false,
+          "score": 6
+        },
+        {
+          "date": "2026-10-10",
+          "has_new_buddy": false,
+          "score": 15
+        },
+        {
+          "date": "2026-10-11",
+          "has_new_buddy": false,
+          "score": 6
+        },
+        {
+          "date": "2026-10-12",
+          "has_new_buddy": false,
+          "score": 51
+        },
+        {
+          "date": "2026-10-13",
+          "has_new_buddy": false,
+          "score": 17
+        },
+        {
+          "date": "2026-10-14",
+          "has_new_buddy": false,
+          "score": 41
+        },
+        {
+          "date": "2026-10-15",
+          "has_new_buddy": true,
+          "score": 64
+        },
+        {
+          "date": "2026-10-16",
+          "has_new_buddy": false,
+          "score": 24
+        },
+        {
+          "date": "2026-10-17",
+          "has_new_buddy": false,
+          "score": 18
+        },
+        {
+          "date": "2026-10-18",
+          "has_new_buddy": false,
+          "score": 21
+        },
+        {
+          "date": "2026-10-19",
+          "has_new_buddy": false,
+          "score": 34
+        },
+        {
+          "date": "2026-10-20",
+          "has_new_buddy": false,
+          "score": 24
+        },
+        {
+          "date": "2026-10-21",
+          "has_new_buddy": false,
+          "score": 49
+        },
+        {
+          "date": "2026-10-22",
+          "has_new_buddy": false,
+          "score": 46
+        },
+        {
+          "date": "2026-10-23",
+          "has_new_buddy": false,
+          "score": 41
+        },
+        {
+          "date": "2026-10-24",
+          "has_new_buddy": false,
+          "score": 48
+        },
+        {
+          "date": "2026-10-25",
+          "has_new_buddy": true,
+          "score": 78
+        },
+        {
+          "date": "2026-10-26",
+          "has_new_buddy": false,
+          "score": 123
+        },
+        {
+          "date": "2026-10-27",
+          "has_new_buddy": false,
+          "score": 146
+        },
+        {
+          "date": "2026-10-28",
+          "has_new_buddy": false,
+          "score": 77
+        },
+        {
+          "date": "2026-10-29",
+          "has_new_buddy": false,
+          "score": 37
+        },
+        {
+          "date": "2026-10-30",
+          "has_new_buddy": false,
+          "score": 52
+        },
+        {
+          "date": "2026-10-31",
+          "has_new_buddy": false,
+          "score": 21
+        },
+        {
+          "date": "2026-11-01",
+          "has_new_buddy": false,
+          "score": 10
+        },
+        {
+          "date": "2026-11-02",
+          "has_new_buddy": false,
+          "score": 105
+        },
+        {
+          "date": "2026-11-03",
+          "has_new_buddy": false,
+          "score": 92
+        },
+        {
+          "date": "2026-11-04",
+          "has_new_buddy": false,
+          "score": 57
+        },
+        {
+          "date": "2026-11-05",
+          "has_new_buddy": false,
+          "score": 100
+        },
+        {
+          "date": "2026-11-06",
+          "has_new_buddy": false,
+          "score": 214
+        },
+        {
+          "date": "2026-11-07",
+          "has_new_buddy": false,
+          "score": 101
+        },
+        {
+          "date": "2026-11-08",
+          "has_new_buddy": false,
+          "score": 85
+        },
+        {
+          "date": "2026-11-09",
+          "has_new_buddy": false,
+          "score": 93
+        },
+        {
+          "date": "2026-11-10",
+          "has_new_buddy": false,
+          "score": 71
+        },
+        {
+          "date": "2026-11-11",
+          "has_new_buddy": false,
+          "score": 78
+        },
+        {
+          "date": "2026-11-12",
+          "has_new_buddy": true,
+          "score": 66
+        },
+        {
+          "date": "2026-11-13",
+          "has_new_buddy": true,
+          "score": 72
+        },
+        {
+          "date": "2026-11-14",
+          "has_new_buddy": false,
+          "score": 125
+        },
+        {
+          "date": "2026-11-15",
+          "has_new_buddy": false,
+          "score": 126
+        },
+        {
+          "date": "2026-11-16",
+          "has_new_buddy": false,
+          "score": 121
+        },
+        {
+          "date": "2026-11-17",
+          "has_new_buddy": false,
+          "score": 44
+        }
+      ],
+      "verdict": "confirmed"
+    }
+  ],
+  "readOnly": true,
+  "variant": "cn",
+  "collectedAt": "2026-11-17T04:03:11Z",
+  "source": "scripts/collect-rewards-evidence.sh",
+  "note": "真实响应已脱敏：凭据键丢弃、邮箱/昵称打码、长串截断；不含 Cookie/Authorization。"
+}
