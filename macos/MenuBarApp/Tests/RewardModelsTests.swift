@@ -242,6 +242,43 @@ final class RewardModelsTests: XCTestCase {
         XCTAssertNil(state.streakNote)
     }
 
+    // MARK: - 动作映射（P0-A 回归）
+
+    func testActionRawValuesAreTheProtocolStrings() {
+        XCTAssertEqual(RewardAction.draw.rawValue, "lottery_draw")
+        XCTAssertEqual(RewardAction.redeem.rawValue, "redeem")
+        XCTAssertEqual(RewardAction.makeup.rawValue, "makeup_card")
+        // 反向也必须解得回来，否则确认按钮点了没反应。
+        for action in RewardAction.allCases {
+            XCTAssertEqual(RewardAction(rawValue: action.rawValue), action)
+        }
+        XCTAssertNil(RewardAction(rawValue: "lottery"), "未知动作不许 fallback")
+    }
+
+    func testPreviewsDecodeToTheMatchingAction() {
+        for (raw, expected) in [
+            ("lottery_draw", RewardAction.draw),
+            ("redeem", RewardAction.redeem),
+            ("makeup_card", RewardAction.makeup),
+        ] {
+            let preview = RewardPreview(json: [
+                "preview": ["accountId": "a", "action": raw, "balance": 1, "balancedReady": true, "cost": "消耗 1 次"],
+            ])
+            XCTAssertEqual(RewardAction(rawValue: preview?.action ?? ""), expected, raw)
+        }
+    }
+
+    func testNeedsAttentionCoversOnlySentAndUnknown() {
+        for (phase, expected) in [
+            ("sent", true), ("unknown", true),
+            ("pending", false), ("ready", false), ("frozen", false),
+            ("confirmed", false), ("rejected", false),
+        ] {
+            let row = RewardOperationRow(json: ["id": "1", "action": "lottery_draw", "phase": phase, "open": true])
+            XCTAssertEqual(row.needsAttention, expected, phase)
+        }
+    }
+
     // MARK: - 整包与 Mock
 
     func testResultLooksUpByAccountId() {

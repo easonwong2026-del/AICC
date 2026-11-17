@@ -288,13 +288,13 @@ pub fn judge_tier(status: Option<&str>) -> Readiness {
         Some("claimed") => Readiness {
             ready: false,
             balance: None,
-            observed: None,
+            observed: observed.clone(),
             reason: Some("该档位已经领过"),
         },
         Some("locked") => Readiness {
             ready: false,
             balance: None,
-            observed: None,
+            observed: observed.clone(),
             reason: Some("该档位还没达成"),
         },
         _ => Readiness {

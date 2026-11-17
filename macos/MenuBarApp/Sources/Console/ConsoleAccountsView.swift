@@ -592,7 +592,7 @@ struct ConsoleAccountsView: View {
             if account.supportsCNTasks {
                 ConsoleDetailGroup(
                     title: "奖励",
-                    detail: "只读 · 不会消耗抽奖次数或补签卡"
+                    detail: "写操作需二次确认 · 每次只发一次请求"
                 ) {
                     ConsoleRewardsBlock(
                         state: store.rewardStates[account.id],

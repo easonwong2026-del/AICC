@@ -189,6 +189,7 @@ const GRANT_KEYS: &[&str] = &[
 const SERVER_STATE_KEYS: &[&str] = &[
     "chances",
     "balance",
+    "observed",
     "days",
     "streak_days",
     "makeup_cards",
@@ -407,7 +408,8 @@ impl Db {
             "UPDATE reward_operations
                 SET phase = ?2, outcome = ?3, grant_json = ?4, server_state = COALESCE(?5, server_state),
                     detail = ?6, updated_at = ?7, verified_at = ?8
-              WHERE id = ?1 AND phase IN ('pending','ready','sent','unknown','frozen')",
+              WHERE id = ?1 AND phase IN ('pending','ready','sent','unknown','frozen')
+                AND NOT (phase = 'frozen' AND ?2 = 'unknown')",
             params![
                 id,
                 res.phase,
@@ -822,6 +824,27 @@ mod tests {
         let op = db.reward_op(&id).unwrap().unwrap();
         assert_eq!(op.phase, "ready", "被拒之后状态不能被改成 sent");
         assert_eq!(op.attempt, MAX_SEND_ATTEMPTS);
+    }
+
+    /// 冻结态不能被回查降级为 unknown：并发下先被定性冻结的记录，
+    /// 后来那次回查只应"看得到"，不能改写它。
+    #[test]
+    fn a_frozen_operation_cannot_be_downgraded_by_a_late_recheck() {
+        let (mut db, _dir) = temp_db();
+        let id = open_then_send(&mut db, "acc", "u-1");
+        db.resolve_reward_op(&id, &conclude("frozen", true))
+            .unwrap();
+        let late = Resolution {
+            phase: "unknown",
+            outcome: "indeterminate",
+            grant: None,
+            server_state: None,
+            detail: Some("late recheck"),
+            verified: false,
+        };
+        let changed = db.resolve_reward_op(&id, &late);
+        assert!(changed.is_err() || db.reward_op(&id).unwrap().unwrap().phase == "frozen");
+        assert_eq!(db.reward_op(&id).unwrap().unwrap().phase, "frozen");
     }
 
     /// 没有幂等键的抽奖/兑换记录**不许标记发送**：那是"用空 token 发请求"的入口。

@@ -278,7 +278,8 @@ struct ConsoleRewardsBlock: View {
             HStack(spacing: 8) {
                 Button("抽奖") { onPreview(.draw, nil) }
                     .buttonStyle(ConsoleSecondaryButtonStyle())
-                    .disabled(acting || state.lotteryChances == 0)
+                    // 余额未知（nil）也要禁用：不能拿"不知道"当"有次数"。
+                    .disabled(acting || (state.lotteryChances ?? 0) <= 0)
                 Button(redeemTitle) {
                     if let tier = claimable?.tier { onPreview(.redeem, tier) }
                 }
@@ -303,7 +304,7 @@ struct ConsoleRewardsBlock: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .confirmationDialog(
-            preview.map { "\($0.action == "draw" ? "确认抽奖" : $0.action == "redeem" ? "确认兑换" : "确认补签")" } ?? "",
+            dialogTitle,
             isPresented: Binding(get: { preview != nil }, set: { if !$0 { onCancelPreview() } }),
             titleVisibility: .visible
         ) {
@@ -318,12 +319,23 @@ struct ConsoleRewardsBlock: View {
         }
     }
 
+    /// 标题走解析后的枚举，不在这里再写一套三元表达式。
+    private var dialogTitle: String {
+        guard let preview, let action = RewardAction(rawValue: preview.action) else {
+            return "确认操作"
+        }
+        return "确认\(action.title)"
+    }
+
     private func detail(for preview: RewardPreview) -> String {
-        var lines = [
-            "账号：\(preview.nickname)",
-            "实时余额：\(preview.balanceText)",
-            "预计消耗：\(preview.cost)",
-        ]
+        var lines = ["账号：\(preview.nickname)"]
+        if RewardAction(rawValue: preview.action) == .redeem {
+            // 兑换没有"余额"这个概念，写"实时余额 —"会误导。
+            lines.append("实时资格：可兑换")
+        } else {
+            lines.append("实时余额：\(preview.balanceText)")
+        }
+        lines.append("预计消耗：\(preview.cost)")
         if let target = preview.target { lines.insert("目标：\(target)", at: 1) }
         lines.append("")
         lines.append("确认后服务端还会再校验一次；结果未定时不会重发。")
