@@ -9,7 +9,7 @@ import XCTest
 /// - 服务端返回没见过的档位状态被当成"可领"。
 final class RewardModelsTests: XCTestCase {
 
-    private func account(_ overrides: [String: Any] = [:]) -> [String: Any] {
+    private func account(overrides: [String: Any] = [:]) -> [String: Any] {
         var base: [String: Any] = [
             "accountId": "acc-1",
             "nickname": "示例",
