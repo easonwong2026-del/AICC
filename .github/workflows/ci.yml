@@ -1,5 +1,13 @@
 name: CI
 
+# 设计说明见 docs/CI.md。要点：
+#   1. 路径过滤只在 **job 级**做（`if:`），从不在 `on.pull_request.paths` 上做。
+#      工作流级 path 过滤会让未触发的检查永远停在 "Expected"，PR 卡死；
+#      job 级 `if:` 跳过时结论是 "skipped"，分支保护视为通过，不会阻塞。
+#   2. 所有 job 名保持与旧版一致（test / lint / android / android-visual /
+#      rust / swift-test / macos-build），只新增 macos-dmg。
+#   3. `changes` job 失败时下游 `!= 'false'` 判真 → 退化成跑全量，不会假绿。
+
 on:
   pull_request:
     # 允许"堆叠 PR"：base 是 feature/* 或 ui/* 的 PR 也要跑检查。
@@ -8,10 +16,170 @@ on:
     branches: [main]
   # 手动重跑：堆叠 PR 的 base 分支若还没带上这条触发器，用 dispatch 也能跑。
   workflow_dispatch:
+    inputs:
+      run_mode:
+        description: "要运行哪些检查。full 相当于改造前的全套 CI。"
+        type: choice
+        default: full
+        options:
+          - full
+          - only-python
+          - only-rust
+          - only-swift
+          # 仅供验证路径过滤门控使用：人为让其它领域保持 skipped。
+          - only-android
+
+permissions:
+  contents: read
+
+# 同一个 PR 新提交取消旧运行；不同 PR / main / 手动运行互不影响。
+# 组名用假三元：PR 走 pr-<编号>，其它事件走 run-<run_id>（天然唯一 → 永不同组），
+# 于是 `cancel-in-progress: true` 的作用范围恰好只有"同一个 PR 的上一次运行"。
+# 不写成 `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`：
+# 表达式形式在这里实测没有生效（旧运行没被取消，新运行卡在 pending）。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: true
 
 jobs:
-  test:
+  # ---------------------------------------------------------------------------
+  # 变更分类：唯一决定"哪些 job 需要跑"的地方。
+  # ---------------------------------------------------------------------------
+  changes:
+    name: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      python: ${{ steps.gate.outputs.python }}
+      rust: ${{ steps.gate.outputs.rust }}
+      swift: ${{ steps.gate.outputs.swift }}
+      android: ${{ steps.gate.outputs.android }}
+      macos: ${{ steps.gate.outputs.macos }}
+      scenario: ${{ steps.gate.outputs.scenario }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # 过滤规则和"job 实际执行哪些文件"必须对得上。这一步失败说明有人挪了脚本
+      # 却没同步 filters——那种改动会让"改了却不测"，比构建慢严重得多。
+      - name: Verify the path filters still cover every executed file
+        run: python3 scripts/ci-filter-selftest.py --check
+
+      - name: Detect changed areas
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            workflow:
+              - '.github/workflows/**'
+            python:
+              - 'server.py'
+              - 'bridge_tls.py'
+              - 'collectors/**'
+              - 'tests/**'
+              - 'scripts/smoke-test-bundled-server.sh'
+            rust:
+              - 'account-worker/**'
+              - 'scripts/smoke-test-account-worker.sh'
+            swift:
+              - 'macos/**'
+              - 'VERSION'
+              - 'scripts/smoke-test-widget.sh'
+              - 'scripts/smoke-test-widget-visual.sh'
+              - 'scripts/smoke-test-widget-bundle.sh'
+              - 'scripts/smoke-test-board-visual.sh'
+              - 'scripts/smoke-test-console-visual.sh'
+              - 'scripts/smoke-test-dashboard-visual.sh'
+              - 'scripts/smoke-test-display-snapshot.sh'
+              - 'scripts/build-widget-preview.sh'
+              - 'scripts/validate-widget-bundle.sh'
+              - 'scripts/validate-version.sh'
+              - 'scripts/fetch-python-runtime.sh'
+              # 这两个把"校验脚本"本身也挂在触发路径上：它们只被 macOS 侧调用
+              # （validate-python-runtime 由 fetch-python-runtime / build-aicc-swiftui 调，
+              # validate-account-worker-bundle 只在打包产物上跑），
+              # 只改它们而跳过 macOS 构建，就等于改了闸门却从不通电。
+              - 'scripts/validate-python-runtime.sh'
+              - 'scripts/validate-account-worker-bundle.sh'
+            android:
+              - 'android/**'
+              - 'scripts/smoke-test-android-visual.sh'
+
+      - name: Resolve job gates
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          MODE: ${{ inputs.run_mode }}
+          WORKFLOW_CHANGED: ${{ steps.filter.outputs.workflow }}
+          F_PYTHON: ${{ steps.filter.outputs.python }}
+          F_RUST: ${{ steps.filter.outputs.rust }}
+          F_SWIFT: ${{ steps.filter.outputs.swift }}
+          F_ANDROID: ${{ steps.filter.outputs.android }}
+        run: |
+          set -euo pipefail
+
+          # 场景判定优先级：push(main) > dispatch 指定 > 工作流自身改动 > 路径过滤。
+          if [[ "$EVENT" == "push" ]]; then
+            scenario=full
+          elif [[ "$EVENT" == "workflow_dispatch" ]]; then
+            scenario="${MODE:-full}"
+          elif [[ "${WORKFLOW_CHANGED:-false}" == "true" ]]; then
+            # 改动 CI 自身时跑全量：既验证新流水线，也避免"改坏门控后永远是绿"。
+            scenario=full
+          else
+            scenario=changed
+          fi
+
+          case "$scenario" in
+            full)
+              python=true; rust=true; swift=true; android=true ;;
+            only-python)
+              python=true; rust=false; swift=false; android=false ;;
+            only-rust)
+              python=false; rust=true; swift=false; android=false ;;
+            only-swift)
+              python=false; rust=false; swift=true; android=false ;;
+            only-android)
+              python=false; rust=false; swift=false; android=true ;;
+            changed)
+              # dorny 输出的就是字符串 true/false；缺省按 false 处理。
+              python="${F_PYTHON:-false}"
+              rust="${F_RUST:-false}"
+              swift="${F_SWIFT:-false}"
+              android="${F_ANDROID:-false}" ;;
+            *)
+              echo "unknown run_mode: $scenario" >&2
+              exit 1 ;;
+          esac
+
+          # macOS 打包会嵌入 server.py / collectors，所以 Python 侧改动也要过一遍构建校验。
+          macos=false
+          if [[ "$python" == "true" || "$swift" == "true" ]]; then
+            macos=true
+          fi
+
+          echo "scenario=$scenario"
+          echo "python=$python rust=$rust swift=$swift android=$android macos=$macos"
+
+          { echo "python=$python"
+            echo "rust=$rust"
+            echo "swift=$swift"
+            echo "android=$android"
+            echo "macos=$macos"
+            echo "scenario=$scenario"
+          } >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Python：collector / bridge / TLS 单测与语法检查
+  # ---------------------------------------------------------------------------
+  test:
+    name: test
+    needs: changes
+    if: always() && needs.changes.outputs.python != 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -29,7 +197,11 @@ jobs:
         run: python -m unittest discover -s tests -v
 
   lint:
+    name: lint
+    needs: changes
+    if: always() && needs.changes.outputs.python != 'false'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -44,34 +216,15 @@ jobs:
       - name: Lint Python
         run: flake8 --max-line-length=140 --exclude=__pycache__,.git,dist,android,web .
 
-  android:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: android/poke-dashboard
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: "temurin"
-          java-version: "17"
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Test and build APK
-        run: ./gradlew test assembleRelease
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: poke4s-dashboard-apk
-          path: android/poke-dashboard/app/build/outputs/apk/release/*.apk
-
+  # ---------------------------------------------------------------------------
+  # Rust：格式 + 全量单测/集成测试 + smoke，不做任何裁剪
+  # ---------------------------------------------------------------------------
   rust:
+    name: rust
+    needs: changes
+    if: always() && needs.changes.outputs.rust != 'false'
     runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -97,8 +250,15 @@ jobs:
       - name: Account worker smoke (self-test + JSON-RPC + WB_SWITCH_HOME isolation)
         run: bash scripts/smoke-test-account-worker.sh account-worker/target/debug/aicc-account-worker
 
+  # ---------------------------------------------------------------------------
+  # Swift：Widget / 看板 / 控制台 离屏渲染与核心库测试
+  # ---------------------------------------------------------------------------
   swift-test:
+    name: swift-test
+    needs: changes
+    if: always() && needs.changes.outputs.swift != 'false'
     runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -141,8 +301,15 @@ jobs:
       - name: Run Swift core library tests
         run: swift test --package-path macos/MenuBarApp
 
+  # ---------------------------------------------------------------------------
+  # macOS 快速通道：只编译 + 校验产物完整性，不做 DMG、PR 上不传大文件
+  # ---------------------------------------------------------------------------
   macos-build:
+    name: macos-build
+    needs: changes
+    if: always() && needs.changes.outputs.macos != 'false'
     runs-on: macos-15
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -221,8 +388,49 @@ jobs:
         run: |
           bash scripts/smoke-test-bundled-server.sh "dist/mac/AICC.app/Contents/Resources/Server"
 
+      - name: Upload macOS app (main / dispatch only)
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: aicc-macos-app
+          path: dist/mac/AICC.app
+
+  # ---------------------------------------------------------------------------
+  # macOS 完整打包：只在 main、手动运行、发版流程里跑（PR 一律跳过）
+  # ---------------------------------------------------------------------------
+  macos-dmg:
+    name: macos-dmg
+    needs: [changes, macos-build]
+    if: >-
+      always()
+      && needs.changes.outputs.macos != 'false'
+      && needs.macos-build.result == 'success'
+      && github.event_name != 'pull_request'
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Fetch and validate the bundled Python runtime
+        run: bash scripts/fetch-python-runtime.sh
+
+      - name: Setup Rust (needed to embed aicc-account-worker)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: account-worker
+
+      # build-dmg.sh 内部会重新调用 build-aicc-swiftui.sh（BUNDLE_SERVER=1）。
+      # 这里刻意不改成"复用 macos-build 的产物"：发版链路上的打包脚本保持原样，
+      # 代价是 main 上多编译一次，换来的是打包输入的独立性。
       - name: Build macOS DMG
-        # 同上：CI 无证书，显式 ad-hoc。
         run: AICC_ALLOW_ADHOC=1 bash macos/build-dmg.sh
 
       - name: Validate DMG artifact exists
@@ -240,21 +448,51 @@ jobs:
           codesign --verify --deep --strict "$MOUNT/AICC.app"
           "$HELPER" --version | grep -q "protocol"
 
-      - name: Upload macOS app
-        uses: actions/upload-artifact@v4
-        with:
-          name: aicc-macos-app
-          path: dist/mac/AICC.app
-
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
         with:
           name: aicc-macos-dmg
           path: dist/*.dmg
 
-  android-visual:
+  # ---------------------------------------------------------------------------
+  # Android
+  # ---------------------------------------------------------------------------
+  android:
+    name: android
+    needs: changes
+    if: always() && needs.changes.outputs.android != 'false'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: android/poke-dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Test and build APK
+        run: ./gradlew test assembleRelease
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: poke4s-dashboard-apk
+          path: android/poke-dashboard/app/build/outputs/apk/release/*.apk
+
+  android-visual:
+    name: android-visual
+    needs: changes
+    if: always() && needs.changes.outputs.android != 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
