@@ -859,6 +859,34 @@ final class AccountWorkerManager: ObservableObject {
         try await rewardWrite("growth.rewards.makeup", accountId: accountId, target: date, confirm: confirm)
     }
 
+    /// 只读预览：真的去打一次 GET，拿实时余额与资格。
+    func rewardPreview(accountId: String, action: RewardAction, target: String?) async throws -> [String: Any] {
+        var params: [String: Any] = ["accountId": accountId, "confirm": false]
+        if let target { params["target"] = target }
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call(method(for: action), params: params, timeout: 45)
+    }
+
+    /// 回查待核验记录。**只读服务端**，不重发。
+    func rewardRecheck(accountId: String) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call(
+            "growth.rewards.recheck",
+            params: ["accountId": accountId],
+            timeout: 45
+        )
+    }
+
+    private func method(for action: RewardAction) -> String {
+        switch action {
+        case .draw: return "growth.rewards.draw"
+        case .redeem: return "growth.rewards.redeem"
+        case .makeup: return "growth.rewards.makeup"
+        }
+    }
+
     private func rewardWrite(
         _ method: String,
         accountId: String,

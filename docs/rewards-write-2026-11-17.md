@@ -98,7 +98,18 @@ Swift：新增写结果四态、`needsAttention`、预览不算已发送、连�
 | P0 | `decide_with(one_shot=false)` 里守卫条件没带 `one_shot`，正式抽奖一次后会被永久 Blocked | 条件补上 `one_shot &&`；回归测试 `the_product_path_may_repeat_a_finished_draw`（正式路径第二次是 Send，探针仍是 Blocked） |
 | P0 | `pending` 没有真正的回查闭环 | 新增 `growth.rewards.recheck`：发送前把基线（余额/档位状态）写进账本 `server_state`；回查时 GET 当前状态对比，**只有基线变了**才 `confirmed`，没变保持 `unknown` |
 | P1 | 补签日期只校验格式 | `readiness()` 对补签改为同时取 `/streak` + `/heatmap`，用 `makeup_candidates` 校验目标日期**确实在候选里**，不在就不发 |
-| P1 | 确认框用旧缓存余额 | **未完成**：RPC 侧每次发送前都会重查（权威判断在服务端），但确认框显示的数字仍来自上一次刷新 |
+| P1 | 确认框用旧缓存余额 | 改为**两段式**：点按钮先调 `preview`（真打一次 GET），拿到实时余额才弹框；失败/资格不足直接不弹 |
 | — | `cargo fmt --check` 失败 | 已 `cargo fmt`，`--check` 通过 |
 
 回查语义与 `verdict()` 一致：看不动就不关账。测试 `recheck_only_closes_when_the_baseline_moved`。
+
+## 十、回查安全收口（第三轮）
+
+| 问题 | 修复 |
+| --- | --- |
+| 余额减少被当成 `confirmed` | 纯回查**永远只给 `unknown`**：余额变化可能来自用户自己的官方客户端，无法归属到本次请求。文案改为"服务端状态有变化，但无法归属到本次请求" |
+| `unknown` 回查会清掉基线 | 落账本时回传原基线（`server_state: Some(&baseline)`），不再写 `None` |
+| `opId` 不校验归属 | 指定 `opId` 时必须 `op.account_id == accountId`，否则 `invalid_params`；不存在则 `NOT_FOUND` |
+| 基线写失败被忽略 | `set_reward_op_baseline(...)?` 放在 `mark_reward_op_sent` **之前**，基线落不下就不发 |
+
+界面：`sent` / `unknown` 的记录出现「回查结果」按钮，只读、不重发；回查后自动刷新余额、档位与历史。

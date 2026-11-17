@@ -16,11 +16,15 @@ struct ConsoleRewardsBlock: View {
     /// 上一次写操作的结果（成功/拒绝/未定/冻结）。
     var result: RewardActionResult? = nil
     var acting: Bool = false
+    /// 点按钮后现拉的预览；只有它到达才弹确认框。
+    var preview: RewardPreview? = nil
+    var checking: Bool = false
     let onRefresh: () -> Void
-    var onPerform: (RewardAction, String?) -> Void = { _, _ in }
+    var onPreview: (RewardAction, String?) -> Void = { _, _ in }
+    var onConfirmPreview: () -> Void = {}
+    var onCancelPreview: () -> Void = {}
+    var onRecheck: () -> Void = {}
     var onDismissResult: () -> Void = {}
-
-    @State private var intent: RewardIntent?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -269,48 +273,61 @@ struct ConsoleRewardsBlock: View {
     private func actions(_ state: RewardAccountState) -> some View {
         let claimable = state.claimableTiers.first
         let redeemTitle = claimable.map { "兑换连登奖励（\($0.tier)）" } ?? "兑换连登奖励"
+        let needsRecheck = state.recentOperations.contains { $0.needsAttention }
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                Button("抽奖") { intent = .draw(state) }
+                Button("抽奖") { onPreview(.draw, nil) }
                     .buttonStyle(ConsoleSecondaryButtonStyle())
                     .disabled(acting || state.lotteryChances == 0)
-                    .help("会先重查余额，再让你确认")
                 Button(redeemTitle) {
-                    if let tier = claimable?.tier { intent = .redeem(state, tier: tier) }
+                    if let tier = claimable?.tier { onPreview(.redeem, tier) }
                 }
                 .buttonStyle(ConsoleSecondaryButtonStyle())
                 .disabled(acting || claimable == nil)
-                .help(claimable == nil ? "当前没有可领取的档位" : "会先重查档位状态，再让你确认")
                 Button("补签") {
-                    if let date = state.makeup.candidates.first { intent = .makeup(state, date: date) }
+                    if let date = state.makeup.candidates.first { onPreview(.makeup, date) }
                 }
                 .buttonStyle(ConsoleSecondaryButtonStyle())
                 .disabled(acting || state.makeup.candidates.isEmpty)
-                .help(state.makeup.candidates.isEmpty ? "没有可补签的断签日" : "会先重查补签卡，再让你确认")
+                if needsRecheck {
+                    Button(checking ? "回查中…" : "回查结果") { onRecheck() }
+                        .buttonStyle(ConsoleSecondaryButtonStyle())
+                        .disabled(checking || acting)
+                        .help("只读：向服务端确认上一次请求的结果，不会重发")
+                }
                 Spacer(minLength: 0)
             }
-            Text("每次操作都会：先重查余额 → 你确认 → 写本地账本 → 只发一次请求 → 结果回查。未知结果不会自动重发。")
+            Text("点击后先拉一次实时余额，再让你确认；确认后写账本、只发一次请求。未知结果只能回查，不会自动重发。")
                 .font(ConsoleType.caption)
                 .foregroundStyle(ConsoleTheme.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .confirmationDialog(
-            intent?.title ?? "",
-            isPresented: Binding(get: { intent != nil }, set: { if !$0 { intent = nil } }),
+            preview.map { "\($0.action == "draw" ? "确认抽奖" : $0.action == "redeem" ? "确认兑换" : "确认补签")" } ?? "",
+            isPresented: Binding(get: { preview != nil }, set: { if !$0 { onCancelPreview() } }),
             titleVisibility: .visible
         ) {
-            if let intent {
-                Button("确认（\(intent.costShort)）") {
-                    onPerform(intent.action, intent.target)
-                    self.intent = nil
-                }
-                Button("取消", role: .cancel) { self.intent = nil }
+            if preview != nil {
+                Button("确认（\(preview?.cost ?? "")）") { onConfirmPreview() }
+                Button("取消", role: .cancel) { onCancelPreview() }
             }
         } message: {
-            if let intent {
-                Text(intent.detail)
+            if let preview {
+                Text(detail(for: preview))
             }
         }
+    }
+
+    private func detail(for preview: RewardPreview) -> String {
+        var lines = [
+            "账号：\(preview.nickname)",
+            "实时余额：\(preview.balanceText)",
+            "预计消耗：\(preview.cost)",
+        ]
+        if let target = preview.target { lines.insert("目标：\(target)", at: 1) }
+        lines.append("")
+        lines.append("确认后服务端还会再校验一次；结果未定时不会重发。")
+        return lines.joined(separator: "\n")
     }
 
     @ViewBuilder
@@ -362,50 +379,5 @@ struct ConsoleRewardsBlock: View {
         case "ended": return ConsoleTheme.tertiaryText
         default: return ConsoleTheme.warning
         }
-    }
-}
-
-// MARK: - 二次确认的内容
-
-/// 一次待确认的操作：**把要花掉什么、还剩多少写在确认框里**，
-/// 用户不必回看上面的小字。
-struct RewardIntent {
-    let action: RewardAction
-    let target: String?
-    let title: String
-    let detail: String
-    let costShort: String
-
-    static func draw(_ state: RewardAccountState) -> RewardIntent {
-        RewardIntent(
-            action: .draw,
-            target: nil,
-            title: "确认抽奖",
-            detail: "账号：\(state.nickname)\n当前抽奖次数：\(state.lotteryChances.map { "\($0)" } ?? "—")\n"
-                + "预计消耗：1 次\n\n发送前会再查一次余额；结果为「未定」时不会重发。",
-            costShort: "消耗 1 次·不可撤销"
-        )
-    }
-
-    static func redeem(_ state: RewardAccountState, tier: String) -> RewardIntent {
-        RewardIntent(
-            action: .redeem,
-            target: tier,
-            title: "确认兑换 \(tier) 连登奖励",
-            detail: "账号：\(state.nickname)\n档位：\(tier)\n"
-                + "预计消耗：1 个档位（领过就不会再有）\n\n发送前会再查一次档位状态。",
-            costShort: "兑换 \(tier)·不可撤销"
-        )
-    }
-
-    static func makeup(_ state: RewardAccountState, date: String) -> RewardIntent {
-        RewardIntent(
-            action: .makeup,
-            target: date,
-            title: "确认补签 \(date)",
-            detail: "账号：\(state.nickname)\n日期：\(date)\n"
-                + "当前补签卡：\(state.makeup.balanceText)\n预计消耗：1 张\n\n发送前会再查一次卡数。",
-            costShort: "补签 \(date)·消耗 1 张"
-        )
     }
 }

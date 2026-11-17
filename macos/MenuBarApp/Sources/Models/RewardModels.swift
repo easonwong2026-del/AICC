@@ -354,6 +354,32 @@ enum RewardAction: String, Identifiable, CaseIterable {
     }
 }
 
+/// 实时预览：点按钮时现拉的，**不是缓存**。
+struct RewardPreview: Equatable {
+    let accountId: String
+    let action: String
+    let target: String?
+    let balance: Int?
+    let ready: Bool
+    let reason: String?
+    let cost: String
+    let nickname: String
+
+    init?(json: [String: Any]) {
+        guard let preview = json["preview"] as? [String: Any] else { return nil }
+        accountId = preview["accountId"] as? String ?? ""
+        action = preview["action"] as? String ?? ""
+        target = (preview["target"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        balance = (preview["balance"] as? NSNumber)?.intValue
+        ready = preview["balancedReady"] as? Bool ?? false
+        reason = preview["reason"] as? String
+        cost = preview["cost"] as? String ?? ""
+        nickname = preview["nickname"] as? String ?? ""
+    }
+
+    var balanceText: String { balance.map { "\($0)" } ?? "—" }
+}
+
 // MARK: - 写操作结果
 
 /// 抽奖 / 兑换 / 补签 的一次结果。四种状态必须分开，**不能都叫"失败"**：

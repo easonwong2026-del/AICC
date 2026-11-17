@@ -600,10 +600,33 @@ struct ConsoleAccountsView: View {
                         failure: store.rewardFailures[account.id],
                         result: store.rewardActions[account.id],
                         acting: store.rewardActing.contains(account.id),
+                        preview: store.rewardPreviews[account.id],
+                        checking: store.rewardChecking.contains(account.id),
                         onRefresh: { Task { await store.loadReward(accountId: account.id) } },
-                        onPerform: { action, target in
-                            Task { await store.performReward(accountId: account.id, action: action, target: target) }
+                        onPreview: { action, target in
+                            Task {
+                                await store.previewReward(
+                                    accountId: account.id,
+                                    action: action,
+                                    target: target
+                                )
+                            }
                         },
+                        onConfirmPreview: {
+                            guard let preview = store.rewardPreviews[account.id] else { return }
+                            let action = RewardAction(rawValue: preview.action)
+                            store.clearRewardPreview(accountId: account.id)
+                            guard let action else { return }
+                            Task {
+                                await store.performReward(
+                                    accountId: account.id,
+                                    action: action,
+                                    target: preview.target
+                                )
+                            }
+                        },
+                        onCancelPreview: { store.clearRewardPreview(accountId: account.id) },
+                        onRecheck: { Task { await store.recheckRewards(accountId: account.id) } },
                         onDismissResult: { store.clearRewardAction(accountId: account.id) }
                     )
                 }

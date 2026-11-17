@@ -116,13 +116,14 @@ pub async fn run(
         }
     };
 
-    app.with_db(|db| db.mark_reward_op_sent(&op_id))?;
-    // 发送前基线：回查时靠它判断"变没变"。写失败不影响发送（最坏是回查更保守）。
+    // 基线必须先落盘，再标记发送：没有基线，回查就没有比较依据，
+    // 那条记录会永远停在 unknown 且无法解释。所以这里不许 `let _ =`。
     let baseline = json!({
         "balance": readiness.balance,
         "observed": readiness.observed,
     });
-    let _ = app.with_db(|db| db.set_reward_op_baseline(&op_id, &baseline));
+    app.with_db(|db| db.set_reward_op_baseline(&op_id, &baseline))?;
+    app.with_db(|db| db.mark_reward_op_sent(&op_id))?;
 
     let sender = probe::HttpSender {
         payload: json!({
@@ -200,7 +201,15 @@ pub async fn recheck(
         .with_db(|db| db.get_account(account_id))?
         .ok_or_else(|| RpcError::new(crate::rpc::E_NOT_FOUND, "账号不存在"))?;
     let ops = app.with_db(|db| match op_id {
-        Some(id) => Ok(db.reward_op(id)?.into_iter().collect::<Vec<_>>()),
+        Some(id) => {
+            let op = db.reward_op(id)?;
+            // 指定 opId 时必须确认它属于这个账号，否则能借回查别人的记录。
+            match op {
+                Some(op) if op.account_id == account_id => Ok(vec![op]),
+                Some(_) => Err(RpcError::invalid_params("这条操作不属于该账号")),
+                None => Err(RpcError::new(crate::rpc::E_NOT_FOUND, "操作不存在")),
+            }
+        }
         None => db.reward_ops_awaiting_verification(account_id),
     })?;
     if ops.is_empty() {
@@ -250,21 +259,29 @@ pub async fn recheck(
             _ => false,
         };
 
-        let verdict = if moved {
-            reward_ledger_verdict(true)
+        // 余额/档位变了**不能**证明是 AICC 这次请求造成的：用户也可能在官方客户端操作。
+        // 所以在拿到"操作级回执"之前，一律不 confirmed，只把变化如实写进账本。
+        let verdict = unattributed_verdict();
+        let message = if moved {
+            "服务端状态有变化，但无法归属到本次请求（可能是官方客户端操作），继续保持待核验"
         } else {
-            reward_ledger_verdict(false)
+            "服务端状态与发送前一致，仍无法确认结果，继续保持待核验"
         };
         app.with_db(|db| {
             db.resolve_reward_op(
                 &op.id,
                 &Resolution {
                     phase: verdict.phase(),
-                    outcome: if moved { "granted" } else { "indeterminate" },
+                    outcome: if moved {
+                        "state_moved_unattributed"
+                    } else {
+                        "indeterminate"
+                    },
                     grant: None,
-                    server_state: None,
-                    detail: Some(verdict.describe()),
-                    verified: verdict.verified(),
+                    // 绝不回传 None：那会把基线清掉，下一次回查就没有比较依据。
+                    server_state: Some(&baseline),
+                    detail: Some(message),
+                    verified: false,
                 },
             )
         })?;
@@ -274,7 +291,7 @@ pub async fn recheck(
             "target": op.target,
             "moved": moved,
             "phase": verdict.phase(),
-            "message": verdict.describe(),
+            "message": message,
         }));
     }
 
@@ -284,14 +301,14 @@ pub async fn recheck(
     }))
 }
 
-/// 生效 → confirmed；否则仍是 unknown（不释放目标）。
-fn reward_ledger_verdict(moved: bool) -> super::reward_ledger::Verdict {
+/// 纯回查的结论：**永远是 unknown**。
+///
+/// 余额少了、档位变 claimed，都可能来自用户自己的官方客户端操作。没有操作级回执
+/// （例如按 `client_token` 查"这条请求"的结果）之前，任何"状态变了"都不足以归属到
+/// 本次请求，所以这里不给 confirmed。
+fn unattributed_verdict() -> super::reward_ledger::Verdict {
     use super::reward_ledger::{verdict, Observation};
-    verdict(if moved {
-        Observation::Applied
-    } else {
-        Observation::Unchanged
-    })
+    verdict(Observation::Unchanged)
 }
 
 /// 四种状态给界面用：成功 / 被拒 / 未定 / 冻结。
@@ -370,14 +387,12 @@ mod tests {
         assert!(message_for("rejected", &Outcome::AlreadyClaimed).contains("已经领过"));
     }
 
-    /// 回查判据：只有基线变了才算生效，没变仍是 unknown。
+    /// 回查判据：**余额变了也不许 confirmed** —— 变化可能来自官方客户端。
     #[test]
-    fn recheck_only_closes_when_the_baseline_moved() {
-        let moved = reward_ledger_verdict(true);
-        assert_eq!(moved.phase(), "confirmed");
-        let still = reward_ledger_verdict(false);
-        assert_eq!(still.phase(), "unknown", "没变化不能关账");
-        assert!(!still.verified());
+    fn a_moved_balance_never_closes_the_operation() {
+        let verdict = unattributed_verdict();
+        assert_eq!(verdict.phase(), "unknown");
+        assert!(!verdict.verified(), "没有归属证据就不许带 verified");
     }
 
     #[test]
