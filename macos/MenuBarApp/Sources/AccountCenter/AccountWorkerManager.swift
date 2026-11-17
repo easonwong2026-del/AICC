@@ -832,6 +832,17 @@ final class AccountWorkerManager: ObservableObject {
         )
     }
 
+    /// 奖励状态（PR #98）：连登档位、抽奖次数、补签卡与可补签日期。
+    ///
+    /// 只读：worker 侧只有四个 GET。一次查询每账号 4 个请求、账号之间串行，
+    /// 所以给 60 秒；也**不会**自动轮询 —— 由用户点「刷新」触发。
+    func rewardStatus(accountIds: [String] = []) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        let params: [String: Any] = accountIds.isEmpty ? [:] : ["accountIds": accountIds]
+        return try await client.call("growth.rewards.status", params: params, timeout: 60)
+    }
+
     // MARK: - 每日签到（PR #69）
 
     /// 查今日签到状态。默认会真的问一次服务端（只读 POST）；`cached` 时不联网。

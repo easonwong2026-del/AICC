@@ -52,6 +52,14 @@ final class ConsoleStore: ObservableObject {
     /// 最近一次手动检查 / 开关动作的一句话结果。
     @Published private(set) var growthNotice: String?
 
+    /// 奖励状态（PR #98：只读）。按账号缓存，只有用户点「刷新」才会联网。
+    ///
+    /// 分成三份而不是一个 Optional 状态：加载中、失败原因、上一次结果要能同时成立，
+    /// 否则刷新失败时界面会把旧数据当成"当前状态"。
+    @Published private(set) var rewardStates: [String: RewardAccountState] = [:]
+    @Published private(set) var rewardFailures: [String: String] = [:]
+    @Published private(set) var rewardLoading: Set<String> = []
+
     /// 每日签到（PR #69）。首屏先用本地缓存出图，联网查询由用户点按钮触发。
     @Published private(set) var checkin: CheckinFleetStatus = .empty
     @Published private(set) var checkinAuto: CheckinAutoStatus = .unknown
@@ -758,6 +766,33 @@ final class ConsoleStore: ObservableObject {
         }
     }
 
+    /// 读一个账号的奖励状态。**只读**：worker 侧没有抽奖、兑换、补签的写入口。
+    ///
+    /// 失败不清空上一次结果：界面上的「上次读到」和「这次失败」是两件事，
+    /// 把数据擦掉反而让人以为奖励没了。
+    func loadReward(accountId: String) async {
+        guard !rewardLoading.contains(accountId) else { return }
+        rewardLoading.insert(accountId)
+        defer { rewardLoading.remove(accountId) }
+        guard await ensureWorkerReady() else {
+            rewardFailures[accountId] = workerFailureText
+            return
+        }
+        do {
+            let json = try await worker.rewardStatus(accountIds: [accountId])
+            let result = RewardStatusResult(json: json)
+            if let state = result.account(accountId) {
+                rewardStates[accountId] = state
+                rewardFailures[accountId] = nil
+            } else {
+                rewardFailures[accountId] = "返回里没有这个账号的奖励状态（可能不是 WorkBuddy 国内版账号）"
+            }
+        } catch {
+            rewardFailures[accountId] =
+                (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
     /// 读所有账号的执行记录。失败保持原样，不影响任务列表。
     func loadGrowthRuns() async {
         for scan in growthResult.scans {
@@ -945,6 +980,9 @@ extension ConsoleStore {
         qoderSyncedAt = fixture.lastAccountsRefresh
         qoderCreditsAuto = fixture.qoderCreditsAuto
         qoderCreditsError = fixture.qoderCreditsError
+
+        rewardStates = fixture.rewardStates
+        rewardFailures = fixture.rewardFailures
     }
 }
 #endif

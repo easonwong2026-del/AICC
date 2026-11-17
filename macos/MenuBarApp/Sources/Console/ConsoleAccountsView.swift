@@ -587,6 +587,22 @@ struct ConsoleAccountsView: View {
                 }
             }
 
+            // 奖励（PR #98）：只读状态 + 三个禁用的写入口。
+            // 国际版没有成长中心，直接不渲染这一块。
+            if account.supportsCNTasks {
+                ConsoleDetailGroup(
+                    title: "奖励",
+                    detail: "只读 · 不会消耗抽奖次数或补签卡"
+                ) {
+                    ConsoleRewardsBlock(
+                        state: store.rewardStates[account.id],
+                        loading: store.rewardLoading.contains(account.id),
+                        failure: store.rewardFailures[account.id],
+                        onRefresh: { Task { await store.loadReward(accountId: account.id) } }
+                    )
+                }
+            }
+
             ConsoleDetailGroup(title: "更多操作") {
                 HStack(spacing: 8) {
                     Button("刷新账号信息") { Task { await verify(account) } }
