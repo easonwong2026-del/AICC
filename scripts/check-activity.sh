@@ -38,21 +38,27 @@ summary = report.get("summary") or {}
 
 def who(diagnosis):
     code = diagnosis.get("code")
-    if code == "active":
-        return "不用管"
-    if code == "checkin_only":
-        return "用户（客户端做一次真实任务）"
-    if code == "checkin_missing":
-        return "AICC（跑一次签到）"
-    if code == "stale_stats":
-        return "等（稍后刷新）"
-    if code == "needs_auth":
-        return "用户（重新授权）"
-    return "用户（先确认凭据）"
+    return {
+        "active": "不用管",
+        "checkin_only": "用户（客户端做一次真实任务）",
+        "checkin_unverified": "用户（看签到状态）",
+        "inactive": "用户（先补签到再使用）",
+        "stale_stats": "等（稍后刷新）",
+        "needs_auth": "用户（重新授权）",
+    }.get(code, "用户（先确认凭据）")
 
 def cells(account):
     checkin = account.get("checkin") or {}
-    checkin_text = checkin.get("status") or "无记录"
+    # 签到结论有五种来源，报告里照原样写，不合并成"完成/未完成"。
+    checkin_state = checkin.get("state")
+    checkin_source = checkin.get("source")
+    checkin_text = {
+        "confirmed": "已签（服务端）" if checkin_source == "server" else "已签（本地）",
+        "absent": "未签到",
+        "failed": "签到失败",
+        "unconfirmed": "未确认",
+        "auth_unavailable": "—",
+    }.get(checkin_state, "未确认")
     active = account.get("todayActive")
     active_text = "是" if active is True else ("否" if active is False else "—")
     score = account.get("todayScore")
@@ -66,7 +72,7 @@ def cells(account):
     return [account.get("nickname") or account.get("accountId"), active_text,
             checkin_text, streak_text, next_text]
 
-header = ["账号", "今日活跃", "签到", "连登", "下一档", "结论", "谁来做"]
+header = ["账号", "今日活跃", "今日签到", "连登", "下一档", "结论", "谁来做"]
 rows = []
 for account in accounts:
     rows.append(cells(account) + [
@@ -89,5 +95,5 @@ print(f"汇总：总 {summary.get('total', 0)} · 已活跃 {summary.get('active
       f"待处理 {summary.get('pending', 0)} · 未知 {summary.get('unknown', 0)} · "
       f"需授权 {summary.get('needsAuth', 0)}")
 print(f"读取时间：{report.get('fetchedAt')}")
-print("只读：签到与活跃分开算；未活跃不代表签到失败。")
+print("只读：签到与活跃分开算；本地没记录不等于没签到。")
 PY
