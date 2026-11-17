@@ -2,14 +2,14 @@ import Foundation
 
 /// 成长活跃状态（PR #103）：`growth.activity.status` 的 Swift 侧模型。
 ///
-/// 这一层只做一件事：把 JSON 翻成界面能画的东西，并且**守住三条实测结论**
+/// 这一层只做一件事：把 JSON 翻成界面能画的东西，并且**守住四条结论**
 /// （`docs/activity-rules-2026-11-17.md`）：
 ///
-/// 1. 签到与活跃是两个字段。签到成功不代表热力墙亮了，界面上也不许合并成一句"今日已完成"。
-/// 2. `nextTierRemaining` 是服务端算好的，**不做 `tier - streak` 的减法**：
-///    实测有 `连登 0 天 / 7 天档还差 6 天` 的账号。
-/// 3. `todayActive == nil` 是"没问到"，不是"未活跃"。把未知当 false 会催用户
-///    重复去做一件可能已经做完的事。
+/// 1. 签到与活跃是两个字段。签到成功不代表热力墙亮了，界面上不许合并成"今日已完成"。
+/// 2. 签到结论分五种来源：服务端确认、AICC 本地确认、确认未签、尝试失败、未确认。
+///    **"本地没记录"不等于"没签到"**——可能是在官方客户端签的。
+/// 3. `nextTierRemaining` 是服务端算好的，**不做 `tier - streak` 的减法**。
+/// 4. `todayActive == nil` 是"没问到"，不是"未活跃"。
 
 // MARK: - 汇总
 
@@ -43,85 +43,137 @@ struct ActivitySummary: Equatable {
 // MARK: - 诊断
 
 struct ActivityDiagnosis: Equatable {
-    /// `active` / `checkin_only` / `checkin_missing` / `stale_stats` / `unknown` / `needs_auth` / `unsupported`
+    /// `active` / `checkin_only` / `checkin_unverified` / `inactive` / `stale_stats` /
+    /// `unknown` / `needs_auth` / `unsupported`
     let code: String
-    /// 后端给的原话。**界面直接展示，不自己拼**：两种"没活跃"的原因不同，动作也不同。
+    /// 后端给的原话。完整句子只进 tooltip，不占表格宽度。
     let label: String
+    /// 该做什么。**由后端给**，界面不自己编。
+    let action: String
     let needsAction: Bool
 
     init(json: [String: Any]?) {
         let json = json ?? [:]
         code = json["code"] as? String ?? "unknown"
         label = json["label"] as? String ?? "活跃状态未知"
+        action = json["action"] as? String ?? ""
         needsAction = json["needsAction"] as? Bool ?? false
     }
 
-    init(code: String, label: String, needsAction: Bool) {
+    init(code: String, label: String, action: String, needsAction: Bool) {
         self.code = code
         self.label = label
+        self.action = action
         self.needsAction = needsAction
     }
 
     var isActive: Bool { code == "active" }
     var isUnknown: Bool { code == "unknown" }
 
-    /// 表格里用的四字以内标签。后端 `label` 是完整句子（也带动作指引），
-    /// 放进表格会把列撑爆；完整句子走 tooltip，不丢信息。
+    /// 表格里用的短标签（四字以内）。完整说法在 `label` / `action`。
     var shortLabel: String {
         switch code {
         case "active": return "已活跃"
         case "checkin_only": return "未活跃"
-        case "checkin_missing": return "签到未跑"
+        case "checkin_unverified": return "签到待查"
+        case "inactive": return "今日未用"
         case "stale_stats": return "待落库"
         case "needs_auth": return "需授权"
         case "unsupported": return "不支持"
         default: return "未知"
         }
     }
-}
 
-// MARK: - 当天签到
-
-struct ActivityCheckinState: Equatable {
-    /// 服务端原话：`success` / `already` / `failed` …
-    let status: String
-    let checkedAt: String
-    /// 签到记录的本地日期。只有等于服务端今天时才出现在这里。
-    let localDate: String
-    /// `auto` / `manual`。
-    let source: String?
-
-    init(json: [String: Any]) {
-        status = json["status"] as? String ?? ""
-        checkedAt = json["checkedAt"] as? String ?? ""
-        localDate = json["localDate"] as? String ?? ""
-        source = (json["source"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+    /// 这一类需要用户打开客户端做一次真实任务。
+    var needsClient: Bool {
+        code == "checkin_only" || code == "inactive"
     }
 
-    init(status: String, checkedAt: String, localDate: String, source: String?) {
+    var tooltip: String {
+        action.isEmpty ? label : "\(label) · \(action)"
+    }
+
+    /// 表格右列只放得下四五个字；完整说法在 `action` / `tooltip`。
+    var shortAction: String {
+        switch code {
+        case "checkin_unverified": return "看签到"
+        case "needs_auth": return "去授权"
+        case "unknown": return "刷新"
+        case "stale_stats": return "稍后刷新"
+        default: return ""
+        }
+    }
+}
+
+// MARK: - 今日签到
+
+struct ActivityCheckinState: Equatable {
+    /// `confirmed` / `absent` / `failed` / `unconfirmed` / `auth_unavailable`
+    let state: String
+    /// `server`（服务端签到状态接口）或 `local`（AICC 本地记录）。
+    let source: String?
+    /// 本地记录原始状态：`success` / `already` / `failed` / `unknown` …
+    let status: String?
+    let checkedAt: String?
+    let localDate: String?
+    /// 服务端签到记录里最近的一天，用于排查"服务端认可、AICC 没记录"。
+    let serverLastDate: String?
+    let note: String?
+
+    init(json: [String: Any]?) {
+        let json = json ?? [:]
+        state = json["state"] as? String ?? "unconfirmed"
+        source = (json["source"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        status = (json["status"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        checkedAt = (json["checkedAt"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        localDate = (json["localDate"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        serverLastDate = (json["serverLastDate"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        note = (json["note"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    init(
+        state: String,
+        source: String?,
+        status: String? = nil,
+        checkedAt: String? = nil,
+        localDate: String? = nil,
+        serverLastDate: String? = nil,
+        note: String? = nil
+    ) {
+        self.state = state
+        self.source = source
         self.status = status
         self.checkedAt = checkedAt
         self.localDate = localDate
-        self.source = source
+        self.serverLastDate = serverLastDate
+        self.note = note
     }
 
-    /// `already` 是"服务端说今天已经签过了"，不是失败。
-    var statusLabel: String {
-        switch status {
-        case "success": return "签到成功"
-        case "already": return "今日已签"
+    /// 今日签到一句话。**只说签到，不说活跃。**
+    var text: String {
+        switch state {
+        case "confirmed":
+            return source == "server" ? "已签（服务端）" : "已签（本地）"
+        case "absent": return "未签到"
         case "failed": return "签到失败"
-        default: return status.isEmpty ? "已签到" : status
+        case "auth_unavailable": return "—"
+        default: return "未确认"
         }
     }
 
-    var sourceLabel: String {
-        switch source {
-        case "auto": return "自动"
-        case "manual": return "手动"
-        default: return "—"
+    /// tooltip：把证据链说清楚。
+    var detail: String {
+        var parts: [String] = [text]
+        if let note { parts.append(note) }
+        if state == "confirmed", source == "server", localDate == nil {
+            parts.append("AICC 本地没有今天的签到记录，服务端签到接口确认已签")
         }
+        if let serverLastDate { parts.append("服务端最近签到 \(serverLastDate)") }
+        if let status { parts.append("本地状态 \(status)") }
+        return parts.joined(separator: " · ")
     }
+
+    var isConfirmed: Bool { state == "confirmed" }
 }
 
 // MARK: - 单账号
@@ -136,7 +188,6 @@ struct ActivityAccountState: Identifiable, Equatable {
     /// `nil` = 没问到，**不是**未活跃。
     let todayActive: Bool?
     let todayScore: Int?
-    /// 服务端给用户看的那句话。
     let todayNote: String?
     let streakDays: Int?
     let nextTier: String?
@@ -145,8 +196,9 @@ struct ActivityAccountState: Identifiable, Equatable {
     let tiers: [RewardTierState]
     let lastActiveDate: String?
     let activeDays7: Int?
-    let updatedAt: String?
-    let checkin: ActivityCheckinState?
+    /// 服务端最后更新时间：只作排查线索，不参与判定。
+    let serverUpdatedAt: String?
+    let checkin: ActivityCheckinState
     let diagnosis: ActivityDiagnosis
     let errors: [GrowthFieldError]
     let fetchedAt: String
@@ -168,8 +220,8 @@ struct ActivityAccountState: Identifiable, Equatable {
         tiers = (json["tiers"] as? [[String: Any]] ?? []).map { RewardTierState(json: $0) }
         lastActiveDate = (json["lastActiveDate"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         activeDays7 = (json["activeDays7"] as? NSNumber)?.intValue
-        updatedAt = (json["updatedAt"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        checkin = (json["checkin"] as? [String: Any]).map { ActivityCheckinState(json: $0) }
+        serverUpdatedAt = (json["serverUpdatedAt"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        checkin = ActivityCheckinState(json: json["checkin"] as? [String: Any])
         diagnosis = ActivityDiagnosis(json: json["diagnosis"] as? [String: Any])
         errors = (json["errors"] as? [[String: Any]] ?? []).map { GrowthFieldError(json: $0) }
         fetchedAt = json["fetchedAt"] as? String ?? ""
@@ -190,8 +242,8 @@ struct ActivityAccountState: Identifiable, Equatable {
         tiers: [RewardTierState],
         lastActiveDate: String?,
         activeDays7: Int?,
-        updatedAt: String?,
-        checkin: ActivityCheckinState?,
+        serverUpdatedAt: String?,
+        checkin: ActivityCheckinState,
         diagnosis: ActivityDiagnosis,
         errors: [GrowthFieldError] = [],
         fetchedAt: String
@@ -210,7 +262,7 @@ struct ActivityAccountState: Identifiable, Equatable {
         self.tiers = tiers
         self.lastActiveDate = lastActiveDate
         self.activeDays7 = activeDays7
-        self.updatedAt = updatedAt
+        self.serverUpdatedAt = serverUpdatedAt
         self.checkin = checkin
         self.diagnosis = diagnosis
         self.errors = errors
@@ -230,11 +282,7 @@ struct ActivityAccountState: Identifiable, Equatable {
         }
     }
 
-    /// 今日签到。**它只说明签到跑没跑，不说明活跃。**
-    var checkinText: String {
-        guard let checkin else { return "今天没有签到记录" }
-        return "\(checkin.statusLabel)（\(checkin.sourceLabel)）"
-    }
+    var checkinText: String { checkin.text }
 
     var streakText: String {
         guard let streakDays else { return "—" }
@@ -244,7 +292,6 @@ struct ActivityAccountState: Identifiable, Equatable {
     /// 下一档进度：数字来自服务端，不做减法。
     var nextTierText: String {
         guard let nextTier else { return "—" }
-        // 服务端给的是 `7d` / `14d` / `28d`；认不出来就原样显示，不猜。
         let days = Self.tierDays(nextTier).map(String.init) ?? nextTier
         guard let remaining = nextTierRemaining else { return "\(days) 天档" }
         return "\(days) 天档 · 还差 \(remaining) 天"
@@ -260,8 +307,6 @@ struct ActivityAccountState: Identifiable, Equatable {
     }
 
     /// 最近 7 天的活跃天数 + 上一次活跃日期。查不到就不出现。
-    ///
-    /// 表格里只有一行的位置，所以日期压成 `MM-DD`；完整日期在 tooltip 里。
     var recentText: String? {
         var parts: [String] = []
         if let activeDays7 { parts.append("近 7 天活跃 \(activeDays7) 天") }
@@ -272,18 +317,9 @@ struct ActivityAccountState: Identifiable, Equatable {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
-    /// 统计延迟时给一句解释：别让用户看着"未活跃"去重复做事。
-    ///
-    /// 只留一行字，完整说法（"过一会儿点刷新回查"）在 tooltip 里。
+    /// 统计延迟时的一行提示。只有服务端"有分数但没标记活跃"才会出现。
     var staleNote: String? {
-        diagnosis.code == "stale_stats" ? "今天有行为未落库，稍后回查" : nil
-    }
-
-    /// tooltip 用的完整说法。
-    var staleHelp: String? {
-        diagnosis.code == "stale_stats"
-            ? "今天已经有过行为，但服务端热力墙还没落库；过一会儿点「刷新」再看，不用重复做事"
-            : nil
+        diagnosis.code == "stale_stats" ? "今天有分数未落库，稍后回查" : nil
     }
 
     var statusLabel: String {
@@ -298,7 +334,6 @@ struct ActivityAccountState: Identifiable, Equatable {
     }
 
     static func tierDays(_ raw: String) -> Int? {
-        // `7d` / `14d` / `28d`
         guard raw.hasSuffix("d") else { return nil }
         return Int(raw.dropLast())
     }
@@ -337,6 +372,10 @@ struct ActivityFleetState: Equatable {
         accounts.filter { $0.diagnosis.needsAction }
     }
 
+    var delayed: [ActivityAccountState] {
+        accounts.filter { $0.diagnosis.code == "stale_stats" }
+    }
+
     /// 顶栏一句话。**只写真实数字**：0 待处理时不写"待处理 0"。
     var summaryText: String {
         guard !accounts.isEmpty else { return "还没有可检查的国内版账号" }
@@ -356,44 +395,55 @@ struct ActivityFleetState: Equatable {
 extension ActivityFleetState {
     /// 视觉回归与单测样本：**不是真实账号数据**。
     ///
-    /// 覆盖四种现状：今天已活跃 / 签到在但未活跃 / 统计延迟 / 没问到。
+    /// 覆盖五种现状：已活跃 / 签到确认但未活跃 / 签到未确认 / 疑似延迟 / 没问到。
     static func mock() -> ActivityFleetState {
-        ActivityFleetState(
+        let locked = [
+            RewardTierState(tier: "7d", days: 7, status: "locked", state: "locked", claimable: false),
+            RewardTierState(tier: "14d", days: 14, status: "locked", state: "locked", claimable: false),
+            RewardTierState(tier: "28d", days: 28, status: "locked", state: "locked", claimable: false),
+        ]
+        let claimed = [
+            RewardTierState(tier: "7d", days: 7, status: "claimed", state: "claimed", claimable: false),
+            RewardTierState(tier: "14d", days: 14, status: "claimed", state: "claimed", claimable: false),
+            RewardTierState(tier: "28d", days: 28, status: "locked", state: "locked", claimable: false),
+        ]
+
+        return ActivityFleetState(
             accounts: [
                 ActivityAccountState(
                     accountId: "acc-wb-1",
                     nickname: "主账号",
                     state: "ok",
-                    serverToday: "2026-11-17",
+                    serverToday: "2026-11-18",
                     todayActive: true,
-                    todayScore: 105,
+                    todayScore: 4,
                     todayNote: "今日已活跃，继续点亮成长热力墙",
-                    streakDays: 17,
+                    streakDays: 18,
                     nextTier: "28d",
-                    nextTierRemaining: 11,
-                    monthActiveDays: 17,
-                    tiers: [
-                        RewardTierState(tier: "7d", days: 7, status: "claimed", state: "claimed", claimable: false),
-                        RewardTierState(tier: "14d", days: 14, status: "claimed", state: "claimed", claimable: false),
-                        RewardTierState(tier: "28d", days: 28, status: "locked", state: "locked", claimable: false),
-                    ],
-                    lastActiveDate: "2026-11-17",
+                    nextTierRemaining: 10,
+                    monthActiveDays: 18,
+                    tiers: claimed,
+                    lastActiveDate: "2026-11-18",
                     activeDays7: 7,
-                    updatedAt: "2026-11-17T22:38:04+08:00",
+                    serverUpdatedAt: "2026-11-18T02:30:00+08:00",
                     checkin: ActivityCheckinState(
-                        status: "already",
-                        checkedAt: "2026-11-17T01:03:01Z",
-                        localDate: "2026-11-17",
-                        source: "auto"
+                        state: "confirmed",
+                        source: "server",
+                        serverLastDate: "2026-11-18"
                     ),
-                    diagnosis: ActivityDiagnosis(code: "active", label: "今日已活跃", needsAction: false),
-                    fetchedAt: "2026-11-17T14:40:00Z"
+                    diagnosis: ActivityDiagnosis(
+                        code: "active",
+                        label: "今日已活跃",
+                        action: "",
+                        needsAction: false
+                    ),
+                    fetchedAt: "2026-11-18T02:43:00Z"
                 ),
                 ActivityAccountState(
                     accountId: "acc-wb-2",
                     nickname: "运营小号",
                     state: "ok",
-                    serverToday: "2026-11-17",
+                    serverToday: "2026-11-18",
                     todayActive: false,
                     todayScore: 0,
                     todayNote: "开始使用以点亮今日热力墙",
@@ -401,28 +451,28 @@ extension ActivityFleetState {
                     nextTier: "7d",
                     nextTierRemaining: 6,
                     monthActiveDays: 1,
-                    tiers: [
-                        RewardTierState(tier: "7d", days: 7, status: "locked", state: "locked", claimable: false),
-                        RewardTierState(tier: "14d", days: 14, status: "locked", state: "locked", claimable: false),
-                        RewardTierState(tier: "28d", days: 28, status: "locked", state: "locked", claimable: false),
-                    ],
+                    tiers: locked,
                     lastActiveDate: "2026-11-13",
                     activeDays7: 1,
-                    updatedAt: "2026-11-13T17:11:53+08:00",
+                    serverUpdatedAt: "2026-11-13T17:11:53+08:00",
                     checkin: ActivityCheckinState(
-                        status: "already",
-                        checkedAt: "2026-11-17T01:03:00Z",
-                        localDate: "2026-11-17",
-                        source: "auto"
+                        state: "confirmed",
+                        source: "server",
+                        serverLastDate: "2026-11-18"
                     ),
-                    diagnosis: ActivityDiagnosis(code: "checkin_only", label: "签到已完成，今日未活跃", needsAction: true),
-                    fetchedAt: "2026-11-17T14:40:00Z"
+                    diagnosis: ActivityDiagnosis(
+                        code: "checkin_only",
+                        label: "签到已完成，今日未活跃",
+                        action: "去 WorkBuddy 客户端做一个真实任务，回来刷新回查",
+                        needsAction: true
+                    ),
+                    fetchedAt: "2026-11-18T02:43:00Z"
                 ),
                 ActivityAccountState(
                     accountId: "acc-wb-3",
                     nickname: "设计外包",
                     state: "ok",
-                    serverToday: "2026-11-17",
+                    serverToday: "2026-11-18",
                     todayActive: false,
                     todayScore: 0,
                     todayNote: "开始使用以点亮今日热力墙",
@@ -430,46 +480,56 @@ extension ActivityFleetState {
                     nextTier: "7d",
                     nextTierRemaining: 4,
                     monthActiveDays: 3,
-                    tiers: [
-                        RewardTierState(tier: "7d", days: 7, status: "locked", state: "locked", claimable: false),
-                        RewardTierState(tier: "14d", days: 14, status: "locked", state: "locked", claimable: false),
-                        RewardTierState(tier: "28d", days: 28, status: "locked", state: "locked", claimable: false),
-                    ],
+                    tiers: locked,
                     lastActiveDate: "2026-11-16",
                     activeDays7: 3,
-                    updatedAt: "2026-11-17T21:00:00+08:00",
+                    serverUpdatedAt: "2026-11-18T02:00:00+08:00",
                     checkin: ActivityCheckinState(
-                        status: "already",
-                        checkedAt: "2026-11-17T01:01:01Z",
-                        localDate: "2026-11-17",
-                        source: "auto"
+                        state: "unconfirmed",
+                        source: "server",
+                        note: "本地没有当天记录，服务端签到状态未取到"
                     ),
-                    diagnosis: ActivityDiagnosis(code: "stale_stats", label: "今天有行为，活跃尚未落库（可能延迟）", needsAction: false),
-                    fetchedAt: "2026-11-17T14:40:00Z"
+                    diagnosis: ActivityDiagnosis(
+                        code: "checkin_unverified",
+                        label: "签到状态未确认",
+                        action: "去签到页确认，或等下一次自动签到",
+                        needsAction: true
+                    ),
+                    fetchedAt: "2026-11-18T02:43:00Z"
                 ),
                 ActivityAccountState(
                     accountId: "acc-wb-4",
                     nickname: "备用账号",
-                    state: "partial",
-                    serverToday: nil,
-                    todayActive: nil,
-                    todayScore: nil,
-                    todayNote: nil,
-                    streakDays: 0,
+                    state: "ok",
+                    serverToday: "2026-11-18",
+                    todayActive: false,
+                    todayScore: 30,
+                    todayNote: "开始使用以点亮今日热力墙",
+                    streakDays: 2,
                     nextTier: "7d",
-                    nextTierRemaining: 7,
-                    monthActiveDays: 0,
-                    tiers: [],
-                    lastActiveDate: nil,
-                    activeDays7: nil,
-                    updatedAt: nil,
-                    checkin: nil,
-                    diagnosis: ActivityDiagnosis(code: "unknown", label: "活跃状态未知", needsAction: false),
-                    fetchedAt: "2026-11-17T14:40:00Z"
+                    nextTierRemaining: 5,
+                    monthActiveDays: 2,
+                    tiers: locked,
+                    lastActiveDate: "2026-11-17",
+                    activeDays7: 2,
+                    serverUpdatedAt: "2026-11-18T01:50:00+08:00",
+                    checkin: ActivityCheckinState(
+                        state: "confirmed",
+                        source: "local",
+                        status: "already",
+                        localDate: "2026-11-18"
+                    ),
+                    diagnosis: ActivityDiagnosis(
+                        code: "stale_stats",
+                        label: "服务端有分数但未标记活跃（可能延迟）",
+                        action: "稍后点刷新回查，不用重复做事",
+                        needsAction: false
+                    ),
+                    fetchedAt: "2026-11-18T02:43:00Z"
                 ),
             ],
-            summary: ActivitySummary(total: 4, active: 1, pending: 2, unknown: 1, needsAuth: 0),
-            fetchedAt: "2026-11-17T14:40:00Z",
+            summary: ActivitySummary(total: 4, active: 1, pending: 3, unknown: 0, needsAuth: 0),
+            fetchedAt: "2026-11-18T02:43:00Z",
             readOnly: true
         )
     }

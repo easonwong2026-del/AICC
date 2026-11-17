@@ -104,14 +104,14 @@ struct ConsoleActivityBlock: View {
                     .font(ConsoleType.caption)
                     .foregroundStyle(account.staleNote == nil ? ConsoleTheme.tertiaryText : ConsoleTheme.warning)
                     .lineLimit(1)
-                    .help(account.staleHelp ?? account.recentText ?? "")
+                    .help(account.recentText ?? "")
             }
             .frame(width: 208, alignment: .leading)
 
             // 短标签进表格，完整句子（含"该怎么处理"）放 tooltip。
             ConsoleBadge(text: account.diagnosis.shortLabel, tint: tone(for: account))
                 .frame(width: 84, alignment: .leading)
-                .help(account.diagnosis.label)
+                .help(account.diagnosis.tooltip)
 
             Text(account.activeText)
                 .font(ConsoleType.body)
@@ -121,9 +121,10 @@ struct ConsoleActivityBlock: View {
 
             Text(account.checkinText)
                 .font(ConsoleType.body)
-                .foregroundStyle(ConsoleTheme.secondaryText)
+                .foregroundStyle(account.checkin.isConfirmed ? ConsoleTheme.secondaryText : ConsoleTheme.warning)
                 .frame(width: 126, alignment: .leading)
                 .lineLimit(1)
+                .help(account.checkin.detail)
 
             Text(account.streakText)
                 .font(ConsoleType.body)
@@ -140,17 +141,21 @@ struct ConsoleActivityBlock: View {
 
             Spacer(minLength: 0)
 
-            if account.diagnosis.needsAction {
+            if account.diagnosis.needsClient {
                 Button("打开客户端") { WorkBuddyClient.open() }
                     .buttonStyle(ConsoleSecondaryButtonStyle())
                     .disabled(!WorkBuddyClient.isInstalled)
                     .frame(width: 96, alignment: .trailing)
                     .help(WorkBuddyClient.isInstalled
-                          ? "在 WorkBuddy 客户端里完成一个真实任务（一句话对话即可），回来点「刷新」回查"
+                          ? "打开 WorkBuddy 客户端（不自动切换账号）；做一次真实任务后回来点「刷新」回查"
                           : "没找到 WorkBuddy 客户端；请先安装再回来点「刷新」")
             } else {
-                Text("")
+                Text(account.diagnosis.needsAction ? account.diagnosis.shortAction : "")
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .lineLimit(1)
                     .frame(width: 96, alignment: .trailing)
+                    .help(account.diagnosis.tooltip)
             }
         }
         .padding(.vertical, 8)
@@ -161,29 +166,30 @@ struct ConsoleActivityBlock: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: 4) {
             if !fleet.needsAction.isEmpty {
-                Text("有 \(fleet.needsAction.count) 个账号今天还没点亮热力墙。")
+                Text("有 \(fleet.needsAction.count) 个账号需要你处理。")
                     .font(ConsoleType.small)
                     .foregroundStyle(ConsoleTheme.text)
+                ForEach(fleet.needsAction) { account in
+                    Text("\(account.nickname)：\(account.diagnosis.action)")
+                        .font(ConsoleType.caption)
+                        .foregroundStyle(ConsoleTheme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
-            if delayedCount > 0 {
-                // "待落库"不该被算进"要处理"：它自己会好，催用户去做事只会重复劳动。
-                Text("另有 \(delayedCount) 个账号今天有行为但还没落库，过一会儿刷新即可。")
+            if !fleet.delayed.isEmpty {
+                Text("另有 \(fleet.delayed.count) 个账号服务端已有分数但还没标记活跃，过一会儿刷新即可。")
                     .font(ConsoleType.caption)
                     .foregroundStyle(ConsoleTheme.warning)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Text("去 WorkBuddy 客户端做一个真实任务（一次对话或一个任务即可），回来点「刷新」回查。签到不算活跃，所以这里只会等客户端的真实行为。")
-                .font(ConsoleType.caption)
-                .foregroundStyle(ConsoleTheme.secondaryText)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("AICC 不切换账号：打开客户端后请确认当前登录的是要补的那个账号。")
+            Text("签到只记账，不点亮热力墙；活跃要在 WorkBuddy 客户端里真实使用一次。AICC 不切换账号，打开后请确认登录的是要补的那个。")
                 .font(ConsoleType.caption)
                 .foregroundStyle(ConsoleTheme.tertiaryText)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private var delayedCount: Int {
-        fleet.accounts.filter { $0.diagnosis.code == "stale_stats" }.count
-    }
+    private var delayedCount: Int { fleet.delayed.count }
 
     private func failureRow(_ text: String, hasCache: Bool) -> some View {
         ConsoleInlineNotice(
@@ -196,7 +202,8 @@ struct ConsoleActivityBlock: View {
         switch account.diagnosis.code {
         case "active": return ConsoleTheme.success
         case "checkin_only": return ConsoleTheme.warning
-        case "checkin_missing", "needs_auth": return ConsoleTheme.danger
+        case "checkin_unverified": return ConsoleTheme.warning
+        case "inactive", "needs_auth": return ConsoleTheme.danger
         case "unknown": return ConsoleTheme.secondaryText
         default: return ConsoleTheme.secondaryText
         }
