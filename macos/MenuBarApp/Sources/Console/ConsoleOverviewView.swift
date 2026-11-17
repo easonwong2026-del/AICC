@@ -21,6 +21,7 @@ struct ConsoleOverviewView: View {
         } content: {
             VStack(alignment: .leading, spacing: ConsoleTheme.sectionSpacing) {
                 statSection
+                activitySection
                 platformSection
                 HStack(alignment: .top, spacing: ConsoleTheme.cardSpacing) {
                     recentSection
@@ -29,7 +30,7 @@ struct ConsoleOverviewView: View {
             }
         }
         .task {
-            // 只读本地记录：总览打开时不联网，也不改任何业务状态。
+            // 其余几块只读本地记录，不联网；唯一联网的是下面的成长活跃（只读 GET）。
             if store.tasksOverview == nil {
                 await store.refreshTasksOverview()
             }
@@ -39,6 +40,11 @@ struct ConsoleOverviewView: View {
             }
             if store.travelRows.isEmpty {
                 await store.loadTravel()
+            }
+            // 成长活跃：每次启动只自动读一次。这一块的存在意义就是"打开就能看一眼"，
+            // 让用户先点一下再看反而违背目的；读到的结果留在 store 里，之后靠「刷新」。
+            if store.lastActivityRefresh == nil && store.activityError == nil && !store.activityLoading {
+                await store.loadActivity()
             }
         }
     }
@@ -108,7 +114,20 @@ struct ConsoleOverviewView: View {
         )
     }
 
-    // MARK: 第二层：服务平台
+    // MARK: 第二层：成长活跃（PR #103）
+
+    /// 四个账号今天亮了没有。**不自动查询**：每账号两个 GET，由用户点「刷新」触发。
+    private var activitySection: some View {
+        ConsoleActivityBlock(
+            fleet: store.activity,
+            loading: store.activityLoading,
+            failure: store.activityError,
+            lastRefresh: store.lastActivityRefresh,
+            onRefresh: { Task { await store.loadActivity() } }
+        )
+    }
+
+    // MARK: 第三层：服务平台
 
     private var platformSection: some View {
         VStack(alignment: .leading, spacing: 8) {

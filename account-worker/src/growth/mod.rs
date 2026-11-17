@@ -6,6 +6,7 @@
 //!
 //! 凭据只从 `auth::broker` 取：默认 Magpie、Own 兜底，两份都不碰对方的键。
 
+pub mod activity;
 pub mod api;
 pub mod catalog;
 pub mod evidence;

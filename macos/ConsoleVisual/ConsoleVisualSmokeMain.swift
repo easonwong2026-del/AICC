@@ -41,6 +41,9 @@ struct ConsoleVisualFixture {
     /// 奖励状态（PR #98）：账号详情里的「奖励」区块靠它渲染。
     var rewardStates: [String: RewardAccountState] = [:]
     var rewardFailures: [String: String] = [:]
+    /// 成长活跃（PR #103）：总览页的「成长活跃」区块靠它渲染。
+    var activity: ActivityFleetState = .empty
+    var activityError: String?
 }
 
 extension ConsoleVisualFixture {
@@ -278,6 +281,9 @@ extension ConsoleVisualFixture {
         if let reward = RewardStatusResult.mock(accountId: "acc-wb-1").account("acc-wb-1") {
             fixture.rewardStates["acc-wb-1"] = reward
         }
+
+        // PR #103：成长活跃样本（已在 / 未活跃 / 疑似延迟 / 未知 四种现状）。
+        fixture.activity = .mock()
 
         fixture.tasksOverview = TasksOverview(json: [
             "today": "2026-11-14",
@@ -533,10 +539,13 @@ struct ConsoleVisualSmokeMain {
                                    page: .accounts, account: "acc-wb-1")) },
              CGSize(width: 1120, height: 1500), .light),
             ("rewards-block-760x560-light",
-             { AnyView(Self.rewardsBlock()) }, CGSize(width: 760, height: 560), .light),
-            ("rewards-block-stale-760x560-light",
+             { AnyView(Self.rewardsBlock()) }, CGSize(width: 760, height: 560), .light),            ("rewards-block-stale-760x560-light",
              { AnyView(Self.rewardsBlock(failure: "读取超时（60s）：account worker 未在时限内返回")) },
              CGSize(width: 760, height: 640), .light),
+            ("activity-block-1000x420-light",
+             { AnyView(Self.activityBlock()) }, CGSize(width: 1000, height: 420), .light),
+            ("activity-block-1000x420-dark",
+             { AnyView(Self.activityBlock()) }, CGSize(width: 1000, height: 420), .dark),
             ("rewards-block-760x560-dark",
              { AnyView(Self.rewardsBlock()) }, CGSize(width: 760, height: 560), .dark),
             ("accounts-rewards-detail-1120x760-light",
@@ -670,6 +679,21 @@ struct ConsoleVisualSmokeMain {
 
 
 extension ConsoleVisualSmokeMain {
+    /// 单独渲染「成长活跃」区块：总览页还有统计卡与服务平台，
+    /// 四行表格在整页截图里偏小，所以单独出一张复核列宽与文案。
+    static func activityBlock() -> some View {
+        ConsoleActivityBlock(
+            fleet: .mock(),
+            loading: false,
+            failure: nil,
+            lastRefresh: Date().addingTimeInterval(-90),
+            onRefresh: {}
+        )
+        .padding(20)
+        .frame(width: 960, alignment: .leading)
+        .background(ConsoleTheme.canvas)
+    }
+
     /// 单独渲染奖励区块：账号详情页太长，这块内容会被挤到折叠线以下，
     /// 所以再做一张只含它的图，用来复核排版与文案。
     static func rewardsBlock(failure: String? = nil) -> some View {

@@ -832,6 +832,18 @@ final class AccountWorkerManager: ObservableObject {
         )
     }
 
+    /// 成长活跃状态（PR #103）：每账号两个 GET（`/heatmap` + `/streak`），
+    /// 外加本地当天的签到记录。
+    ///
+    /// 只读，但仍然会打服务端：一次四个账号 8 个请求、账号之间串行，给 60 秒。
+    /// **不自动轮询** —— 由用户点「刷新」触发。
+    func activityStatus(accountIds: [String] = []) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        let params: [String: Any] = accountIds.isEmpty ? [:] : ["accountIds": accountIds]
+        return try await client.call("growth.activity.status", params: params, timeout: 60)
+    }
+
     /// 奖励状态（PR #98）：连登档位、抽奖次数、补签卡与可补签日期。
     ///
     /// 只读：worker 侧只有四个 GET。一次查询每账号 4 个请求、账号之间串行，

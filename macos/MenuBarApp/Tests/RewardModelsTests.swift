@@ -234,10 +234,10 @@ final class RewardModelsTests: XCTestCase {
         let state = RewardAccountState(json: account(overrides: ["streakDays": 0]))
         let note = state.streakNote
         XCTAssertNotNil(note)
-        // 只陈述服务端事实 + 未确证，不再断言"签到不会增加连登"。
-        XCTAssertTrue(note?.contains("连登 0 天") == true)
-        XCTAssertTrue(note?.contains("尚无确证") == true)
-        XCTAssertFalse(note?.contains("不会让它") == true, "不许断言因果")
+        // PR #103 之后这句话有了实测依据：签到只记账，连登要靠客户端真实使用。
+        XCTAssertTrue(note?.contains("签到只记账") == true)
+        XCTAssertTrue(note?.contains("连登") == true)
+        XCTAssertFalse(note?.contains("尚无确证") == true, "已经验证过，不许再写未确证")
     }
 
     func testANonZeroStreakHasNoExplanation() {
