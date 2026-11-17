@@ -38,6 +38,9 @@ struct ConsoleVisualFixture {
     var qoderError: String?
     var qoderCreditsAuto: [QoderCreditsAutoItem] = []
     var qoderCreditsError: String?
+    /// 奖励状态（PR #98）：账号详情里的「奖励」区块靠它渲染。
+    var rewardStates: [String: RewardAccountState] = [:]
+    var rewardFailures: [String: String] = [:]
 }
 
 extension ConsoleVisualFixture {
@@ -270,6 +273,11 @@ extension ConsoleVisualFixture {
                 "error": "该版本没有已证实的 Credits 接口，未发送任何请求",
             ]),
         ].compactMap { $0 }
+
+        // PR #98：奖励状态样本，挂到国内版主账号上（acc-wb-1）。
+        if let reward = RewardStatusResult.mock(accountId: "acc-wb-1").account("acc-wb-1") {
+            fixture.rewardStates["acc-wb-1"] = reward
+        }
 
         fixture.tasksOverview = TasksOverview(json: [
             "today": "2026-11-14",
@@ -520,6 +528,25 @@ struct ConsoleVisualSmokeMain {
              { AnyView(consoleView(store: store, settings: settings, scheme: .light,
                                    page: .accounts, account: "qoderService:qsa-cn-1")) },
              CGSize(width: 1120, height: 760), .light),
+            ("accounts-rewards-detail-tall-1120x1500-light",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
+                                   page: .accounts, account: "acc-wb-1")) },
+             CGSize(width: 1120, height: 1500), .light),
+            ("rewards-block-760x560-light",
+             { AnyView(Self.rewardsBlock()) }, CGSize(width: 760, height: 560), .light),
+            ("rewards-block-stale-760x560-light",
+             { AnyView(Self.rewardsBlock(failure: "读取超时（60s）：account worker 未在时限内返回")) },
+             CGSize(width: 760, height: 640), .light),
+            ("rewards-block-760x560-dark",
+             { AnyView(Self.rewardsBlock()) }, CGSize(width: 760, height: 560), .dark),
+            ("accounts-rewards-detail-1120x760-light",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
+                                   page: .accounts, account: "acc-wb-1")) },
+             CGSize(width: 1120, height: 760), .light),
+            ("accounts-rewards-detail-1120x760-dark",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .dark,
+                                   page: .accounts, account: "acc-wb-1")) },
+             CGSize(width: 1120, height: 760), .dark),
             ("accounts-profile-detail-1120x760-dark",
              { AnyView(consoleView(store: store, settings: settings, scheme: .dark,
                                    page: .accounts, account: "qoderProfile:qp-1")) },
@@ -641,4 +668,24 @@ struct ConsoleVisualSmokeMain {
     }
 }
 
+
+extension ConsoleVisualSmokeMain {
+    /// 单独渲染奖励区块：账号详情页太长，这块内容会被挤到折叠线以下，
+    /// 所以再做一张只含它的图，用来复核排版与文案。
+    static func rewardsBlock(failure: String? = nil) -> some View {
+        let state = RewardStatusResult.mock(accountId: "acc-wb-1").account("acc-wb-1")
+        return ConsoleRewardsBlock(
+            state: state,
+            loading: false,
+            failure: failure,
+            onRefresh: {}
+        )
+        .padding(18)
+        .frame(width: 720, alignment: .leading)
+        .background(ConsoleTheme.card, in: RoundedRectangle(cornerRadius: 12))
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(ConsoleTheme.canvas)
+    }
+}
 #endif
