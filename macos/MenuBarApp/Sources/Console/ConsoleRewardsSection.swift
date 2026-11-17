@@ -19,6 +19,9 @@ struct ConsoleRewardsBlock: View {
         VStack(alignment: .leading, spacing: 12) {
             headerRow
             if let state {
+                if let notice = RewardRefreshNotice.make(state: state, failure: failure) {
+                    staleBanner(notice)
+                }
                 tierRow(state)
                 metricsRow(state)
                 makeupRow(state)
@@ -56,7 +59,15 @@ struct ConsoleRewardsBlock: View {
                 .foregroundStyle(ConsoleTheme.secondaryText)
             Spacer(minLength: 8)
             if let state {
-                ConsoleBadge(text: state.stateLabel, tint: tone(for: state.state))
+                Text("上次读取 \(ConsoleFormat.shortTimestamp(state.scannedAt))")
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                if RewardRefreshNotice.make(state: state, failure: failure) != nil {
+                    // 旧数据 + 本次失败：状态徽章换成「显示旧数据」，别让"已读取"与红字冲突。
+                    ConsoleBadge(text: "显示旧数据", tint: ConsoleTheme.warning)
+                } else {
+                    ConsoleBadge(text: state.stateLabel, tint: tone(for: state.state))
+                }
             }
             Button(loading ? "读取中…" : "刷新") { onRefresh() }
                 .buttonStyle(ConsoleSecondaryButtonStyle())
@@ -127,6 +138,33 @@ struct ConsoleRewardsBlock: View {
         let head = dates.prefix(5).map { $0.suffix(5) } // MM-DD
         let rest = dates.count - head.count
         return head.joined(separator: "、") + (rest > 0 ? " 等 \(dates.count) 天" : "")
+    }
+
+    /// 刷新失败但还留着旧数据时的横幅。**必须比普通提示更显眼**：
+    /// 用户看到的数字是旧的，不说明白就会把它当实时状态。
+    private func staleBanner(_ notice: RewardRefreshNotice) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(RewardRefreshNotice.title)
+                .font(ConsoleType.rowTitle)
+                .foregroundStyle(ConsoleTheme.warning)
+            Text(notice.reason)
+                .font(ConsoleType.caption)
+                .foregroundStyle(ConsoleTheme.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(notice.hasReadAt
+                 ? "上次成功读取：\(ConsoleFormat.shortTimestamp(notice.readAt))"
+                 : "上次成功读取时间未知")
+                .font(ConsoleType.caption)
+                .foregroundStyle(ConsoleTheme.tertiaryText)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(ConsoleTheme.warning.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(ConsoleTheme.warning.opacity(0.35))
+        )
     }
 
     private func noticeRow(_ text: String, tone: Color) -> some View {

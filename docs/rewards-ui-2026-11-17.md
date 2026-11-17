@@ -61,7 +61,7 @@
 
 ## 六、测试
 
-`macos/MenuBarApp/Tests/RewardModelsTests.swift`（19 条）：
+`macos/MenuBarApp/Tests/RewardModelsTests.swift`（23 条）：
 
 | 组 | 覆盖 |
 | --- | --- |
@@ -71,6 +71,7 @@
 | 历史 | 阶段翻译（`unknown`=待核验、`frozen`=已冻结、`failed`=确认未执行）；`open` 计数 |
 | 汇总 | 未知不写 0；有值时的完整摘要；状态标签 |
 | 整包 | 按账号取；Mock 自身可被解析；空 payload 不造假行 |
+| 刷新失败 | 有缓存 + 失败 → 出提示；成功 → 无提示；无缓存 + 失败 → 不出"上次数据"；读取时间缺失 → 报未知 |
 
 ## 七、这一层不做什么
 
@@ -98,3 +99,21 @@
 
 复核过的几点：三档格子在深色下边框仍可辨；"待核验"用黄色徽章、"已到账"用绿色，
 不把未定状态画成失败；三个禁用按钮在两种外观下都能看出是禁用。
+
+## 十、复审修复：刷新失败不再静默（2026-11-17）
+
+**问题**：`loadReward()` 失败时**不清空**缓存（这是对的），但 `ConsoleRewardsBlock.body`
+里 `if let state` 优先于 `failure`，于是第二次刷新失败时界面继续显示旧数据，一个字都不提。
+
+**修法**：
+
+| 变化 | 位置 |
+| --- | --- |
+| 新增 `RewardRefreshNotice`（模型层，可单测）：只有"有缓存 + 本次失败"同时成立才存在 | `RewardModels.swift` |
+| 旧数据顶部加黄色横幅：「刷新失败，以下为上次成功读取的数据」+ 失败原因 + 上次成功读取时间 | `ConsoleRewardsSection.swift` |
+| 头部固定显示「上次读取 …」（来自 `scannedAt`），没有失败时也显示，避免把昨天的数据当实时 | 同上 |
+| 旧数据 + 失败时状态徽章从「已读取」换成「显示旧数据」（黄色），不与红字自相矛盾 | 同上 |
+| 再次刷新成功：`rewardFailures[accountId] = nil`（原有行为），横幅与徽章自动消失 | `ConsoleStore.loadReward` |
+
+新增 4 条单测：有缓存+失败出提示、成功不出提示、无缓存+失败不出"上次数据"、读取时间缺失报未知。
+视觉回归新增 `rewards-block-stale-760x560-light`（放在 `docs/images/rewards-ui/block-stale-light.png`）。

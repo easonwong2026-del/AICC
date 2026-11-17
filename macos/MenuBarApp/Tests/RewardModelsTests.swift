@@ -171,6 +171,35 @@ final class RewardModelsTests: XCTestCase {
         }
     }
 
+    // MARK: - 刷新失败（保留旧数据）
+
+    func testAFailedRefreshOverCachedDataProducesANotice() {
+        // 复审 P1 回归：Store 保留旧数据 + 记 failure，界面必须说清楚"这是旧数据"。
+        let state = RewardAccountState(json: account())
+        let notice = RewardRefreshNotice.make(state: state, failure: "请求超时（60s）")
+        XCTAssertEqual(notice?.reason, "请求超时（60s）")
+        XCTAssertEqual(notice?.readAt, "2026-11-17T01:00:00Z")
+        XCTAssertTrue(notice?.hasReadAt == true)
+        XCTAssertEqual(RewardRefreshNotice.title, "刷新失败，以下为上次成功读取的数据")
+    }
+
+    func testASuccessfulRefreshHasNoNotice() {
+        let state = RewardAccountState(json: account())
+        XCTAssertNil(RewardRefreshNotice.make(state: state, failure: nil))
+        XCTAssertNil(RewardRefreshNotice.make(state: state, failure: ""))
+    }
+
+    func testAFailedRefreshWithoutCacheHasNoStaleNotice() {
+        // 没有旧数据时不该说"以下是上次的数据"—— 因为压根没有。
+        XCTAssertNil(RewardRefreshNotice.make(state: nil, failure: "connection refused"))
+    }
+
+    func testAnUnknownReadTimeIsReportedAsUnknown() {
+        let state = RewardAccountState(json: account(overrides: ["scannedAt": ""]))
+        let notice = RewardRefreshNotice.make(state: state, failure: "timeout")
+        XCTAssertEqual(notice?.hasReadAt, false)
+    }
+
     // MARK: - 整包与 Mock
 
     func testResultLooksUpByAccountId() {

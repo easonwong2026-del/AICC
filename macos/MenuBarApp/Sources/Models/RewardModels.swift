@@ -294,6 +294,31 @@ struct RewardAccountState: Identifiable, Equatable {
     }
 }
 
+// MARK: - 刷新失败（保留旧数据）
+
+/// 「这次刷新失败了，但屏幕上还是上次的数据」这一条提示。
+///
+/// 存在的理由：`loadReward()` 失败时**不清空**缓存（清空会让人以为奖励没了），
+/// 于是界面必须自己说清楚"现在看到的不是最新的"。把这段判定放进模型，
+/// 是为了让它可单测 —— 放在 View 的 if 里就只能靠肉眼。
+struct RewardRefreshNotice: Equatable {
+    static let title = "刷新失败，以下为上次成功读取的数据"
+
+    /// 失败原因（来自 store）。
+    let reason: String
+    /// 上次成功读取时间（服务端扫描时间）。空串表示不知道。
+    let readAt: String
+
+    /// 只有在"有缓存 + 本次失败"同时成立时才存在。
+    static func make(state: RewardAccountState?, failure: String?) -> RewardRefreshNotice? {
+        guard let state, let failure, !failure.isEmpty else { return nil }
+        return RewardRefreshNotice(reason: failure, readAt: state.scannedAt)
+    }
+
+    /// 有没有一个可显示的时间。格式化交给界面层（模型层不依赖 Console）。
+    var hasReadAt: Bool { !readAt.isEmpty }
+}
+
 // MARK: - 一次查询的结果
 
 struct RewardStatusResult: Equatable {

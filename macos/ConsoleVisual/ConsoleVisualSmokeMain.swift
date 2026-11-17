@@ -534,6 +534,9 @@ struct ConsoleVisualSmokeMain {
              CGSize(width: 1120, height: 1500), .light),
             ("rewards-block-760x560-light",
              { AnyView(Self.rewardsBlock()) }, CGSize(width: 760, height: 560), .light),
+            ("rewards-block-stale-760x560-light",
+             { AnyView(Self.rewardsBlock(failure: "读取超时（60s）：account worker 未在时限内返回")) },
+             CGSize(width: 760, height: 640), .light),
             ("rewards-block-760x560-dark",
              { AnyView(Self.rewardsBlock()) }, CGSize(width: 760, height: 560), .dark),
             ("accounts-rewards-detail-1120x760-light",
@@ -669,12 +672,12 @@ struct ConsoleVisualSmokeMain {
 extension ConsoleVisualSmokeMain {
     /// 单独渲染奖励区块：账号详情页太长，这块内容会被挤到折叠线以下，
     /// 所以再做一张只含它的图，用来复核排版与文案。
-    static func rewardsBlock() -> some View {
+    static func rewardsBlock(failure: String? = nil) -> some View {
         let state = RewardStatusResult.mock(accountId: "acc-wb-1").account("acc-wb-1")
         return ConsoleRewardsBlock(
             state: state,
             loading: false,
-            failure: nil,
+            failure: failure,
             onRefresh: {}
         )
         .padding(18)
