@@ -1,3 +1,5 @@
+// probe: rust-only change used to verify path classification for PR #97.
+// This branch is deleted right after the run; nothing here is meant to merge.
 //! vendored 上游补丁的回归。
 //!
 //! AICC 用 `WB_SWITCH_HOME` 把上游存储收进自己的数据目录，
