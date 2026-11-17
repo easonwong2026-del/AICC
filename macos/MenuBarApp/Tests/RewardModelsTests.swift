@@ -173,7 +173,7 @@ final class RewardModelsTests: XCTestCase {
     func testResultLooksUpByAccountId() {
         let result = RewardStatusResult(json: [
             "readOnly": true,
-            "accounts": [account(), account(["accountId": "acc-2"])],
+            "accounts": [account(), account(overrides: ["accountId": "acc-2"])],
         ])
         XCTAssertEqual(result.accounts.count, 2)
         XCTAssertEqual(result.account("acc-2")?.accountId, "acc-2")
