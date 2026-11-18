@@ -3,11 +3,11 @@
 本轮的验收证据。命令一条：`bash scripts/check-activity.sh`
 （只读：每账号 `/heatmap` + `/streak`，本地拿不出成功签到记录时再读一次签到状态）。
 
-## 一、实测输出（服务端今天 2026-11-18，02:51 CST）
+## 一、实测输出（服务端今天 2026-11-18，08:19 CST）
 
 | 账号 | 今日活跃 | 今日签到 | 连登 | 下一档 | 结论 | 谁来做 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 卡里 | 是 · 4 分 | 已签（服务端） | 18 天 | 28d · 还差 10 天 | `active` | 不用管 |
+| 卡里 | 是 · 8 分 | 已签（服务端） | 18 天 | 28d · 还差 10 天 | `active` | 不用管 |
 | SAMSUNG 技术服务 | 否 | 已签（服务端） | 0 | 7d · 还差 6 天 | `checkin_only` | 用户（客户端做一次真实任务） |
 | 高亮 | 否 | 已签（服务端） | 0 | 7d · 还差 7 天 | `checkin_only` | 用户（客户端做一次真实任务） |
 | 一锅端 | 否 | 已签（服务端） | 0 | 7d · 还差 7 天 | `checkin_only` | 用户（客户端做一次真实任务） |
@@ -53,10 +53,22 @@ AICC 的价值是把"哪个账号需要动手、动手前该先做什么"压缩�
 | 7 | 多账号按 `accountId` 对应 | 单测 `multiple_accounts_keep_their_own_identity` + RPC 集成测试 | 各自归属，汇总计数正确 |
 | 8 | 连登与剩余天数只取服务端 | 单测 `next_tier_remaining_is_server_truth_not_arithmetic`（0 天 / 还差 6 天） | 不做减法 |
 | 9 | 连续刷新没有任何写操作 | RPC 集成测试 `activity_status_is_registered_and_read_only`（连调两次）+ 源码守卫断言无 `growth.activity.write` | 只读，无写接口 |
+| 11 | 本地 `claimed` / `already` 都必须算已签 | 单测 `both_stored_success_states_confirm_without_asking_the_server` + `claimed_and_already_are_the_only_success_states` | 两种状态都 `confirmed(local)`，且不依赖探针结论 |
+| 12 | 状态查询不许回退到上游探针 | 单测 `the_activity_module_uses_the_controlled_status_query`（源码守卫）+ `checkin::api` 的 5 条请求纪律用例 | 只用 `query_status_tolerant`；401/403/429/5xx/超时都只发一次 |
 | 10 | 正式构建不含调试探针 | 单测 `dev_only_probes_stay_behind_debug_assertions`（读 `handlers.rs` 断言 `#[cfg(debug_assertions)]`） | 探针只在 debug 注册 |
 
 另有 `the_diagnosis_matrix_never_claims_activity_without_evidence`：45 种
 （活跃三态 × 分数三档 × 签到五态）组合里，没有 `is_active = true` 一律不报 `active`。
+
+### 复审 P0 的两条修复（本轮）
+
+1. **`claimed` 漏判**：本地成功状态只认存储层常量 `claimed` / `already`；
+   本地成功时**零额外请求**（`a_claimed_local_record_needs_no_server_verdict`）。
+2. **不受控的状态查询**：换掉上游 `get_checkin_status`（非成功即换路、401/429/5xx
+   都重问），改用 `checkin::api::query_status_tolerant`：只读语义 `POST {}`、
+   仅 404 fallback 一次、不刷令牌、不发 `daily-checkin`。`checkin::api` 新增 5 条
+   带 Mock 发送层的用例，断言"成功只发 1 次、404 才发 2 次、其它错误只发 1 次"。
+3. **信号冲突不选边**：`checkin_dates` 与显式布尔冲突 → `Indeterminate` → 未确认。
 
 ## 四、这一轮没有验证的
 
@@ -74,6 +86,6 @@ AICC 的价值是把"哪个账号需要动手、动手前该先做什么"压缩�
 cargo build --manifest-path account-worker/Cargo.toml
 bash scripts/check-activity.sh                # 四账号交叉诊断
 bash scripts/collect-activity-evidence.sh     # 判定所需字段摘要落 docs/evidence/
-cargo test --manifest-path account-worker/Cargo.toml growth::activity   # 29 条
+cargo test --manifest-path account-worker/Cargo.toml growth::activity   # 35 条
 bash scripts/smoke-test-console-visual.sh     # 53 张，含 activity-block 两张
 ```

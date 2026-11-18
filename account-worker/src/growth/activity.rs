@@ -1418,6 +1418,43 @@ mod tests {
         assert_eq!(summarize(&[active, pending]).pending, 1);
     }
 
+    /// 回归（复审 P0-1）：存储层两个成功状态都必须直接算"已签"，不依赖探针结论。
+    #[test]
+    fn both_stored_success_states_confirm_without_asking_the_server() {
+        for status in [
+            crate::storage::checkin::STATUS_CLAIMED,
+            crate::storage::checkin::STATUS_ALREADY,
+        ] {
+            let checkin = resolve_checkin(
+                Some("2026-11-18"),
+                Some(&record("2026-11-18", status)),
+                // 探针说"没签"也不该翻案：本地成功就是成功。
+                probe(CheckinProbe::NotChecked),
+            );
+            assert_eq!(checkin.state, "confirmed", "状态 {status} 必须是已签");
+            assert_eq!(checkin.source, Some("local"), "本地成功不该去问服务端");
+        }
+    }
+
+    /// 回归（复审 P0-2）：不许回退到上游那个签到探针。
+    ///
+    /// 上游实现"只要不是成功就换路径"，401/429/5xx 都会重问一次；
+    /// 本仓的纪律是**只有 404 换路径**。
+    #[test]
+    fn the_activity_module_uses_the_controlled_status_query() {
+        let source = include_str!("activity.rs");
+        assert!(
+            source.contains("query_status_tolerant"),
+            "必须用受控的只读状态查询"
+        );
+        // 拆开拼，避免这条断言自己出现在源码里被匹配到。
+        let forbidden = ["get_checkin", "status"].join("_");
+        assert!(
+            !source.contains(&forbidden),
+            "不许调用上游的 {forbidden}（非 404 也会换路）"
+        );
+    }
+
     /// 官方文档：调试探针只能出现在 debug 构建里，正式包不许带。
     #[test]
     fn dev_only_probes_stay_behind_debug_assertions() {
