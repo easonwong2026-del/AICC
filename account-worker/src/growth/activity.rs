@@ -145,11 +145,12 @@ pub enum CheckinProbe {
     Indeterminate,
 }
 
-/// 探针的一次观测：结论 + 服务端最近一次签到日期。
+/// 探针的一次观测：结论 + 服务端最近一次签到日期 + 一句脱敏说明。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckinProbeView {
     pub verdict: CheckinProbe,
     pub last_date: Option<String>,
+    pub note: Option<String>,
 }
 
 impl CheckinProbeView {
@@ -157,11 +158,21 @@ impl CheckinProbeView {
         Self {
             verdict: CheckinProbe::Indeterminate,
             last_date: None,
+            note: None,
         }
     }
 
     fn of(verdict: CheckinProbe, last_date: Option<String>) -> Self {
-        Self { verdict, last_date }
+        Self {
+            verdict,
+            last_date,
+            note: None,
+        }
+    }
+
+    fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
+        self
     }
 }
 
@@ -330,54 +341,47 @@ pub fn parse_streak(body: &Value) -> StreakView {
     }
 }
 
-/// 解析签到状态接口。
+/// 把服务端签到状态翻成探针结论。
 ///
-/// 上游把 `todayCheckedIn` 的缺省值写成了 `false` —— **不能照抄**：
-/// "字段缺失"与"明确没签"在界面上是两句话。这里只认 `raw` 里显式给出的
-/// `today_checked_in` / `todayCheckedIn`。
-pub fn parse_checkin_probe(status: &Value, server_today: Option<&str>) -> CheckinProbeView {
-    if status.get("ok").and_then(Value::as_bool) != Some(true) {
-        return CheckinProbeView::indeterminate();
-    }
-    let raw = status.get("raw");
-    // `checkin_dates` 是服务端自己列的"已签到日期"，用它比布尔值更硬：
-    // 它能把"服务端今天"和"我们的今天"对齐。实测 AICC 没有本地记录、服务端却有
-    // 2026-11-18 这一天 —— 只看布尔值就会误判成"签到没跑"。
-    let dates: Vec<String> = raw
-        .and_then(|raw| raw.get("checkin_dates"))
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str())
-                .map(|text| text.trim().to_string())
-                .filter(|text| !text.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
-    let last_date = dates.first().cloned();
+/// 两条信号（`checkin_dates` 与显式 `today_checked_in`）**冲突时不覆盖证据**：
+/// 返回 `Indeterminate` 并留一句脱敏说明，让界面显示"未确认"而不是武断地说
+/// "已签"或"未签"。
+pub fn probe_from_reply(
+    reply: &crate::checkin::api::StatusReply,
+    server_today: Option<&str>,
+) -> CheckinProbeView {
+    let last_date = reply.checkin_dates.first().cloned();
+    let explicit = reply.checked_in;
 
-    if let (Some(today), false) = (server_today, dates.is_empty()) {
-        let verdict = if dates.iter().any(|date| date == today) {
-            CheckinProbe::Checked
-        } else {
-            CheckinProbe::NotChecked
+    let Some(today) = server_today else {
+        return match explicit {
+            Some(true) => CheckinProbeView::of(CheckinProbe::Checked, last_date),
+            Some(false) => CheckinProbeView::of(CheckinProbe::NotChecked, last_date),
+            None => CheckinProbeView::indeterminate().with_note("没有服务端日期，无法对齐签到日历"),
         };
-        return CheckinProbeView::of(verdict, last_date);
+    };
+
+    if reply.checkin_dates.is_empty() {
+        return match explicit {
+            Some(true) => CheckinProbeView::of(CheckinProbe::Checked, last_date),
+            Some(false) => CheckinProbeView::of(CheckinProbe::NotChecked, last_date),
+            None => CheckinProbeView::indeterminate().with_note("签到状态响应里没有可判定的字段"),
+        };
     }
 
-    let explicit = raw
-        .and_then(|raw| {
-            raw.get("today_checked_in")
-                .or_else(|| raw.get("todayCheckedIn"))
-        })
-        .and_then(Value::as_bool);
-    let verdict = match explicit {
-        Some(true) => CheckinProbe::Checked,
-        Some(false) => CheckinProbe::NotChecked,
-        None => CheckinProbe::Indeterminate,
-    };
-    CheckinProbeView::of(verdict, last_date)
+    let listed_today = reply
+        .checkin_dates
+        .iter()
+        .any(|date| date.as_str() == today);
+
+    match (listed_today, explicit) {
+        (true, Some(false)) => CheckinProbeView::indeterminate()
+            .with_note("签到日期列表含今天，但 today_checked_in 为 false（服务端信号冲突）"),
+        (false, Some(true)) => CheckinProbeView::indeterminate()
+            .with_note("today_checked_in 为 true，但签到日期列表不含今天（服务端信号冲突）"),
+        (true, _) => CheckinProbeView::of(CheckinProbe::Checked, last_date),
+        (false, _) => CheckinProbeView::of(CheckinProbe::NotChecked, last_date),
+    }
 }
 
 /// 把"本地记录 + 服务端状态"合成今日签到结论。
@@ -399,8 +403,6 @@ pub fn resolve_checkin(
         return ActivityCheckin::of("unconfirmed", None)
             .with_note("没有拿到服务端日期，无法判断今天的签到");
     };
-    let verdict = probe.verdict;
-
     let local_today = local.filter(|record| record.local_date == today);
     let local_status = local_today.map(|record| record.status.trim().to_lowercase());
 
@@ -415,30 +417,36 @@ pub fn resolve_checkin(
         view
     };
 
-    match local_status.as_deref() {
-        Some("success") | Some("already") | Some("ok") | Some("done") => {
-            build("confirmed", "local")
-        }
-        _ => match verdict {
-            CheckinProbe::Checked => build("confirmed", "server"),
-            CheckinProbe::NotChecked => match local_status.as_deref() {
-                // 本地试过但失败，服务端也说没签：两条证据一致，说"失败"而不是"没签"。
-                Some("failed") | Some("error") => build("failed", "local"),
-                // 本地没有记录、服务端说没签：这是唯一能说"未签到"的情况。
-                _ => build("absent", "server"),
-            },
-            CheckinProbe::Indeterminate => match local_status.as_deref() {
-                // failed / unknown / disabled 都不许当成签到成功。
-                Some("failed") | Some("error") => {
-                    build("failed", "local").with_note("最近一次签到尝试失败；服务端状态未取到")
-                }
-                Some(other) => build("unconfirmed", "local")
-                    .with_note(format!("本地记录状态为 {other}，不能当作已签到")),
-                None => build("unconfirmed", "server")
-                    .with_note("本地没有当天记录，服务端签到状态未取到"),
-            },
-        },
+    if local_status
+        .as_deref()
+        .map(is_success_status)
+        .unwrap_or(false)
+    {
+        return build("confirmed", "local");
     }
+
+    let mut outcome = match probe.verdict {
+        CheckinProbe::Checked => build("confirmed", "server"),
+        CheckinProbe::NotChecked => match local_status.as_deref() {
+            // 本地试过但失败，服务端也说没签：两条证据一致，说"失败"而不是"没签"。
+            Some("failed") | Some("error") => build("failed", "local"),
+            // 本地没有记录、服务端说没签：这是唯一能说"未签到"的情况。
+            _ => build("absent", "server"),
+        },
+        CheckinProbe::Indeterminate => match local_status.as_deref() {
+            // failed / unknown / disabled 都不许当成签到成功。
+            Some("failed") | Some("error") => build("failed", "local"),
+            Some(other) => build("unconfirmed", "local")
+                .with_note(format!("本地记录状态为 {other}，不能当作已签到")),
+            None => {
+                build("unconfirmed", "server").with_note("本地没有当天记录，服务端签到状态未取到")
+            }
+        },
+    };
+    if outcome.note.is_none() {
+        outcome.note = probe.note;
+    }
+    outcome
 }
 
 /// 诊断。**顺序即优先级**，前几条相互排斥。
@@ -630,15 +638,25 @@ pub async fn account_activity(app: &App, account: &AccountRecord) -> ActivityAcc
         .map(|record| is_success_status(&record.status))
         .unwrap_or(false)
     {
+        // 本地已经确认签到：**一个请求都不发**。
         CheckinProbeView::indeterminate()
     } else {
-        let status = wb_switch_core::modules::checkin::get_checkin_status(&checkin_payload(
+        // 只读语义的 `POST {}`，只在 404 时换一次路径；401/403/429/5xx/超时
+        // 一律直接返回错误，不重试、不刷新令牌、不发 `daily-checkin`。
+        match crate::checkin::api::query_status_tolerant(&checkin_payload(
             &resolved.access,
             &account.uid,
             &domain,
         ))
-        .await;
-        parse_checkin_probe(&status, server_today.as_deref())
+        .await
+        {
+            Ok(reply) => probe_from_reply(&reply, server_today.as_deref()),
+            Err(err) => CheckinProbeView {
+                verdict: CheckinProbe::Indeterminate,
+                last_date: None,
+                note: Some(format!("签到状态查询未完成（{}）", err.kind.as_str())),
+            },
+        }
     };
 
     let checkin = resolve_checkin(server_today.as_deref(), local.as_ref(), probe);
@@ -659,11 +677,15 @@ pub async fn account_activity(app: &App, account: &AccountRecord) -> ActivityAcc
     out
 }
 
+/// 本地记录里的"确实签到了"。
+///
+/// **只认存储层自己的两个常量**（`claimed` / `already`）：AICC 真正写进
+/// `checkin_records` 的就是这两个值。自己另立一套 `success/ok/done` 会把
+/// "AICC 今天签到成功"误判成"未确认"——这正是复审抓到的 P0。
 fn is_success_status(status: &str) -> bool {
-    matches!(
-        status.trim().to_lowercase().as_str(),
-        "success" | "already" | "ok" | "done"
-    )
+    let status = status.trim();
+    status == crate::storage::checkin::STATUS_CLAIMED
+        || status == crate::storage::checkin::STATUS_ALREADY
 }
 
 fn field_error(field: &'static str, err: &super::api::GrowthError) -> FieldError {
@@ -870,10 +892,44 @@ mod tests {
         assert_eq!(out.diagnosis.code, "checkin_unverified");
     }
 
-    /// failed / unknown / disabled 一律不许当成成功。
+    /// AICC 真实落库的两个成功状态：`claimed` / `already`。
+    ///
+    /// 复审 P0：漏掉 `claimed` 会让"AICC 自己签到成功"显示成未确认。
+    #[test]
+    fn claimed_and_already_are_the_only_success_states() {
+        assert!(is_success_status(crate::storage::checkin::STATUS_CLAIMED));
+        assert!(is_success_status(crate::storage::checkin::STATUS_ALREADY));
+        for status in [
+            "failed", "skipped", "unknown", "disabled", "success", "ok", "done", "",
+        ] {
+            assert!(
+                !is_success_status(status),
+                "状态 {status} 不在存储层的成功名单里"
+            );
+        }
+    }
+
+    /// `claimed` 当场就够下结论：即使探针说"没签"，也以本地成功为准。
+    #[test]
+    fn a_claimed_local_record_needs_no_server_verdict() {
+        let checkin = resolve_checkin(
+            Some("2026-11-18"),
+            Some(&record(
+                "2026-11-18",
+                crate::storage::checkin::STATUS_CLAIMED,
+            )),
+            probe(CheckinProbe::NotChecked),
+        );
+        assert_eq!(checkin.state, "confirmed");
+        assert_eq!(checkin.source, Some("local"));
+        let out = build(false, 0, "2026-10-01T00:00:00+08:00", checkin);
+        assert_eq!(out.diagnosis.code, "checkin_only");
+    }
+
+    /// failed / skipped / unknown 一律不许当成成功。
     #[test]
     fn no_non_success_status_is_ever_treated_as_checked_in() {
-        for status in ["failed", "unknown", "disabled", "error", "", "skipped"] {
+        for status in ["failed", "skipped", "unknown", "disabled", "error", ""] {
             let checkin = checkin_of(
                 Some(&record("2026-11-17", status)),
                 CheckinProbe::Indeterminate,
@@ -1114,67 +1170,72 @@ mod tests {
     // 签到状态接口的解析
     // -----------------------------------------------------------------------
 
+    fn status_reply(checked: Option<bool>, dates: &[&str]) -> crate::checkin::api::StatusReply {
+        crate::checkin::api::StatusReply {
+            checked_in: checked,
+            streak_days: None,
+            daily_credit: None,
+            today_credit: None,
+            checkin_dates: dates.iter().map(|date| date.to_string()).collect(),
+            path: "/p",
+        }
+    }
+
+    /// 缺布尔值就是"不知道"，不能默认 false。
     #[test]
     fn the_probe_requires_an_explicit_field() {
         let today = Some("2026-11-18");
-
-        // 上游把缺省值写成 false —— 不能照抄。
-        let ok_without_field = json!({ "ok": true, "raw": { "other": 1 } });
         assert_eq!(
-            parse_checkin_probe(&ok_without_field, today).verdict,
+            probe_from_reply(&status_reply(None, &[]), today).verdict,
             CheckinProbe::Indeterminate
         );
-
-        let failed_call = json!({ "ok": false, "error": "code=500" });
         assert_eq!(
-            parse_checkin_probe(&failed_call, today).verdict,
-            CheckinProbe::Indeterminate
-        );
-
-        let checked = json!({ "ok": true, "raw": { "today_checked_in": true } });
-        assert_eq!(
-            parse_checkin_probe(&checked, today).verdict,
+            probe_from_reply(&status_reply(Some(true), &[]), today).verdict,
             CheckinProbe::Checked
         );
-
-        let not_checked = json!({ "ok": true, "raw": { "today_checked_in": false } });
         assert_eq!(
-            parse_checkin_probe(&not_checked, today).verdict,
+            probe_from_reply(&status_reply(Some(false), &[]), today).verdict,
             CheckinProbe::NotChecked
-        );
-
-        let camel = json!({ "ok": true, "raw": { "todayCheckedIn": true } });
-        assert_eq!(
-            parse_checkin_probe(&camel, today).verdict,
-            CheckinProbe::Checked
         );
     }
 
-    /// `checkin_dates` 比布尔值更硬：服务端列了哪几天，就按哪几天算。
+    /// `checkin_dates` 与布尔值一致时按日期列表走，并把最近签到日带出来。
     #[test]
     fn checkin_dates_are_aligned_with_the_server_day() {
-        let status = json!({
-            "ok": true,
-            "raw": {
-                "today_checked_in": false,
-                "checkin_dates": ["2026-11-18", "2026-11-17"]
-            }
-        });
-        let view = parse_checkin_probe(&status, Some("2026-11-18"));
-        assert_eq!(view.verdict, CheckinProbe::Checked, "日期列表优先于布尔值");
+        let reply = status_reply(Some(true), &["2026-11-18", "2026-11-17"]);
+        let view = probe_from_reply(&reply, Some("2026-11-18"));
+        assert_eq!(view.verdict, CheckinProbe::Checked);
         assert_eq!(view.last_date.as_deref(), Some("2026-11-18"));
 
-        // 服务端最新一天是昨天：今天还没签。
-        let view = parse_checkin_probe(&status, Some("2026-11-19"));
+        // 服务端最新一天是昨天、布尔值也说没签：今天还没签。
+        let yesterday = status_reply(Some(false), &["2026-11-18", "2026-11-17"]);
+        let view = probe_from_reply(&yesterday, Some("2026-11-19"));
         assert_eq!(view.verdict, CheckinProbe::NotChecked);
         assert_eq!(view.last_date.as_deref(), Some("2026-11-18"));
+    }
 
-        // 没有服务端日期时退回布尔值。
-        let stale = json!({ "ok": true, "raw": { "today_checked_in": true } });
-        assert_eq!(
-            parse_checkin_probe(&stale, None).verdict,
-            CheckinProbe::Checked
-        );
+    /// 两条服务端信号互相矛盾时，不选边站。
+    #[test]
+    fn conflicting_server_signals_stay_indeterminate() {
+        let listed_not_flagged = status_reply(Some(false), &["2026-11-18"]);
+        let view = probe_from_reply(&listed_not_flagged, Some("2026-11-18"));
+        assert_eq!(view.verdict, CheckinProbe::Indeterminate);
+        assert!(view.note.unwrap_or_default().contains("冲突"));
+
+        let flagged_not_listed = status_reply(Some(true), &["2026-11-17"]);
+        let view = probe_from_reply(&flagged_not_listed, Some("2026-11-18"));
+        assert_eq!(view.verdict, CheckinProbe::Indeterminate);
+
+        // 冲突 → 未确认，绝不报"已签"或"未签"。
+        let checkin = resolve_checkin(Some("2026-11-18"), None, view);
+        assert_eq!(checkin.state, "unconfirmed");
+    }
+
+    /// 没有服务端日期时只看显式布尔值，不拿日期列表硬猜。
+    #[test]
+    fn without_a_server_day_the_probe_uses_the_explicit_flag_only() {
+        let view = probe_from_reply(&status_reply(None, &["2026-11-18"]), None);
+        assert_eq!(view.verdict, CheckinProbe::Indeterminate);
     }
 
     #[test]

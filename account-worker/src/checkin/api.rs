@@ -113,6 +113,10 @@ pub struct StatusReply {
     pub streak_days: Option<i64>,
     pub daily_credit: Option<i64>,
     pub today_credit: Option<i64>,
+    /// 服务端自己的"已签到日期"列表（`checkin_dates`）。**原样保留**：
+    /// 它是把"服务端的今天"和"我们的今天"对齐的唯一依据。
+    /// 接口没给就是空数组，不用猜。
+    pub checkin_dates: Vec<String>,
     /// 实到的那条路径。线上出问题时不用再猜。
     pub path: &'static str,
 }
@@ -270,11 +274,25 @@ pub fn status_from_response(response: &Value, path: &'static str) -> StatusReply
         .get("today_checked_in")
         .or_else(|| data.get("todayCheckedIn"))
         .and_then(Value::as_bool);
+    let checkin_dates = data
+        .get("checkin_dates")
+        .or_else(|| data.get("checkinDates"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
     StatusReply {
         checked_in: checked,
         streak_days: int_of(&data, &["streak_days", "streakDays"]),
         daily_credit: int_of(&data, &["daily_credit", "dailyCredit"]),
         today_credit: int_of(&data, &["today_credit", "todayCredit"]),
+        checkin_dates,
         path,
     }
 }
@@ -298,15 +316,63 @@ fn int_of(value: &Value, keys: &[&str]) -> Option<i64> {
     None
 }
 
-/// 查一次今日状态：先 activity-status，只在 404 时退旧路径。
-async fn query_status(payload: &Value) -> Result<StatusReply, CheckinError> {
+/// 状态查询的发送层。唯一的存在理由：让"只换一次路径、错误不重试"能在 Mock 上断言。
+#[allow(async_fn_in_trait)]
+pub trait StatusSender {
+    async fn send(&self, path: &'static str) -> Result<Value, CheckinError>;
+}
+
+/// 线上发送：只读语义的 `POST {}`，只带 access/uid/domain。
+pub struct LiveStatusSender<'a> {
+    payload: &'a Value,
+}
+
+impl StatusSender for LiveStatusSender<'_> {
+    async fn send(&self, path: &'static str) -> Result<Value, CheckinError> {
+        send_once(self.payload, path).await
+    }
+}
+
+/// 查一次今日状态：先 activity-status，**只在 404 时**退旧路径。
+///
+/// 401 / 403 / 429 / 5xx / 超时都是服务端的真实回答，直接返回错误，
+/// **不换路径重问、不刷新令牌、不发 `daily-checkin`**。
+/// 两条路径都是 `POST {}`（只读语义），不是 GET —— 别按 HTTP 方法猜语义。
+pub async fn query_status(payload: &Value) -> Result<StatusReply, CheckinError> {
+    query_status_with(LiveStatusSender { payload }).await
+}
+
+/// 同上，但发送层可注入（测试用）。
+pub async fn query_status_with<S: StatusSender>(sender: S) -> Result<StatusReply, CheckinError> {
+    query_status_inner(sender, true).await
+}
+
+/// 只读状态查询（活跃面板用）：允许"只有 `checkin_dates`、没有布尔值"的响应。
+///
+/// 对活跃面板来说，日期列表本身就能回答"今天签了没有"；把这种响应判成
+/// 未知会白丢一条证据。签到写链路仍然用 [`query_status`]，它对缺布尔值
+/// 保持"未知，别写"的旧纪律。
+pub async fn query_status_tolerant(payload: &Value) -> Result<StatusReply, CheckinError> {
+    query_status_tolerant_with(LiveStatusSender { payload }).await
+}
+
+pub async fn query_status_tolerant_with<S: StatusSender>(
+    sender: S,
+) -> Result<StatusReply, CheckinError> {
+    query_status_inner(sender, false).await
+}
+
+async fn query_status_inner<S: StatusSender>(
+    sender: S,
+    require_boolean: bool,
+) -> Result<StatusReply, CheckinError> {
     let mut last: Option<CheckinError> = None;
     for path in STATUS_PATHS {
-        let response = send_once(payload, path).await?;
+        let response = sender.send(path).await?;
         match classify(&response) {
             Ok(()) => {
                 let reply = status_from_response(&response, path);
-                if reply.checked_in.is_none() {
+                if require_boolean && reply.checked_in.is_none() {
                     // 成功但没有布尔值：结构变了。这不是"没签到"，是"不知道"。
                     return Err(CheckinError {
                         kind: ErrorKind::UnknownStatus,
@@ -457,5 +523,138 @@ mod tests {
         let err = guard_token(&json!({"access_token": "  "})).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Unauthorized);
         assert!(guard_token(&json!({"access_token": "abc"})).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // 状态查询的请求纪律：只在 404 时换路径；其它错误一次就停。
+    //
+    // 复审 P0-2 要求能断言"一次查询到底发了几个请求、打到哪条路径"。
+    // -----------------------------------------------------------------------
+
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::rc::Rc;
+
+    #[derive(Clone)]
+    struct MockSender {
+        calls: Rc<RefCell<Vec<&'static str>>>,
+        script: Rc<RefCell<VecDeque<Result<Value, CheckinError>>>>,
+    }
+
+    impl MockSender {
+        fn new(script: Vec<Result<Value, CheckinError>>) -> Self {
+            Self {
+                calls: Rc::new(RefCell::new(Vec::new())),
+                script: Rc::new(RefCell::new(script.into())),
+            }
+        }
+
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl StatusSender for MockSender {
+        async fn send(&self, path: &'static str) -> Result<Value, CheckinError> {
+            self.calls.borrow_mut().push(path);
+            self.script
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or_else(|| Err(CheckinError::new(ErrorKind::Network, "脚本用完了")))
+        }
+    }
+
+    fn ok_status(checked: bool) -> Value {
+        json!({ "code": 0, "data": { "today_checked_in": checked, "checkin_dates": ["2026-11-18"] } })
+    }
+
+    fn err_status(code: i64) -> Value {
+        json!({ "code": code })
+    }
+
+    #[tokio::test]
+    async fn a_successful_status_query_sends_exactly_one_request() {
+        let sender = MockSender::new(vec![Ok(ok_status(true))]);
+        let reply = query_status_with(sender.clone()).await.expect("应成功");
+        assert!(reply.checked_in.unwrap_or(false));
+        assert_eq!(reply.checkin_dates, vec!["2026-11-18".to_string()]);
+        assert_eq!(reply.path, STATUS_PATHS[0], "成功时不该换路径");
+        assert_eq!(sender.calls(), vec![STATUS_PATHS[0]], "只该发一次");
+    }
+
+    #[tokio::test]
+    async fn only_a_404_falls_back_to_the_second_path() {
+        let sender = MockSender::new(vec![Ok(err_status(404)), Ok(ok_status(true))]);
+        let reply = query_status_with(sender.clone())
+            .await
+            .expect("第二次应成功");
+        assert_eq!(reply.path, STATUS_PATHS[1]);
+        assert_eq!(
+            sender.calls(),
+            vec![STATUS_PATHS[0], STATUS_PATHS[1]],
+            "必须严格按顺序、且只换一次"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_and_rate_limit_errors_never_retry_on_another_path() {
+        for code in [401, 403, 429, 500, 502] {
+            // 如果实现错误地重试，第二次会拿到"成功"并掩盖错误。
+            let sender = MockSender::new(vec![Ok(err_status(code)), Ok(ok_status(true))]);
+            let err = query_status_with(sender.clone())
+                .await
+                .expect_err("必须报错");
+            assert_ne!(err.kind, ErrorKind::RouteMissing);
+            assert!(
+                err.kind == ErrorKind::Unauthorized
+                    || err.kind == ErrorKind::Forbidden
+                    || err.kind == ErrorKind::RateLimited
+                    || err.kind == ErrorKind::Server
+            );
+            assert_eq!(sender.calls().len(), 1, "HTTP {code} 之后不许换路径重问");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_transport_error_stops_the_query() {
+        let sender = MockSender::new(vec![Err(CheckinError::new(ErrorKind::Network, "timeout"))]);
+        let err = query_status_with(sender.clone())
+            .await
+            .expect_err("必须报错");
+        assert_eq!(err.kind, ErrorKind::Network);
+        assert_eq!(sender.calls().len(), 1, "超时后不许重试");
+    }
+
+    #[tokio::test]
+    async fn the_tolerant_query_accepts_dates_without_a_boolean() {
+        let dates_only = json!({ "code": 0, "data": { "checkin_dates": ["2026-11-18"] } });
+        let sender = MockSender::new(vec![Ok(dates_only)]);
+        let reply = query_status_tolerant_with(sender.clone())
+            .await
+            .expect("有日期就够");
+        assert_eq!(reply.checked_in, None);
+        assert_eq!(reply.checkin_dates, vec!["2026-11-18".to_string()]);
+        assert_eq!(sender.calls().len(), 1);
+
+        // 严格版仍把它判成"未知"：签到写链路不许在缺布尔值时继续。
+        let strict = MockSender::new(vec![Ok(
+            json!({ "code": 0, "data": { "checkin_dates": [] } }),
+        )]);
+        let err = query_status_with(strict).await.expect_err("严格版应报未知");
+        assert_eq!(err.kind, ErrorKind::UnknownStatus);
+    }
+
+    /// 两条状态路径都是"只读语义的 POST"，不是 GET。方法写错会改变服务端行为。
+    #[test]
+    fn the_status_query_uses_post_not_get() {
+        let source = include_str!("api.rs");
+        let index = source
+            .find("http_request(&url, \"POST\"")
+            .expect("send_once 应使用 POST");
+        assert!(index > 0);
+        assert!(
+            !source.contains("\"GET\""),
+            "签到接口没有 GET 形态，别按方法猜语义"
+        );
     }
 }

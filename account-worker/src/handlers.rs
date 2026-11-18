@@ -997,7 +997,9 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
 
         // ---- 成长活跃（PR #103）----
         //
-        // 只读：每账号两个 GET（`/heatmap` + `/streak`），外加本地当天的签到记录。
+        // 只读：每账号两个成长 GET（`/heatmap` + `/streak`），外加本地当天的签到记录；
+        // 本地拿不出成功记录时，再发一次**只读语义的 POST**（签到状态接口，
+        // 仅在 404 时换一次路径）。上限：4 账号 × (2 GET + 1 POST)。
         // 签到与活跃是两个独立字段，**不互相推导**：实测四个账号连续签到 5 天，
         // 其中三个热力墙仍是 0（docs/activity-rules-2026-11-17.md）。
         "growth.activity.status" => {

@@ -12,8 +12,8 @@
 | --- | --- |
 | 方法 | `growth.activity.status` |
 | 参数 | `accountIds?: string[]`（省略 = 所有国内版账号） |
-| 请求 | `/heatmap`、`/streak`；**本地拿不出成功签到记录时**再加一次只读签到状态查询（最多 3 个 GET/账号） |
-| 写操作 | 无。响应固定 `"readOnly": true` |
+| 请求 | `/heatmap`、`/streak`（GET）；**本地拿不出成功签到记录时**再加一次签到状态查询（`POST {}`，只读语义，仅 404 换一次路径）。上限：每账号 2 GET + 1 POST |
+| 写操作 | 无。响应固定 `"readOnly": true`；状态查询不刷新令牌、不发 `daily-checkin` |
 | 超时 | 客户端 60 秒（4 账号最多 12 个请求，账号之间串行） |
 
 ### 1. 今日签到：五种结论，六个来源
@@ -45,6 +45,18 @@
 
 > 上游把 `todayCheckedIn` 的缺省值写成了 `false`，所以解析时只认 `raw` 里**显式**
 > 出现的 `today_checked_in` / `todayCheckedIn`；字段缺失一律视为"不知道"。
+
+### 1.1 三个实现细节（复审 P0）
+
+- **本地成功状态只认存储层的 `claimed` / `already`。** 这是 AICC 自己写进
+  `checkin_records` 的两个值；自造 `success/ok/done` 会把"AICC 今天签到成功"显示成
+  "未确认"。本地成功时**一个查询请求都不发**。
+- **状态查询是只读语义的 `POST {}`，不是 GET。** 走 `checkin::api::query_status_tolerant`：
+  只在 404 时换一次路径；401 / 403 / 429 / 5xx / 超时一律直接返回，**不换路径重问、
+  不刷新令牌、不发 `daily-checkin`**。别按 HTTP 方法猜语义。
+- **两条服务端信号冲突时不选边。** `checkin_dates` 与显式 `today_checked_in` 打架
+  （列表含今天但布尔 false，或布尔 true 但列表不含今天）→ `Indeterminate` →
+  界面显示"未确认"，并留一句脱敏说明。
 
 ### 2. 诊断码：七种，动作各不相同
 

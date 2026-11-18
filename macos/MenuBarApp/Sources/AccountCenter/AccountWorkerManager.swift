@@ -832,7 +832,7 @@ final class AccountWorkerManager: ObservableObject {
         )
     }
 
-    /// 成长活跃状态（PR #103）：每账号两个 GET（`/heatmap` + `/streak`），
+    /// 成长活跃状态（PR #103）：每账号两个成长 GET（`/heatmap` + `/streak`），
     /// 外加本地当天的签到记录。
     ///
     /// 只读，但仍然会打服务端：一次四个账号 8 个请求、账号之间串行，给 60 秒。

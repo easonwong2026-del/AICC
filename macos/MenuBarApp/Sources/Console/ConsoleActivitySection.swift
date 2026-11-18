@@ -25,7 +25,7 @@ struct ConsoleActivityBlock: View {
                 header
                 if let failure { failureRow(failure, hasCache: !fleet.accounts.isEmpty) }
                 if fleet.accounts.isEmpty {
-                    Text(loading ? "正在读取四账号活跃状态…" : "还没读取。点「刷新」查一次（只读，每账号两个请求）。")
+                    Text(loading ? "正在读取四账号活跃状态…" : "还没读取。点「刷新」查一次（只读）。")
                         .font(ConsoleType.small)
                         .foregroundStyle(ConsoleTheme.secondaryText)
                 } else {

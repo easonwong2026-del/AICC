@@ -62,6 +62,7 @@ fn status_ok(checked: Option<bool>) -> Result<StatusReply, CheckinError> {
         streak_days: Some(12),
         daily_credit: Some(100),
         today_credit: None,
+        checkin_dates: Vec::new(),
         path: "/v2/billing/meter/checkin-activity-status",
     })
 }

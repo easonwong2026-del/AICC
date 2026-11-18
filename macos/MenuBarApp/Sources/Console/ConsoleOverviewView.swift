@@ -116,7 +116,8 @@ struct ConsoleOverviewView: View {
 
     // MARK: 第二层：成长活跃（PR #103）
 
-    /// 四个账号今天亮了没有。**不自动查询**：每账号两个 GET，由用户点「刷新」触发。
+    /// 四个账号今天亮了没有。自动读一次，之后由用户点「刷新」触发。
+    /// 每账号 2 个成长 GET；本地没有成功签到记录时再加 1 次只读语义 POST。
     private var activitySection: some View {
         ConsoleActivityBlock(
             fleet: store.activity,
