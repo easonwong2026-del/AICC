@@ -69,7 +69,7 @@ bash macos/build-release-mac.sh          # 产出 dist/AICC-2.13.0.dmg
 
 # 3) 提交并打 tag（构建号在 macos/MenuBarApp/Info.plist 里手动 +1）
 git add -A && git commit -m "chore(release): 2.13.0"
-git tag -a v2.13.0 -m "AICC 2.13.0 / macOS Build 23"
+git tag -a v2.13.0 -m "AICC 2.13.0 / macOS Build 25"
 git push origin main --tags
 
 # 4) 一条命令发版

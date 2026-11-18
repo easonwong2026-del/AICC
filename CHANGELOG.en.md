@@ -4,6 +4,42 @@
 
 This file summarizes the current and recent public releases. The Chinese changelog contains the older detailed history.
 
+## 2.13.0 - 2026-11-18
+
+### Growth center · rewards
+
+- **Streak rewards are visible and claimable.** The account detail page shows the 7 / 14 / 28-day tiers,
+  lottery chances, makeup cards and the dates that can be made up (read-only `growth.rewards.status`).
+- **Three write actions are wired, each behind a guard rail:** draw / redeem / makeup go through
+  live balance preview -> explicit confirmation -> local ledger -> exactly one request -> server recheck.
+  Unknown outcomes can only be rechecked, never re-sent; an unreadable ledger says "unknown", not zero.
+
+### Growth center · activity
+
+- **Four-account activity board** on the overview page: today's activity, today's check-in, streak length,
+  days left to the next tier and active days in the last week. Two growth GETs per account, plus one
+  read-only POST (check-in state) only when the local record cannot answer.
+- **Check-in and activity are separate signals.** Check-in reports confirmed (local) / confirmed (server) /
+  not checked in / failed / unconfirmed. Local success is judged only by the stored `claimed` / `already`
+  values, and a confirmed local record sends no extra request.
+- **Seven diagnoses, each with its own action:** `active`, `checkin_only`, `checkin_unverified`, `inactive`,
+  `stale_stats`, `unknown`, `needs_auth`. Unknown and delayed states never nag the user; auth problems ask
+  for re-authorization.
+- **No activity is ever faked.** No client emulation, no batch conversations, no one-click activity. When a
+  real task is needed, AICC only points at the official client and rechecks afterwards.
+
+### Reliability
+
+- Activity coverage adds a 45-case diagnosis matrix, day rollover, offline, 401/network failures,
+  per-account attribution, server-only streak values, no-write-on-refresh and a guard that debug probes
+  stay out of release builds.
+- The check-in state query only falls back on 404; 401/403/429/5xx/timeouts never retry, never refresh
+  a token and never submit a check-in.
+
+### CI
+
+- Path filters plus concurrency cancellation bring a full PR run from about 15 minutes to about 7.
+
 ## 2.12.2 - 2026-10-27
 
 ### macOS
