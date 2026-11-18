@@ -1,14 +1,17 @@
 #!/bin/bash
 # 发布脚本的 Mock 测试（PR #105 复审要求）。
 #
-# 只测三件在真实发版里最贵的事：
-#   1. `--dry-run` 在还没有 Tag 的时候也能跑完并给出计划；
-#   2. 资产上传失败时**不碰**自动更新清单，也不提交、不推送；
-#   3. 实跑时 Tag 缺失会先失败，一个 API 请求都不发。
+# 测的是"失败时绝不能有副作用"，以及几条发布前必须成立的约束：
+#   1. `--dry-run` 在还没有 Tag 时也能跑完并给出计划；
+#   2. Release 查询失败（401/500/坏 JSON）必须停，只有 404 才允许创建；
+#   3. 资产列表查询失败必须停，不能当成"没有资产"；
+#   4. 资产上传失败不碰清单，不提交、不推送；
+#   5. 实跑要求 Tag 存在、指向 HEAD，且 origin 上一致；
+#   6. 正常路径能传完两个资产、写清单、提交并推送。
 #
-# 做法：临时目录里造一个"仓库"（含 VERSION / 发布说明 / 假 DMG / 假 Info.plist），
-# 用一个假 `curl` 拦掉网络，git 走真实的本地 bare 仓库（origin 用 insteadOf 映射），
-# 这样 commit / push / diff 全是真执行，只有 HTTP 是假的。
+# 做法：临时目录里造一个"仓库"（VERSION / 发布说明 / 假 DMG / 假 Info.plist），
+# 用一个假 `curl` 拦掉网络，git 走真实的本地 bare 仓库（`url.insteadOf` 把
+# github SSH 映射到本地），所以 commit / push / diff / ls-remote 全是真执行。
 set -uo pipefail
 
 SRC_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
@@ -56,13 +59,23 @@ emit() {
 
 case "$url" in
   */releases/tags/*)
-    if [[ "${FAKE_RELEASE_EXISTS:-1}" == "1" ]]; then emit '{"id":900}'; else emit '{"message":"Not Found"}' 404; fi ;;
+    st="${FAKE_RELEASE_LOOKUP_STATUS:-200}"
+    if [[ "$st" == "200" ]]; then
+      body="${FAKE_RELEASE_LOOKUP_BODY-}"
+      [[ -n "$body" ]] || body='{"id":900}'
+      emit "$body" 200
+    else
+      emit '{"message":"boom"}' "$st"
+    fi ;;
   *assets?name=*)
     name="${url##*name=}"
     if [[ "$name" == *.dmg ]]; then code="${FAKE_UPLOAD_DMG_STATUS:-201}"; else code="${FAKE_UPLOAD_SHA_STATUS:-201}"; fi
     if [[ "$code" == 2* ]]; then printf '%s\n' "$name" >> "${FAKE_STATE}/assets"; fi
     emit '{"id":1}' "$code" ;;
   */releases/900/assets)
+    st="${FAKE_ASSETS_STATUS:-200}"
+    if [[ "$st" != "200" ]]; then emit '{"message":"boom"}' "$st"; exit 0; fi
+    if [[ -n "${FAKE_ASSETS_BODY:-}" ]]; then emit "$FAKE_ASSETS_BODY" 200; exit 0; fi
     body="[]"
     if [[ -s "${FAKE_STATE}/assets" ]]; then
       body="$(python3 -c 'import json,sys; print(json.dumps([{"name":n.strip()} for n in open(sys.argv[1]) if n.strip()]))' "${FAKE_STATE}/assets")"
@@ -71,7 +84,7 @@ case "$url" in
   */releases/900)
     emit '{"id":900,"published_at":"2026-11-18T00:00:00Z"}' ;;
   */releases)
-    emit '{"id":900}' 201 ;;
+    emit '{"id":900}' "${FAKE_CREATE_STATUS:-201}" ;;
   *)
     emit '' 200 ;;
 esac
@@ -80,7 +93,6 @@ chmod +x "$TMP/bin/curl"
 export PATH="$TMP/bin:$PATH"
 
 # ---------------------------------------------------------------- repo maker
-# make_repo NAME → 回声临时仓库路径；同时把 bare 远端放在 $TMP/NAME-remote.git
 make_repo() {
   local name="$1" dir="$TMP/$1" remote="$TMP/$1-remote.git"
   mkdir -p "$dir/scripts" "$dir/docs/releases" "$dir/dist/mac/AICC.app/Contents" "$dir/updates"
@@ -102,14 +114,15 @@ PLIST
   git -C "$dir" commit -q -m base
   git init -q --bare "$remote"
   git -C "$dir" remote add origin "git@github.com:easonwong2026-del/AICC.git"
-  # 让 push / ls-remote 真的走本地 bare 仓库
   git -C "$dir" config "url.$remote.insteadOf" "git@github.com:easonwong2026-del/AICC.git"
   git -C "$dir" push -q origin main
   echo "$dir"
 }
 
+tag_head() { git -C "$1" tag -a v9.9.9 -m test && git -C "$1" push -q origin v9.9.9; }
 head_of() { git -C "$1" rev-parse HEAD; }
 manifest_of() { cat "$1/updates/aicc-update.json"; }
+fresh_state() { export FAKE_STATE="$TMP/$1-state"; rm -rf "$FAKE_STATE"; mkdir -p "$FAKE_STATE"; }
 
 # ---------------------------------------------------------------- case 1
 echo "case 1: dry-run without a tag"
@@ -118,38 +131,32 @@ BEFORE_HEAD="$(head_of "$DIR")"
 BEFORE_MANIFEST="$(manifest_of "$DIR")"
 OUT="$("$DIR/scripts/release-publish.sh" --dry-run 2>&1)"; CODE=$?
 check "exit 0" "[[ $CODE -eq 0 ]]"
-check "mentions the missing tag" "grep -q 'not created yet' <<<\"\$OUT\""
-check "prints the plan" "grep -q 'upload AICC-9.9.9.dmg' <<<\"\$OUT\""
+check "mentions the missing tag" "grep -q 'not created yet' <<<'$OUT'"
+check "plans both uploads" "grep -q 'upload AICC-9.9.9.dmg.sha256' <<<'$OUT'"
 check "no commit" "[[ \"$(head_of "$DIR")\" == \"$BEFORE_HEAD\" ]]"
 check "manifest untouched" "[[ \"$(manifest_of "$DIR")\" == \"$BEFORE_MANIFEST\" ]]"
 
 # ---------------------------------------------------------------- case 2
 echo "case 2: real run, DMG upload fails"
-DIR="$(make_repo badcdn)"
-git -C "$DIR" tag -a v9.9.9 -m test
-git -C "$DIR" push -q origin v9.9.9
-BEFORE_HEAD="$(head_of "$DIR")"
-BEFORE_MANIFEST="$(manifest_of "$DIR")"
-export FAKE_STATE="$TMP/badcdn-state"; mkdir -p "$FAKE_STATE"
+DIR="$(make_repo badcdn)"; tag_head "$DIR"
+BEFORE_HEAD="$(head_of "$DIR")"; BEFORE_MANIFEST="$(manifest_of "$DIR")"
+fresh_state badcdn
 OUT="$(FAKE_LOG="$TMP/badcdn.log" AICC_RELEASE_TOKEN=dummy FAKE_UPLOAD_DMG_STATUS=500 \
   "$DIR/scripts/release-publish.sh" 2>&1)"; CODE=$?
 check "exits non-zero" "[[ $CODE -ne 0 ]]"
-check "reports HTTP 500" "grep -q 'HTTP 500' <<<\"\$OUT\""
+check "reports HTTP 500" "grep -q 'HTTP 500' <<<'$OUT'"
 check "no commit" "[[ \"$(head_of "$DIR")\" == \"$BEFORE_HEAD\" ]]"
 check "manifest untouched" "[[ \"$(manifest_of "$DIR")\" == \"$BEFORE_MANIFEST\" ]]"
 
 # ---------------------------------------------------------------- case 3
 echo "case 3: real run, checksum upload fails"
-DIR="$(make_repo badsha)"
-git -C "$DIR" tag -a v9.9.9 -m test
-git -C "$DIR" push -q origin v9.9.9
-BEFORE_HEAD="$(head_of "$DIR")"
-BEFORE_MANIFEST="$(manifest_of "$DIR")"
-export FAKE_STATE="$TMP/badsha-state"; mkdir -p "$FAKE_STATE"
+DIR="$(make_repo badsha)"; tag_head "$DIR"
+BEFORE_HEAD="$(head_of "$DIR")"; BEFORE_MANIFEST="$(manifest_of "$DIR")"
+fresh_state badsha
 OUT="$(FAKE_LOG="$TMP/badsha.log" AICC_RELEASE_TOKEN=dummy FAKE_UPLOAD_SHA_STATUS=502 \
   "$DIR/scripts/release-publish.sh" 2>&1)"; CODE=$?
 check "exits non-zero" "[[ $CODE -ne 0 ]]"
-check "reports HTTP 502" "grep -q 'HTTP 502' <<<\"\$OUT\""
+check "reports HTTP 502" "grep -q 'HTTP 502' <<<'$OUT'"
 check "no commit" "[[ \"$(head_of "$DIR")\" == \"$BEFORE_HEAD\" ]]"
 check "manifest untouched" "[[ \"$(manifest_of "$DIR")\" == \"$BEFORE_MANIFEST\" ]]"
 
@@ -160,20 +167,80 @@ BEFORE_HEAD="$(head_of "$DIR")"
 LOG="$TMP/notag.log"; : > "$LOG"
 OUT="$(FAKE_LOG="$LOG" AICC_RELEASE_TOKEN=dummy "$DIR/scripts/release-publish.sh" 2>&1)"; CODE=$?
 check "exits non-zero" "[[ $CODE -ne 0 ]]"
-check "says the tag is missing" "grep -q 'does not exist locally' <<<\"\$OUT\""
+check "says the tag is missing" "grep -q 'does not exist locally' <<<'$OUT'"
 check "no HTTP calls" "[[ ! -s \"$LOG\" ]]"
 check "no commit" "[[ \"$(head_of "$DIR")\" == \"$BEFORE_HEAD\" ]]"
 
 # ---------------------------------------------------------------- case 5
-echo "case 5: happy path"
-DIR="$(make_repo happy)"
-git -C "$DIR" tag -a v9.9.9 -m test
+echo "case 5: release lookup fails with 500"
+DIR="$(make_repo rel500)"; tag_head "$DIR"
+BEFORE_HEAD="$(head_of "$DIR")"; BEFORE_MANIFEST="$(manifest_of "$DIR")"
+fresh_state rel500
+OUT="$(FAKE_LOG="$TMP/rel500.log" AICC_RELEASE_TOKEN=dummy FAKE_RELEASE_LOOKUP_STATUS=500 \
+  "$DIR/scripts/release-publish.sh" 2>&1)"; CODE=$?
+check "exits non-zero" "[[ $CODE -ne 0 ]]"
+check "refuses to guess" "grep -q 'refusing to guess' <<<'$OUT'"
+check "never creates a release" "! grep -q '^POST https://api.github.com.*/releases\$' \"$TMP/rel500.log\""
+check "no commit" "[[ \"$(head_of "$DIR")\" == \"$BEFORE_HEAD\" ]]"
+check "manifest untouched" "[[ \"$(manifest_of "$DIR")\" == \"$BEFORE_MANIFEST\" ]]"
+
+# ---------------------------------------------------------------- case 6
+echo "case 6: release lookup returns invalid JSON"
+DIR="$(make_repo relbadjson)"; tag_head "$DIR"
+fresh_state relbadjson
+OUT="$(FAKE_LOG="$TMP/relbadjson.log" AICC_RELEASE_TOKEN=dummy \
+  FAKE_RELEASE_LOOKUP_BODY='{"nope":' "$DIR/scripts/release-publish.sh" 2>&1)"; CODE=$?
+check "exits non-zero" "[[ $CODE -ne 0 ]]"
+check "says JSON is unusable" "grep -q 'no usable JSON' <<<'$OUT'"
+
+# ---------------------------------------------------------------- case 7
+echo "case 7: asset list fails with 500"
+DIR="$(make_repo assets500)"; tag_head "$DIR"
+BEFORE_HEAD="$(head_of "$DIR")"; BEFORE_MANIFEST="$(manifest_of "$DIR")"
+fresh_state assets500
+OUT="$(FAKE_LOG="$TMP/assets500.log" AICC_RELEASE_TOKEN=dummy FAKE_ASSETS_STATUS=500 \
+  "$DIR/scripts/release-publish.sh" 2>&1)"; CODE=$?
+check "exits non-zero" "[[ $CODE -ne 0 ]]"
+check "says the list query failed" "grep -q 'asset list query failed with HTTP 500' <<<'$OUT'"
+check "no upload attempted" "! grep -q 'assets?name=' \"$TMP/assets500.log\""
+check "no commit" "[[ \"$(head_of "$DIR")\" == \"$BEFORE_HEAD\" ]]"
+check "manifest untouched" "[[ \"$(manifest_of "$DIR")\" == \"$BEFORE_MANIFEST\" ]]"
+
+# ---------------------------------------------------------------- case 8
+echo "case 8: local tag points to another commit"
+DIR="$(make_repo tagoflocal)"
+git -C "$DIR" tag -a v9.9.9 -m test          # tag 落在 base
+echo tweak >> "$DIR/docs/releases/9.9.9.md"
+git -C "$DIR" commit -q -am "second"         # HEAD 前进一格
 git -C "$DIR" push -q origin v9.9.9
 BEFORE_HEAD="$(head_of "$DIR")"
-export FAKE_STATE="$TMP/happy-state"; mkdir -p "$FAKE_STATE"
+fresh_state tagoflocal
+OUT="$(FAKE_LOG="$TMP/tagoflocal.log" AICC_RELEASE_TOKEN=dummy "$DIR/scripts/release-publish.sh" 2>&1)"; CODE=$?
+check "exits non-zero" "[[ $CODE -ne 0 ]]"
+check "explains the mismatch" "grep -q 'not HEAD' <<<'$OUT'"
+check "no HTTP calls" "[[ ! -s \"$TMP/tagoflocal.log\" ]]"
+check "no commit" "[[ \"$(head_of "$DIR")\" == \"$BEFORE_HEAD\" ]]"
+
+# ---------------------------------------------------------------- case 9
+echo "case 9: origin tag points to another commit"
+DIR="$(make_repo tagofremote)"; tag_head "$DIR"
+echo tweak >> "$DIR/docs/releases/9.9.9.md"
+git -C "$DIR" commit -q -am "second"
+git -C "$DIR" tag -f -a v9.9.9 -m moved      # 本地重打，origin 还是旧提交
+fresh_state tagofremote
+OUT="$(FAKE_LOG="$TMP/tagofremote.log" AICC_RELEASE_TOKEN=dummy "$DIR/scripts/release-publish.sh" 2>&1)"; CODE=$?
+check "exits non-zero" "[[ $CODE -ne 0 ]]"
+check "names origin" "grep -q 'origin tag v9.9.9' <<<'$OUT'"
+check "no HTTP calls" "[[ ! -s \"$TMP/tagofremote.log\" ]]"
+
+# ---------------------------------------------------------------- case 10
+echo "case 10: happy path"
+DIR="$(make_repo happy)"; tag_head "$DIR"
+BEFORE_HEAD="$(head_of "$DIR")"
+fresh_state happy
 OUT="$(FAKE_LOG="$TMP/happy.log" AICC_RELEASE_TOKEN=dummy "$DIR/scripts/release-publish.sh" 2>&1)"; CODE=$?
 check "exit 0" "[[ $CODE -eq 0 ]]"
-check "uploads both assets" "[[ \$(grep -c 'assets?name=' "$TMP/happy.log") -eq 2 ]]"
+check "uploads both assets" "[[ \$(grep -c 'assets?name=' \"$TMP/happy.log\") -eq 2 ]]"
 check "manifest updated" "python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d[\"version\"]==\"9.9.9\" and d[\"build\"]==\"99\" else 1)' '$DIR/updates/aicc-update.json'"
 check "one new commit" "[[ \"$(head_of "$DIR")\" != \"$BEFORE_HEAD\" ]]"
 check "pushed to origin main" "[[ \"$(git -C "$TMP/happy-remote.git" rev-parse main)\" == \"$(head_of "$DIR")\" ]]"

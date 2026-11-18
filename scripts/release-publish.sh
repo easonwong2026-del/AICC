@@ -18,6 +18,14 @@ set -euo pipefail
 # Every step is idempotent: an existing release is reused, an asset that is
 # already attached is skipped, and a manifest that already matches is not
 # committed again.  Re-running after a partial failure is safe.
+#
+# 三条安全约束（2026-11-18 复审）：
+#   1. **查询失败不许当成“不存在”**：Release 查询只有明确 404 才继续创建；
+#      资产列表查询必须 200 且是合法 JSON，否则立刻停下。
+#   2. **上传失败不许动清单**：任一资产非 2xx 直接退出，改清单前还要回查资产确实在。
+#   3. **Tag 必须指向正确提交**：本地 Tag 解析出的 commit 必须等于 HEAD，
+#      origin 上的同一个 Tag 也必须指向同一 commit。只“存在”不够。
+#   `--dry-run` 不要求 Tag 存在——它的用途就是打 Tag 之前先看计划。
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$ROOT"
@@ -53,18 +61,55 @@ say() { echo "==> $*"; }
 BUILD="$(plutil -extract CFBundleVersion raw -o - "$APP_PLIST")"
 [[ -n "$BUILD" ]] || die "cannot read CFBundleVersion"
 
-# dry-run 的目的就是"打 Tag 之前先看计划"，所以它不要求 Tag 存在。
-# 实跑才强制：本地和 origin 都必须有同一个 Tag，否则 Release 指向的 commit 没人能对上。
-if [[ $DRY_RUN -eq 0 ]]; then
-  git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || die "tag $TAG does not exist locally"
-  if ! git ls-remote --exit-code --tags origin "$TAG" >/dev/null 2>&1; then
-    die "tag $TAG is not on origin — run: git push origin $TAG"
+HEAD_SHA="$(git rev-parse HEAD)"
+
+# HTTP GET 的统一出口：body 写文件、回显状态码；传输出错返回 000。
+# 调用方必须自己判断状态码——把失败当“不存在”正是复审要修的问题。
+api_get() {
+  local url="$1" out="$2"
+  curl -sS --max-time 20 -o "$out" -w '%{http_code}' "$url" 2>/dev/null || echo 000
+}
+
+# ---- tag -----------------------------------------------------------------
+# 实跑要求：Tag 存在、指向 HEAD、origin 上一致。dry-run 只报告状态。
+REMOTE_TAG_SHA=""
+if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+  TAG_SHA="$(git rev-parse "$TAG^{commit}")"
+  REMOTE_TAGS="$(git ls-remote origin "refs/tags/$TAG" "refs/tags/$TAG^{}" 2>/dev/null || true)"
+  if [[ -n "$REMOTE_TAGS" ]]; then
+    REMOTE_TAG_SHA="$(printf '%s\n' "$REMOTE_TAGS" | python3 -c '
+import sys
+wanted = "refs/tags/" + sys.argv[1]
+plain = peeled = ""
+for line in sys.stdin:
+    parts = line.split()
+    if len(parts) != 2:
+        continue
+    sha, ref = parts
+    if ref == wanted + "^{}":
+        peeled = sha
+    elif ref == wanted:
+        plain = sha
+print(peeled or plain)
+' "$TAG")"
   fi
+fi
+
+if [[ $DRY_RUN -eq 0 ]]; then
+  [[ -n "${TAG_SHA:-}" ]] || die "tag $TAG does not exist locally"
+  [[ "$TAG_SHA" == "$HEAD_SHA" ]] \
+    || die "tag $TAG points to $TAG_SHA, not HEAD $HEAD_SHA — 发布会指向错误的提交"
+  [[ -n "$REMOTE_TAG_SHA" ]] || die "tag $TAG is not on origin — run: git push origin $TAG"
+  [[ "$REMOTE_TAG_SHA" == "$HEAD_SHA" ]] \
+    || die "origin tag $TAG points to $REMOTE_TAG_SHA, not HEAD $HEAD_SHA"
+  say "tag $TAG -> $HEAD_SHA (local and origin agree)"
 else
-  if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
-    say "tag $TAG exists locally (dry-run does not need it)"
-  else
+  if [[ -z "${TAG_SHA:-}" ]]; then
     say "tag $TAG not created yet — a real run requires it locally and on origin"
+  elif [[ "$TAG_SHA" != "$HEAD_SHA" ]]; then
+    say "tag $TAG points to $TAG_SHA, HEAD is $HEAD_SHA — a real run would refuse"
+  else
+    say "tag $TAG -> $HEAD_SHA"
   fi
 fi
 
@@ -80,22 +125,59 @@ TOKEN=""
 if [[ $DRY_RUN -eq 0 ]]; then
   TOKEN="${AICC_RELEASE_TOKEN:-$(printf 'protocol=https\nhost=github.com\n\n' | git credential fill 2>/dev/null | sed -n 's/^password=//p')}"
   [[ -n "$TOKEN" ]] || die "no github.com credential in the keychain — see docs/RELEASING.md"
-  curl -sS --max-time 20 -o /dev/null -w '' -H "Authorization: Bearer $TOKEN" "$API" \
-    || die "the stored credential cannot read $OWNER/$REPO"
+  TOKEN_CHECK="$(mktemp)"
+  CODE="$(curl -sS --max-time 20 -o "$TOKEN_CHECK" -w '%{http_code}' \
+    -H "Authorization: Bearer $TOKEN" "$API" 2>/dev/null || echo 000)"
+  rm -f "$TOKEN_CHECK"
+  [[ "$CODE" == "200" ]] || die "the stored credential cannot read $OWNER/$REPO (HTTP $CODE)"
 fi
 
 say "version $VERSION, macOS build $BUILD, tag $TAG"
 
 # ---- release -------------------------------------------------------------
-RELEASE_ID="$(curl -sS --max-time 20 "$API/releases/tags/$TAG" \
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("id", ""))' 2>/dev/null || true)"
+# 只有 404 才算“还没有 Release”。401/403/429/5xx/超时/坏 JSON 都必须停下：
+# 把它们当成不存在，会在错误前提下建 Release。
+RELEASE_ID=""
+REL_BODY="$(mktemp)"
+REL_CODE="$(api_get "$API/releases/tags/$TAG" "$REL_BODY")"
+case "$REL_CODE" in
+  200)
+    RELEASE_ID="$(python3 - "$REL_BODY" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(2)
+if not isinstance(data, dict) or not data.get("id"):
+    sys.exit(3)
+print(data["id"])
+PY
+)" || { rm -f "$REL_BODY"; die "release lookup returned HTTP 200 but no usable JSON"; }
+    say "release $TAG already exists (id $RELEASE_ID), reusing it"
+    ;;
+  404)
+    RELEASE_ID=""
+    ;;
+  *)
+    rm -f "$REL_BODY"
+    if [[ $DRY_RUN -eq 1 ]]; then
+      say "release lookup failed (HTTP $REL_CODE) — dry-run cannot tell whether it exists"
+      RELEASE_ID=""
+    else
+      die "release lookup failed with HTTP $REL_CODE — refusing to guess"
+    fi
+    ;;
+esac
+rm -f "$REL_BODY"
 
 if [[ -z "$RELEASE_ID" ]]; then
-  say "creating release $TAG"
   if [[ $DRY_RUN -eq 1 ]]; then
+    say "would create release $TAG"
     echo "    POST $API/releases (name=AICC $VERSION / macOS Build $BUILD, body=$NOTES)"
   else
-    python3 - "$VERSION" "$BUILD" "$NOTES" > /tmp/aicc-release.json <<'PY'
+    say "creating release $TAG"
+    REQ="$(mktemp)"
+    python3 - "$VERSION" "$BUILD" "$NOTES" > "$REQ" <<'PY'
 import json, sys
 version, build, notes = sys.argv[1], sys.argv[2], sys.argv[3]
 print(json.dumps({
@@ -106,39 +188,77 @@ print(json.dumps({
     "prerelease": False,
 }, ensure_ascii=False))
 PY
-    RELEASE_ID="$(curl -sS -X POST "$API/releases" \
+    RESP="$(mktemp)"
+    CODE="$(curl -sS --max-time 60 -o "$RESP" -w '%{http_code}' -X POST "$API/releases" \
       -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
-      -H "Content-Type: application/json" --data-binary @/tmp/aicc-release.json \
-      | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("id") or sys.exit(d.get("message")))')"
-    rm -f /tmp/aicc-release.json
+      -H "Content-Type: application/json" --data-binary "@$REQ" 2>/dev/null || echo 000)"
+    rm -f "$REQ"
+    if [[ "$CODE" != 2* ]]; then
+      head -c 300 "$RESP" >&2 || true
+      rm -f "$RESP"
+      die "creating the release failed with HTTP $CODE"
+    fi
+    RELEASE_ID="$(python3 - "$RESP" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+print(data["id"])
+PY
+)" || { rm -f "$RESP"; die "creating the release returned no id"; }
+    rm -f "$RESP"
     say "release id $RELEASE_ID"
   fi
-else
-  say "release $TAG already exists (id $RELEASE_ID), reusing it"
 fi
 
 # ---- assets --------------------------------------------------------------
+# 先一次拿到资产列表：查询失败必须停下，不能把 401/500/超时/坏 JSON 当成“没有资产”。
+# bash 3.2 没有 mapfile，用 while read 往数组里塞。
+ASSET_NAMES=()
+if [[ -n "$RELEASE_ID" && $DRY_RUN -eq 0 ]]; then
+  ASSETS_BODY="$(mktemp)"
+  CODE="$(curl -sS --max-time 20 -o "$ASSETS_BODY" -w '%{http_code}' \
+    -H "Authorization: Bearer $TOKEN" "$API/releases/$RELEASE_ID/assets" 2>/dev/null || echo 000)"
+  if [[ "$CODE" != "200" ]]; then
+    rm -f "$ASSETS_BODY"
+    die "asset list query failed with HTTP $CODE — refusing to guess"
+  fi
+  NAMES="$(python3 - "$ASSETS_BODY" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(2)
+if not isinstance(data, list):
+    sys.exit(3)
+for asset in data:
+    name = asset.get("name")
+    if name:
+        print(name)
+PY
+)" || { rm -f "$ASSETS_BODY"; die "asset list is not valid JSON"; }
+  rm -f "$ASSETS_BODY"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && ASSET_NAMES+=("$line")
+  done <<< "$NAMES"
+fi
+
+has_asset() {
+  local needle="$1" name
+  for name in ${ASSET_NAMES[@]+"${ASSET_NAMES[@]}"}; do
+    [[ "$name" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
 for FILE in "$DMG" "$SHA"; do
   NAME="$(basename "$FILE")"
   if [[ $DRY_RUN -eq 1 ]]; then
-    # dry-run 不落 sha 文件，但计划里必须有它——否则看起来像"只传 DMG"。
+    # dry-run 不落 sha 文件，但计划里必须列出它，否则看起来像“只传 DMG”。
     echo "    upload $NAME to release ${RELEASE_ID:-<new>}"
     continue
   fi
   [[ -f "$FILE" ]] || die "missing $NAME — the release assets must both exist"
-  PRESENT="False"
-  if [[ -n "$RELEASE_ID" ]]; then
-    AUTH=()
-    [[ -n "$TOKEN" ]] && AUTH=(-H "Authorization: Bearer $TOKEN")
-    PRESENT="$(curl -sS --max-time 20 ${AUTH[@]+"${AUTH[@]}"} "$API/releases/$RELEASE_ID/assets" \
-      | python3 -c "import json,sys; print(any(a['name']==sys.argv[1] for a in json.load(sys.stdin)))" "$NAME" 2>/dev/null || echo False)"
-  fi
-  if [[ "$PRESENT" == "True" ]]; then
+  if has_asset "$NAME"; then
     say "asset $NAME already attached, skipping"
-    continue
-  fi
-  if [[ $DRY_RUN -eq 1 ]]; then
-    echo "    upload $NAME to release ${RELEASE_ID:-<new>}"
     continue
   fi
   say "uploading $NAME"
@@ -147,9 +267,9 @@ for FILE in "$DMG" "$SHA"; do
     *)     CONTENT_TYPE="application/octet-stream" ;;
   esac
   BODY="$(mktemp)"
-  CODE="$(curl -sS -X POST "$UPLOAD/releases/$RELEASE_ID/assets?name=$NAME" \
+  CODE="$(curl -sS --max-time 300 -X POST "$UPLOAD/releases/$RELEASE_ID/assets?name=$NAME" \
     -H "Authorization: Bearer $TOKEN" -H "Content-Type: $CONTENT_TYPE" \
-    --data-binary "@$FILE" -o "$BODY" -w '%{http_code}' || echo 000)"
+    --data-binary "@$FILE" -o "$BODY" -w '%{http_code}' 2>/dev/null || echo 000)"
   if [[ "$CODE" != 2* ]]; then
     echo "    body: $(head -c 300 "$BODY" 2>/dev/null)" >&2
     rm -f "$BODY"
@@ -157,15 +277,32 @@ for FILE in "$DMG" "$SHA"; do
     die "upload $NAME failed with HTTP $CODE"
   fi
   rm -f "$BODY"
+  ASSET_NAMES+=("$NAME")
   say "  uploaded $NAME (HTTP $CODE)"
 done
 
 # ---- verify assets before touching the manifest --------------------------
 if [[ $DRY_RUN -eq 0 ]]; then
-  ASSETS_JSON="$(curl -sS --max-time 20 -H "Authorization: Bearer $TOKEN" "$API/releases/$RELEASE_ID/assets")"
+  VERIFY_BODY="$(mktemp)"
+  CODE="$(curl -sS --max-time 20 -o "$VERIFY_BODY" -w '%{http_code}' \
+    -H "Authorization: Bearer $TOKEN" "$API/releases/$RELEASE_ID/assets" 2>/dev/null || echo 000)"
+  if [[ "$CODE" != "200" ]]; then
+    rm -f "$VERIFY_BODY"
+    die "post-upload asset check failed with HTTP $CODE"
+  fi
+  VERIFIED="$(python3 - "$VERIFY_BODY" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+for asset in data:
+    name = asset.get("name")
+    if name:
+        print(name)
+PY
+)" || { rm -f "$VERIFY_BODY"; die "post-upload asset list is not valid JSON"; }
+  rm -f "$VERIFY_BODY"
   for FILE in "$DMG" "$SHA"; do
     NAME="$(basename "$FILE")"
-    if ! printf '%s' "$ASSETS_JSON" | python3 -c 'import json,sys; print(any(a["name"]==sys.argv[1] for a in json.load(sys.stdin)))' "$NAME" | grep -q True; then
+    if ! printf '%s\n' "$VERIFIED" | grep -Fxq "$NAME"; then
       die "asset $NAME is missing from release $RELEASE_ID — manifest left untouched"
     fi
   done
@@ -174,8 +311,22 @@ fi
 
 # ---- update manifest -----------------------------------------------------
 if [[ $DRY_RUN -eq 0 ]]; then
-  PUBLISHED="$(curl -sS --max-time 20 "$API/releases/$RELEASE_ID" \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["published_at"])')"
+  REL_BODY="$(mktemp)"
+  CODE="$(api_get "$API/releases/$RELEASE_ID" "$REL_BODY")"
+  if [[ "$CODE" != "200" ]]; then
+    rm -f "$REL_BODY"
+    die "release metadata query failed with HTTP $CODE"
+  fi
+  PUBLISHED="$(python3 - "$REL_BODY" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+published = data.get("published_at")
+if not published:
+    sys.exit(2)
+print(published)
+PY
+)" || { rm -f "$REL_BODY"; die "release has no published_at — refusing to write a manifest without it"; }
+  rm -f "$REL_BODY"
   python3 - "$VERSION" "$BUILD" "$PUBLISHED" "$OWNER" "$REPO" <<'PY'
 import json, pathlib, sys
 version, build, published, owner, repo = sys.argv[1:6]

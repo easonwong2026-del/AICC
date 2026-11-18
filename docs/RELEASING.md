@@ -79,6 +79,9 @@ bash scripts/release-publish.sh              # 建 release、传 dmg + sha256、
 
 `release-publish.sh` 幂等：release 已存在就复用，附件已存在就跳过，清单没变化就不提交。中途失败直接重跑。
 
+**在打了 Tag 的那个提交上执行**：脚本要求本地 Tag 解析出的 commit 等于 `HEAD`，并且 `origin`
+上同一个 Tag 指向同一 commit。在别的分支或更晚的提交上跑会直接拒绝。
+
 三条安全约束（2026-11-18 复审后加固，`scripts/test-release-publish.sh` 覆盖）：
 
 1. **`--dry-run` 不要求 Tag 存在。** 它的用途就是"打 Tag 之前先看计划"，
@@ -86,8 +89,13 @@ bash scripts/release-publish.sh              # 建 release、传 dmg + sha256、
 2. **上传失败立刻中止。** DMG 或 `.sha256` 的 HTTP 码不是 2xx 就直接 `die`，
    不碰 `updates/aicc-update.json`、不提交、不推送；上传完还会回查两个资产确实挂在
    release 上，再动清单。
-3. **Mock 测试**：`bash scripts/test-release-publish.sh` 用假 `curl` + 本地 bare 仓库跑五种场景
-   （dry-run 无 Tag / DMG 上传 500 / sha256 上传 502 / 实跑无 Tag / 正常路径），
+3. **查询失败不许当成"不存在"**：Release 查询只有明确 404 才允许创建；资产列表查询必须
+   200 且是合法 JSON。401/403/429/5xx/超时/坏 JSON 一律停下。
+4. **Tag 必须指向正确提交**：本地 `vX.Y.Z` 解析出的 commit 必须等于 `HEAD`，`origin` 上的同一个
+   Tag 也必须指向同一 commit。只"存在"不够。
+5. **Mock 测试**：`bash scripts/test-release-publish.sh` 用假 `curl` + 本地 bare 仓库跑十种场景
+   （dry-run 无 Tag、DMG/sha256 上传失败、实跑无 Tag、Release 查询 500 / 坏 JSON、
+   资产列表 500、本地/远端 Tag 指向别处、正常路径；共 41 条断言），
    断言失败时没有任何副作用。CI 的 `swift-test` job 会跑它。
 
 ## 3. 排障
