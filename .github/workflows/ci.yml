@@ -103,6 +103,9 @@ jobs:
               # 只改它们而跳过 macOS 构建，就等于改了闸门却从不通电。
               - 'scripts/validate-python-runtime.sh'
               - 'scripts/validate-account-worker-bundle.sh'
+              # 发布脚本只被 macOS 侧执行（要 plutil / shasum），改动必须跑到它的 Mock 测试。
+              - 'scripts/release-publish.sh'
+              - 'scripts/test-release-publish.sh'
             android:
               - 'android/**'
               - 'scripts/smoke-test-android-visual.sh'
@@ -261,6 +264,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
+      - name: Test the release script with local mocks
+        run: bash scripts/test-release-publish.sh
 
       - name: Run Widget status smoke tests
         run: bash scripts/smoke-test-widget.sh
