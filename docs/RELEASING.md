@@ -79,6 +79,17 @@ bash scripts/release-publish.sh              # 建 release、传 dmg + sha256、
 
 `release-publish.sh` 幂等：release 已存在就复用，附件已存在就跳过，清单没变化就不提交。中途失败直接重跑。
 
+三条安全约束（2026-11-18 复审后加固，`scripts/test-release-publish.sh` 覆盖）：
+
+1. **`--dry-run` 不要求 Tag 存在。** 它的用途就是"打 Tag 之前先看计划"，
+   现在只在实跑时强制本地与 `origin` 都有 Tag。
+2. **上传失败立刻中止。** DMG 或 `.sha256` 的 HTTP 码不是 2xx 就直接 `die`，
+   不碰 `updates/aicc-update.json`、不提交、不推送；上传完还会回查两个资产确实挂在
+   release 上，再动清单。
+3. **Mock 测试**：`bash scripts/test-release-publish.sh` 用假 `curl` + 本地 bare 仓库跑五种场景
+   （dry-run 无 Tag / DMG 上传 500 / sha256 上传 502 / 实跑无 Tag / 正常路径），
+   断言失败时没有任何副作用。CI 的 `swift-test` job 会跑它。
+
 ## 3. 排障
 
 | 症状 | 原因 | 处理 |

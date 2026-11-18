@@ -31,7 +31,9 @@ if [[ "$REMOTE" =~ github\.com[:/]+([^/]+)/([^/]+)$ ]]; then
   OWNER="${BASH_REMATCH[1]}"
   REPO="${BASH_REMATCH[2]%.git}"
 fi
-API="https://api.github.com/repos/$OWNER/$REPO"
+# 基址可覆盖：Mock 测试用它们把请求拦在本地，生产环境不用设。
+API="${AICC_RELEASE_API_BASE:-https://api.github.com}/repos/$OWNER/$REPO"
+UPLOAD="${AICC_RELEASE_UPLOAD_BASE:-https://uploads.github.com}/repos/$OWNER/$REPO"
 DRY_RUN=0
 [[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
 
@@ -51,9 +53,19 @@ say() { echo "==> $*"; }
 BUILD="$(plutil -extract CFBundleVersion raw -o - "$APP_PLIST")"
 [[ -n "$BUILD" ]] || die "cannot read CFBundleVersion"
 
-git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || die "tag $TAG does not exist locally"
-if ! git ls-remote --exit-code --tags origin "$TAG" >/dev/null 2>&1; then
-  die "tag $TAG is not on origin — run: git push origin $TAG"
+# dry-run 的目的就是"打 Tag 之前先看计划"，所以它不要求 Tag 存在。
+# 实跑才强制：本地和 origin 都必须有同一个 Tag，否则 Release 指向的 commit 没人能对上。
+if [[ $DRY_RUN -eq 0 ]]; then
+  git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || die "tag $TAG does not exist locally"
+  if ! git ls-remote --exit-code --tags origin "$TAG" >/dev/null 2>&1; then
+    die "tag $TAG is not on origin — run: git push origin $TAG"
+  fi
+else
+  if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+    say "tag $TAG exists locally (dry-run does not need it)"
+  else
+    say "tag $TAG not created yet — a real run requires it locally and on origin"
+  fi
 fi
 
 # The checksum file ships next to the DMG; regenerate it if it is missing or
@@ -66,7 +78,7 @@ fi
 
 TOKEN=""
 if [[ $DRY_RUN -eq 0 ]]; then
-  TOKEN="$(printf 'protocol=https\nhost=github.com\n\n' | git credential fill 2>/dev/null | sed -n 's/^password=//p')"
+  TOKEN="${AICC_RELEASE_TOKEN:-$(printf 'protocol=https\nhost=github.com\n\n' | git credential fill 2>/dev/null | sed -n 's/^password=//p')}"
   [[ -n "$TOKEN" ]] || die "no github.com credential in the keychain — see docs/RELEASING.md"
   curl -sS --max-time 20 -o /dev/null -w '' -H "Authorization: Bearer $TOKEN" "$API" \
     || die "the stored credential cannot read $OWNER/$REPO"
@@ -108,7 +120,12 @@ fi
 # ---- assets --------------------------------------------------------------
 for FILE in "$DMG" "$SHA"; do
   NAME="$(basename "$FILE")"
-  [[ -f "$FILE" ]] || { say "skip $NAME (not built)"; continue; }
+  if [[ $DRY_RUN -eq 1 ]]; then
+    # dry-run 不落 sha 文件，但计划里必须有它——否则看起来像"只传 DMG"。
+    echo "    upload $NAME to release ${RELEASE_ID:-<new>}"
+    continue
+  fi
+  [[ -f "$FILE" ]] || die "missing $NAME — the release assets must both exist"
   PRESENT="False"
   if [[ -n "$RELEASE_ID" ]]; then
     AUTH=()
@@ -129,10 +146,31 @@ for FILE in "$DMG" "$SHA"; do
     *.dmg) CONTENT_TYPE="application/x-apple-diskimage" ;;
     *)     CONTENT_TYPE="application/octet-stream" ;;
   esac
-  curl -sS -X POST "https://uploads.github.com/repos/$OWNER/$REPO/releases/$RELEASE_ID/assets?name=$NAME" \
+  BODY="$(mktemp)"
+  CODE="$(curl -sS -X POST "$UPLOAD/releases/$RELEASE_ID/assets?name=$NAME" \
     -H "Authorization: Bearer $TOKEN" -H "Content-Type: $CONTENT_TYPE" \
-    --data-binary "@$FILE" -o /dev/null -w '    http=%{http_code}\n'
+    --data-binary "@$FILE" -o "$BODY" -w '%{http_code}' || echo 000)"
+  if [[ "$CODE" != 2* ]]; then
+    echo "    body: $(head -c 300 "$BODY" 2>/dev/null)" >&2
+    rm -f "$BODY"
+    # 上传没成功就直接退出：绝不能继续去改自动更新清单。
+    die "upload $NAME failed with HTTP $CODE"
+  fi
+  rm -f "$BODY"
+  say "  uploaded $NAME (HTTP $CODE)"
 done
+
+# ---- verify assets before touching the manifest --------------------------
+if [[ $DRY_RUN -eq 0 ]]; then
+  ASSETS_JSON="$(curl -sS --max-time 20 -H "Authorization: Bearer $TOKEN" "$API/releases/$RELEASE_ID/assets")"
+  for FILE in "$DMG" "$SHA"; do
+    NAME="$(basename "$FILE")"
+    if ! printf '%s' "$ASSETS_JSON" | python3 -c 'import json,sys; print(any(a["name"]==sys.argv[1] for a in json.load(sys.stdin)))' "$NAME" | grep -q True; then
+      die "asset $NAME is missing from release $RELEASE_ID — manifest left untouched"
+    fi
+  done
+  say "both assets verified on the release"
+fi
 
 # ---- update manifest -----------------------------------------------------
 if [[ $DRY_RUN -eq 0 ]]; then
