@@ -1,0 +1,43 @@
+{
+ "_note": "只保留判定所需字段；365 天逐日轨迹不落库（PR #102 复审）。",
+ "accountId": "d3de2ea3626c2b44",
+ "capturedAt": "2026-11-17T14:40:40Z",
+ "today": {
+  "date": "2026-11-17",
+  "isActive": false,
+  "score": 0,
+  "statusText": "开始使用以点亮今日热力墙"
+ },
+ "heatmapMeta": {
+  "rangeDays": 365,
+  "endDate": "2026-11-17",
+  "updatedAt": "2026-10-25T21:46:00+08:00"
+ },
+ "cellsSummary": {
+  "cellCount": 365,
+  "activeDays": 6,
+  "lastActiveDate": "2026-10-25",
+  "activeDaysLast7": 0
+ },
+ "streak": {
+  "days": 0,
+  "nextTier": "7d",
+  "nextTierRemaining": 7,
+  "monthTotalDays": 0,
+  "launchDate": "2026-06-17",
+  "timezone": "Asia/Shanghai",
+  "makeupCards": {
+   "balance": 0,
+   "max": 4
+  },
+  "redemptionStatus": {
+   "remaining_days": 0,
+   "tier_14d_count": 0,
+   "tier_14d_status": "locked",
+   "tier_28d_count": 0,
+   "tier_28d_status": "locked",
+   "tier_7d_count": 0,
+   "tier_7d_status": "locked"
+  }
+ }
+}

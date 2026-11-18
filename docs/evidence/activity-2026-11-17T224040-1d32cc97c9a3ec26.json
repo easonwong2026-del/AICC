@@ -1,0 +1,43 @@
+{
+ "_note": "只保留判定所需字段；365 天逐日轨迹不落库（PR #102 复审）。",
+ "accountId": "1d32cc97c9a3ec26",
+ "capturedAt": "2026-11-17T14:40:41Z",
+ "today": {
+  "date": "2026-11-17",
+  "isActive": true,
+  "score": 105,
+  "statusText": "今日已活跃，继续点亮成长热力墙"
+ },
+ "heatmapMeta": {
+  "rangeDays": 365,
+  "endDate": "2026-11-17",
+  "updatedAt": "2026-11-17T22:38:04+08:00"
+ },
+ "cellsSummary": {
+  "cellCount": 365,
+  "activeDays": 150,
+  "lastActiveDate": "2026-11-17",
+  "activeDaysLast7": 7
+ },
+ "streak": {
+  "days": 17,
+  "nextTier": "28d",
+  "nextTierRemaining": 11,
+  "monthTotalDays": 17,
+  "launchDate": "2026-06-17",
+  "timezone": "Asia/Shanghai",
+  "makeupCards": {
+   "balance": 4,
+   "max": 4
+  },
+  "redemptionStatus": {
+   "remaining_days": 17,
+   "tier_14d_count": 1,
+   "tier_14d_status": "claimed",
+   "tier_28d_count": 0,
+   "tier_28d_status": "locked",
+   "tier_7d_count": 1,
+   "tier_7d_status": "claimed"
+  }
+ }
+}
