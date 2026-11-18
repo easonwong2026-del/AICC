@@ -119,6 +119,8 @@ pub const METHODS: &[&str] = &[
     "growth.auto.setEnabled",
     "growth.auto.tick",
     "growth.runs",
+    // ---- 成长活跃（PR #103：只读；签到与活跃分开算）----
+    "growth.activity.status",
     // ---- 奖励状态（PR #96：只读；三个写动作仍未接线）----
     "growth.rewards.status",
     // ---- 正式奖励写操作（PR #101）----
@@ -991,6 +993,37 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                     "grantedEnergy": energy,
                 }))
             })
+        }
+
+        // ---- 成长活跃（PR #103）----
+        //
+        // 只读：每账号两个成长 GET（`/heatmap` + `/streak`），外加本地当天的签到记录；
+        // 本地拿不出成功记录时，再发一次**只读语义的 POST**（签到状态接口，
+        // 仅在 404 时换一次路径）。上限：4 账号 × (2 GET + 1 POST)。
+        // 签到与活跃是两个独立字段，**不互相推导**：实测四个账号连续签到 5 天，
+        // 其中三个热力墙仍是 0（docs/activity-rules-2026-11-17.md）。
+        "growth.activity.status" => {
+            let ids = optional_string_list(params, "accountIds")?;
+            let fleet = crate::growth::activity::fleet(app, &ids).await?;
+            let summary: Vec<String> = fleet
+                .accounts
+                .iter()
+                .map(|account| {
+                    format!(
+                        "{}={}(active {:?}, streak {:?}, next {})",
+                        account.account_id,
+                        account.diagnosis.code,
+                        account.today_active,
+                        account.streak_days,
+                        account
+                            .next_tier_remaining
+                            .map(|days| days.to_string())
+                            .unwrap_or_else(|| "—".to_string())
+                    )
+                })
+                .collect();
+            log_note(&format!("成长活跃查询：{}", summary.join("; ")));
+            Ok(serde_json::to_value(fleet).unwrap_or(Value::Null))
         }
 
         // ---- 奖励状态（PR #96）----

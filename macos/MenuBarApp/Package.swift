@@ -42,6 +42,7 @@ let package = Package(
                 "Models/TaskOverviewModels.swift",
                 "Models/TravelModels.swift",
                 "Models/GrowthModels.swift",
+                "Models/ActivityModels.swift",
                 "Models/RewardModels.swift",
                 "Models/CheckinModels.swift",
                 "Models/QuotaModel.swift",

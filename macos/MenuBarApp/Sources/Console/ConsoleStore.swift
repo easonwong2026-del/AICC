@@ -60,6 +60,14 @@ final class ConsoleStore: ObservableObject {
     @Published private(set) var rewardFailures: [String: String] = [:]
     @Published private(set) var rewardLoading: Set<String> = []
 
+    // MARK: - 成长活跃（PR #103）
+
+    /// 四个账号"今天亮了没有"。**只读**，且只在用户点「刷新」时才联网。
+    @Published private(set) var activity: ActivityFleetState = .empty
+    @Published private(set) var activityError: String?
+    @Published private(set) var activityLoading = false
+    @Published private(set) var lastActivityRefresh: Date?
+
     /// 每日签到（PR #69）。首屏先用本地缓存出图，联网查询由用户点按钮触发。
     @Published private(set) var checkin: CheckinFleetStatus = .empty
     @Published private(set) var checkinAuto: CheckinAutoStatus = .unknown
@@ -895,6 +903,29 @@ final class ConsoleStore: ObservableObject {
         }
     }
 
+    /// 读所有账号的活跃状态。**只读**：worker 侧每账号 2 个成长 GET，
+    /// 必要时 1 次只读语义 POST（签到状态），没有任何写入口。
+    ///
+    /// 失败时**保留上一次结果**并留一条错误：界面上「上次读到」和「这次没读到」
+    /// 是两件事，把数据擦掉会让人以为活跃记录丢了。
+    func loadActivity() async {
+        guard !activityLoading else { return }
+        activityLoading = true
+        defer { activityLoading = false }
+        guard await ensureWorkerReady() else {
+            activityError = workerFailureText
+            return
+        }
+        do {
+            let json = try await worker.activityStatus()
+            activity = ActivityFleetState(json: json)
+            activityError = nil
+            lastActivityRefresh = Date()
+        } catch {
+            activityError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
     /// 读所有账号的执行记录。失败保持原样，不影响任务列表。
     func loadGrowthRuns() async {
         for scan in growthResult.scans {
@@ -1085,6 +1116,9 @@ extension ConsoleStore {
 
         rewardStates = fixture.rewardStates
         rewardFailures = fixture.rewardFailures
+        activity = fixture.activity
+        activityError = fixture.activityError
+        lastActivityRefresh = fixture.lastAccountsRefresh
     }
 }
 #endif
