@@ -346,7 +346,7 @@ if [[ -n "$DMG" ]]; then
   } >> "$MD"
 
   if [[ "$DMG_BREAKDOWN" == "1" ]]; then
-    echo "  测量各组件压缩贡献（逐个重建临时 DMG）..."
+    echo "  测量各组件边际压缩贡献（逐个重建临时 DMG）..."
     dmg_for_dir() {
       local label="$1" mutate="$2" stage="$WORK/dmg-$1"
       local out="$WORK/$1.dmg"
@@ -364,7 +364,7 @@ if [[ -n "$DMG" ]]; then
       echo "_无法重建 DMG（hdiutil 失败），跳过压缩贡献测量。_" >> "$MD"
     else
       {
-        echo "| 组件 | 移除后的 DMG | 压缩后贡献 |"
+        echo "| 组件 | 移除后的 DMG | 边际压缩贡献 |"
         echo "| --- | ---: | ---: |"
       } >> "$MD"
       for spec in \
@@ -387,6 +387,10 @@ if [[ -n "$DMG" ]]; then
       done
       echo "" >> "$MD"
       echo "重建出的完整 DMG（用于对照）：$FULL_BYTES 字节；输入 DMG：$DMG_BYTES 字节。" >> "$MD"
+      echo "" >> "$MD"
+      echo "> **口径**：上表是**边际贡献**——把某个组件整体删掉后重新压缩得到的差值。" >> "$MD"
+      echo "> 压缩有布局依赖，这些差值**不能相加**，也不等于该组件在 DMG 里的精确字节数；" >> "$MD"
+      echo "> 它只回答「动这个组件值不值」。可加总的只有本脚本直接测到的 DMG 体积本身。" >> "$MD"
       echo "两者差异来自 hdiutil 的卷元数据与时间戳，属于正常抖动。" >> "$MD"
       echo "" >> "$MD"
     fi

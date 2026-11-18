@@ -112,6 +112,8 @@ jobs:
               - 'scripts/audit-bundle.sh'
               - 'scripts/audit-python-imports.sh'
               - 'scripts/measure-resources.sh'
+              - 'scripts/test-measure-resources.sh'
+              - 'scripts/test-audit-python-imports.sh'
             android:
               - 'android/**'
               - 'scripts/smoke-test-android-visual.sh'
@@ -404,6 +406,15 @@ jobs:
         run: |
           bash scripts/audit-bundle.sh --out dist/audit
           sed -n '/^## 1/,/^## 3/p' dist/audit/audit.md
+
+      # These two assert the *safety* of the diagnostics, not their output:
+      # that measure-resources cannot quit or launch an App without explicit
+      # consent, and that the import audit reaches no real endpoint. Both run
+      # against fixtures/a mock, so they neither start nor stop anything.
+      - name: Guard tests for the audit tools
+        run: |
+          bash scripts/test-measure-resources.sh
+          bash scripts/test-audit-python-imports.sh
 
       - name: Smoke test bundled server
         run: |

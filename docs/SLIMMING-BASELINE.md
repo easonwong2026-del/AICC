@@ -37,7 +37,7 @@ PR-A 新增 `scripts/audit-bundle.sh`，它做三件只读的事：
 
 1. 用 `du` / `stat` / `otool` / `nm` 量磁盘体积与 Mach-O 段构成；
 2. 对每个 Mach-O **在临时副本上真跑一次 `strip -x`**，报告「strip 后」而不是估算；
-3. 用 `hdiutil` 重建 DMG 并逐个移除组件，量出**每个组件压缩后占多少字节**。
+3. 用 `hdiutil` 重建 DMG 并逐个移除组件，量出**每个组件的边际压缩贡献**。
 
 产物：`dist/audit/audit.md`、`audit.csv`、`audit.json`（`dist/` 不入库，
 按上面命令可原样重建；报告里的每个数字都来自这三个文件）。
@@ -45,9 +45,35 @@ PR-A 新增 `scripts/audit-bundle.sh`，它做三件只读的事：
 第 3 步的意义：磁盘上的 44.9 MiB 和用户下载的 20.07 MB 是两个不同的数，
 一个在磁盘上很大但压缩后趋近于 0 的组件不值得动。
 
-**可复现性证据**：脚本用同一份 App 重建出的 DMG 是 **20,067,407 字节**，
-与发布件 20,067,290 相差 **117 字节**（0.0006%），差异来自 hdiutil 的卷元数据与时间戳。
-这说明本报告的测量环境与发布构建是同一回事，不是另一台机器上的近似。
+**口径（重要）**：第 3 步得到的是**边际贡献**——把某个组件整体删掉再重新压缩，
+用两次 DMG 体积相减得到。压缩结果依赖布局，**这些差值不能相加**，也不等于该组件在
+DMG 里的精确字节数；它只回答「动这个组件值不值」。可加总的只有脚本直接测到的 DMG 体积本身。
+
+**可复现性证据**：脚本用同一份 App 重建出的 DMG 在 20,067,290 ± 400 字节区间内
+（两次运行：20,067,407 / 20,067,646，差 117 / 356 字节，≤0.002%），差异来自 hdiutil 的
+卷元数据与时间戳。这说明本报告的测量环境与发布构建是同一回事，不是另一台机器上的近似。
+
+### 1.1 工具的安全边界（PR-A 复审后补）
+
+诊断工具不能改变被诊断的系统。三条硬规则，都有测试守着：
+
+| 工具 / 模式 | 行为 | 守卫 |
+| --- | --- | --- |
+| `measure-resources.sh --mode sample` | **只读**：不 quit、不 open、不写 App | `scripts/test-measure-resources.sh` 断言动作日志为空 |
+| `--mode launch` / `--mode exit` | 会退出正在运行的 AICC | 必须显式 `--allow-lifecycle-actions`；`launch` 还必须 `--allow-real-data` |
+| 启动新构建 | 用**真实**账号库 | 没有隔离模式：AICC 没有数据目录参数，`open` 也无法注入环境变量。脚本如实说明，不假装隔离 |
+| 其他安装位置正在运行 | 默认**拒绝** | 检测所有同 Bundle ID 实例的实际路径；要退别人的日常构建必须 `--allow-foreign-instance-quit` |
+| 退出失败 | **fail closed** | 同 Bundle ID 实例仍在 → 退出码 3，**绝不 `open`**，避免双实例抢端口/数据库 |
+| `audit-python-imports.sh` | 跑真实 `server.py` | 子进程用 `env -i` 白名单启动：强制 loopback、关 LAN/discovery、临时数据与证书目录、额度流量指向本地 mock |
+
+`audit-python-imports.sh` 的隔离不是声明，是断言：脚本要求 mock 至少收到一个
+`POST /v1/magpie/quotas/refresh`，并在 `127.0.0.1:3425` 放一个 canary socket，
+命中必须为 0（端口被占用则标注 `unavailable`）；任一不满足就直接失败。
+`scripts/test-audit-python-imports.sh` 会先用**被污染的环境**
+（`EINK_HOST=0.0.0.0`、`EINK_DISCOVERY=1`、真实 `AICC_MAGPIE_URL`、`AICC_TOKEN_STDIN`、
+`AICC_PARENT_PID`、`*_proxy`）跑一遍，证明这些变量没有被继承。
+
+两个测试都进 CI（`macos-build` 的 `Guard tests for the audit tools`），都不启动、不退出任何真实 App。
 
 ---
 
@@ -67,16 +93,18 @@ PR-A 新增 `scripts/audit-bundle.sh`，它做三件只读的事：
 
 文件总数 **620**，符号链接 2，**没有任何重复内容**（sha256 全量比对，> 64 KB 无一重复）。
 
-### 2.2 压缩后构成（DMG 里真正的字节）
+### 2.2 边际压缩贡献（不是可加总的"分区大小"）
 
-| 组件 | 移除后的 DMG | 压缩后贡献 | 占 DMG |
+删除该组件后重建 DMG，用两次体积相减得到。**不能相加**（见 §1 口径）。
+
+| 组件 | 移除后的 DMG | 边际贡献 | 占 DMG（仅用于排序） |
 | --- | ---: | ---: | ---: |
-| Python 运行时（整体） | 6,543,512 | **13,523,895** | 67.4% |
-| ├─ 解释器 `bin/python3.14` | 11,976,225 | 8,091,182 | 40.3% |
-| └─ 标准库 `lib/python3.14` | 15,329,720 | 4,737,687 | 23.6% |
-| Rust worker | 16,278,257 | 3,789,150 | 18.9% |
-| Swift 主程序 | 17,967,017 | 2,100,390 | 10.5% |
-| Widget 扩展 | 19,776,196 | 291,211 | 1.5% |
+| Python 运行时（整体） | 6,543,519 | **13,524,127** | 67.4% |
+| ├─ 解释器 `bin/python3.14` | 11,976,235 | 8,091,411 | 40.3% |
+| └─ 标准库 `lib/python3.14` | 15,329,742 | 4,737,904 | 23.6% |
+| Rust worker | 16,278,219 | 3,789,427 | 18.9% |
+| Swift 主程序 | 17,966,870 | 2,100,776 | 10.5% |
+| Widget 扩展 | 19,776,083 | 291,563 | 1.5% |
 
 Python 解释器本体（18.6 MiB）压缩后仍有 **8.09 MB**：它把 OpenSSL 3.5.9 与全部扩展模块
 静态链进去了，这是 `python-build-standalone` 的 `install_only` 形态的固有代价，
@@ -84,14 +112,18 @@ Python 解释器本体（18.6 MiB）压缩后仍有 **8.09 MB**：它把 OpenSSL
 
 ### 2.3 符号表：最大的一块纯浪费
 
+> 术语：`__LINKEDIT` 里**不只是**符号表，还包含 rebase/bind 信息、导出表、函数起始表、
+> 代码签名等元数据。所以不能把 4.41 MiB 直接当成「可删除的符号字节」。
+
 | 二进制 | 文件 MiB | `__TEXT` | `__LINKEDIT` | 符号数 | strip -x 后 | 可省 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `Contents/MacOS/AICC` | 7.01 | 2.47 | **4.41** | 23,711 | 2.81 | **4.19 MiB** |
+| `Contents/MacOS/AICC` | 7.01 | 2.47 | 4.41 | 23,711 | 2.81 | **4.19 MiB** |
 | `AICCWidget` | 1.06 | 0.42 | 0.61 | 4,512 | 0.54 | **0.52 MiB** |
 | `python3.14` | 18.58 | 14.75 | 2.11 | 69,527 | 16.75 | **1.83 MiB** |
 | `aicc-account-worker` | 6.83 | 6.62 | 0.06 | 227 | 6.83 | 0（已 strip） |
 
-合计 **6.54 MiB** 磁盘体积是可以直接扔掉的调试符号：
+可删除的字节以**实测**为准——下表最后一列是临时副本上真跑 `strip -x` 之后减少的体积，
+合计 **6.54 MiB 磁盘**：
 
 - `build-aicc-swiftui.sh` 用 `swiftc -O` 直接产出，**没有 strip 步骤**。
   Xcode 的 release 构建默认 `STRIP_INSTALLED_PRODUCT=YES`，这里是手写脚本，漏了。
@@ -145,17 +177,17 @@ bash scripts/validate-python-runtime.sh <runtime>        # 12 项 TLS 硬门
 
 `scripts/audit-python-imports.sh` 用 `sys.addaudithook` 记录 `import` 事件，
 并合并 `sys.modules`（`encodings` 在 site 之前就被解释器导入，只靠 hook 会漏），
-跑真实 `server.py` 6 秒后 SIGINT 落盘：
+跑真实 `server.py` 6 秒后 SIGINT 落盘（隔离方式见 §1.1）：
 
-- 有磁盘文件的模块：**119 个**
-- 标准库未加载：**439 个 `.py`，7.2 MiB**
+- 有磁盘文件的模块：**114 个**
+- 标准库未加载：**447 个 `.py`，7.3 MiB**
 
 未加载的按目录（节选）：
 
 | 目录 | KiB | 文件数 | 判断 |
 | --- | ---: | ---: | --- |
-| 顶层 `.py`（pydoc/pdb/doctest/tarfile/zipfile/…） | 2,936 | 88 | 多数可删，需逐个确认 |
-| `encodings/` | 1,365 | 120 | **不要删**：编码是按需导入的，删错就是运行时崩溃 |
+| 顶层 `.py`（pydoc/pdb/doctest/tarfile/…） | 3,329 | 100 | 多数可删，需逐个确认 |
+| `encodings/` | 1,352 | 119 | **不要删**：编码是按需导入的，删错就是运行时崩溃 |
 | `asyncio/` | 523 | 35 | 桥接是 `ThreadingHTTPServer`，用不到 |
 | `multiprocessing/` | 302 | 23 | 用不到 |
 | `xml/` | 297 | 22 | 用不到（`xmlrpc` 也在里面） |
@@ -288,10 +320,18 @@ DMG 反而**变大** 217 KB（18,713,552 → 18,930,575，三次重测一致，�
 ## 6. 内存与空闲资源基线
 
 ```bash
-bash scripts/measure-resources.sh --mode launch  --label cold-start --settle-timeout 120
-bash scripts/measure-resources.sh --mode sample  --label idle-30min --warmup 1800 --samples 3
-bash scripts/measure-resources.sh --mode exit    --label quit-check
+# 只读观察：不需要任何授权
+bash scripts/measure-resources.sh --mode sample --label idle-30min --warmup 1800 --samples 3
+
+# 冷启动/退出：会退出正在运行的 AICC，必须显式授权
+bash scripts/measure-resources.sh --mode launch --label cold-start --settle-timeout 120 \
+  --allow-lifecycle-actions --allow-real-data
+bash scripts/measure-resources.sh --mode exit --label quit-check --allow-lifecycle-actions
 ```
+
+`--mode launch` 会用**真实**账号库启动（AICC 没有数据目录参数，`open` 也无法注入环境变量），
+所以脚本要求 `--allow-real-data` 并打印这条说明；如果正在运行的是**另一个安装位置**的 AICC，
+默认直接拒绝，而不是替你退掉日常在用的那个。
 
 PR-A 重写了 `scripts/measure-resources.sh`：原来只覆盖 Swift + Python 两个进程、
 只输出到屏幕；现在覆盖**整个进程组**（Swift 宿主 + Rust worker + Python 桥接 + 系统拉起的 Widget 扩展），
@@ -305,6 +345,12 @@ PR-A 重写了 `scripts/measure-resources.sh`：原来只覆盖 Swift + Python �
 （本次实测数据见 §6.1，环境与场景标注见每张表下方。）
 
 ### 6.1 实测（本机 macOS arm64，真实构建）
+
+> 过程披露：§6.1 的数据是在复审提出 P0-A **之前**采的。当时 `--mode launch` 会按 Bundle ID
+> 退出正在运行的 App，本轮确实退出过一次 `~/Applications` 的 2.12.2（测完已恢复启动）。
+> 现在加上 `--allow-lifecycle-actions` / `--allow-real-data` 与"外来实例默认拒绝"之后，
+> 同样的测量必须由人明确授权，且不会再退掉另一个安装位置的构建。
+> **数据本身不受影响**（测的是 2.13.0/25 的 dist 构建，与 2.12.2 无关）。
 
 测量环境，每次运行都会写进 `summary.json` 的 `context` 段，前后必须一致才可比：
 
@@ -374,15 +420,19 @@ worker 15 MB、Python 42–44 MB。RSS 远大于 footprint 是因为共享的只
 
 ## 7. 前三大优化机会
 
-| # | 机会 | 预计收益（DMG） | 风险 | 工作量 | 优先级 |
+按复审意见，顺序是**先固定压缩格式、再动二进制**，这样后面每一步都用同一个 UDBZ 基线比较：
+
+| 步骤 | 机会 | 预计收益（DMG） | 风险 | 工作量 | 优先级 |
 | --- | --- | ---: | --- | --- | --- |
 | 1 | DMG 换 `UDBZ` | **-2.92 MB** | 极低（打包参数，不碰 App） | 1 行 | **P0** |
-| 2 | 发布构建加 `strip -x`（Swift/Widget/Python） | **-1.13 MB** | 低（Apple 标准做法，需在签名前） | 3 行 | **P0** |
-| 3 | worker `opt-level="z"` + `panic="abort"` | **-1.35 MB** | 中（需全链路实测） | 2 行 + 验证 | **P1** |
+| 2 | 发布构建加 `strip -x`（Swift/Widget/Python），保留 dSYM 归档 | **-1.13 MB** | 低（Apple 标准做法，必须在签名前） | 3 行 + 归档步骤 | **P0** |
+| 3a | worker `opt-level="z"`（单独） | 待测 | 中低（只影响速度） | 1 行 | **P1** |
+| 3b | worker `panic="abort"`（单独） | 待测 | 中（崩溃语义变化：不再 unwind） | 1 行 + 故障恢复验证 | **P1** |
 | 4 | 标准库裁剪（保守集合） | -0.6 ~ -0.9 MB | 中高（未加载≠可删） | 中 | P2 |
 | 5 | 桥接迁 Rust | -10 MB（净） | 高（协议/设备兼容） | 大 | P3，先不立项 |
 
-1–3 项叠加实测 **-5.40 MB（-26.9%）**，即 20.07 MB → **14.67 MB**。
+三项一起上的实测是 **-5.40 MB（-26.9%）**，即 20.07 MB → **14.67 MB**；
+但 3a/3b 是**合并测量**的，PR-B 里必须分开评估，不能把两者的收益混在一起。
 
 ---
 
@@ -390,23 +440,39 @@ worker 15 MB、Python 42–44 MB。RSS 远大于 footprint 是因为共享的只
 
 ### PR-B：安装包瘦身（依据本文第 2/4/5 节）
 
-改动面（全部在构建脚本与 Cargo profile，**不碰业务代码**）：
+**分三步提交、逐步验收**（先固定压缩格式，后面每步都用同一个 UDBZ 基线比较收益）：
 
-| 文件 | 改动 |
-| --- | --- |
-| `macos/build-aicc-swiftui.sh` | 编译后、签名前对 `AICC`、`AICCWidget`、`python3.14`、`_dbm.so` 执行 `xcrun strip -x` |
-| `macos/build-dmg.sh` | `-format UDZO` → `-format UDBZ` |
-| `account-worker/Cargo.toml` | `[profile.release]` 加 `opt-level = "z"`、`panic = "abort"` |
+**B1 — 只换压缩格式（`build-dmg.sh`：`UDZO` → `UDBZ`）**
 
-验收要求：新 DMG 字节数对比基线；`codesign --verify --deep --strict`；
-`hdiutil verify`；`validate-python-runtime.sh`（12 项 TLS）；
-`smoke-test-account-worker.sh`；App/Widget/worker 正常启动；
-**固定签名身份与 SPKI pin 不变**；真实账号展示、额度、签到、旅行、成长中心各跑一遍。
-回滚：revert 这三个文件即可，无数据/schema 变化。
+验收：DMG 字节数；`hdiutil verify`；`hdiutil attach` 后在 macOS 14+ 上实际拖拽安装一次
+并记录耗时；确认卷名、`/Applications` 快捷方式、`Info.plist` 读取正常。
+这一步不碰 App 内任何字节，**签名身份与 SPKI 必然不变**。
+
+**B2 — Swift / Widget 符号裁剪（`build-aicc-swiftui.sh`）**
+
+编译后、**任何 codesign 之前**对 `AICC`、`AICCWidget`、`python3.14`、`_dbm.so`
+执行 `xcrun strip -x`；同时把未 strip 的二进制与 dSYM 归档成构建产物
+（**不进 DMG**），否则以后线上崩溃无法符号化。
+
+验收：`codesign --verify --deep --strict`；App/Widget 启动；Keychain 无额外弹窗；
+`validate-python-runtime.sh`（12 项 TLS，SPKI pin 不变）；worker 不重签（cdhash 不变）。
+
+**B3 — worker 代码生成（`Cargo.toml`）**
+
+`opt-level = "z"` 与 `panic = "abort"` **分别提交、分别评估**：
+
+- `panic="abort"` 改变崩溃语义（不再 unwind），不能只凭"没有 `catch_unwind`"就通过；
+  要跑 release profile 编译、启动/退出、故障恢复（worker 被杀后父进程重建）和完整
+  RPC/调度回归。
+- 两者都要用同一 UDBZ 基线比字节，并附带一次真实签到/额度/成长中心链路。
+
+回滚：每一步都是独立提交，revert 单个文件即可；无数据/schema 变化。
 
 ### PR-C：内存与空闲资源（依据 §6）
 
-基线已经把几个猜测排除了，PR-C 的范围应当收窄到下面三条，**不再去动"翻页缓存"**：
+基线已经把几个猜测排除了。**PR-C 不以重写 `ConsoleStore` 缓存为优先目标**：
+四页 footprint 差 <0.06 MB、刷新 20 次无增长，重写它只会增加状态不一致的风险而没有可量化收益。
+范围收窄到下面三条：
 
 | 方向 | 依据 | 预期收益 | 风险 |
 | --- | --- | --- | --- |

@@ -24,15 +24,42 @@
 # machine cannot measure (wakeups without root, widget presence) is reported as
 # `unavailable` instead of guessed.
 #
-# This script installs nothing and reconfigures nothing. Only --mode launch and
-# --mode exit touch the running App, and they do so the way a user would: quit
-# it, then open it from the bundle.
+# ## Safety boundary
+#
+# `--mode sample` is read-only: it never quits, never launches, never writes to
+# the App. It is the default.
+#
+# `--mode launch` / `--mode exit` do touch a running App, so they refuse to run
+# without explicit consent:
+#
+#   --allow-lifecycle-actions   required. Acknowledges that the running AICC
+#                               will be quit.
+#   --allow-real-data           required by launch. Acknowledges that the App
+#                               being started uses the **real** account
+#                               database under ~/Library/Application Support,
+#                               so it may migrate it and may trigger scheduled
+#                               work (check-in, travel). There is no isolated
+#                               mode: AICC has no data-directory option, and
+#                               `open` cannot inject environment variables.
+#   --allow-foreign-instance-quit
+#                               opt-in only. Without it, a running instance at a
+#                               *different* install path (e.g. the 2.12.2 in
+#                               ~/Applications while measuring dist/mac) makes
+#                               the run **refuse**, because quitting someone's
+#                               daily-use build to measure another one is not a
+#                               measuring decision.
+#
+# Quitting is fail-closed: if any instance of the same bundle id is still alive
+# afterwards, the script exits without launching anything. It never replaces a
+# running App with a different build behind your back.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="${AICC_APP:-$ROOT/dist/mac/AICC.app}"
-BUNDLE_ID="com.aieink.dashboard.menubar"
+# Filled in from the bundle under test (see `bundle_id_of "$APP"`), so a
+# mismatched --app cannot silently operate on a different product.
+BUNDLE_ID=""
 MODE="sample"
 LABEL=""
 WARMUP=0
@@ -43,6 +70,9 @@ SWIFT_PID=""
 PYTHON_PID=""
 SETTLE_TIMEOUT=60
 QUIT_TIMEOUT=20
+ALLOW_LIFECYCLE=0
+ALLOW_REAL_DATA=0
+ALLOW_FOREIGN_QUIT=0
 
 usage() {
   cat <<'USAGE'
@@ -64,7 +94,17 @@ Optional:
   --swift-pid <pid>     Pin the Swift host PID instead of discovering it
   --python-pid <pid>    Pin the Python bridge PID instead of discovering it
   --out <dir>           Output directory (default: dist/audit/resources)
+
+Lifecycle consent (launch / exit only):
+  --allow-lifecycle-actions   Required. The running AICC will be quit.
+  --allow-real-data           Required by launch. The App uses the real account
+                              database and may migrate it / run scheduled work.
+  --allow-foreign-instance-quit
+                              Allow quitting an instance at a different install
+                              path (default: refuse).
   -h, --help            This message
+
+`--mode sample` is read-only and needs none of the above.
 USAGE
   exit 0
 }
@@ -81,6 +121,9 @@ while [[ $# -gt 0 ]]; do
     --swift-pid)      SWIFT_PID="$2"; shift 2 ;;
     --python-pid)     PYTHON_PID="$2"; shift 2 ;;
     --out)            OUT="$2"; shift 2 ;;
+    --allow-lifecycle-actions)      ALLOW_LIFECYCLE=1; shift ;;
+    --allow-real-data)              ALLOW_REAL_DATA=1; shift ;;
+    --allow-foreign-instance-quit)  ALLOW_FOREIGN_QUIT=1; shift ;;
     -h|--help)        usage ;;
     *) echo "Unknown argument: $1" >&2; usage ;;
   esac
@@ -121,6 +164,13 @@ iso_now() { date '+%Y-%m-%dT%H:%M:%S%z'; }
 # keeps the set self-consistent: two snapshots can disagree about a worker that
 # appeared or exited in between.
 ps_tree() {
+  # AICC_MEASURE_PS_FILE is a test seam: the guard tests feed a synthetic
+  # process table so they can assert "would this have quit / launched?" without
+  # a real App anywhere near them.
+  if [[ -n "${AICC_MEASURE_PS_FILE:-}" ]]; then
+    cat "$AICC_MEASURE_PS_FILE"
+    return 0
+  fi
   ps -axo pid=,ppid=,command= 2>/dev/null
 }
 
@@ -136,6 +186,44 @@ root_pid() {
       split(line, f, " ")
       if (f[3] == bin) { print f[1]; exit }
     }'
+}
+
+die() {
+  local code="$1"; shift
+  echo "ERROR: $*" >&2
+  exit "$code"
+}
+
+# Every running process whose argv[0] looks like an AICC host binary, as
+# "pid<TAB>bundle path". Discovered by executable path rather than by bundle id
+# because we need to know *where* each instance lives before asking it anything.
+running_hosts() {
+  ps_tree | awk '
+    {
+      line = $0
+      sub(/^[ ]*/, "", line)
+      split(line, f, " ")
+      cmd = f[3]
+      if (cmd ~ /\/Contents\/MacOS\/AICC$/) {
+        sub(/\/Contents\/MacOS\/AICC$/, "", cmd)
+        print f[1] "\t" cmd
+      }
+    }'
+}
+
+bundle_id_of() {
+  /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$1/Contents/Info.plist" 2>/dev/null || echo ""
+}
+
+# All instances that belong to the bundle we are measuring.
+instances_of_bundle() {
+  local pid path
+  running_hosts | while IFS=$'\t' read -r pid path; do
+    [[ -z "$pid" || -z "$path" ]] && continue
+    if [[ "$(bundle_id_of "$path")" == "$BUNDLE_ID" ]]; then
+      printf '%s\t%s\n' "$pid" "$path"
+    fi
+  done
 }
 
 # Every descendant of $1, one pid per line.
@@ -200,15 +288,83 @@ default_read() {
 # ---- lifecycle helpers ------------------------------------------------------
 
 quit_app() {
+  if [[ -n "${AICC_MEASURE_TEST_LOG:-}" ]]; then
+    printf 'quit %s\n' "$BUNDLE_ID" >> "$AICC_MEASURE_TEST_LOG"
+    if [[ "${AICC_MEASURE_QUIT_RESULT:-ok}" == "timeout" ]]; then
+      return 1
+    fi
+    if [[ -n "${AICC_MEASURE_PS_FILE_AFTER_QUIT:-}" ]]; then
+      AICC_MEASURE_PS_FILE="$AICC_MEASURE_PS_FILE_AFTER_QUIT"
+    fi
+    return 0
+  fi
   osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
   local waited=0
   while [[ "$waited" -lt "$QUIT_TIMEOUT" ]]; do
-    [[ -z "$(root_pid)" ]] && return 0
+    # Not just our --app: *any* instance of this bundle id must be gone, or a
+    # second instance would race us for the port and the database.
+    [[ -z "$(instances_of_bundle)" ]] && return 0
     sleep 1
     waited=$(( waited + 1 ))
   done
   return 1
 }
+
+launch_app() {
+  if [[ -n "${AICC_MEASURE_TEST_LOG:-}" ]]; then
+    printf 'open %s\n' "$APP" >> "$AICC_MEASURE_TEST_LOG"
+    return 0
+  fi
+  open -n "$APP"
+}
+
+# Consent gate: everything that can quit or start an App goes through here.
+require_lifecycle_consent() {
+  [[ "$MODE" == "sample" ]] && return 0
+  if [[ "$ALLOW_LIFECYCLE" != "1" ]]; then
+    die 2 "--mode $MODE 会退出正在运行的 AICC。确认后加 --allow-lifecycle-actions；只观察用 --mode sample"
+  fi
+  if [[ "$MODE" == "launch" && "$ALLOW_REAL_DATA" != "1" ]]; then
+    cat >&2 <<'MSG'
+ERROR: --mode launch 会用**真实**账号库启动 App。
+
+  App 的数据目录固定在 ~/Library/Application Support/AICC-Dashboard，
+  没有数据目录参数，`open` 也无法注入环境变量，所以本脚本提供不了"隔离
+  数据目录"的模式。启动后的新构建可能迁移该库、并触发签到/旅行等定时任务。
+
+  确认接受后加 --allow-real-data；只想观察现有实例则用 --mode sample。
+MSG
+    exit 2
+  fi
+}
+
+# A running instance at another install path is someone's daily build, not a
+# measurement fixture. Refuse unless the caller says so explicitly.
+refuse_foreign_instances() {
+  local foreign="" pid path
+  while IFS=$'\t' read -r pid path; do
+    [[ -z "$pid" || -z "$path" ]] && continue
+    [[ "$path" == "$APP" ]] && continue
+    foreign="$foreign $pid:$path"
+  done < <(instances_of_bundle)
+  if [[ -z "$foreign" ]]; then return 0; fi
+  if [[ "$ALLOW_FOREIGN_QUIT" == "1" ]]; then
+    echo "WARNING: 另一个安装位置的 AICC 正在运行，按 --allow-foreign-instance-quit 一并退出：$foreign" >&2
+    return 0
+  fi
+  cat >&2 <<MSG
+ERROR: 检测到另一个安装位置的 AICC 正在运行：$foreign
+
+  正在测量的是：$APP
+  退出/替换别人的日常构建不该是测量的副作用。先手动退出它，或明确加
+  --allow-foreign-instance-quit。
+MSG
+  exit 2
+}
+
+BUNDLE_ID="$(bundle_id_of "$APP")"
+[[ -n "$BUNDLE_ID" ]] || die 1 "无法从 $APP 读出 CFBundleIdentifier"
+require_lifecycle_consent
 
 STARTUP_SECONDS="unavailable"
 LAUNCH_T_SWIFT="unavailable"
@@ -216,12 +372,20 @@ LAUNCH_T_WORKER="unavailable"
 LAUNCH_T_PYTHON="unavailable"
 
 if [[ "$MODE" == "launch" ]]; then
+  refuse_foreign_instances
   echo "==> 关闭已在运行的实例（冷启动要干净基线）"
-  quit_app || echo "WARNING: 已有实例在 ${QUIT_TIMEOUT}s 内没有退出，冷启动数据不可信" >&2
+  # Fail closed: a quit that did not take means a second instance would race
+  # this one for the bridge port and the account database. Report, do not open.
+  if ! quit_app; then
+    die 3 "已有实例在 ${QUIT_TIMEOUT}s 内没有退出，放弃启动（绝不制造双实例）"
+  fi
+  if [[ -n "$(instances_of_bundle)" ]]; then
+    die 3 "退出后仍检测到同 Bundle ID 实例：$(instances_of_bundle | tr '\n' ' ')"
+  fi
 
   echo "==> 启动 $APP"
   t0="$(now_s)"
-  open -n "$APP" || { echo "ERROR: 无法启动 App" >&2; exit 1; }
+  launch_app || { echo "ERROR: 无法启动 App" >&2; exit 1; }
 
   # Startup peak: the highest group footprint seen while the App is coming up.
   # Steady-state sampling below would miss it entirely.
@@ -273,6 +437,7 @@ fi
 
 LEFTOVERS=""
 if [[ "$MODE" == "exit" ]]; then
+  refuse_foreign_instances
   root="$(root_pid || true)"
   if [[ -z "$root" ]]; then
     echo "ERROR: AICC 没有在运行，退出清理无从测量" >&2
