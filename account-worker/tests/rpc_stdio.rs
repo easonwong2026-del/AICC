@@ -956,3 +956,43 @@ fn qoder_device_auth_start_is_offline_and_edition_scoped() {
     );
     session.call(9, "worker.shutdown", json!({}));
 }
+
+/// 成长活跃（PR #103）：方法必须注册，且没有账号时是空结果而不是错误。
+///
+/// 空数据目录下不会发任何网络请求，所以这条不会碰到真实账号。
+#[test]
+fn activity_status_is_registered_and_read_only() {
+    let mut session = Session::start();
+
+    let health = session.call(1, "health", json!({}));
+    let methods = health["result"]["methods"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        methods
+            .iter()
+            .any(|method| method == "growth.activity.status"),
+        "活跃状态 RPC 没注册：{health}"
+    );
+    assert!(
+        !methods
+            .iter()
+            .any(|method| method == "growth.activity.write"),
+        "这条路不该有写接口"
+    );
+
+    let reply = session.call(2, "growth.activity.status", json!({}));
+    let result = &reply["result"];
+    assert_eq!(result["readOnly"], json!(true));
+    assert_eq!(result["summary"]["total"], json!(0), "空库就是 0 个账号");
+    assert!(
+        result["accounts"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(false),
+        "空库不该凭空造出账号：{reply}"
+    );
+
+    session.call(3, "worker.shutdown", json!({}));
+}

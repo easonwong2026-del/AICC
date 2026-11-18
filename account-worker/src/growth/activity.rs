@@ -1314,4 +1314,162 @@ mod tests {
         assert_eq!(first.today_active, second.today_active);
         assert_eq!(first.next_tier_remaining, second.next_tier_remaining);
     }
+
+    // -----------------------------------------------------------------------
+    // PR-ACT-3：可靠性。跨日 / 离线 / 授权失效 / 多账号对应 / 不本地造数
+    // -----------------------------------------------------------------------
+
+    /// 热力图亮了但 `/streak` 还没更新：不许自己补连登。
+    #[test]
+    fn a_lit_heatmap_without_streak_data_does_not_invent_streak() {
+        let heat = heatmap(
+            "2026-11-18",
+            true,
+            12,
+            "2026-11-18T02:10:00+08:00",
+            json!([{ "date": "2026-11-18", "score": 12 }]),
+        );
+        let stale_streak = json!({
+            "code": 0,
+            "data": { "streak": { "next_tier": "7d", "next_tier_remaining": 7 } }
+        });
+        let out = assemble(
+            "acc",
+            "卡里",
+            Some(&heat),
+            Some(&stale_streak),
+            checkin_of(None, CheckinProbe::Indeterminate),
+        );
+        assert_eq!(out.diagnosis.code, "active");
+        assert_eq!(out.streak_days, None, "连登字段缺失就是缺失");
+        assert_eq!(out.next_tier_remaining, Some(7));
+    }
+
+    /// 401 必须被标成授权问题，而不是"没活跃"。
+    #[test]
+    fn a_401_is_reported_as_an_authorization_problem() {
+        let err = super::super::api::GrowthError {
+            kind: ErrorKind::Unauthorized,
+            http: Some(401),
+            code: Some(401),
+            message: "unauthorized".to_string(),
+        };
+        let field = field_error("heatmap", &err);
+        assert_eq!(field.kind, "unauthorized");
+        assert_eq!(field.http, Some(401));
+        assert_eq!(field.field, "heatmap");
+    }
+
+    /// 网络失败同样不能变成"未活跃"。
+    #[test]
+    fn a_network_failure_is_unknown_not_inactive() {
+        let err = super::super::api::GrowthError {
+            kind: ErrorKind::Network,
+            http: None,
+            code: None,
+            message: "connection reset".to_string(),
+        };
+        assert_eq!(field_error("streak", &err).kind, "network");
+
+        let offline = assemble(
+            "acc",
+            "高亮",
+            None,
+            None,
+            ActivityCheckin::of("unconfirmed", None),
+        );
+        assert_eq!(offline.state, "failed");
+        assert_eq!(offline.diagnosis.code, "unknown");
+        assert!(!offline.diagnosis.needs_action);
+    }
+
+    /// 多账号结果按 accountId 各自归属，不串行混淆。
+    #[test]
+    fn multiple_accounts_keep_their_own_identity() {
+        let active = assemble(
+            "a",
+            "甲",
+            Some(&heatmap(
+                "2026-11-18",
+                true,
+                20,
+                "2026-11-18T02:00:00+08:00",
+                json!([]),
+            )),
+            Some(&streak(3, "7d", 4, 3)),
+            checkin_of(None, CheckinProbe::Indeterminate),
+        );
+        let pending = assemble(
+            "b",
+            "乙",
+            Some(&heatmap(
+                "2026-11-18",
+                false,
+                0,
+                "2026-11-10T02:00:00+08:00",
+                json!([]),
+            )),
+            Some(&streak(0, "7d", 7, 0)),
+            checkin_of(None, CheckinProbe::Checked),
+        );
+        assert_eq!(active.account_id, "a");
+        assert_eq!(pending.account_id, "b");
+        assert_ne!(active.diagnosis.code, pending.diagnosis.code);
+        assert_eq!(summarize(&[active, pending]).pending, 1);
+    }
+
+    /// 回归（复审 P0-1）：存储层两个成功状态都必须直接算"已签"，不依赖探针结论。
+    #[test]
+    fn both_stored_success_states_confirm_without_asking_the_server() {
+        for status in [
+            crate::storage::checkin::STATUS_CLAIMED,
+            crate::storage::checkin::STATUS_ALREADY,
+        ] {
+            let checkin = resolve_checkin(
+                Some("2026-11-18"),
+                Some(&record("2026-11-18", status)),
+                // 探针说"没签"也不该翻案：本地成功就是成功。
+                probe(CheckinProbe::NotChecked),
+            );
+            assert_eq!(checkin.state, "confirmed", "状态 {status} 必须是已签");
+            assert_eq!(checkin.source, Some("local"), "本地成功不该去问服务端");
+        }
+    }
+
+    /// 回归（复审 P0-2）：不许回退到上游那个签到探针。
+    ///
+    /// 上游实现"只要不是成功就换路径"，401/429/5xx 都会重问一次；
+    /// 本仓的纪律是**只有 404 换路径**。
+    #[test]
+    fn the_activity_module_uses_the_controlled_status_query() {
+        let source = include_str!("activity.rs");
+        assert!(
+            source.contains("query_status_tolerant"),
+            "必须用受控的只读状态查询"
+        );
+        // 拆开拼，避免这条断言自己出现在源码里被匹配到。
+        let forbidden = ["get_checkin", "status"].join("_");
+        assert!(
+            !source.contains(&forbidden),
+            "不许调用上游的 {forbidden}（非 404 也会换路）"
+        );
+    }
+
+    /// 官方文档：调试探针只能出现在 debug 构建里，正式包不许带。
+    #[test]
+    fn dev_only_probes_stay_behind_debug_assertions() {
+        let source = include_str!("../handlers.rs");
+        let index = source
+            .find("\"growth.rewards.evidence\"")
+            .expect("方法应存在");
+        let window = &source[index.saturating_sub(240)..index];
+        assert!(
+            window.contains("#[cfg(debug_assertions)]"),
+            "growth.rewards.evidence 必须只在 debug 构建注册"
+        );
+        assert!(
+            !source.contains("\"growth.activity.write\""),
+            "活跃这条路不该有写接口"
+        );
+    }
 }
