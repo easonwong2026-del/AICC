@@ -509,6 +509,10 @@ DMG：B1 的 17,149,777 → **16,470,283**（-679,494，-3.96%）；相对发布
 清单每次构建前清空目录，避免同版本多次实验混用旧符号；`AICC_STRIP=0` 的调试构建
 会删掉旧归档并明确声明"本次没有符号"。
 
+**符号不上传**：仓库是 public，Actions artifact 对任何有读权限的用户可见，
+所以 CI 只做校验并在日志里打印清单（UUID / sha256 / 版本），dSYM 与未裁剪二进制
+留在构建机。已上传的历史 artifact 已删除（见 PR #108 评论）。
+
 `scripts/test-verify-symbols.sh` 有 8 个用例，其中 5 个必须被拒绝：拿 Widget 的 dSYM
 冒充 App 的、manifest 记的是另一次构建的 UUID、二进制被改动（UUID 不变 sha256 变）、
 没有 manifest、拿另一个文件冒充 DMG。另有一例用 `atos` 把真实地址解析到源码行

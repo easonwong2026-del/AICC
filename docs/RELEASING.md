@@ -98,12 +98,23 @@ bash scripts/verify-symbols.sh --app dist/mac/AICC.app \
   --symbols dist/symbols/2.13.0-25 --dmg dist/AICC-2.13.0.dmg
 ```
 
-**不要**把 `dist/symbols/` 上传到 Release 页面：它体积大（约 25 MB）、含未裁剪原始二进制，
-不进 DMG 也不对外分发。请在可信的私有位置留存，按 `version-build` 归档，命名与 manifest 一致。
+**符号归档只在私有位置留存，不进任何公开渠道**：
 
-注意 CI 的两个 job 各自编译各自的 App：`aicc-build-dsym`（macos-build）与
-`aicc-dmg-dsym`（macos-dmg）是**两组不同 UUID 的符号**。要符号化用户装的包，
-只能用本机固定证书构建出的那一份，或用与 DMG 同 job 的那份；不能混用。
+| 渠道 | 允许 | 说明 |
+| --- | --- | --- |
+| 本机 `dist/symbols/<version>-<build>/` | ✅ | 发布件的唯一权威符号，需要你**自己备份到有访问控制的位置**（私有仓库 / 加密盘）；`dist/` 被 gitignore，不会误提交 |
+| Release 附件 | ❌ | 仓库是 public，Release 附件等于公开下载 |
+| Actions artifact | ❌ | 公开仓库的 artifact 对**任何有读权限的登录用户**可见，且默认会过期（不是长期归档）。CI 已在 2026-11-19 移除这两处上传 |
+| 构建日志 | ✅ 仅清单 | CI 只打印 `manifest.txt`（UUID / sha256 / 版本），不含代码、不含 dSYM |
+
+CI 仍然做完整校验：两个 job 各自编译各自的 App，各自用 `verify-symbols.sh` 把
+「DMG 卷内二进制 ↔ dSYM ↔ manifest」对一遍，不符就让 job 失败。**校验通过不代表可以上传**——
+校验和留存是两件事。
+
+⚠️ 别用 CI 的符号去符号化本机发布的包：`macos-build` 与 `macos-dmg` 是两次不同的编译，
+UUID 必然不同；即使同一 job，也只是"那个 job 的产物"。用户装的包只认本机固定证书构建出的那一份。
+
+升级到新版本时，旧归档不要删：崩溃报告可能来自几个月前的版本。
 
 **在打了 Tag 的那个提交上执行**：脚本要求本地 Tag 解析出的 commit 等于 `HEAD`，并且 `origin`
 上同一个 Tag 指向同一 commit。在别的分支或更晚的提交上跑会直接拒绝。
