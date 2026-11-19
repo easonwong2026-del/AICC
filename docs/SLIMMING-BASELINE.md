@@ -62,6 +62,7 @@ DMG 里的精确字节数；它只回答「动这个组件值不值」。可加�
 | `measure-resources.sh --mode sample` | **只读**：不 quit、不 open、不写 App | `scripts/test-measure-resources.sh` 断言动作日志为空 |
 | `--mode launch` / `--mode exit` | 会退出正在运行的 AICC | 必须显式 `--allow-lifecycle-actions`；`launch` 还必须 `--allow-real-data` |
 | `--mode exit` 的结论 | 退出没生效或仍有残留 = **失败** | 报表先落盘，然后 **exit 3**；不再出现"报告写着残留、命令返回 0" |
+| 读不到进程表（`ps` 被拒） | **拒绝运行**，退出码 4 | 看不见 ≠ 没有：曾因沙箱下 `ps` 全部失败，守卫误判"无实例"而准备再次启动 |
 | 启动新构建 | 用**真实**账号库 | 没有隔离模式：AICC 没有数据目录参数，`open` 也无法注入环境变量。脚本如实说明，不假装隔离 |
 | 其他安装位置正在运行 | 默认**拒绝** | 检测所有同 Bundle ID 实例的实际路径；要退别人的日常构建必须 `--allow-foreign-instance-quit` |
 | 退出失败 | **fail closed** | 同 Bundle ID 实例仍在 → 退出码 3，**绝不 `open`**，避免双实例抢端口/数据库 |

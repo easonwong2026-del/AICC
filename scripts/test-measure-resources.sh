@@ -66,14 +66,16 @@ PS_EMPTY="$WORK/ps-empty.txt"
 # relying on `VAR=x func` semantics.
 QUIT_RESULT="ok"
 PS_AFTER_QUIT=""
+PS_BROKEN=""
 
 run() {  # run <log file> [args...]
   local log="$1"; shift
   : > "$log"
-  AICC_MEASURE_PS_FILE="${PS_FILE:?}" \
+  AICC_MEASURE_PS_FILE="${PS_FILE-}" \
   AICC_MEASURE_TEST_LOG="$log" \
   AICC_MEASURE_QUIT_RESULT="$QUIT_RESULT" \
   AICC_MEASURE_PS_FILE_AFTER_QUIT="$PS_AFTER_QUIT" \
+  AICC_MEASURE_PS_BROKEN="$PS_BROKEN" \
     bash "$SCRIPT" "$@" > "$WORK/stdout.log" 2>&1
 }
 
@@ -228,6 +230,23 @@ if [[ "$STATUS" -eq 0 ]] && grep -q '干净退出' "$WORK/out10/summary-exit.md"
 else
   bad "exit 干净退出时应为 0（status=${STATUS}）"
 fi
+
+# --- 11. no process table -> refuse, do not assume "nothing running" --------
+# A sandboxed shell once returned an empty table for every query, the script
+# concluded the App was gone, and went on to launch a second instance.
+PS_FILE=""
+PS_BROKEN="1"
+set +e
+run "$WORK/log-nops.txt" --mode launch --app "$OURS" --out "$WORK/out11" \
+  --allow-lifecycle-actions --allow-real-data
+STATUS=$?
+set -e
+if [[ "$STATUS" -eq 4 ]] && [[ ! -s "$WORK/log-nops.txt" ]]; then
+  ok "读不到进程表：退出码 4，且没有 quit/open"
+else
+  bad "读不到进程表时的行为不对（status=$STATUS, log=$(cat "$WORK/log-nops.txt" 2>/dev/null))"
+fi
+PS_BROKEN=""
 
 echo
 if [[ "$FAIL" -gt 0 ]]; then
