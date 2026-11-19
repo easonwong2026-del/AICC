@@ -142,6 +142,14 @@ check "mock 收到了 refresh POST（额度流量被重定向）" \
   grep -q 'POST /v1/magpie/quotas/refresh' "$REPORT"
 check "真实 Magpie 端口 canary 命中 0（或端口被占时明确标 unavailable）" \
   grep -qE 'canary 命中 \*\*(0|unavailable)\*\*' "$REPORT"
+
+# Print the observed value: "the check passed" is weaker evidence than the
+# number itself, and this is the number the whole canary exists to produce.
+CANARY_OBSERVED="$(sed -n 's/.*canary 命中 \*\*\([^*]*\)\*\*.*/\1/p' "$REPORT" | head -1)"
+echo "    实测 canary 计数：${CANARY_OBSERVED:-未取到}"
+if [[ "$CANARY_OBSERVED" == "unavailable" ]]; then
+  echo "    （该端口已被占用，本次只有 mock 单侧证据）"
+fi
 check "没有 LAN 监听（EINK_HOST=0.0.0.0 未被继承）" \
   grep -q 'LAN 监听行 0 条' "$REPORT"
 check "报告声明了 env -i 白名单而不是笼统的「不联网」" \
