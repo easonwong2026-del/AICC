@@ -114,6 +114,7 @@ jobs:
               - 'scripts/measure-resources.sh'
               - 'scripts/test-measure-resources.sh'
               - 'scripts/test-audit-python-imports.sh'
+              - 'scripts/canary_loopback_port.py'
             android:
               - 'android/**'
               - 'scripts/smoke-test-android-visual.sh'

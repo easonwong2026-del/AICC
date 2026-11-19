@@ -32,7 +32,10 @@
 # could go stale. After the run the script *proves* the redirection worked
 # rather than asserting it: the mock must have received at least one request,
 # and a canary socket on 127.0.0.1:3425 (when that port is free) must have
-# received none. If either check fails, the audit fails.
+# received none. The canary publishes its count immediately after binding and
+# after every accept, so the number is valid even if the process is killed.
+# If either check fails — or the canary cannot report a number at all — the
+# audit fails.
 #
 # Usage:
 #   bash scripts/audit-python-imports.sh
@@ -167,39 +170,44 @@ disown "$MOCK_PID" 2>/dev/null || true
 # here instead of at a user's Magpie. When Magpie is actually running the port
 # is taken and the canary is reported as unavailable rather than silently
 # passing.
+# The canary must guard the port the bridge would actually use, i.e. the real
+# Magpie port. The only exception is the audit's own negative test, which points
+# the canary at a throw-away port so it can produce a hit on a machine where
+# Magpie is running.
+CANARY_PORT="$MAGPIE_PORT"
+if [[ "${AICC_AUDIT_TEST_PROBE_CANARY:-}" == "1" && -n "${AICC_AUDIT_TEST_CANARY_PORT:-}" ]]; then
+  CANARY_PORT="$AICC_AUDIT_TEST_CANARY_PORT"
+fi
+
 CANARY_LOG="$WORK/canary.log"
-echo "unavailable" > "$CANARY_LOG"
-cat > "$WORK/canary.py" <<'PY'
-"""Listen on 127.0.0.1:<port> and count connections. Writes the count on exit."""
-import atexit
-import os
-import socket
-import sys
-
-LOG = os.environ["AICC_CANARY_LOG"]
-count = 0
-atexit.register(lambda: open(LOG, "w").write("%d\n" % count))
-with socket.socket() as server:
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
-    try:
-        server.bind(("127.0.0.1", int(sys.argv[1])))
-    except OSError:
-        open(LOG, "w").write("unavailable\n")
-        sys.exit(0)
-    server.listen(8)
-    while True:
-        try:
-            conn, _ = server.accept()
-        except OSError:
-            break
-        count += 1
-        conn.close()
-PY
-
-AICC_CANARY_LOG="$CANARY_LOG" "$PYTHON" -B "$WORK/canary.py" "$MAGPIE_PORT" &
+# "pending" is deliberately distinct from "unavailable": the canary publishes 0
+# the moment it is bound, so anything still pending means it never started.
+echo "pending" > "$CANARY_LOG"
+"$PYTHON" -B "$ROOT/scripts/canary_loopback_port.py" "$CANARY_PORT" "$CANARY_LOG" &
 CANARY_PID=$!
 disown "$CANARY_PID" 2>/dev/null || true
-sleep 1
+
+# Wait until the canary is *counting*. Starting the bridge first would make a
+# later "0" mean "listened too late" instead of "nobody connected".
+canary_ready=0
+for _ in $(seq 1 50); do
+  case "$(head -1 "$CANARY_LOG" 2>/dev/null || true)" in
+    0|unavailable) canary_ready=1; break ;;
+  esac
+  sleep 0.1
+done
+if [[ "$canary_ready" != "1" ]]; then
+  echo "ERROR: canary 5s 内未就绪（$CANARY_LOG: $(head -1 "$CANARY_LOG" 2>/dev/null)）" >&2
+  exit 1
+fi
+
+# Test-only: make one real connection to the canary, so the negative path
+# ("a hit must fail the audit") is demonstrable instead of assumed. Never set
+# outside scripts/test-audit-python-imports.sh.
+if [[ "${AICC_AUDIT_TEST_PROBE_CANARY:-}" == "1" ]]; then
+  "$PYTHON" -c 'import socket,sys; socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=3).close()' "$CANARY_PORT" || true
+  sleep 0.3
+fi
 
 # ---- the measured child -----------------------------------------------------
 
@@ -271,7 +279,7 @@ PY
 IMPORT_LOG="$WORK/imports.tsv"
 
 echo "==> 采集导入表（${SECONDS_TO_RUN}s；桥接子进程用白名单环境启动）"
-echo "    额度流量 → mock 127.0.0.1:$MOCK_PORT · 真实端口 canary :$MAGPIE_PORT"
+echo "    额度流量 → mock 127.0.0.1:$MOCK_PORT · canary :${CANARY_PORT}（真实 Magpie 端口 ${MAGPIE_PORT}）"
 
 # `env -i` is the whole point: nothing is inherited, so AICC_TOKEN_STDIN,
 # AICC_PARENT_PID, EINK_HOST=0.0.0.0, EINK_DISCOVERY=1, *_proxy and any TLS
@@ -311,7 +319,7 @@ MOCK_REQUESTS=$(wc -l < "$MOCK_LOG" | tr -d ' ')
 MOCK_POSTS=$(grep -c '^POST' "$MOCK_LOG" 2>/dev/null || true)
 MOCK_POSTS=${MOCK_POSTS:-0}
 CANARY_HITS=$(head -1 "$CANARY_LOG" 2>/dev/null || true)
-CANARY_HITS=${CANARY_HITS:-unavailable}
+CANARY_HITS=${CANARY_HITS:-pending}
 LAN_LINES=$(grep -c 'https 0\.0\.0\.0' "$WORK/bridge.log" 2>/dev/null || true)
 LAN_LINES=${LAN_LINES:-0}
 
@@ -332,8 +340,15 @@ if [[ "$MOCK_POSTS" -lt 1 ]]; then
   echo "FAIL: mock 没有收到 POST /v1/magpie/quotas/refresh，refresh 路径没被覆盖" >&2
   exit 1
 fi
-if [[ "$CANARY_HITS" != "unavailable" && "$CANARY_HITS" -gt 0 ]]; then
-  echo "FAIL: 有 $CANARY_HITS 个连接打到了 127.0.0.1:${MAGPIE_PORT}（真实 Magpie 端口）" >&2
+if [[ "$CANARY_HITS" == "unavailable" ]]; then
+  # Legitimate: something already listens on the real port (usually Magpie
+  # itself). Say so, and say what it costs: the check degrades to mock-only.
+  echo "NOTE: ${MAGPIE_PORT} 已被占用（多半是 Magpie 在运行），canary 无法放置探针；本次退化为「额度流量全部落到 mock」的单侧证据" >&2
+elif ! [[ "$CANARY_HITS" =~ ^[0-9]+$ ]]; then
+  echo "FAIL: canary 既没有计数也不是 unavailable（${CANARY_HITS}）—— 观测缺失，审计作废" >&2
+  exit 1
+elif [[ "$CANARY_HITS" -gt 0 ]]; then
+  echo "FAIL: 有 ${CANARY_HITS} 个连接打到了 127.0.0.1:${CANARY_PORT}（canary 保护的是真实 Magpie 端口 ${MAGPIE_PORT}）" >&2
   exit 1
 fi
 if [[ "$LAN_LINES" -gt 0 ]]; then
@@ -415,7 +430,7 @@ mib() { awk -v b="$1" 'BEGIN { printf "%.2f", b / 1048576 }'; }
   echo "| mDNS/发现 | 强制 \`EINK_DISCOVERY=0\` |"
   echo "| 数据目录 / 证书 | \`EINK_DATA_DIR\`、\`EINK_CERT_DIR\` 均指向临时目录，不读用户配对材料 |"
   echo "| 额度流量 | 全部落在本地 mock：$MOCK_REQUESTS 个请求（其中 POST ${MOCK_POSTS}） |"
-  echo "| 真实 Magpie 端口 $MAGPIE_PORT | canary 命中 **$CANARY_HITS**（\`unavailable\` 表示该端口已被占，无法放探针） |"
+  echo "| 真实 Magpie 端口 $MAGPIE_PORT | canary 命中 **$CANARY_HITS**（数值；\`unavailable\` 表示端口已被占用、无法放置探针） |"
   echo
   echo "mock 实际收到的请求："
   echo

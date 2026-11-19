@@ -61,17 +61,29 @@ DMG 里的精确字节数；它只回答「动这个组件值不值」。可加�
 | --- | --- | --- |
 | `measure-resources.sh --mode sample` | **只读**：不 quit、不 open、不写 App | `scripts/test-measure-resources.sh` 断言动作日志为空 |
 | `--mode launch` / `--mode exit` | 会退出正在运行的 AICC | 必须显式 `--allow-lifecycle-actions`；`launch` 还必须 `--allow-real-data` |
+| `--mode exit` 的结论 | 退出没生效或仍有残留 = **失败** | 报表先落盘，然后 **exit 3**；不再出现"报告写着残留、命令返回 0" |
 | 启动新构建 | 用**真实**账号库 | 没有隔离模式：AICC 没有数据目录参数，`open` 也无法注入环境变量。脚本如实说明，不假装隔离 |
 | 其他安装位置正在运行 | 默认**拒绝** | 检测所有同 Bundle ID 实例的实际路径；要退别人的日常构建必须 `--allow-foreign-instance-quit` |
 | 退出失败 | **fail closed** | 同 Bundle ID 实例仍在 → 退出码 3，**绝不 `open`**，避免双实例抢端口/数据库 |
 | `audit-python-imports.sh` | 跑真实 `server.py` | 子进程用 `env -i` 白名单启动：强制 loopback、关 LAN/discovery、临时数据与证书目录、额度流量指向本地 mock |
 
 `audit-python-imports.sh` 的隔离不是声明，是断言：脚本要求 mock 至少收到一个
-`POST /v1/magpie/quotas/refresh`，并在 `127.0.0.1:3425` 放一个 canary socket，
-命中必须为 0（端口被占用则标注 `unavailable`）；任一不满足就直接失败。
+`POST /v1/magpie/quotas/refresh`，并在 `127.0.0.1:3425` 放一个 canary socket，命中必须为 0。
+
+canary 的计数由 `scripts/canary_loopback_port.py` 负责，写法刻意避开"退出时才写"的坑：
+`bind()+listen()` 成功后**立刻原子写 0**，之后每次 `accept()` 都原子重写计数
+（临时文件 + `os.replace`），**不依赖 `atexit` 或信号处理**——`kill` 发的是 SIGTERM，
+Python 不会跑 `atexit`，旧实现因此永远停在初始值，让"0 请求"变成"无法判断"。
+端口被占用时写 `unavailable`，审计把它当作**合法的降级**并打印代价（只剩 mock 单侧证据）；
+只有"既没有计数也不是 unavailable"才算观测缺失、直接失败。审计端会等 canary 就绪后才启动桥接，
+避免"监听晚于流量"的假 0。
 `scripts/test-audit-python-imports.sh` 会先用**被污染的环境**
 （`EINK_HOST=0.0.0.0`、`EINK_DISCOVERY=1`、真实 `AICC_MAGPIE_URL`、`AICC_TOKEN_STDIN`、
 `AICC_PARENT_PID`、`*_proxy`）跑一遍，证明这些变量没有被继承。
+
+`scripts/test-audit-python-imports.sh` 先单独验 canary 的三种状态
+（空闲 → 0、故意连一次 → 1、端口被占 → `unavailable`），再开启测试开关故意打一次 canary，
+要求**审计非零退出**——这条把"命中必须失败"从注释变成了可执行断言。
 
 两个测试都进 CI（`macos-build` 的 `Guard tests for the audit tools`），都不启动、不退出任何真实 App。
 

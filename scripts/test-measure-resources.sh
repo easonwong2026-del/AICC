@@ -111,7 +111,7 @@ set -e
 if [[ "$STATUS" -ne 0 && ! -s "$WORK/log-nodata.txt" ]]; then
   ok "launch 缺 --allow-real-data：拒绝且未退出任何进程"
 else
-  bad "launch 缺真实数据授权时的行为不对（status=$STATUS）"
+  bad "launch 缺真实数据授权时的行为不对（status=${STATUS}）"
 fi
 
 # --- 4. another install path is running -------------------------------------
@@ -156,7 +156,7 @@ OPENS=$(grep -c '^open ' "$WORK/log-ok.txt" 2>/dev/null || true)
 if [[ "${QUITS:-0}" -eq 1 && "${OPENS:-0}" -eq 1 ]]; then
   ok "授权后：quit 一次、open 一次"
 else
-  bad "正常路径的动作次数不对（quit=${QUITS:-0} open=${OPENS:-0}, status=$STATUS）"
+  bad "正常路径的动作次数不对（quit=${QUITS:-0} open=${OPENS:-0}, status=${STATUS}）"
 fi
 
 # --- 7. exit mode without consent ------------------------------------------
@@ -168,7 +168,65 @@ set -e
 if [[ "$STATUS" -ne 0 && ! -s "$WORK/log-exit-noconsent.txt" ]]; then
   ok "exit 无授权：拒绝"
 else
-  bad "exit 无授权时的行为不对（status=$STATUS）"
+  bad "exit 无授权时的行为不对（status=${STATUS}）"
+fi
+
+# --- 8. exit mode: quit timeout must fail the command -----------------------
+# The fixture lists this very shell as the App host, so "still alive" is real
+# and does not depend on starting anything.
+PS_LIVE="$WORK/ps-live.txt"
+ps_with $$ "$OURS" > "$PS_LIVE"
+
+PS_FILE="$PS_LIVE"
+PS_AFTER_QUIT=""
+QUIT_RESULT="timeout"
+set +e
+run "$WORK/log-exit-timeout.txt" --mode exit --app "$OURS" --out "$WORK/out8" \
+  --allow-lifecycle-actions
+STATUS=$?
+set -e
+if [[ "$STATUS" -eq 3 ]] && [[ -f "$WORK/out8/summary-exit.md" ]]; then
+  ok "exit 退出超时：退出码 3，且报告已落盘"
+else
+  bad "exit 退出超时时应为 3 且保留报告（status=$STATUS, report=$([[ -f "$WORK/out8/summary-exit.md" ]] && echo yes || echo no))"
+fi
+
+# --- 9. exit mode: quit "succeeds" but the process is still there -----------
+PS_FILE="$PS_LIVE"
+PS_AFTER_QUIT="$PS_LIVE"
+QUIT_RESULT="ok"
+set +e
+run "$WORK/log-exit-residue.txt" --mode exit --app "$OURS" --out "$WORK/out9" \
+  --allow-lifecycle-actions
+STATUS=$?
+set -e
+if [[ "$STATUS" -eq 3 ]] && grep -q '残留进程' "$WORK/out9/summary-exit.md" 2>/dev/null; then
+  ok "exit 有残留：退出码 3，报告写明残留"
+else
+  bad "exit 有残留时应为 3（status=${STATUS}）"
+fi
+
+# --- 10. exit mode: clean quit -> zero -------------------------------------
+# A pid that has already been reaped: the fixture can still name it, and
+# `kill -0` correctly reports it gone, which is what "clean exit" means.
+bash -c 'exit 0' &
+DEAD_PID=$!
+wait "$DEAD_PID" 2>/dev/null || true
+PS_DEAD="$WORK/ps-dead.txt"
+ps_with "$DEAD_PID" "$OURS" > "$PS_DEAD"
+
+PS_FILE="$PS_DEAD"
+PS_AFTER_QUIT="$PS_EMPTY"
+QUIT_RESULT="ok"
+set +e
+run "$WORK/log-exit-clean.txt" --mode exit --app "$OURS" --out "$WORK/out10" \
+  --allow-lifecycle-actions
+STATUS=$?
+set -e
+if [[ "$STATUS" -eq 0 ]] && grep -q '干净退出' "$WORK/out10/summary-exit.md" 2>/dev/null; then
+  ok "exit 干净退出：退出码 0"
+else
+  bad "exit 干净退出时应为 0（status=${STATUS}）"
 fi
 
 echo

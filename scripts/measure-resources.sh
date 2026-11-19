@@ -445,7 +445,12 @@ if [[ "$MODE" == "exit" ]]; then
   fi
   echo "==> 请求退出 AICC (pid $root)"
   before_pids="$(group_pids "$root" | tr '\n' ' ')"
-  quit_app || true
+  QUIT_OK=0
+  if quit_app; then
+    QUIT_OK=1
+  else
+    echo "==> 退出在 ${QUIT_TIMEOUT}s 内没有生效" >&2
+  fi
   sleep 2
   for pid in $before_pids; do
     if kill -0 "$pid" 2>/dev/null; then
@@ -626,10 +631,19 @@ FP_MB="$(awk -v v="$GROUP_FP" 'BEGIN { printf "%.1f", v / 1048576 }')"
   if [[ "$MODE" == "exit" ]]; then
     echo "## 退出清理"
     echo
-    if [[ -z "$LEFTOVERS" ]]; then
-      echo "退出后无残留进程。"
+    if [[ "${QUIT_OK:-0}" == "1" ]]; then
+      echo "| 退出请求 | 在 ${QUIT_TIMEOUT}s 内生效 |"
     else
-      echo "残留进程：\`$LEFTOVERS\`"
+      echo "| 退出请求 | **超时（${QUIT_TIMEOUT}s 内未退出）** |"
+    fi
+    if [[ -z "$LEFTOVERS" ]]; then
+      echo "| 残留进程 | 无 |"
+      echo
+      echo "结论：**干净退出**。"
+    else
+      echo "| 残留进程 | \`$LEFTOVERS\` |"
+      echo
+      echo "结论：**失败** —— 退出后仍有进程存活，本次测量不计为成功。"
     fi
     echo
   else
@@ -689,4 +703,17 @@ echo "JSON：$JSON"
 if [[ "$MODE" != "exit" ]]; then
   echo
   echo "进程组上界：RSS $(mb_of "$GROUP_RSS") MB · footprint $FP_MB MB · CPU $SUM_CPU %"
+fi
+
+# The exit run's whole result is its verdict: a report that says "residue" but
+# exits 0 is the kind of green that hides a leak in CI. Report first, then fail.
+if [[ "$MODE" == "exit" ]]; then
+  if [[ "${QUIT_OK:-0}" != "1" ]]; then
+    echo "FAIL: 退出请求在 ${QUIT_TIMEOUT}s 内没有生效（报告已写出：${MD}）" >&2
+    exit 3
+  fi
+  if [[ -n "$LEFTOVERS" ]]; then
+    echo "FAIL: 退出后仍有残留进程:${LEFTOVERS}（报告已写出：${MD}）" >&2
+    exit 3
+  fi
 fi
