@@ -477,12 +477,32 @@ worker 15 MB、Python 42–44 MB。RSS 远大于 footprint 是因为共享的只
 
 **B2 — Swift / Widget 符号裁剪（`build-aicc-swiftui.sh`）**
 
-编译后、**任何 codesign 之前**对 `AICC`、`AICCWidget`、`python3.14`、`_dbm.so`
-执行 `xcrun strip -x`；同时把未 strip 的二进制与 dSYM 归档成构建产物
-（**不进 DMG**），否则以后线上崩溃无法符号化。
+已实现：编译改成两步（`-O -g -wmo -c` + 链接），`dsymutil` 产出**带行号**的 dSYM，
+归档到 `dist/symbols/<version>-<build>/`（含未裁剪原件），再对两个二进制执行
+`strip -x -S`，**全部在 codesign 之前**完成。
 
-验收：`codesign --verify --deep --strict`；App/Widget 启动；Keychain 无额外弹窗；
-`validate-python-runtime.sh`（12 项 TLS，SPKI pin 不变）；worker 不重签（cdhash 不变）。
+为什么必须两步：单次 `swiftc ... -o bin` 会在结束时删掉中间 `.o`，dsymutil 拿不到
+调试映射，只能产出"有符号名、没有行号"的残留 dSYM（实测 `--debug-line` 只有 3 行）。
+拆开后 dSYM 有 51,125 行行号表，`.o` 留在 `dist/obj/`。
+
+实测（v2.13.0 / build 25）：
+
+| 二进制 | 裁剪前 | 裁剪后 | 省 | dSYM 行号 |
+| --- | ---: | ---: | ---: | ---: |
+| `AICC` | 7,080,632 | 2,660,424 | 4,316 KiB | 51,125 |
+| `AICCWidget` | 1,078,040 | 516,744 | 548 KiB | 20,077 |
+
+DMG：B1 的 17,149,777 → **16,470,283**（-679,494，-3.96%）；相对发布件 20,067,290
+累计 **-17.92%**。磁盘上省 4.75 MiB 只换来 DMG 少 0.68 MB —— 符号表字符串压缩率很高，
+这也是为什么"磁盘省了多少"不能直接当"下载省了多少"。
+
+校验：`codesign --verify --deep --strict` 通过；固定身份 `AICC Local Code Signing` 不变；
+`validate-widget-bundle.sh`、`validate-account-worker-bundle.sh`、
+`validate-python-runtime.sh`（12 项 TLS、SPKI pin）全过；DMG 卷内二进制符号数
+55,079 → 1,636，`__swift5` 元数据段 11 个全部保留（Swift 反射走元数据段，不走符号表）。
+
+**未做**：`python3.14` / `_dbm.so` 的 strip 留到 B2b 单独提交（不同产物、不同风险），
+不与 Swift 混在一个 PR；worker 的 `opt-level` / `panic` 属于 B3。
 
 **B3 — worker 代码生成（`Cargo.toml`）**
 

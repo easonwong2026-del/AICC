@@ -173,20 +173,34 @@ fi
 echo "SDK: $SDK_PATH"
 echo "=== Compiling ==="
 
+# === 两步编译（PR-B2）===
+# 单次 `swiftc ... -o bin` 会在结束后删掉中间 .o，dsymutil 找不到调试映射，
+# 只能产出"有符号名、没有行号"的残缺 dSYM（实测 --debug-line 仅 3 行）。
+# 拆成 `-wmo -c` + 链接后，.o 留在 OBJ_DIR 里，dSYM 才带完整行号表。
+OBJ_DIR="$ROOT/dist/obj/$BUILD_VERSION"
+rm -rf "$OBJ_DIR"
+mkdir -p "$OBJ_DIR"
+
 xcrun swiftc \
   -parse-as-library \
   -module-name AICC \
   -D AICC_HOST \
-  -O \
+  -O -g -wmo -c \
+  -sdk "$SDK_PATH" \
+  -target arm64-apple-macosx14.0 \
+  -module-cache-path /tmp/swift-module-cache \
+  "${SWIFT_FILES[@]}" \
+  -o "$OBJ_DIR/AICC.o"
+
+xcrun swiftc \
   -sdk "$SDK_PATH" \
   -target arm64-apple-macosx14.0 \
   -framework SwiftUI \
   -framework AppKit \
   -framework Foundation \
   -framework WidgetKit \
-  -module-cache-path /tmp/swift-module-cache \
   -Xlinker -rpath -Xlinker /usr/lib/swift \
-  "${SWIFT_FILES[@]}" \
+  "$OBJ_DIR/AICC.o" \
   -o "$MACOS_DIR/$APP_NAME"
 
 echo "=== Building Widget extension ==="
@@ -228,16 +242,22 @@ xcrun swiftc \
   -parse-as-library \
   -application-extension \
   -module-name AICCWidget \
-  -O \
+  -O -g -wmo -c \
+  -sdk "$SDK_PATH" \
+  -target arm64-apple-macosx14.0 \
+  -module-cache-path /tmp/swift-module-cache \
+  "${WIDGET_FILES[@]}" \
+  -o "$OBJ_DIR/AICCWidget.o"
+
+xcrun swiftc \
   -sdk "$SDK_PATH" \
   -target arm64-apple-macosx14.0 \
   -framework WidgetKit \
   -framework SwiftUI \
   -framework Foundation \
-  -module-cache-path /tmp/swift-module-cache \
   -Xlinker -e \
   -Xlinker _NSExtensionMain \
-  "${WIDGET_FILES[@]}" \
+  "$OBJ_DIR/AICCWidget.o" \
   -o "$WIDGET_MACOS_DIR/AICCWidget"
 
 echo "=== Building account worker (Rust helper) ==="
@@ -310,6 +330,63 @@ elif [[ "$BUNDLE_SERVER" == "1" ]]; then
 else
   echo "WARNING: no prepared runtime at $PY_RUNTIME_SRC — this is a development build." >&2
   echo "         The App will only start it with AICC_DEV=1 and a host python3." >&2
+fi
+
+echo "=== Symbols and strip (PR-B2) ==="
+# 发布二进制不带调试符号，但符号必须留下来，否则线上崩溃无法符号化。
+#
+# 顺序是硬约束：dsymutil → strip → codesign。反过来（先签名再 strip）会让
+# 签名失效，内核直接拒绝执行——PR-A 里实测过：strip 后未重签的 python3.14
+# 静默退出、退出码 1 且没有任何输出。
+AICC_STRIP="${AICC_STRIP:-1}"
+SYMBOLS_DIR="$ROOT/dist/symbols/$VERSION-$BUILD_VERSION"
+
+archive_and_strip() {
+  local binary="$1" name="$2"
+  [[ -f "$binary" ]] || { echo "ERROR: 找不到 $binary" >&2; exit 1; }
+
+  if [[ "$AICC_STRIP" != "1" ]]; then
+    echo "AICC_STRIP=${AICC_STRIP}：跳过 strip，$name 保留完整符号（仅用于调试构建）"
+    return 0
+  fi
+
+  mkdir -p "$SYMBOLS_DIR"
+  # 1) 未裁剪的原件：即使 dSYM 丢了，也能用 `atos -o` 还原函数名。
+  cp "$binary" "$SYMBOLS_DIR/$name.unstripped"
+  # 2) dSYM：必须与二进制同 UUID，否则符号化对不上。
+  xcrun dsymutil "$binary" -o "$SYMBOLS_DIR/$name.dSYM" >/dev/null
+
+  local bin_uuid dsym_uuid line_rows
+  bin_uuid="$(dwarfdump --uuid "$binary" 2>/dev/null | awk '{print $2}')"
+  dsym_uuid="$(dwarfdump --uuid "$SYMBOLS_DIR/$name.dSYM" 2>/dev/null | awk '{print $2}')"
+  if [[ -z "$bin_uuid" || "$bin_uuid" != "$dsym_uuid" ]]; then
+    echo "ERROR: $name 的 dSYM UUID ($dsym_uuid) 与二进制 ($bin_uuid) 不一致" >&2
+    exit 1
+  fi
+  # 3) 只产出一个没有行号的 dSYM 等于没留：实测单次 swiftc 调用只能得到
+  #    3 行 --debug-line，这里要求它真的有行号表。
+  line_rows="$(dwarfdump --debug-line "$SYMBOLS_DIR/$name.dSYM" 2>/dev/null | wc -l | tr -d ' ')"
+  if [[ "${line_rows:-0}" -lt 100 ]]; then
+    echo "ERROR: $name 的 dSYM 只有 ${line_rows} 行 .debug_line，行号不可用" >&2
+    exit 1
+  fi
+
+  local before after
+  before="$(stat -f%z "$binary")"
+  # -x 删本地符号，-S 删调试段：两者都不动动态符号，Swift 运行时反射照常。
+  xcrun strip -x -S "$binary"
+  after="$(stat -f%z "$binary")"
+  if [[ "$after" -ge "$before" ]]; then
+    echo "ERROR: strip 没有缩小 ${name}（$before → $after 字节）" >&2
+    exit 1
+  fi
+  echo "  $name: $before → $after 字节（省 $(( (before - after) / 1024 )) KiB），dSYM ${line_rows} 行行号，UUID $bin_uuid"
+}
+
+archive_and_strip "$MACOS_DIR/$APP_NAME" "AICC"
+archive_and_strip "$WIDGET_MACOS_DIR/AICCWidget" "AICCWidget"
+if [[ "$AICC_STRIP" == "1" ]]; then
+  echo "  符号归档：${SYMBOLS_DIR}（不进 App，不进 DMG）"
 fi
 
 echo "=== Signing ==="

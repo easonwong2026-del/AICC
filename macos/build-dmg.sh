@@ -23,7 +23,9 @@ ln -s /Applications "$STAGING_DIR/Applications"
 # 压缩格式：UDBZ（bzip2），不是 hdiutil 的默认 UDZO。
 #
 # 实测（同一份 App 内容，v2.13.0 / 20,067,290 字节的 UDZO 基线）：
-#   UDZO 默认级别   20,066,915   ← 发布基线
+#   UDZO 默认级别   20,066,915   ← 本机重建对照
+#                                 （正式发布件 AICC-2.13.0.dmg 是 20,067,290，
+#                                  两者差 375 字节，来自 hdiutil 卷元数据抖动）
 #   UDZO zlib-level=9 17,296,107
 #   ULFO（lzfse）    17,243,561
 #   UDBZ（bzip2）    17,150,001   ← -14.5%，就是这一行

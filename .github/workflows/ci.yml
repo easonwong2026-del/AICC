@@ -428,6 +428,17 @@ jobs:
           name: aicc-macos-app
           path: dist/mac/AICC.app
 
+      # The ship binary is stripped, so these are the only artefacts that can
+      # symbolicate a crash from a released build. They must never reach the
+      # DMG, but they must survive the runner.
+      - name: Upload dSYM and unstripped binaries (main / dispatch only)
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: aicc-dsym
+          path: dist/symbols
+          if-no-files-found: error
+
   # ---------------------------------------------------------------------------
   # macOS 完整打包：只在 main、手动运行、发版流程里跑（PR 一律跳过）
   # ---------------------------------------------------------------------------
