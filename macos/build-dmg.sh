@@ -45,6 +45,39 @@ hdiutil create \
   -format UDBZ \
   "$TEMP_DMG" >/dev/null
 mv "$TEMP_DMG" "$DMG_PATH"
+
+# === 符号与包的身份链 ===
+# 这份 DMG 里的二进制，和 dist/symbols 里的 dSYM 必须是同一次构建出来的。
+# 只靠版本号 + build 号是证明不了这件事的：同版本重新构建会得到不同的 UUID。
+# 校验方式是把 DMG 真挂起来，读卷内二进制的 UUID 和 sha256，与清单逐项比。
+BUILD_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_DIR/Contents/Info.plist" 2>/dev/null || echo unknown)"
+SYMBOLS_DIR="$ROOT/dist/symbols/$VERSION-$BUILD_VERSION"
+DMG_SHA="$(shasum -a 256 "$DMG_PATH" | awk '{ print $1 }')"
+
+if [[ -f "$SYMBOLS_DIR/manifest.txt" ]]; then
+  echo "dmg_sha256 $DMG_SHA" >> "$SYMBOLS_DIR/manifest.txt"
+  MOUNT_POINT="$(mktemp -d "${TMPDIR:-/tmp}/aicc-dmg-verify.XXXXXX")"
+  hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$MOUNT_POINT" >/dev/null
+  if bash "$ROOT/scripts/verify-symbols.sh" \
+       --app "$MOUNT_POINT/$APP_NAME.app" \
+       --symbols "$SYMBOLS_DIR" \
+       --dmg "$DMG_PATH"; then
+    VERIFY_OK=1
+  else
+    VERIFY_OK=0
+  fi
+  hdiutil detach "$MOUNT_POINT" >/dev/null 2>&1 || true
+  rmdir "$MOUNT_POINT" 2>/dev/null || true
+  if [[ "$VERIFY_OK" != "1" ]]; then
+    rm -f "$DMG_PATH"
+    echo "ERROR: DMG 与符号归档对不上，产物已删除（见上面 verify-symbols 的输出）" >&2
+    exit 1
+  fi
+  echo "  DMG sha256 $DMG_SHA（已写入 $SYMBOLS_DIR/manifest.txt）"
+else
+  echo "WARNING: 没有符号清单（AICC_STRIP=0 的调试构建？），跳过符号与包的对应校验" >&2
+fi
+
 rm -rf "$STAGING_DIR"
 
 echo "$DMG_PATH"

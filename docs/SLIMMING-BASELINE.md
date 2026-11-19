@@ -501,6 +501,18 @@ DMG：B1 的 17,149,777 → **16,470,283**（-679,494，-3.96%）；相对发布
 `validate-python-runtime.sh`（12 项 TLS、SPKI pin）全过；DMG 卷内二进制符号数
 55,079 → 1,636，`__swift5` 元数据段 11 个全部保留（Swift 反射走元数据段，不走符号表）。
 
+**符号与包的身份链**（复审后补）：只保留 dSYM 还不够，必须证明它对应**这一个**包。
+`dist/symbols/<version>-<build>/manifest.txt` 记录每个二进制的 UUID 与**签名后**的 sha256；
+`scripts/verify-symbols.sh` 逐项比对「App 内二进制 ↔ dSYM ↔ manifest」，并把 DMG 挂起来
+核对 sha256。`build-dmg.sh` 在打包后自动跑它，任何一项不符就删掉 DMG 并失败。
+清单每次构建前清空目录，避免同版本多次实验混用旧符号；`AICC_STRIP=0` 的调试构建
+会删掉旧归档并明确声明"本次没有符号"。
+
+`scripts/test-verify-symbols.sh` 有 8 个用例，其中 5 个必须被拒绝：拿 Widget 的 dSYM
+冒充 App 的、manifest 记的是另一次构建的 UUID、二进制被改动（UUID 不变 sha256 变）、
+没有 manifest、拿另一个文件冒充 DMG。另有一例用 `atos` 把真实地址解析到源码行
+（实测 `AccountWorkerProtocol.swift:143`），而不只是"表里有一百行"。
+
 **未做**：`python3.14` / `_dbm.so` 的 strip 留到 B2b 单独提交（不同产物、不同风险），
 不与 Swift 混在一个 PR；worker 的 `opt-level` / `panic` 属于 B3。
 

@@ -115,6 +115,8 @@ jobs:
               - 'scripts/test-measure-resources.sh'
               - 'scripts/test-audit-python-imports.sh'
               - 'scripts/canary_loopback_port.py'
+              - 'scripts/verify-symbols.sh'
+              - 'scripts/test-verify-symbols.sh'
             android:
               - 'android/**'
               - 'scripts/smoke-test-android-visual.sh'
@@ -417,6 +419,14 @@ jobs:
           bash scripts/test-measure-resources.sh
           bash scripts/test-audit-python-imports.sh
 
+      # Symbols must belong to *this* build: UUID, sha256 and a real atos lookup.
+      # Five of the eight cases are negative — they must be rejected.
+      - name: Verify the symbol archive matches the built app
+        run: |
+          bash scripts/verify-symbols.sh --app dist/mac/AICC.app \
+            --symbols "$(ls -d dist/symbols/* | tail -1)"
+          bash scripts/test-verify-symbols.sh
+
       - name: Smoke test bundled server
         run: |
           bash scripts/smoke-test-bundled-server.sh "dist/mac/AICC.app/Contents/Resources/Server"
@@ -431,11 +441,13 @@ jobs:
       # The ship binary is stripped, so these are the only artefacts that can
       # symbolicate a crash from a released build. They must never reach the
       # DMG, but they must survive the runner.
+      # Named for the job that produced it: macos-dmg compiles again on another
+      # runner, and its symbols are a *different* set with different UUIDs.
       - name: Upload dSYM and unstripped binaries (main / dispatch only)
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: aicc-dsym
+          name: aicc-build-dsym
           path: dist/symbols
           if-no-files-found: error
 
@@ -497,6 +509,16 @@ jobs:
         with:
           name: aicc-macos-dmg
           path: dist/*.dmg
+
+      # The symbols that belong to *this* DMG. build-dmg.sh already mounted the
+      # image and proved the UUID/sha256 chain before we got here; if it had not
+      # matched, the job would have failed and the DMG would have been deleted.
+      - name: Upload the symbols for this DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: aicc-dmg-dsym
+          path: dist/symbols
+          if-no-files-found: error
 
   # ---------------------------------------------------------------------------
   # Android

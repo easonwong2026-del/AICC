@@ -79,6 +79,32 @@ bash scripts/release-publish.sh              # 建 release、传 dmg + sha256、
 
 `release-publish.sh` 幂等：release 已存在就复用，附件已存在就跳过，清单没变化就不提交。中途失败直接重跑。
 
+### 符号归档（B2 起是硬门）
+
+`build-dmg.sh` 在打包后会**把 DMG 挂起来**，读卷内 `AICC` / `AICCWidget` 的 UUID 与
+sha256，与 `dist/symbols/<version>-<build>/manifest.txt` 逐项比对，并对 dSYM 做一次
+`atos` 级可用性检查。任何一项不符就直接删掉 DMG 并失败——不会留下"看起来成功、
+实际无法符号化"的包。
+
+对应关系是：**清单里的 UUID = 卷内二进制 UUID = dSYM UUID，sha256 取的是签名后、
+即用户实际安装的那一份**。公证 + staple 会再改一次 DMG 字节，所以
+`build-release-mac.sh` 收尾时只复核 UUID 链，并把最终的
+`dmg_sha256_final` 记进清单。
+
+手工复核（任意时刻都可跑）：
+
+```bash
+bash scripts/verify-symbols.sh --app dist/mac/AICC.app \
+  --symbols dist/symbols/2.13.0-25 --dmg dist/AICC-2.13.0.dmg
+```
+
+**不要**把 `dist/symbols/` 上传到 Release 页面：它体积大（约 25 MB）、含未裁剪原始二进制，
+不进 DMG 也不对外分发。请在可信的私有位置留存，按 `version-build` 归档，命名与 manifest 一致。
+
+注意 CI 的两个 job 各自编译各自的 App：`aicc-build-dsym`（macos-build）与
+`aicc-dmg-dsym`（macos-dmg）是**两组不同 UUID 的符号**。要符号化用户装的包，
+只能用本机固定证书构建出的那一份，或用与 DMG 同 job 的那份；不能混用。
+
 **在打了 Tag 的那个提交上执行**：脚本要求本地 Tag 解析出的 commit 等于 `HEAD`，并且 `origin`
 上同一个 Tag 指向同一 commit。在别的分支或更晚的提交上跑会直接拒绝。
 
