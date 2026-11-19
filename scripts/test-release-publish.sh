@@ -90,6 +90,21 @@ case "$url" in
 esac
 FAKE
 chmod +x "$TMP/bin/curl"
+
+# 假 dwarfdump：UUID 与 .debug_line 行数都给固定值，让 verify-symbols.sh 能通过。
+# 真实的 UUID 语义由 scripts/test-verify-symbols.sh 用真产物覆盖，这里只测发布流程。
+cat > "$TMP/bin/dwarfdump" <<'FAKE'
+#!/bin/bash
+case "$1" in
+  --uuid)
+    echo "UUID: 11111111-1111-1111-1111-111111111111 (arm64) ${2:-}"
+    ;;
+  --debug-line)
+    i=0; while (( i < 150 )); do echo "0x00000000: Fake.swift:1"; i=$(( i + 1 )); done
+    ;;
+esac
+FAKE
+chmod +x "$TMP/bin/dwarfdump"
 export PATH="$TMP/bin:$PATH"
 
 # ---------------------------------------------------------------- repo maker
@@ -97,6 +112,8 @@ make_repo() {
   local name="$1" dir="$TMP/$1" remote="$TMP/$1-remote.git"
   mkdir -p "$dir/scripts" "$dir/docs/releases" "$dir/dist/mac/AICC.app/Contents" "$dir/updates"
   cp "$SRC_ROOT/scripts/release-publish.sh" "$dir/scripts/"
+  # 发布脚本的符号硬门会调用它；fixture 里要有一份，否则连正常路径都过不去。
+  cp "$SRC_ROOT/scripts/verify-symbols.sh" "$dir/scripts/"
   printf '9.9.9\n' > "$dir/VERSION"
   cat > "$dir/dist/mac/AICC.app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -105,6 +122,24 @@ make_repo() {
 PLIST
   printf '# notes\n' > "$dir/docs/releases/9.9.9.md"
   head -c 2048 /dev/urandom > "$dir/dist/AICC-9.9.9.dmg"
+
+  # 假 App 二进制 + 假符号归档：release-publish.sh 现在会强制校验符号与包的一致性。
+  local macos="$dir/dist/mac/AICC.app/Contents/MacOS"
+  local widget="$dir/dist/mac/AICC.app/Contents/PlugIns/AICCWidget.appex/Contents/MacOS"
+  local symbols="$dir/dist/symbols/9.9.9-99"
+  mkdir -p "$macos" "$widget" "$symbols/AICC.dSYM" "$symbols/AICCWidget.dSYM"
+  printf 'fake-host-binary' > "$macos/AICC"
+  printf 'fake-widget-binary' > "$widget/AICCWidget"
+  {
+    echo "format=1"
+    echo "version=9.9.9"
+    echo "build=99"
+    printf 'binary AICC %s %s %s\n' "Contents/MacOS/AICC" \
+      "11111111-1111-1111-1111-111111111111" "$(shasum -a 256 "$macos/AICC" | awk '{ print $1 }')"
+    printf 'binary AICCWidget %s %s %s\n' "Contents/PlugIns/AICCWidget.appex/Contents/MacOS/AICCWidget" \
+      "11111111-1111-1111-1111-111111111111" "$(shasum -a 256 "$widget/AICCWidget" | awk '{ print $1 }')"
+    printf 'dmg_sha256 %s\n' "$(shasum -a 256 "$dir/dist/AICC-9.9.9.dmg" | awk '{ print $1 }')"
+  } > "$symbols/manifest.txt"
   printf '{"version":"0.0.0","build":"0","minimumSystemVersion":"14.0"}\n' > "$dir/updates/aicc-update.json"
   git -C "$dir" init -q -b main
   git -C "$dir" config user.email t@example.com
@@ -244,6 +279,41 @@ check "uploads both assets" "[[ \$(grep -c 'assets?name=' \"$TMP/happy.log\") -e
 check "manifest updated" "python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d[\"version\"]==\"9.9.9\" and d[\"build\"]==\"99\" else 1)' '$DIR/updates/aicc-update.json'"
 check "one new commit" "[[ \"$(head_of "$DIR")\" != \"$BEFORE_HEAD\" ]]"
 check "pushed to origin main" "[[ \"$(git -C "$TMP/happy-remote.git" rev-parse main)\" == \"$(head_of "$DIR")\" ]]"
+
+# ---------------------------------------------------------------- case 11
+echo "case 11: no symbol manifest -> refuse to publish"
+DIR="$(make_repo nosymbols)"; tag_head "$DIR"
+rm -f "$DIR/dist/symbols/9.9.9-99/manifest.txt"
+BEFORE_HEAD="$(head_of "$DIR")"
+BEFORE_MANIFEST="$(manifest_of "$DIR")"
+fresh_state nosymbols
+OUT="$(FAKE_LOG="$TMP/nosymbols.log" AICC_RELEASE_TOKEN=dummy "$DIR/scripts/release-publish.sh" 2>&1)"; CODE=$?
+check "exits non-zero" "[[ $CODE -ne 0 ]]"
+check "names the missing manifest" "grep -q 'manifest.txt' <<<'$OUT'"
+check "no HTTP calls" "[[ ! -s \"$TMP/nosymbols.log\" ]]"
+check "no commit" "[[ \"$(head_of "$DIR")\" == \"$BEFORE_HEAD\" ]]"
+check "manifest untouched" "[[ \"$(manifest_of "$DIR")\" == \"$BEFORE_MANIFEST\" ]]"
+
+# ---------------------------------------------------------------- case 12
+echo "case 12: symbol archive belongs to another build -> refuse"
+DIR="$(make_repo wrongsymbols)"; tag_head "$DIR"
+python3 - "$DIR/dist/symbols/9.9.9-99/manifest.txt" <<'PYEOF'
+import sys
+path = sys.argv[1]
+lines = []
+for line in open(path):
+    if line.startswith("binary AICC "):
+        parts = line.split()
+        parts[4] = "deadbeef"
+        line = " ".join(parts) + "\n"
+    lines.append(line)
+open(path, "w").writelines(lines)
+PYEOF
+fresh_state wrongsymbols
+OUT="$(FAKE_LOG="$TMP/wrongsymbols.log" AICC_RELEASE_TOKEN=dummy "$DIR/scripts/release-publish.sh" 2>&1)"; CODE=$?
+check "exits non-zero" "[[ $CODE -ne 0 ]]"
+check "says the symbols do not match" "grep -q '对不上' <<<'$OUT'"
+check "no uploads" "! grep -q 'assets?name=' \"$TMP/wrongsymbols.log\" 2>/dev/null"
 
 # ---------------------------------------------------------------- summary
 echo

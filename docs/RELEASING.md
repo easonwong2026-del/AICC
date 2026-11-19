@@ -121,6 +121,12 @@ UUID 必然不同；即使同一 job，也只是"那个 job 的产物"。用户�
 
 三条安全约束（2026-11-18 复审后加固，`scripts/test-release-publish.sh` 覆盖）：
 
+0. **符号门在发布前**：`release-publish.sh` 启动时会校验
+   `dist/symbols/<version>-<build>/manifest.txt` 存在，且该归档与本机 DMG 一致
+   （App 内二进制 ↔ dSYM ↔ manifest ↔ DMG sha256）。缺失或不符直接拒绝，
+   `--dry-run` 也一样——宁可打不出包，也不要发一个崩溃时无法定位的版本。
+   手工复核：`bash scripts/verify-symbols.sh --app dist/mac/AICC.app --symbols dist/symbols/<ver>-<build> --dmg dist/AICC-<ver>.dmg`。
+
 1. **`--dry-run` 不要求 Tag 存在。** 它的用途就是"打 Tag 之前先看计划"，
    现在只在实跑时强制本地与 `origin` 都有 Tag。
 2. **上传失败立刻中止。** DMG 或 `.sha256` 的 HTTP 码不是 2xx 就直接 `die`，

@@ -47,7 +47,8 @@ DRY_RUN=0
 
 VERSION="$(tr -d '[:space:]' < VERSION)"
 TAG="v$VERSION"
-DMG="dist/AICC-$VERSION.dmg"
+APP_NAME="AICC"
+DMG="dist/$APP_NAME-$VERSION.dmg"
 SHA="$DMG.sha256"
 NOTES="docs/releases/$VERSION.md"
 APP_PLIST="dist/mac/AICC.app/Contents/Info.plist"
@@ -60,6 +61,19 @@ say() { echo "==> $*"; }
 [[ -f "$APP_PLIST" ]] || die "missing $APP_PLIST — build the app first"
 BUILD="$(plutil -extract CFBundleVersion raw -o - "$APP_PLIST")"
 [[ -n "$BUILD" ]] || die "cannot read CFBundleVersion"
+
+# 发布前最后一道门：符号必须与这个 DMG 是同一次构建。
+# 没有它，线上崩溃只能拿到地址；记错版本号的符号比没有符号更糟——它会
+# 把崩溃指到错误的代码行。校验内容：App 内二进制 ↔ dSYM ↔ manifest ↔ DMG hash。
+SYMBOLS_DIR="$ROOT/dist/symbols/$VERSION-$BUILD"
+[[ -f "$SYMBOLS_DIR/manifest.txt" ]] \
+  || die "missing $SYMBOLS_DIR/manifest.txt — 没有符号清单就不能发布（build-dmg.sh 会生成）"
+bash "$ROOT/scripts/verify-symbols.sh" \
+  --app "$ROOT/dist/mac/$APP_NAME.app" \
+  --symbols "$SYMBOLS_DIR" \
+  --dmg "$DMG" >/dev/null \
+  || die "符号归档与 $DMG 对不上，拒绝发布（手工复核：bash scripts/verify-symbols.sh --app dist/mac/$APP_NAME.app --symbols $SYMBOLS_DIR --dmg ${DMG}）"
+say "symbols: $(basename "$SYMBOLS_DIR") 与 DMG 一致"
 
 HEAD_SHA="$(git rev-parse HEAD)"
 
