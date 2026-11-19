@@ -106,6 +106,15 @@ jobs:
               # 发布脚本只被 macOS 侧执行（要 plutil / shasum），改动必须跑到它的 Mock 测试。
               - 'scripts/release-publish.sh'
               - 'scripts/test-release-publish.sh'
+              # 体积/资源诊断脚本：audit-bundle 由 macos-build 直接执行，
+              # 另两个只被人工运行，但改它们同样要在真实的 macOS 构建上过一遍
+              # `bash -n` 与打包校验，否则等于改了尺子却没用它量过。
+              - 'scripts/audit-bundle.sh'
+              - 'scripts/audit-python-imports.sh'
+              - 'scripts/measure-resources.sh'
+              - 'scripts/test-measure-resources.sh'
+              - 'scripts/test-audit-python-imports.sh'
+              - 'scripts/canary_loopback_port.py'
             android:
               - 'android/**'
               - 'scripts/smoke-test-android-visual.sh'
@@ -389,6 +398,24 @@ jobs:
         run: |
           for file in macos/*.sh; do bash -n "$file"; done
           for file in scripts/*.sh; do bash -n "$file"; done
+
+      # Size is a property of the artifact, not of the source tree: print the
+      # breakdown on every macOS build so a regression shows up in the log
+      # instead of being discovered after a release. Not a gate (no threshold
+      # yet) — the numbers are the point.
+      - name: Audit app size
+        run: |
+          bash scripts/audit-bundle.sh --out dist/audit
+          sed -n '/^## 1/,/^## 3/p' dist/audit/audit.md
+
+      # These two assert the *safety* of the diagnostics, not their output:
+      # that measure-resources cannot quit or launch an App without explicit
+      # consent, and that the import audit reaches no real endpoint. Both run
+      # against fixtures/a mock, so they neither start nor stop anything.
+      - name: Guard tests for the audit tools
+        run: |
+          bash scripts/test-measure-resources.sh
+          bash scripts/test-audit-python-imports.sh
 
       - name: Smoke test bundled server
         run: |

@@ -129,10 +129,12 @@ concurrency:
 2. **`changes` 用一个第三方 action**（`dorny/paths-filter@v3`）。自己用 `git diff`
    写一遍要处理 fork、rename、首个 push、force push 等边界，收益不抵风险；该 action
    是事实标准，固定主版本号，与仓库已有的 `Swatinem/rust-cache`、`gradle/actions` 同类。
-3. **非测试类脚本不在任何 job 的触发路径里**（如 `scripts/release-publish.sh`、
-   `scripts/measure-resources.sh`）。它们本来就没有任何 job 会执行，所以覆盖断言也不管它们
+3. **非测试类脚本不在任何 job 的触发路径里**（如 `scripts/release-publish.sh`）。
+   它们本来就没有任何 job 会执行，所以覆盖断言也不管它们
    ——断言只对"确实被某个 job 执行的文件"负责。`Validate macOS scripts` 那步仍留在
    `macos-build` 内，任何 `scripts/*.sh` 的语法仍会在 Swift/python 改动时被检查到。
+   `scripts/audit-bundle.sh` 是例外：它被 `macos-build` 的 `Audit app size` 步骤直接执行，
+   所以它和另外两个体积/资源诊断脚本都挂在了 `swift` 触发路径上。
 4. **视觉验收图 artifact 只在 macOS 变更时才产出**。需要看某一版的图，改一下
    `macos/**` 或用 `run_mode: full` 手动跑。
 
