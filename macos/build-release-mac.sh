@@ -46,7 +46,7 @@ if [[ -f "$SYMBOLS_DIR/manifest.txt" ]]; then
     --app "$ROOT/dist/mac/AICC.app" \
     --symbols "$SYMBOLS_DIR"
   echo "dmg_sha256_final $(shasum -a 256 "$DMG" | awk '{ print $1 }')" >> "$SYMBOLS_DIR/manifest.txt"
-  echo "=== Symbols: $SYMBOLS_DIR（私有归档，不上传 Release）==="
+  echo "=== Symbols: ${SYMBOLS_DIR}（私有归档，不上传 Release）==="
 else
   echo "ERROR: 没有符号清单 $SYMBOLS_DIR/manifest.txt，拒绝收尾（发布会失去符号化能力）" >&2
   exit 1

@@ -358,7 +358,7 @@ if [[ "$AICC_STRIP" == "1" ]]; then
 else
   # 调试构建不裁剪，也就没有对应的符号归档。旧归档必须作废，否则它会被
   # 当成本次构建的 dSYM 使用——UUID 不同，符号化会静默给出错误结果。
-  echo "AICC_STRIP=$AICC_STRIP：不生成符号归档，并删除 $SYMBOLS_DIR 里的旧归档" >&2
+  echo "AICC_STRIP=${AICC_STRIP}：不生成符号归档，并删除 $SYMBOLS_DIR 里的旧归档" >&2
 fi
 
 archive_and_strip() {
@@ -449,7 +449,7 @@ if [[ "$AICC_STRIP" == "1" && -f "$MANIFEST" ]]; then
     sym_sha="$(shasum -a 256 "$sym_path" | awk '{ print $1 }')"
     dsym_uuid="$(dwarfdump --uuid "$SYMBOLS_DIR/$sym_name.dSYM" 2>/dev/null | awk 'NR == 1 { print $2 }')"
     if [[ -z "$sym_uuid" || "$sym_uuid" != "$dsym_uuid" ]]; then
-      echo "ERROR: ${sym_name} 签名后 UUID（$sym_uuid）与 dSYM（$dsym_uuid）不一致" >&2
+      echo "ERROR: ${sym_name} 签名后 UUID（${sym_uuid}）与 dSYM（${dsym_uuid}）不一致" >&2
       exit 1
     fi
     printf 'binary %s %s %s %s\n' \

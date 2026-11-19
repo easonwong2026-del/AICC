@@ -39,18 +39,18 @@ bad() { echo "FAIL $*" >&2; FAIL=$(( FAIL + 1 )); }
 expect_ok() {  # expect_ok <描述> <命令...>
   local what="$1"; shift
   if "$@" > "$WORK/out.log" 2>&1; then ok "$what"; else
-    bad "$what（应当通过却失败）"; tail -3 "$WORK/out.log" >&2
+    bad "${what}（应当通过却失败）"; tail -3 "$WORK/out.log" >&2
   fi
 }
 
 expect_fail() {  # expect_fail <描述> <期望出现的关键字> <命令...>
   local what="$1" needle="$2"; shift 2
   if "$@" > "$WORK/out.log" 2>&1; then
-    bad "$what（应当失败却通过）"
+    bad "${what}（应当失败却通过）"
   elif grep -q "$needle" "$WORK/out.log"; then
     ok "$what"
   else
-    bad "$what（报错信息里没有 '$needle'）"; tail -3 "$WORK/out.log" >&2
+    bad "${what}（报错信息里没有 '$needle'）"; tail -3 "$WORK/out.log" >&2
   fi
 }
 

@@ -116,6 +116,7 @@ jobs:
               - 'scripts/test-audit-python-imports.sh'
               - 'scripts/canary_loopback_port.py'
               - 'scripts/verify-symbols.sh'
+              - 'scripts/check-shell-var-braces.py'
               - 'scripts/test-verify-symbols.sh'
             android:
               - 'android/**'
@@ -400,6 +401,9 @@ jobs:
         run: |
           for file in macos/*.sh; do bash -n "$file"; done
           for file in scripts/*.sh; do bash -n "$file"; done
+          # bash 会把紧跟变量的多字节字符当成变量名的一部分：`$NAME（` 是
+          # unbound variable，且只在打印那一行时炸。这个 lint 挡住这一类。
+          python3 scripts/check-shell-var-braces.py
 
       # Size is a property of the artifact, not of the source tree: print the
       # breakdown on every macOS build so a regression shows up in the log

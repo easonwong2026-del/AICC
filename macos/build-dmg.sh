@@ -73,7 +73,7 @@ if [[ -f "$SYMBOLS_DIR/manifest.txt" ]]; then
     echo "ERROR: DMG 与符号归档对不上，产物已删除（见上面 verify-symbols 的输出）" >&2
     exit 1
   fi
-  echo "  DMG sha256 $DMG_SHA（已写入 $SYMBOLS_DIR/manifest.txt）"
+  echo "  DMG sha256 ${DMG_SHA}（已写入 $SYMBOLS_DIR/manifest.txt）"
 else
   echo "WARNING: 没有符号清单（AICC_STRIP=0 的调试构建？），跳过符号与包的对应校验" >&2
 fi
