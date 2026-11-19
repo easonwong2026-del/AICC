@@ -56,17 +56,43 @@ DMG_SHA="$(shasum -a 256 "$DMG_PATH" | awk '{ print $1 }')"
 
 if [[ -f "$SYMBOLS_DIR/manifest.txt" ]]; then
   echo "dmg_sha256 $DMG_SHA" >> "$SYMBOLS_DIR/manifest.txt"
+  # 共享 runner 上 hdiutil attach 偶尔会以 "Resource temporarily unavailable"
+  # 失败（diskimages-helper 抢不到资源）。重试是安全的：挂载是只读的。
+  ATTACHED_POINT=""
+  attach_dmg() {
+    local attempt
+    for attempt in 1 2 3; do
+      if hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$MOUNT_POINT" >/dev/null 2>&1; then
+        ATTACHED_POINT="$MOUNT_POINT"
+        return 0
+      fi
+      echo "  WARNING: hdiutil attach 第 ${attempt} 次失败，2 秒后重试" >&2
+      sleep 2
+    done
+    # 最后一次不指定挂载点，让系统自己选（某些 runner 上 -mountpoint 会一直失败）
+    local out
+    if out="$(hdiutil attach "$DMG_PATH" -nobrowse -readonly 2>/dev/null)"; then
+      ATTACHED_POINT="$(printf '%s\n' "$out" | grep -o '/Volumes/.*' | tail -1)"
+      [[ -n "$ATTACHED_POINT" ]] && return 0
+    fi
+    return 1
+  }
+
   MOUNT_POINT="$(mktemp -d "${TMPDIR:-/tmp}/aicc-dmg-verify.XXXXXX")"
-  hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$MOUNT_POINT" >/dev/null
-  if bash "$ROOT/scripts/verify-symbols.sh" \
-       --app "$MOUNT_POINT/$APP_NAME.app" \
-       --symbols "$SYMBOLS_DIR" \
-       --dmg "$DMG_PATH"; then
-    VERIFY_OK=1
+  if attach_dmg; then
+    if bash "$ROOT/scripts/verify-symbols.sh" \
+         --app "$ATTACHED_POINT/$APP_NAME.app" \
+         --symbols "$SYMBOLS_DIR" \
+         --dmg "$DMG_PATH"; then
+      VERIFY_OK=1
+    else
+      VERIFY_OK=0
+    fi
+    hdiutil detach "$ATTACHED_POINT" >/dev/null 2>&1 || true
   else
+    echo "ERROR: 无法挂载刚生成的 DMG，符号与包的对应关系无法证明" >&2
     VERIFY_OK=0
   fi
-  hdiutil detach "$MOUNT_POINT" >/dev/null 2>&1 || true
   rmdir "$MOUNT_POINT" 2>/dev/null || true
   if [[ "$VERIFY_OK" != "1" ]]; then
     rm -f "$DMG_PATH"
