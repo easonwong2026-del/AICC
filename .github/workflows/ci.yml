@@ -115,6 +115,10 @@ jobs:
               - 'scripts/test-measure-resources.sh'
               - 'scripts/test-audit-python-imports.sh'
               - 'scripts/canary_loopback_port.py'
+              - 'scripts/verify-symbols.sh'
+              - 'scripts/check-shell-var-braces.py'
+              - 'scripts/check-ci-artifacts.py'
+              - 'scripts/test-verify-symbols.sh'
             android:
               - 'android/**'
               - 'scripts/smoke-test-android-visual.sh'
@@ -398,6 +402,11 @@ jobs:
         run: |
           for file in macos/*.sh; do bash -n "$file"; done
           for file in scripts/*.sh; do bash -n "$file"; done
+          # bash 会把紧跟变量的多字节字符当成变量名的一部分：`$NAME（` 是
+          # unbound variable，且只在打印那一行时炸。这个 lint 挡住这一类。
+          python3 scripts/check-shell-var-braces.py
+          # 公开仓库的 artifact 不是私有存储：符号只留在构建机，CI 只校验 + 打印清单。
+          python3 scripts/check-ci-artifacts.py
 
       # Size is a property of the artifact, not of the source tree: print the
       # breakdown on every macOS build so a regression shows up in the log
@@ -417,6 +426,14 @@ jobs:
           bash scripts/test-measure-resources.sh
           bash scripts/test-audit-python-imports.sh
 
+      # Symbols must belong to *this* build: UUID, sha256 and a real atos lookup.
+      # Five of the eight cases are negative — they must be rejected.
+      - name: Verify the symbol archive matches the built app
+        run: |
+          bash scripts/verify-symbols.sh --app dist/mac/AICC.app \
+            --symbols "$(ls -d dist/symbols/* | tail -1)"
+          bash scripts/test-verify-symbols.sh
+
       - name: Smoke test bundled server
         run: |
           bash scripts/smoke-test-bundled-server.sh "dist/mac/AICC.app/Contents/Resources/Server"
@@ -427,6 +444,24 @@ jobs:
         with:
           name: aicc-macos-app
           path: dist/mac/AICC.app
+
+      # The ship binary is stripped, so these are the only artefacts that can
+      # symbolicate a crash from a released build. They must never reach the
+      # DMG, but they must survive the runner.
+      # Symbols stay on the machine that built them. This repository is public,
+      # and an Actions artifact is readable by anyone who can read the repo:
+      # "not on the Release page" is not access control. Only the manifest —
+      # UUIDs, hashes, versions, no code and no dSYM — goes into the log.
+      - name: Record the symbol manifest (main / dispatch only)
+        if: github.event_name != 'pull_request'
+        run: |
+          manifest="$(ls -d dist/symbols/*/manifest.txt 2>/dev/null | tail -1)"
+          if [[ -z "$manifest" ]]; then
+            echo "ERROR: 没有符号清单，无法记录与本次构建对应的符号身份" >&2
+            exit 1
+          fi
+          cat "$manifest"
+          echo "注意：dSYM 与未裁剪二进制不上传，请在本机保留 dist/symbols 的私有副本。"
 
   # ---------------------------------------------------------------------------
   # macOS 完整打包：只在 main、手动运行、发版流程里跑（PR 一律跳过）
@@ -486,6 +521,20 @@ jobs:
         with:
           name: aicc-macos-dmg
           path: dist/*.dmg
+
+      # Same rule as macos-build: this DMG's symbols are proven against the
+      # mounted image by build-dmg.sh above, then left out of the artifact
+      # store. The manifest is printed so the run log itself records which UUIDs
+      # this DMG had.
+      - name: Record this DMG's symbol manifest
+        run: |
+          manifest="$(ls -d dist/symbols/*/manifest.txt 2>/dev/null | tail -1)"
+          if [[ -z "$manifest" ]]; then
+            echo "ERROR: 没有符号清单，DMG 与符号的对应关系无从追溯" >&2
+            exit 1
+          fi
+          cat "$manifest"
+          echo "注意：dSYM 与未裁剪二进制不上传（仓库是 public），请在本机私有留存。"
 
   # ---------------------------------------------------------------------------
   # Android

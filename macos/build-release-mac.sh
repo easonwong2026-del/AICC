@@ -35,4 +35,21 @@ xcrun stapler staple "$DMG"
 echo "=== Assess ==="
 spctl --assess --verbose --type install "$ROOT/dist/mac/AICC.app"
 xcrun stapler validate "$DMG"
+
+# 打包时已经用 manifest 校验过「DMG 里的二进制 ↔ dSYM」。公证 + staple 会再改
+# 一次 DMG 字节（写入票据），所以这里只复核 UUID 链，并把最终 sha256 记进清单，
+# 让符号归档与“真正被下载的那个文件”仍然一一对应。
+BUILD_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/dist/mac/AICC.app/Contents/Info.plist")"
+SYMBOLS_DIR="$ROOT/dist/symbols/$VERSION-$BUILD_VERSION"
+if [[ -f "$SYMBOLS_DIR/manifest.txt" ]]; then
+  bash "$ROOT/scripts/verify-symbols.sh" \
+    --app "$ROOT/dist/mac/AICC.app" \
+    --symbols "$SYMBOLS_DIR"
+  echo "dmg_sha256_final $(shasum -a 256 "$DMG" | awk '{ print $1 }')" >> "$SYMBOLS_DIR/manifest.txt"
+  echo "=== Symbols: ${SYMBOLS_DIR}（私有归档，不上传 Release）==="
+else
+  echo "ERROR: 没有符号清单 $SYMBOLS_DIR/manifest.txt，拒绝收尾（发布会失去符号化能力）" >&2
+  exit 1
+fi
+
 echo "=== Complete: $DMG ==="

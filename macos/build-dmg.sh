@@ -23,7 +23,9 @@ ln -s /Applications "$STAGING_DIR/Applications"
 # 压缩格式：UDBZ（bzip2），不是 hdiutil 的默认 UDZO。
 #
 # 实测（同一份 App 内容，v2.13.0 / 20,067,290 字节的 UDZO 基线）：
-#   UDZO 默认级别   20,066,915   ← 发布基线
+#   UDZO 默认级别   20,066,915   ← 本机重建对照
+#                                 （正式发布件 AICC-2.13.0.dmg 是 20,067,290，
+#                                  两者差 375 字节，来自 hdiutil 卷元数据抖动）
 #   UDZO zlib-level=9 17,296,107
 #   ULFO（lzfse）    17,243,561
 #   UDBZ（bzip2）    17,150,001   ← -14.5%，就是这一行
@@ -43,6 +45,65 @@ hdiutil create \
   -format UDBZ \
   "$TEMP_DMG" >/dev/null
 mv "$TEMP_DMG" "$DMG_PATH"
+
+# === 符号与包的身份链 ===
+# 这份 DMG 里的二进制，和 dist/symbols 里的 dSYM 必须是同一次构建出来的。
+# 只靠版本号 + build 号是证明不了这件事的：同版本重新构建会得到不同的 UUID。
+# 校验方式是把 DMG 真挂起来，读卷内二进制的 UUID 和 sha256，与清单逐项比。
+BUILD_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_DIR/Contents/Info.plist" 2>/dev/null || echo unknown)"
+SYMBOLS_DIR="$ROOT/dist/symbols/$VERSION-$BUILD_VERSION"
+DMG_SHA="$(shasum -a 256 "$DMG_PATH" | awk '{ print $1 }')"
+
+if [[ -f "$SYMBOLS_DIR/manifest.txt" ]]; then
+  echo "dmg_sha256 $DMG_SHA" >> "$SYMBOLS_DIR/manifest.txt"
+  # 共享 runner 上 hdiutil attach 偶尔会以 "Resource temporarily unavailable"
+  # 失败（diskimages-helper 抢不到资源）。重试是安全的：挂载是只读的。
+  ATTACHED_POINT=""
+  attach_dmg() {
+    local attempt
+    for attempt in 1 2 3; do
+      if hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$MOUNT_POINT" >/dev/null 2>&1; then
+        ATTACHED_POINT="$MOUNT_POINT"
+        return 0
+      fi
+      echo "  WARNING: hdiutil attach 第 ${attempt} 次失败，2 秒后重试" >&2
+      sleep 2
+    done
+    # 最后一次不指定挂载点，让系统自己选（某些 runner 上 -mountpoint 会一直失败）
+    local out
+    if out="$(hdiutil attach "$DMG_PATH" -nobrowse -readonly 2>/dev/null)"; then
+      ATTACHED_POINT="$(printf '%s\n' "$out" | grep -o '/Volumes/.*' | tail -1)"
+      [[ -n "$ATTACHED_POINT" ]] && return 0
+    fi
+    return 1
+  }
+
+  MOUNT_POINT="$(mktemp -d "${TMPDIR:-/tmp}/aicc-dmg-verify.XXXXXX")"
+  if attach_dmg; then
+    if bash "$ROOT/scripts/verify-symbols.sh" \
+         --app "$ATTACHED_POINT/$APP_NAME.app" \
+         --symbols "$SYMBOLS_DIR" \
+         --dmg "$DMG_PATH"; then
+      VERIFY_OK=1
+    else
+      VERIFY_OK=0
+    fi
+    hdiutil detach "$ATTACHED_POINT" >/dev/null 2>&1 || true
+  else
+    echo "ERROR: 无法挂载刚生成的 DMG，符号与包的对应关系无法证明" >&2
+    VERIFY_OK=0
+  fi
+  rmdir "$MOUNT_POINT" 2>/dev/null || true
+  if [[ "$VERIFY_OK" != "1" ]]; then
+    rm -f "$DMG_PATH"
+    echo "ERROR: DMG 与符号归档对不上，产物已删除（见上面 verify-symbols 的输出）" >&2
+    exit 1
+  fi
+  echo "  DMG sha256 ${DMG_SHA}（已写入 $SYMBOLS_DIR/manifest.txt）"
+else
+  echo "WARNING: 没有符号清单（AICC_STRIP=0 的调试构建？），跳过符号与包的对应校验" >&2
+fi
+
 rm -rf "$STAGING_DIR"
 
 echo "$DMG_PATH"

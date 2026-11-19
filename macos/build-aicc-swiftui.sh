@@ -173,20 +173,34 @@ fi
 echo "SDK: $SDK_PATH"
 echo "=== Compiling ==="
 
+# === 两步编译（PR-B2）===
+# 单次 `swiftc ... -o bin` 会在结束后删掉中间 .o，dsymutil 找不到调试映射，
+# 只能产出"有符号名、没有行号"的残缺 dSYM（实测 --debug-line 仅 3 行）。
+# 拆成 `-wmo -c` + 链接后，.o 留在 OBJ_DIR 里，dSYM 才带完整行号表。
+OBJ_DIR="$ROOT/dist/obj/$BUILD_VERSION"
+rm -rf "$OBJ_DIR"
+mkdir -p "$OBJ_DIR"
+
 xcrun swiftc \
   -parse-as-library \
   -module-name AICC \
   -D AICC_HOST \
-  -O \
+  -O -g -wmo -c \
+  -sdk "$SDK_PATH" \
+  -target arm64-apple-macosx14.0 \
+  -module-cache-path /tmp/swift-module-cache \
+  "${SWIFT_FILES[@]}" \
+  -o "$OBJ_DIR/AICC.o"
+
+xcrun swiftc \
   -sdk "$SDK_PATH" \
   -target arm64-apple-macosx14.0 \
   -framework SwiftUI \
   -framework AppKit \
   -framework Foundation \
   -framework WidgetKit \
-  -module-cache-path /tmp/swift-module-cache \
   -Xlinker -rpath -Xlinker /usr/lib/swift \
-  "${SWIFT_FILES[@]}" \
+  "$OBJ_DIR/AICC.o" \
   -o "$MACOS_DIR/$APP_NAME"
 
 echo "=== Building Widget extension ==="
@@ -228,16 +242,22 @@ xcrun swiftc \
   -parse-as-library \
   -application-extension \
   -module-name AICCWidget \
-  -O \
+  -O -g -wmo -c \
+  -sdk "$SDK_PATH" \
+  -target arm64-apple-macosx14.0 \
+  -module-cache-path /tmp/swift-module-cache \
+  "${WIDGET_FILES[@]}" \
+  -o "$OBJ_DIR/AICCWidget.o"
+
+xcrun swiftc \
   -sdk "$SDK_PATH" \
   -target arm64-apple-macosx14.0 \
   -framework WidgetKit \
   -framework SwiftUI \
   -framework Foundation \
-  -module-cache-path /tmp/swift-module-cache \
   -Xlinker -e \
   -Xlinker _NSExtensionMain \
-  "${WIDGET_FILES[@]}" \
+  "$OBJ_DIR/AICCWidget.o" \
   -o "$WIDGET_MACOS_DIR/AICCWidget"
 
 echo "=== Building account worker (Rust helper) ==="
@@ -312,6 +332,86 @@ else
   echo "         The App will only start it with AICC_DEV=1 and a host python3." >&2
 fi
 
+echo "=== Symbols and strip (PR-B2) ==="
+# 发布二进制不带调试符号，但符号必须留下来，否则线上崩溃无法符号化。
+#
+# 顺序是硬约束：dsymutil → strip → codesign。反过来（先签名再 strip）会让
+# 签名失效，内核直接拒绝执行——PR-A 里实测过：strip 后未重签的 python3.14
+# 静默退出、退出码 1 且没有任何输出。
+AICC_STRIP="${AICC_STRIP:-1}"
+SYMBOLS_DIR="$ROOT/dist/symbols/$VERSION-$BUILD_VERSION"
+MANIFEST="$SYMBOLS_DIR/manifest.txt"
+
+# 每次构建都从空目录开始：同一个 version+build 反复构建时，旧 dSYM 留在原地
+# 会和新产物混在一起，UUID 对不上而没人发现。
+rm -rf "$SYMBOLS_DIR"
+
+if [[ "$AICC_STRIP" == "1" ]]; then
+  mkdir -p "$SYMBOLS_DIR"
+  {
+    echo "format=1"
+    echo "version=$VERSION"
+    echo "build=$BUILD_VERSION"
+    echo "git_commit=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+    echo "generated=$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  } > "$MANIFEST"
+else
+  # 调试构建不裁剪，也就没有对应的符号归档。旧归档必须作废，否则它会被
+  # 当成本次构建的 dSYM 使用——UUID 不同，符号化会静默给出错误结果。
+  echo "AICC_STRIP=${AICC_STRIP}：不生成符号归档，并删除 $SYMBOLS_DIR 里的旧归档" >&2
+fi
+
+archive_and_strip() {
+  local binary="$1" name="$2"
+  [[ -f "$binary" ]] || { echo "ERROR: 找不到 $binary" >&2; exit 1; }
+
+  if [[ "$AICC_STRIP" != "1" ]]; then
+    echo "AICC_STRIP=${AICC_STRIP}：跳过 strip，$name 保留完整符号（仅用于调试构建）"
+    return 0
+  fi
+
+  # 1) 未裁剪的原件：即使 dSYM 丢了，也能用 `atos -o` 还原函数名。
+  cp "$binary" "$SYMBOLS_DIR/$name.unstripped"
+  # 2) dSYM：必须与二进制同 UUID，否则符号化对不上。
+  xcrun dsymutil "$binary" -o "$SYMBOLS_DIR/$name.dSYM" >/dev/null
+
+  local bin_uuid dsym_uuid line_rows
+  bin_uuid="$(dwarfdump --uuid "$binary" 2>/dev/null | awk '{print $2}')"
+  dsym_uuid="$(dwarfdump --uuid "$SYMBOLS_DIR/$name.dSYM" 2>/dev/null | awk '{print $2}')"
+  if [[ -z "$bin_uuid" || "$bin_uuid" != "$dsym_uuid" ]]; then
+    echo "ERROR: $name 的 dSYM UUID ($dsym_uuid) 与二进制 ($bin_uuid) 不一致" >&2
+    exit 1
+  fi
+  # 3) 只产出一个没有行号的 dSYM 等于没留：实测单次 swiftc 调用只能得到
+  #    3 行 --debug-line，这里要求它真的有行号表。
+  line_rows="$(dwarfdump --debug-line "$SYMBOLS_DIR/$name.dSYM" 2>/dev/null | wc -l | tr -d ' ')"
+  if [[ "${line_rows:-0}" -lt 100 ]]; then
+    echo "ERROR: $name 的 dSYM 只有 ${line_rows} 行 .debug_line，行号不可用" >&2
+    exit 1
+  fi
+
+  local before after
+  before="$(stat -f%z "$binary")"
+  # -x 删本地符号，-S 删调试段：两者都不动动态符号，Swift 运行时反射照常。
+  xcrun strip -x -S "$binary"
+  after="$(stat -f%z "$binary")"
+  if [[ "$after" -ge "$before" ]]; then
+    echo "ERROR: strip 没有缩小 ${name}（$before → $after 字节）" >&2
+    exit 1
+  fi
+  echo "  $name: $before → $after 字节（省 $(( (before - after) / 1024 )) KiB），dSYM ${line_rows} 行行号，UUID $bin_uuid"
+
+  # 清单在签名之后统一写（见下面 "符号清单" 段）：codesign 会把签名封进
+  # Mach-O，签前算的 sha256 必然与用户装到的那份不符。UUID 不受签名影响，
+  # 但 sha256 必须取签后的，否则 verify-symbols 永远对不上。
+}
+
+archive_and_strip "$MACOS_DIR/$APP_NAME" "AICC"
+archive_and_strip "$WIDGET_MACOS_DIR/AICCWidget" "AICCWidget"
+if [[ "$AICC_STRIP" == "1" ]]; then
+  echo "  符号归档：${SYMBOLS_DIR}（不进 App，不进 DMG，含 manifest.txt）"
+fi
+
 echo "=== Signing ==="
 # 嵌套可执行文件必须先签，再签外层 bundle，否则 --deep --strict 会失败。
 if [[ "$HELPER_BUILT" == "1" ]]; then
@@ -338,6 +438,25 @@ test "$(plutil -extract CFBundleShortVersionString raw -o - "$WIDGET_INFO")" = "
 test "$(plutil -extract CFBundleVersion raw -o - "$WIDGET_INFO")" = "$BUILD_VERSION"
 codesign --verify --strict "$WIDGET_APP_DIR"
 codesign --verify --deep --strict "$APP_DIR"
+
+# === 符号清单（必须在签名之后）===
+# UUID 定身份，sha256 定内容；两者都取**已签名**的二进制，才对得上用户装到的那份。
+if [[ "$AICC_STRIP" == "1" && -f "$MANIFEST" ]]; then
+  for pair in "AICC:$MACOS_DIR/$APP_NAME" "AICCWidget:$WIDGET_MACOS_DIR/AICCWidget"; do
+    sym_name="${pair%%:*}"
+    sym_path="${pair#*:}"
+    sym_uuid="$(dwarfdump --uuid "$sym_path" 2>/dev/null | awk 'NR == 1 { print $2 }')"
+    sym_sha="$(shasum -a 256 "$sym_path" | awk '{ print $1 }')"
+    dsym_uuid="$(dwarfdump --uuid "$SYMBOLS_DIR/$sym_name.dSYM" 2>/dev/null | awk 'NR == 1 { print $2 }')"
+    if [[ -z "$sym_uuid" || "$sym_uuid" != "$dsym_uuid" ]]; then
+      echo "ERROR: ${sym_name} 签名后 UUID（${sym_uuid}）与 dSYM（${dsym_uuid}）不一致" >&2
+      exit 1
+    fi
+    printf 'binary %s %s %s %s\n' \
+      "$sym_name" "${sym_path#"$APP_DIR/"}" "$sym_uuid" "$sym_sha" >> "$MANIFEST"
+  done
+  echo "  符号清单：$MANIFEST"
+fi
 
 echo "=== Signature ==="
 codesign -dvv "$APP_DIR" 2>&1 | grep -E "^(Identifier|Authority|TeamIdentifier)=" || true

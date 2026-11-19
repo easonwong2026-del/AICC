@@ -62,6 +62,7 @@ DMG 里的精确字节数；它只回答「动这个组件值不值」。可加�
 | `measure-resources.sh --mode sample` | **只读**：不 quit、不 open、不写 App | `scripts/test-measure-resources.sh` 断言动作日志为空 |
 | `--mode launch` / `--mode exit` | 会退出正在运行的 AICC | 必须显式 `--allow-lifecycle-actions`；`launch` 还必须 `--allow-real-data` |
 | `--mode exit` 的结论 | 退出没生效或仍有残留 = **失败** | 报表先落盘，然后 **exit 3**；不再出现"报告写着残留、命令返回 0" |
+| 读不到进程表（`ps` 被拒） | **拒绝运行**，退出码 4 | 看不见 ≠ 没有：曾因沙箱下 `ps` 全部失败，守卫误判"无实例"而准备再次启动 |
 | 启动新构建 | 用**真实**账号库 | 没有隔离模式：AICC 没有数据目录参数，`open` 也无法注入环境变量。脚本如实说明，不假装隔离 |
 | 其他安装位置正在运行 | 默认**拒绝** | 检测所有同 Bundle ID 实例的实际路径；要退别人的日常构建必须 `--allow-foreign-instance-quit` |
 | 退出失败 | **fail closed** | 同 Bundle ID 实例仍在 → 退出码 3，**绝不 `open`**，避免双实例抢端口/数据库 |
@@ -477,12 +478,48 @@ worker 15 MB、Python 42–44 MB。RSS 远大于 footprint 是因为共享的只
 
 **B2 — Swift / Widget 符号裁剪（`build-aicc-swiftui.sh`）**
 
-编译后、**任何 codesign 之前**对 `AICC`、`AICCWidget`、`python3.14`、`_dbm.so`
-执行 `xcrun strip -x`；同时把未 strip 的二进制与 dSYM 归档成构建产物
-（**不进 DMG**），否则以后线上崩溃无法符号化。
+已实现：编译改成两步（`-O -g -wmo -c` + 链接），`dsymutil` 产出**带行号**的 dSYM，
+归档到 `dist/symbols/<version>-<build>/`（含未裁剪原件），再对两个二进制执行
+`strip -x -S`，**全部在 codesign 之前**完成。
 
-验收：`codesign --verify --deep --strict`；App/Widget 启动；Keychain 无额外弹窗；
-`validate-python-runtime.sh`（12 项 TLS，SPKI pin 不变）；worker 不重签（cdhash 不变）。
+为什么必须两步：单次 `swiftc ... -o bin` 会在结束时删掉中间 `.o`，dsymutil 拿不到
+调试映射，只能产出"有符号名、没有行号"的残留 dSYM（实测 `--debug-line` 只有 3 行）。
+拆开后 dSYM 有 51,125 行行号表，`.o` 留在 `dist/obj/`。
+
+实测（v2.13.0 / build 25）：
+
+| 二进制 | 裁剪前 | 裁剪后 | 省 | dSYM 行号 |
+| --- | ---: | ---: | ---: | ---: |
+| `AICC` | 7,080,632 | 2,660,424 | 4,316 KiB | 51,125 |
+| `AICCWidget` | 1,078,040 | 516,744 | 548 KiB | 20,077 |
+
+DMG：B1 的 17,149,777 → **16,470,283**（-679,494，-3.96%）；相对发布件 20,067,290
+累计 **-17.92%**。磁盘上省 4.75 MiB 只换来 DMG 少 0.68 MB —— 符号表字符串压缩率很高，
+这也是为什么"磁盘省了多少"不能直接当"下载省了多少"。
+
+校验：`codesign --verify --deep --strict` 通过；固定身份 `AICC Local Code Signing` 不变；
+`validate-widget-bundle.sh`、`validate-account-worker-bundle.sh`、
+`validate-python-runtime.sh`（12 项 TLS、SPKI pin）全过；DMG 卷内二进制符号数
+55,079 → 1,636，`__swift5` 元数据段 11 个全部保留（Swift 反射走元数据段，不走符号表）。
+
+**符号与包的身份链**（复审后补）：只保留 dSYM 还不够，必须证明它对应**这一个**包。
+`dist/symbols/<version>-<build>/manifest.txt` 记录每个二进制的 UUID 与**签名后**的 sha256；
+`scripts/verify-symbols.sh` 逐项比对「App 内二进制 ↔ dSYM ↔ manifest」，并把 DMG 挂起来
+核对 sha256。`build-dmg.sh` 在打包后自动跑它，任何一项不符就删掉 DMG 并失败。
+清单每次构建前清空目录，避免同版本多次实验混用旧符号；`AICC_STRIP=0` 的调试构建
+会删掉旧归档并明确声明"本次没有符号"。
+
+**符号不上传**：仓库是 public，Actions artifact 对任何有读权限的用户可见，
+所以 CI 只做校验并在日志里打印清单（UUID / sha256 / 版本），dSYM 与未裁剪二进制
+留在构建机。已上传的历史 artifact 已删除（见 PR #108 评论）。
+
+`scripts/test-verify-symbols.sh` 有 8 个用例，其中 5 个必须被拒绝：拿 Widget 的 dSYM
+冒充 App 的、manifest 记的是另一次构建的 UUID、二进制被改动（UUID 不变 sha256 变）、
+没有 manifest、拿另一个文件冒充 DMG。另有一例用 `atos` 把真实地址解析到源码行
+（实测 `AccountWorkerProtocol.swift:143`），而不只是"表里有一百行"。
+
+**未做**：`python3.14` / `_dbm.so` 的 strip 留到 B2b 单独提交（不同产物、不同风险），
+不与 Swift 混在一个 PR；worker 的 `opt-level` / `panic` 属于 B3。
 
 **B3 — worker 代码生成（`Cargo.toml`）**
 

@@ -171,7 +171,29 @@ ps_tree() {
     cat "$AICC_MEASURE_PS_FILE"
     return 0
   fi
+  # Returns non-zero when the process table cannot be read. Callers must treat
+  # that as "unknown", never as "nothing is running": a sandboxed shell once
+  # made every guard believe the App was gone, and the script went on to launch
+  # a second instance on top of a live one.
+  if [[ -n "${AICC_MEASURE_PS_BROKEN:-}" ]]; then
+    return 1
+  fi
   ps -axo pid=,ppid=,command= 2>/dev/null
+}
+
+# Guard everything that acts on processes: without visibility we cannot tell
+# "no instance" from "cannot see", and both lifecycle modes would be blind.
+require_process_visibility() {
+  if ps_tree >/dev/null 2>&1; then return 0; fi
+  cat >&2 <<'MSG'
+ERROR: 读不到进程表（ps 被拒绝或不可用）。
+
+  没有进程表就无法判断是否已有 AICC 在运行，也就无法保证不会出现
+  双实例抢端口/数据库。脚本在这里停止，而不是把"看不到"当成"没有"。
+
+  如果你在沙箱里运行，请在宿主机上重跑；或者用 --swift-pid 显式指定实例。
+MSG
+  exit 4
 }
 
 root_pid() {
@@ -364,6 +386,7 @@ MSG
 
 BUNDLE_ID="$(bundle_id_of "$APP")"
 [[ -n "$BUNDLE_ID" ]] || die 1 "无法从 $APP 读出 CFBundleIdentifier"
+require_process_visibility
 require_lifecycle_consent
 
 STARTUP_SECONDS="unavailable"
