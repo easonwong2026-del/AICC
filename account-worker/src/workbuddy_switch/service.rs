@@ -259,8 +259,6 @@ pub async fn switch(
         }
     };
 
-    ensure_no_pending_temporary(app, &account.uid)?;
-
     let target = target_session(app, &account, &plan, before.json.as_ref())?;
 
     // 活跃取证放在关客户端之前：它要联网，客户端这时还能正常用。
@@ -295,12 +293,9 @@ pub async fn switch(
         });
     }
 
-    // 走到这里只会是"切回了那个原账号"（其余情况前面已经拒绝），把旧记录收掉。
-    if let Some(pending) = app.with_db(|db| db.pending_temporary_restore())? {
-        if pending.id != applied.journal_id {
-            let _ = app.with_db(|db| db.set_restore_state(&pending.id, RESTORE_DONE));
-        }
-    }
+    // 新的一次切换已经成功，更早的临时记录就此结算：
+    // 「恢复原账号」永远指"回到最近一次切换之前那一站"，不会攒出一堆待还原条目。
+    let _ = app.with_db(|db| db.settle_pending_temporary_except(&applied.journal_id));
 
     log_note(&format!(
         "WorkBuddy 账号切换：{} → {}（{}），phase={}",
@@ -646,29 +641,6 @@ pub fn restore(
         "verified": after.uid == previous_uid,
         "detail": detail,
     }))
-}
-
-/// 上一次临时登录还没还原时，只允许"切回那个原账号"，其余切换先拒绝。
-///
-/// 否则旧快照会被后一次切换悄悄取代，而用户以为随时能回去。
-fn ensure_no_pending_temporary(app: &App, target_uid: &str) -> RpcResult<()> {
-    let Some(pending) = app.with_db(|db| db.pending_temporary_restore())? else {
-        return Ok(());
-    };
-    if pending.previous_uid.as_deref() == Some(target_uid) {
-        return Ok(());
-    }
-    Err(RpcError::new(
-        crate::rpc::E_SWITCH,
-        format!(
-            "还有一次临时登录没恢复（目标 {}），请先点「恢复原账号」再切换",
-            WorkbuddyUidLabel(&pending.target_uid)
-        ),
-    )
-    .with_data(json!({
-        "kind": plan::reason::TEMPORARY_PENDING,
-        "journalId": pending.id,
-    })))
 }
 
 /// 没指定 journal 时挑一条：未完成切换优先，其次待还原的临时登录，最后是最近一次成功切换。
@@ -1954,9 +1926,12 @@ mod tests {
         magpie::test_reset();
     }
 
-    /// 11) 有未还原的临时登录时，切别的账号先拒绝；切回原账号允许。
+    /// 11) 连续临时切换不会攒下一堆"待还原"：只保留最近一次的记录。
+    ///
+    /// 第一版在这里用的是"按最新 pending 结算旧记录"，结果最新那条正是刚写入的自己，
+    /// 旧记录一条都清不掉 —— 真机连续切两次后，别的账号全被 `temporary_pending` 挡住。
     #[test]
-    fn a_pending_temporary_login_blocks_another_switch() {
+    fn only_the_latest_temporary_switch_stays_pending() {
         let (h, control) = harness(true, Launch::Works);
         grant(&h.app, &h.account.id, "magpie", Some("workbuddy"), false);
         magpie::test_set_logins(Some(vec![login(
@@ -1969,13 +1944,32 @@ mod tests {
         let plan = ready(&h);
         let before = client::read_live(&h.env.auth_path);
         let target = target_session(&h.app, &h.account, &plan, before.json.as_ref()).unwrap();
-        apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
 
-        let err = ensure_no_pending_temporary(&h.app, "uid-z").unwrap_err();
-        assert_eq!(err.data.unwrap()["kind"], plan::reason::TEMPORARY_PENDING);
+        let first = apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
+        // 第二次切换（同一套夹具下等价于"又切了一次"）。
+        let second = apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
+        h.app
+            .with_db(|db| db.settle_pending_temporary_except(&second.journal_id))
+            .unwrap();
 
-        // 切回原账号（uid-a）是允许的。
-        ensure_no_pending_temporary(&h.app, "uid-a").unwrap();
+        let pending = h
+            .app
+            .with_db(|db| db.pending_temporary_restore())
+            .unwrap()
+            .expect("最近一次仍待还原");
+        assert_eq!(pending.id, second.journal_id);
+        assert_ne!(pending.id, first.journal_id);
+
+        let first_row = h
+            .app
+            .with_db(|db| db.wb_switch_journal(&first.journal_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first_row.restore_state,
+            crate::storage::wb_switch::RESTORE_DONE,
+            "更早的临时记录必须被结算，不能一直 pending"
+        );
         magpie::test_reset();
     }
 

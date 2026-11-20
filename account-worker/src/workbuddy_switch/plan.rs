@@ -122,8 +122,6 @@ pub mod reason {
     pub const MAGPIE_EXPIRY_UNKNOWN: &str = "magpie_expiry_unknown";
     /// 剩余有效期低于 [`MIN_SWITCH_REMAINING_SECS`]。
     pub const MAGPIE_TOO_SHORT: &str = "magpie_too_short";
-    /// 上一次临时切换还没恢复，先还原再切。
-    pub const TEMPORARY_PENDING: &str = "temporary_pending";
     /// 客户端当前登录的不是这一轮切换的目标（用户手动换过）。
     pub const LIVE_CHANGED: &str = "live_changed";
 }
@@ -347,7 +345,6 @@ fn leak_static(value: &str) -> &'static str {
         reason::MAGPIE_ACCESS_EXPIRED,
         reason::MAGPIE_EXPIRY_UNKNOWN,
         reason::MAGPIE_TOO_SHORT,
-        reason::TEMPORARY_PENDING,
         reason::LIVE_CHANGED,
     ];
     ALL.iter()

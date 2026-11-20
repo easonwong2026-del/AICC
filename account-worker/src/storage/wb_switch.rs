@@ -327,6 +327,23 @@ impl super::Db {
             .optional()?)
     }
 
+    /// 把**除 `keep_id` 之外**所有待还原的临时记录标成已结算。
+    ///
+    /// 「恢复原账号」的语义是"回到**最近一次**切换之前那一站"，所以新的一次切换
+    /// 成功之后，更早的临时记录就该结算掉 —— 否则它们会永远停在 pending，
+    /// 界面每次刷新都看到一堆"待还原"。
+    ///
+    /// 注意必须排除**这一次**的 id：新记录本身也是 pending，按"最新的那条"去结算
+    /// 只会结算到它自己，旧记录一条都清不掉（这正是第一版的行为）。
+    pub fn settle_pending_temporary_except(&self, keep_id: &str) -> RpcResult<usize> {
+        Ok(self.conn.execute(
+            "UPDATE workbuddy_switch_journal
+                SET restore_state = ?2, updated_at = ?3
+              WHERE temporary = 1 AND restore_state = ?1 AND id <> ?4",
+            params![RESTORE_PENDING, RESTORE_DONE, now_rfc3339(), keep_id],
+        )?)
+    }
+
     /// 改恢复状态。`done` 表示"这条不再提供恢复"。
     pub fn set_restore_state(&self, id: &str, state: &str) -> RpcResult<()> {
         let changed = self.conn.execute(

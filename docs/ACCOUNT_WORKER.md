@@ -499,7 +499,7 @@ WorkBuddy AI 是另一个站点，拿它的授权请求这些接口，轻则 401
 | 不写什么 | 不读 / 不存 / 不同步 Magpie 的 refresh；不把上一账号的 refresh 带给目标账号 |
 | 有效期 | 以 Magpie 文件里的 `expires` 为准，**不用数据库里的旧 `token_expires_at`**；切换时现读一次 |
 | 恢复 | 成功后 `restore_state=pending`，界面必须一直给「恢复原账号」；`open_slot` 同时释放 |
-| 冲突 | 有 `pending` 临时登录时，只允许切回那个原账号；切别的账号先拒绝（`temporary_pending`） |
+| 冲突 | `open_slot` 只挡"切换正在执行"；待还原的临时登录**不阻塞**别的账号。每次成功切换会把更早的临时记录结算成 `done`，所以「恢复原账号」= 回到**最近一次**切换之前 |
 | 服务端有效性 | 一次只读探针记 `auth_accepted`；`unknown` 就是未知，不冒充成功 |
 
 两种模式的判定都在 `workbuddy_switch::plan::resolve()`，`status` 与 `switch` 同源，

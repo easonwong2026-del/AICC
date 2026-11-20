@@ -196,7 +196,6 @@ enum WorkbuddySwitchReason: String {
     case magpieAccessExpired = "magpie_access_expired"
     case magpieExpiryUnknown = "magpie_expiry_unknown"
     case magpieTooShort = "magpie_too_short"
-    case temporaryPending = "temporary_pending"
     case liveChanged = "live_changed"
 
     init(raw: String?) {
@@ -220,7 +219,6 @@ enum WorkbuddySwitchReason: String {
         case .magpieAccessExpired: return "Magpie 的访问令牌已过期，先在 Magpie 里重新登录"
         case .magpieExpiryUnknown: return "Magpie 没给出有效期，无法判断临时登录能用多久"
         case .magpieTooShort: return "Magpie 令牌剩余有效期太短，不够完成一次临时切换"
-        case .temporaryPending: return "还有一次临时登录没恢复，先点「恢复原账号」"
         case .liveChanged: return "客户端当前登录的已经不是你切换过去的账号"
         }
     }
