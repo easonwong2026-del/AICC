@@ -1388,12 +1388,24 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
             app.with_db(|db| db.set_rotation_enabled(enabled))?;
             let control = workbuddy_switch::SystemControl::for_variant(WbVariant::Cn);
             let env = workbuddy_switch::SwitchEnv::system(app);
-            workbuddy_switch::rotation::status(
+            // 关掉开关不只是"别再开新轮次"：还在跑的那一轮必须立刻安全收尾，
+            // 否则客户端会停在一个轮换账号上过夜。这里同步执行一次 stop，
+            // 让界面能马上看到"已恢复原账号"，而不是等下一次心跳。
+            let stop_result = if enabled {
+                Value::Null
+            } else {
+                workbuddy_switch::rotation::stop(app, &control, &env)?
+            };
+            let mut payload = workbuddy_switch::rotation::status(
                 app,
                 &control,
                 &env,
                 &workbuddy_switch::rotation::SystemClock,
-            )
+            )?;
+            if !enabled {
+                payload["stopResult"] = stop_result;
+            }
+            Ok(payload)
         }
 
         "workbuddy.rotation.runNow" => {

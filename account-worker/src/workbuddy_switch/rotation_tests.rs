@@ -22,7 +22,8 @@ use crate::paths::Paths;
 use crate::rpc::RpcResult;
 use crate::storage::authz::AuthorizationRecord;
 use crate::storage::rotation::{
-    RotationPlan, RotationRun, STATE_COMPLETED, STATE_DWELLING, STATE_SKIPPED,
+    RotationPlan, RotationRun, STATE_COMPLETED, STATE_DWELLING, STATE_PRECHECKING, STATE_SKIPPED,
+    STATE_SWITCHING,
 };
 use crate::storage::{AccountInput, AccountRecord};
 
@@ -824,4 +825,205 @@ fn plan_resolution_is_shared_with_the_manual_switch() {
         plan::PlanOutcome::Ready(ready) => assert_eq!(ready.mode, plan::Mode::OwnRefresh),
         plan::PlanOutcome::Blocked { reason, detail } => panic!("应当可切：{reason} {detail}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// 复审修复（2026-11-20 第二轮）
+// ---------------------------------------------------------------------------
+
+/// P0-1：用户在键盘前时，**关客户端之前**就推迟。
+#[test]
+fn starting_a_run_waits_when_the_user_is_active() {
+    let h = Harness::new();
+    h.plan(&[&h.b], 300);
+    h.idle.0.store(30, Ordering::SeqCst); // 30 秒前刚动过键盘
+
+    let report = h.tick(false);
+    assert_eq!(report["status"], STATE_PRECHECKING, "{report}");
+    assert_eq!(h.control.closes(), 0, "不能让用户正在用的客户端被关掉");
+    assert_eq!(h.live_uid().as_deref(), Some("uid-a"));
+    assert_eq!(h.run().state, STATE_PRECHECKING, "状态留在预检，下一跳再看");
+
+    // 用户离开后，下一次心跳正常开始。
+    h.idle.0.store(3600, Ordering::SeqCst);
+    let report = h.tick(false);
+    assert_eq!(report["status"], STATE_DWELLING, "{report}");
+    assert_eq!(h.live_uid().as_deref(), Some("uid-b"));
+}
+
+/// P0-1：窗口剩余时间不够一次停留，就不该开始（哪怕用户不在用）。
+#[test]
+fn a_window_too_short_never_starts_a_hop() {
+    let h = Harness::new();
+    let mut plan = RotationPlan::defaults();
+    plan.weekdays = vec![5];
+    plan.start_minutes = 22 * 60 + 30;
+    plan.end_minutes = 22 * 60 + 38; // 8 分钟窗口，停留 5 分钟 + 恢复余量 5 分钟
+    plan.dwell_seconds = 300;
+    plan.account_ids = vec![h.b.id.clone()];
+    h.app.with_db(|db| db.save_rotation_plan(&plan)).unwrap();
+    h.app.with_db(|db| db.set_rotation_enabled(true)).unwrap();
+
+    let report = h.tick(false);
+    assert_eq!(report["status"], "skipped", "{report}");
+    assert_eq!(h.control.closes(), 0, "时间不够就不该关客户端");
+    assert_eq!(h.live_uid().as_deref(), Some("uid-a"));
+}
+
+/// P0-2：关掉开关 = 停止后续计划 + **立刻**把账号恢复到原样。
+#[test]
+fn disabling_the_plan_mid_run_restores_the_original_account() {
+    let h = Harness::new();
+    h.plan(&[&h.b, &h.c], 300);
+    h.tick(false);
+    assert_eq!(h.live_uid().as_deref(), Some("uid-b"));
+
+    h.app.with_db(|db| db.set_rotation_enabled(false)).unwrap();
+    let report = h.tick(false);
+    assert_eq!(report["status"], STATE_COMPLETED, "{report}");
+    assert_eq!(
+        h.live_uid().as_deref(),
+        Some("uid-a"),
+        "关闭后必须回到原账号"
+    );
+    let run = h.run();
+    assert_eq!(run.state, STATE_COMPLETED);
+    assert!(
+        run.detail.as_deref().unwrap_or_default().contains("关闭"),
+        "{:?}",
+        run.detail
+    );
+
+    // 关掉之后不会再开新的一轮。
+    h.clock.advance_secs(60);
+    assert_eq!(h.tick(false)["status"], "disabled");
+}
+
+/// P0-2：即使开关是关的，遗留的未完成轮次也必须被收尾（不能扔在那）。
+#[test]
+fn a_pending_run_is_still_finished_when_the_switch_is_already_off() {
+    let h = Harness::new();
+    h.plan(&[&h.b], 300);
+    h.tick(false);
+    // 模拟"用户关了开关但进程还没跑下一次 tick"。
+    h.app.with_db(|db| db.set_rotation_enabled(false)).unwrap();
+    let run = h.run();
+    h.app
+        .with_db(|db| db.set_rotation_state(&run.id, STATE_DWELLING, Some("遗留")))
+        .unwrap();
+
+    let report = h.tick(false);
+    assert_eq!(report["status"], STATE_COMPLETED, "{report}");
+    assert_eq!(h.live_uid().as_deref(), Some("uid-a"));
+}
+
+/// P1：停留**结束之后**才查活跃；刚切完不能自问自答。
+#[test]
+fn activity_after_is_recorded_only_after_the_dwell_ends() {
+    let h = Harness::new();
+    h.plan(&[&h.b, &h.c], 300);
+
+    h.tick(false); // 切到乙，进入停留
+    let run = h.run();
+    let steps = h.app.with_db(|db| db.rotation_steps(&run.id)).unwrap();
+    assert_eq!(steps[0].status, "done");
+    assert!(
+        steps[0].activity_after.is_none(),
+        "刚切完就取证等于拿到旧值：{:?}",
+        steps[0].activity_after
+    );
+    assert!(steps[0].activity_before.is_some(), "切换前那次照旧要记");
+
+    h.clock.advance_secs(300); // 停留结束，切到丙
+    h.tick(false);
+    let run = h.run();
+    let steps = h.app.with_db(|db| db.rotation_steps(&run.id)).unwrap();
+    assert!(steps[0].activity_after.is_some(), "停留结束后必须补上");
+    assert!(
+        steps[1].activity_after.is_none(),
+        "第二个账号刚切完，还没到点"
+    );
+}
+
+/// P0-1：用户在忙时不切下一个账号（推迟），而不是关掉客户端。
+#[test]
+fn a_busy_user_postpones_the_next_hop() {
+    let h = Harness::new();
+    h.plan(&[&h.b, &h.c], 300);
+    h.tick(false); // 切到乙
+    let closes_after_first = h.control.closes();
+
+    h.clock.advance_secs(300); // 乙的停留结束
+    h.idle.0.store(20, Ordering::SeqCst); // 用户正在用
+
+    let report = h.tick(false);
+    assert_eq!(report["status"], STATE_SWITCHING, "{report}");
+    assert_eq!(h.live_uid().as_deref(), Some("uid-b"), "不能在用户手里切走");
+    assert_eq!(h.control.closes(), closes_after_first, "推迟时不该关客户端");
+}
+
+/// P0-1：窗口快结束时不再开始新切换，直接恢复原账号。
+#[test]
+fn near_the_window_end_it_restores_instead_of_forcing_another_switch() {
+    let h = Harness::new();
+    h.plan(&[&h.b, &h.c], 300);
+    h.tick(false); // 切到乙
+
+    // 22:30 开始、07:00 结束；把时钟推到 06:58（离结束只剩 2 分钟）。
+    h.clock.set(beijing(2026, 11, 21, 6, 58));
+    let report = h.tick(false);
+    assert_eq!(report["status"], STATE_COMPLETED, "{report}");
+    assert_eq!(
+        h.live_uid().as_deref(),
+        Some("uid-a"),
+        "必须恢复而不是切到丙"
+    );
+}
+
+/// P0-3：**两个线程**同时 tick（各自一份进程内状态），只能有一个动客户端。
+///
+/// 这就是"两个 worker"的最小复现：文件锁在两个线程之间是真实的（flock 按 fd 判），
+/// 而线程局部的 `BusyGuard` 互不可见 —— 所以这条用例只可能被跨进程锁挡住。
+#[test]
+fn two_concurrent_ticks_switch_only_once() {
+    use std::sync::{Arc, Barrier};
+
+    let h = Arc::new(Harness::new());
+    h.plan(&[&h.b], 300);
+    let barrier = Arc::new(Barrier::new(2));
+
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let harness = Arc::clone(&h);
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            harness.tick(false)
+        }));
+    }
+    let results: Vec<Value> = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("线程不应 panic"))
+        .collect();
+
+    let ran = results
+        .iter()
+        .filter(|report| report["status"] != "busy")
+        .count();
+    assert_eq!(ran, 1, "只应有一个 tick 真正执行：{results:?}");
+    assert_eq!(h.live_uid().as_deref(), Some("uid-b"), "只切了一次");
+
+    let run = h.run();
+    let steps = h.app.with_db(|db| db.rotation_steps(&run.id)).unwrap();
+    assert_eq!(
+        steps.iter().filter(|step| step.status == "done").count(),
+        1,
+        "不能出现两条成功记录：{steps:?}"
+    );
+    // 成功那条路径固定关两次（拍快照一次、切换一次）；多出来的就是重复执行。
+    assert!(
+        h.control.closes() <= 2,
+        "关客户端的次数超出一次切换的预算：{}",
+        h.control.closes()
+    );
 }

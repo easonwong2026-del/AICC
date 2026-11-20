@@ -113,10 +113,23 @@ restoring ──► completed / recovery_required / failed
 | 星期 | 按**窗口开始那天**的星期判断 |
 | 一天最多一轮 | `UNIQUE(plan_id, plan_date)`，插入冲突 = 今天已经跑过 |
 | 迟到不补跑 | 超过开始时间 10 分钟（`LATE_START_TOLERANCE_SECS`）→ 建一条 `skipped`，**同一晚不再尝试** |
-| 窗口不够 | 每次切换前算"现在 + 停留 + 恢复余量"，不够就收尾而不是硬塞 |
+| 窗口不够 | **开始之前**就算"现在 + 停留 + 恢复余量"，不够就 `skipped`，连客户端都不关 |
+| 关闭开关 | 停止后续所有轮次 + **立刻**把还在跑的那一轮恢复到最初账号（`restoring`），两者不可分割 |
+| 用户在用 | 拍原账号快照**之前**就推迟（`prechecking` 状态等下一跳）；等不起就跳过，不关客户端 |
 
 `RESTORE_RESERVE_SECS = 5 分钟`：恢复要关客户端、写文件、等它起来。
-`USER_ACTIVE_IDLE_SECS = 120`：HID 空闲低于 2 分钟视为"用户在键盘前"，这一跳推迟。
+`USER_ACTIVE_IDLE_SECS = 120`：HID 空闲低于 2 分钟视为"用户在键盘前"。
+
+### 关闭开关 ≠ 只是"别再开新的"
+
+| 动作 | 后续计划 | 当前这一轮 |
+| --- | --- | --- |
+| 关闭开关 | 停止（明天也不会跑） | **立即恢复最初账号**，然后 `completed` |
+| 面板「暂停并恢复原账号」 | 不动开关（明天照常） | 立即恢复最初账号 |
+
+两者对**当轮**的行为一样，区别只在"明天还跑不跑"。之所以让"关闭"也立刻恢复：
+把客户端留在某个轮换账号上过夜，是这条链路上最坏的结果。
+界面文案与这张表一致（关闭后显示"并把账号恢复到…"，没恢复成功就说没成功）。
 
 ---
 
@@ -167,7 +180,9 @@ restoring ──► completed / recovery_required / failed
 
 | 场景 | 行为 |
 | --- | --- |
-| 用户在键盘前（HID 空闲 < 2 分钟） | 推迟这一跳，等下一次 tick；临近窗口结束仍要恢复时会执行恢复 |
+| 用户在键盘前（HID 空闲 < 2 分钟） | **拍快照之前**就推迟（这一轮停在 `prechecking`）；等不起就整轮跳过，客户端一次都不关 |
+| 推迟之后用户离开 | 下一次 tick 正常开始，不需要用户操作 |
+| 已在停留中、用户回来了 | 停留照旧；到点该切下一个时若仍在用，就推迟那一跳（不关客户端） |
 | 用户中途手动换了账号 | **立即停止**整轮，且**不覆盖**他的选择（`completed` + 说明） |
 | 用户中途自己切回最初账号 | 停止，视为已收尾 |
 | 客户端因 access 过期而登出（`uid` 为空） | **不算**用户干预：这正是要救的场景，继续恢复 |
@@ -192,11 +207,32 @@ restoring ──► completed / recovery_required / failed
 **没有独立调度服务**：`aicc-account-worker` 是 `AICC.app` 的子进程，这是既有架构。
 需要"App 关了也跑"必须引入 launchd LaunchAgent，那是另一件事（见 §12），本轮不做。
 
+### 并发：三层，各管一件事
+
+| 层 | 机制 | 挡住什么 |
+| --- | --- | --- |
+| 进程内 | 线程局部 `BusyGuard` | 同一进程里 tick 与 RPC 抢着操作客户端 |
+| 跨进程 | `<数据目录>/workbuddy-switch/rotation.lock` 上的 `flock`（`try_lock`，非阻塞） | **两个 worker 进程**同时进 `prechecking` / `switching` |
+| 数据库 | `state` 的 CAS + `open_slot` 唯一索引 | 同一状态被推进两次、两条切换同时存在 |
+
+只用前两层里的任何一层都不够：
+
+- 只有进程内互斥 → 两个 worker 各自持锁，会各关一次客户端；
+- 只有 CAS → 它只保证"状态不重复迁移"，挡不住两个进程**同时执行同一个状态**。
+
+`flock` 而不是锁文件里的 pid：进程崩溃时内核自动释放，不需要"清理陈旧锁"，
+也不会因为 pid 复用判错。锁文件残留无害。
+
+真实并发测试：`two_concurrent_ticks_switch_only_once` 用两个线程共享同一份数据目录
+（线程局部的 `BusyGuard` 互不可见），断言只有一个 tick 真正执行、只切一次、只产生一条 `done`。
+
 ---
 
 ## 8. 崩溃恢复
 
-重启后的判定顺序（`advance` + `reconcile`）：
+崩溃时 `flock` 由内核释放，不需要人工清锁；重启后从 `active_rotation_run` 接着判定。
+
+判定顺序（`advance` + `reconcile`）：
 
 1. 读客户端**实际**登录（`live.uid`），不信 AICC 的选中项；
 2. 判本轮是否还在窗口内（`window_end` + 是否迟到）；
@@ -316,6 +352,14 @@ Fake Clock + Fake Client + 注入式预检与活跃取证，**不联网、不碰
 | `a_target_that_is_already_live_is_not_switched_again` | 已是当前账号不重复切 |
 | `a_client_that_rejects_the_login_does_not_wedge_the_run` | 客户端拒绝不会卡死 |
 | 窗口 / 时区 / 星期 / 跨午夜 | 时间计算 |
+| `starting_a_run_waits_when_the_user_is_active` | 用户在用时**不关客户端**，状态停在预检；离开后正常开始 |
+| `a_window_too_short_never_starts_a_hop` | 窗口不够一个停留 → 跳过，客户端零动作 |
+| `a_busy_user_postpones_the_next_hop` | 停留到点但用户在忙 → 推迟，不切走 |
+| `near_the_window_end_it_restores_instead_of_forcing_another_switch` | 窗口快结束 → 恢复而不是强切 |
+| `disabling_the_plan_mid_run_restores_the_original_account` | 关开关 → 立刻回到最初账号，之后不再开新轮次 |
+| `a_pending_run_is_still_finished_when_the_switch_is_already_off` | 开关已关但轮次遗留 → 仍会收尾 |
+| `activity_after_is_recorded_only_after_the_dwell_ends` | 停留结束前不取证 |
+| `two_concurrent_ticks_switch_only_once` | **两个线程**同时 tick，只执行一次 |
 
 并发：`state` CAS + `open_slot` 唯一索引 + 进程内互斥（单线程 runtime 的线程局部标志）。
 测试里用"连续两次 tick"验证幂等；真正的双进程并发由数据库约束兜底（与 #111/#112 同一套）。

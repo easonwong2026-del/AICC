@@ -131,7 +131,7 @@ impl IdleProbe for SystemIdle {
 }
 
 // 进程内互斥：tick、立即执行、暂停、恢复都可能同时被触发。
-///
+//
 // 数据库层面还有 `open_slot` 与状态 CAS 兜底，但那只能挡住"重复切换"，
 // 挡不住"一边恢复一边切换"。这个开关让第二个动作直接返回忙。
 //
@@ -194,6 +194,62 @@ impl ActivityProbe for SystemActivity {
     fn snapshot<'a>(&'a self, app: &'a App, account_id: &'a str) -> BoxFut<'a, Value> {
         Box::pin(async move { service::activity_snapshot(app, account_id).await })
     }
+}
+
+/// **跨进程**独占：同一台机器上只允许一个 AICC 进程操作 WorkBuddy 客户端。
+///
+/// 为什么进程内互斥不够：两个 `aicc-account-worker`（例如旧 App 没退干净、
+/// 或用户手动开了两个）各自持有一份自己的 `BusyGuard`，status 里的 CAS 也只能
+/// 保证"状态迁移不重复"，挡不住两个进程同时进 `prechecking` 各关一次客户端。
+///
+/// 用 `flock` 而不是锁文件里的 pid：进程崩溃时内核自动释放，不需要"清理陈旧锁"，
+/// 也不会因为 pid 复用判错。锁文件本身残留是无害的。
+struct RotationLock {
+    _file: std::fs::File,
+}
+
+impl RotationLock {
+    fn acquire(path: &Path) -> RpcResult<Option<Self>> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| RpcError::internal(format!("创建轮换锁目录失败：{err}")))?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|err| RpcError::internal(format!("打开轮换锁失败：{err}")))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            // 另一个进程正在跑：不是错误，这一轮让给它。
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(err)) => {
+                Err(RpcError::internal(format!("轮换锁不可用：{err}")))
+            }
+        }
+    }
+}
+
+/// 一次操作客户端所需的全部独占权：进程内 + 跨进程。
+struct RotationGate {
+    _local: BusyGuard,
+    _cross_process: RotationLock,
+}
+
+fn acquire_gate(deps: &RotationDeps<'_>) -> RpcResult<Option<RotationGate>> {
+    let Some(local) = BusyGuard::acquire() else {
+        return Ok(None);
+    };
+    let path = deps.env.snapshot_dir.join("rotation.lock");
+    let Some(cross_process) = RotationLock::acquire(&path)? else {
+        return Ok(None);
+    };
+    Ok(Some(RotationGate {
+        _local: local,
+        _cross_process: cross_process,
+    }))
 }
 
 pub struct RotationDeps<'a> {
@@ -382,18 +438,36 @@ pub async fn run_tick(app: &App, force: bool) -> RpcResult<Value> {
 
 /// 一次心跳。设计成**幂等**：连续调两次，第二次什么都不会多做。
 pub async fn run_tick_with(app: &App, deps: &RotationDeps<'_>, force: bool) -> RpcResult<Value> {
-    let Some(_guard) = BusyGuard::acquire() else {
-        return Ok(json!({ "status": "busy" }));
+    let Some(_gate) = acquire_gate(deps)? else {
+        return Ok(json!({ "status": "busy", "detail": "另一个 AICC 进程正在执行轮换" }));
     };
     let plan = app.with_db(|db| db.rotation_plan_or_default())?;
     let now = deps.clock.now_ms();
 
-    if let Some(run) = app.with_db(|db| db.active_rotation_run())? {
-        return advance_with_depth(app, deps, &plan, run, now, 0).await;
+    // 开关关掉 = **不再开新轮次**，但还在跑的那一轮必须安全收尾。
+    //
+    // 这两件事必须分开：只把 enabled 置 0 而让轮次继续，用户会看到"关掉了还在切"；
+    // 而直接丢弃轮次会让客户端停在一个轮换账号上过夜。所以这里的语义是
+    // 「停止后续计划 + 立刻恢复原账号」，界面文案与它一致。
+    if !plan.enabled && !force {
+        if let Some(run) = app.with_db(|db| db.active_rotation_run())? {
+            if run.state != STATE_RESTORING {
+                app.with_db(|db| {
+                    db.set_rotation_state(
+                        &run.id,
+                        STATE_RESTORING,
+                        Some("自动轮换已关闭，正在把账号恢复到这一轮最初登录的那个"),
+                    )
+                })?;
+            }
+            let run = reload(app, &run.id)?;
+            return advance_with_depth(app, deps, &plan, run, now, 0).await;
+        }
+        return Ok(json!({ "status": "disabled" }));
     }
 
-    if !plan.enabled && !force {
-        return Ok(json!({ "status": "disabled" }));
+    if let Some(run) = app.with_db(|db| db.active_rotation_run())? {
+        return advance_with_depth(app, deps, &plan, run, now, 0).await;
     }
     if plan.account_ids.is_empty() {
         return Ok(json!({ "status": "not_configured" }));
@@ -516,6 +590,11 @@ async fn advance_with_depth(
                     let run = reload(app, &run.id)?;
                     Box::pin(advance_with_depth(app, deps, plan, run, now, depth + 1)).await
                 }
+                Precheck::Wait { detail } => Ok(json!({
+                    "status": STATE_PRECHECKING,
+                    "runId": run.id,
+                    "detail": detail,
+                })),
                 Precheck::Stop { state, detail } => {
                     app.with_db(|db| db.set_rotation_state(&run.id, state, Some(&detail)))?;
                     Ok(json!({
@@ -563,9 +642,15 @@ async fn advance_with_depth(
             } else {
                 STATE_RECOVERY_REQUIRED
             };
+            // 保留"为什么开始恢复"（例如用户关了开关），再补上恢复结论。
+            // 只写结论会把原因盖掉，第二天没人知道这一轮为什么提前结束。
+            let detail = match run.detail.as_deref().filter(|text| !text.is_empty()) {
+                Some(cause) => format!("{cause}；{}", outcome.detail),
+                None => outcome.detail.clone(),
+            };
             app.with_db(|db| {
                 db.note_rotation_restore(&run.id, run.restore_attempts + 1, &outcome.code)?;
-                db.set_rotation_state(&run.id, state, Some(&outcome.detail))
+                db.set_rotation_state(&run.id, state, Some(&detail))
             })?;
             Ok(json!({
                 "status": state,
@@ -589,7 +674,15 @@ fn reload(app: &App, id: &str) -> RpcResult<RotationRun> {
 
 enum Precheck {
     Ready,
-    Stop { state: &'static str, detail: String },
+    /// 条件暂时不满足，但**不能**把这一轮结掉：等下一次心跳再看。
+    /// 用在"用户正在用"这种会自己消失的情况上。
+    Wait {
+        detail: String,
+    },
+    Stop {
+        state: &'static str,
+        detail: String,
+    },
 }
 
 /// 预检：决定这轮到底要不要动客户端，并把每一步先登记好。
@@ -691,6 +784,40 @@ async fn precheck(
         });
     }
 
+    // 到这里已经确定"有可切目标"。但**关客户端之前**必须先看两件事：
+    // 时间够不够，以及用户是不是正在用。顺序错了就会在凌晨一点把用户正在写的
+    // 文档连同客户端一起关掉。
+    let window_end = parse_rfc3339_ms(&run.window_end).unwrap_or(now);
+    let reserve_ms = RESTORE_RESERVE_SECS * 1000;
+    let need_ms = plan.dwell_seconds * 1000;
+
+    // 剩余时间连"切一次 + 停一会儿 + 留出恢复余量"都不够：根本不开始。
+    if now + need_ms >= window_end - reserve_ms {
+        return Ok(Precheck::Stop {
+            state: STATE_SKIPPED,
+            detail: "窗口剩余时间不足一个停留时长，本轮不执行".to_string(),
+        });
+    }
+
+    // 用户在键盘前：不关客户端。还等得起就等下一跳，等不起就明确跳过。
+    if let Some(idle) = deps.idle.idle_secs() {
+        if idle < USER_ACTIVE_IDLE_SECS {
+            let can_wait = now + need_ms + reserve_ms < window_end - reserve_ms;
+            if can_wait {
+                return Ok(Precheck::Wait {
+                    detail: format!(
+                        "检测到正在使用（空闲 {idle} 秒），等用户离开后再开始；现在没有关闭客户端"
+                    ),
+                });
+            }
+            return Ok(Precheck::Stop {
+                state: STATE_SKIPPED,
+                detail: "用户正在使用，且窗口剩余时间不足以再等一轮，本轮跳过（没有改动客户端）"
+                    .to_string(),
+            });
+        }
+    }
+
     // 到这里才需要"最初登录态"：它要关一次客户端，不能白关。
     let Some(origin) = capture_origin(deps)? else {
         return Ok(Precheck::Stop {
@@ -772,17 +899,6 @@ async fn precheck(
             detail: "没有可切换的账号".to_string(),
         });
     };
-
-    // 窗口剩余时间不够切一次：连第一跳都别做，直接收尾（此时客户端没被改过）。
-    let reserve_ms = RESTORE_RESERVE_SECS * 1000;
-    if now + plan.dwell_seconds * 1000
-        >= parse_rfc3339_ms(&run.window_end).unwrap_or(now) - reserve_ms
-    {
-        return Ok(Precheck::Stop {
-            state: STATE_SKIPPED,
-            detail: "窗口剩余时间不足一个停留时长，本轮不执行".to_string(),
-        });
-    }
 
     app.with_db(|db| {
         db.set_rotation_cursor(&run.id, cursor)?;
@@ -919,8 +1035,16 @@ async fn switch_current(
     }
 
     // 用户正在用：推迟，不突然关客户端。
+    //
+    // 接近窗口结束时**不再强行开始新的一跳**：那时候切过去只剩几分钟停留，
+    // 却要关一次客户端、再关一次来恢复，代价全给用户，收益接近零。
     if let Some(idle) = deps.idle.idle_secs() {
-        if idle < USER_ACTIVE_IDLE_SECS && !near_window_end(run, plan, now) {
+        if idle < USER_ACTIVE_IDLE_SECS {
+            if near_window_end(run, plan, now) {
+                return Ok(StepGate::Restore {
+                    detail: "用户在忙且窗口快结束，不再开始新的切换，直接恢复原账号".to_string(),
+                });
+            }
             return Ok(StepGate::Wait {
                 detail: format!("检测到正在使用（空闲 {} 秒），这一跳推迟", idle),
             });
@@ -1172,14 +1296,6 @@ async fn dwelling(
         .map(|step| step.seq)
         .min();
 
-    // 上一个账号的活跃取证：停留结束时查一次，别在刚切完就查（服务端还没记上）。
-    if let Some(step) = current {
-        if step.activity_after.is_none() {
-            let after = deps.activity.snapshot(app, &step.account_id).await;
-            let _ = app.with_db(|db| db.set_rotation_step_activity(&step.id, None, Some(&after)));
-        }
-    }
-
     let window_end = parse_rfc3339_ms(&run.window_end).unwrap_or(now);
     let reserve_ms = RESTORE_RESERVE_SECS * 1000;
     let dwell_until = current
@@ -1188,16 +1304,32 @@ async fn dwelling(
         .map(|ended| ended + plan.dwell_seconds * 1000)
         .unwrap_or(now + plan.dwell_seconds * 1000);
 
-    let can_switch_another =
-        next_seq.is_some() && dwell_until + plan.dwell_seconds * 1000 < window_end - reserve_ms;
+    // 到没到点、要不要因为窗口而提前离开。
+    let dwell_over = now >= dwell_until;
+    let must_leave = now + reserve_ms >= window_end;
 
-    if now < dwell_until && (can_switch_another || next_seq.is_none()) {
+    if !dwell_over && !must_leave {
         return Ok(json!({
             "status": STATE_DWELLING,
             "runId": run.id,
             "nextSwitchAt": ms_to_rfc3339(dwell_until),
         }));
     }
+
+    // **停留真正结束**（或被窗口逼着走）时才查这一步的活跃。
+    //
+    // 刚切完就查等于自问自答：服务端那时还没记上这次登录，拿到的一定是旧值，
+    // 用户第二天看到的"今日活跃"就永远是假的。
+    if let Some(step) = current {
+        if step.activity_after.is_none() {
+            let after = deps.activity.snapshot(app, &step.account_id).await;
+            let _ = app.with_db(|db| db.set_rotation_step_activity(&step.id, None, Some(&after)));
+        }
+    }
+
+    let can_switch_another = next_seq.is_some()
+        && !must_leave
+        && now + plan.dwell_seconds * 1000 + reserve_ms < window_end;
 
     if let Some(next) = next_seq {
         if can_switch_another {
@@ -1370,7 +1502,16 @@ fn apply_marker(auth_path: &Path, present: bool) {
 
 /// 暂停/结束当前这一轮：**先尽力把原账号恢复回来**，再落终态。
 pub fn stop(app: &App, control: &dyn ClientControl, env: &SwitchEnv) -> RpcResult<Value> {
-    let Some(_guard) = BusyGuard::acquire() else {
+    let deps = RotationDeps {
+        control,
+        env,
+        clock: &SystemClock,
+        idle: &SystemIdle,
+        precheck: &SystemPrecheck,
+        activity: &SystemActivity,
+    };
+    // 与 tick 抢**同一把跨进程锁**：不能一边恢复一边被另一个进程切走。
+    let Some(_gate) = acquire_gate(&deps)? else {
         return Ok(json!({ "ok": false, "status": "busy", "detail": "另一项轮换操作正在执行" }));
     };
     let Some(run) = app.with_db(|db| db.active_rotation_run())? else {
@@ -1384,14 +1525,6 @@ pub fn stop(app: &App, control: &dyn ClientControl, env: &SwitchEnv) -> RpcResul
             json!({ "ok": true, "status": STATE_COMPLETED, "runId": run.id, "restored": true }),
         );
     }
-    let deps = RotationDeps {
-        control,
-        env,
-        clock: &SystemClock,
-        idle: &SystemIdle,
-        precheck: &SystemPrecheck,
-        activity: &SystemActivity,
-    };
     let outcome = restore_origin(app, &deps, &run, false)?;
     app.with_db(|db| {
         db.note_rotation_restore(&run.id, run.restore_attempts + 1, &outcome.code)?;
@@ -1422,7 +1555,15 @@ pub fn restore_now(
     run_id: Option<&str>,
     force: bool,
 ) -> RpcResult<Value> {
-    let Some(_guard) = BusyGuard::acquire() else {
+    let deps = RotationDeps {
+        control,
+        env,
+        clock: &SystemClock,
+        idle: &SystemIdle,
+        precheck: &SystemPrecheck,
+        activity: &SystemActivity,
+    };
+    let Some(_gate) = acquire_gate(&deps)? else {
         return Ok(json!({ "ok": false, "status": "busy", "detail": "另一项轮换操作正在执行" }));
     };
     let run = match run_id {
@@ -1436,14 +1577,6 @@ pub fn restore_now(
             "reason": "nothing_to_restore",
             "detail": "还没有可恢复的轮换记录",
         }));
-    };
-    let deps = RotationDeps {
-        control,
-        env,
-        clock: &SystemClock,
-        idle: &SystemIdle,
-        precheck: &SystemPrecheck,
-        activity: &SystemActivity,
     };
     let outcome = restore_origin(app, &deps, &run, force)?;
     app.with_db(|db| {
