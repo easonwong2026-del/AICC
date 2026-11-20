@@ -22,6 +22,7 @@ pub mod qoder_profiles;
 pub mod qoder_switch;
 pub mod quota;
 pub mod reward_ops;
+pub mod rotation;
 pub mod travel;
 pub mod wb_switch;
 
@@ -412,6 +413,85 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_wb_switch_open \
 CREATE INDEX IF NOT EXISTS idx_wb_switch_created \
     ON workbuddy_switch_journal (created_at DESC);";
 
+/// v27：夜间账号轮换。
+///
+/// 三张表彼此独立，**没有外键**：几轮记录被清理时不该连带删掉另一张表里的历史。
+/// 关键约束只有两条，且都放在数据库里：
+///
+/// - `UNIQUE(plan_id, plan_date)` —— 同一天最多一轮。重复心跳、两个 worker、
+///   AICC 重启都不可能凭空多跑一轮；插入冲突就是"今天已经跑过"。
+/// - `UNIQUE(run_id, seq)` —— 一轮里每个位置只有一个步骤。重复 tick 撞唯一键，
+///   调用方按"已存在"处理。
+///
+/// `origin_*` 五列是这一轮**最初**的登录态（不是"上一站"）。它必须能独立于
+/// `workbuddy_switch_journal` 存在：中途切了几次、那些 journal 怎么结算，
+/// 都不影响"回到 A"。
+const MIGRATION_V27_SQL: &str = "\
+CREATE TABLE IF NOT EXISTS workbuddy_rotation_plan (\
+    id             TEXT PRIMARY KEY,\
+    enabled        INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),\
+    timezone       TEXT NOT NULL DEFAULT 'Asia/Shanghai',\
+    weekdays       TEXT NOT NULL DEFAULT '1,2,3,4,5,6,7',\
+    start_minutes  INTEGER NOT NULL DEFAULT 1350 CHECK (start_minutes BETWEEN 0 AND 1439),\
+    end_minutes    INTEGER NOT NULL DEFAULT 420 CHECK (end_minutes BETWEEN 0 AND 1439),\
+    account_ids    TEXT NOT NULL DEFAULT '[]',\
+    dwell_seconds  INTEGER NOT NULL DEFAULT 3600,\
+    created_at     TEXT NOT NULL,\
+    updated_at     TEXT NOT NULL\
+);\
+CREATE TABLE IF NOT EXISTS workbuddy_rotation_run (\
+    id                     TEXT PRIMARY KEY,\
+    plan_id                TEXT NOT NULL,\
+    plan_date              TEXT NOT NULL,\
+    timezone               TEXT NOT NULL,\
+    window_start           TEXT NOT NULL,\
+    window_end             TEXT NOT NULL,\
+    origin_account_id      TEXT,\
+    origin_uid             TEXT,\
+    origin_snapshot_path   TEXT,\
+    origin_snapshot_sha256 TEXT,\
+    origin_marker          INTEGER NOT NULL DEFAULT 0 CHECK (origin_marker IN (0, 1)),\
+    origin_running         INTEGER NOT NULL DEFAULT 0 CHECK (origin_running IN (0, 1)),\
+    state                  TEXT NOT NULL CHECK (state IN (\
+                             'scheduled','prechecking','switching','dwelling','restoring',\
+                             'completed','skipped','failed','recovery_required')),\
+    cursor                 INTEGER NOT NULL DEFAULT 0,\
+    current_journal_id     TEXT,\
+    last_target_account_id TEXT,\
+    last_target_uid        TEXT,\
+    restore_attempts       INTEGER NOT NULL DEFAULT 0,\
+    restore_result         TEXT,\
+    detail                 TEXT,\
+    created_at             TEXT NOT NULL,\
+    updated_at             TEXT NOT NULL\
+);\
+CREATE UNIQUE INDEX IF NOT EXISTS ux_rotation_run_per_day \
+    ON workbuddy_rotation_run (plan_id, plan_date);\
+CREATE INDEX IF NOT EXISTS idx_rotation_run_state \
+    ON workbuddy_rotation_run (state, window_end);\
+CREATE TABLE IF NOT EXISTS workbuddy_rotation_step (\
+    id              TEXT PRIMARY KEY,\
+    run_id          TEXT NOT NULL,\
+    seq             INTEGER NOT NULL,\
+    account_id      TEXT NOT NULL,\
+    uid             TEXT NOT NULL,\
+    mode            TEXT,\
+    planned_at      TEXT,\
+    started_at      TEXT,\
+    ended_at        TEXT,\
+    status          TEXT NOT NULL,\
+    journal_id      TEXT,\
+    skip_reason     TEXT,\
+    detail          TEXT,\
+    auth_precheck   TEXT,\
+    activity_before TEXT,\
+    activity_after  TEXT,\
+    created_at      TEXT NOT NULL,\
+    updated_at      TEXT NOT NULL\
+);\
+CREATE UNIQUE INDEX IF NOT EXISTS ux_rotation_step_seq \
+    ON workbuddy_rotation_step (run_id, seq);";
+
 /// 一次迁移里的一步：纯 SQL，或者需要 Rust 参与的数据迁移。
 ///
 /// v16 起的 Qoder 迁移都是 Rust 步骤：它们要先检测现状再动手，重复执行必须是
@@ -575,9 +655,17 @@ const MIGRATIONS: &[Migration] = &[
         version: 26,
         steps: &[MigrationStep::Rust(wb_switch::migrate_v26)],
     },
+    // v27：夜间账号轮换（计划 / 轮次 / 步骤）。只建新表 + 两个唯一索引。
+    //
+    // 「一轮最初登录的是谁」必须有自己的列：`switch_journal` 的语义是"回到上一站"，
+    // A→B→C→D 之后它只能带回 C。夜间计划要回 A，所以 origin 快照与 journal 分开存。
+    Migration {
+        version: 27,
+        steps: &[MigrationStep::Sql(MIGRATION_V27_SQL)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 26;
+pub const LATEST_VERSION: i64 = 27;
 
 pub struct Db {
     conn: Connection,

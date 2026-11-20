@@ -1,0 +1,340 @@
+# WorkBuddy 夜间账号轮换（WB-ROTATE-1 / #113）
+
+一句话：**按用户设的时间窗依次切换若干个 WorkBuddy 登录账号，并在窗口结束时
+回到这一轮最初登录的那个** —— 不是回到"上一个"。
+
+```text
+22:30 原本登录 A   →  23:00 切 B  →  00:00 切 C  →  01:00 切 D  →  07:00 回 A
+```
+
+之所以能回 A，是因为**本轮开始时的登录态被单独存了一份**（`origin_*`），
+而不是靠 `workbuddy_switch_journal` 的"回到上一站"。后者在 A→B→C→D 之后只能带回 C。
+
+> 本文档是这一功能的唯一口径。界面文案、RPC 字段、数据库列都以这里为准。
+
+---
+
+## 1. 边界
+
+| 能做的 | 不能做的（以及为什么） |
+| --- | --- |
+| 定时切换**国内版** WorkBuddy 的登录账号 | 国际版（`workbuddy_ai`）：认证文件与客户端行为都没有实测证据 |
+| 自有长期授权（access + refresh）与 Magpie 临时授权（只有 access） | 替 Magpie 刷新令牌：那是 Magpie 的凭据，两边一起刷会互相踢下线 |
+| 结束时按快照逐字节恢复**最初**账号 | 恢复中途"上一个"账号：语义不同，会让 D→C→B→A 变成 D→C |
+| 切换前后只读查询活跃状态 | 伪造活跃、自动发对话、调内部写接口：官方条款里属于取消资格 |
+| 用户在场时的短时验证（「立即执行一轮」） | 无人值守情况下"无论如何都要切完"：宁可跳过，不硬来 |
+
+**默认关闭**。只有用户在面板里显式打开，才会有任何自动操作。
+
+---
+
+## 2. 为什么不复用 `switch_journal`
+
+`workbuddy_switch_journal`（v25/v26）的语义是**一次切换**：`previous_uid` 是"上一站"，
+`restore` 是"回上一站"。这对单个手动切换是对的；对一夜多跳是错的：
+
+| 需求 | journal 能给的 | 夜间轮换要的 |
+| --- | --- | --- |
+| 结束回到哪 | 上一站（D→C） | 这一轮最初（D→A） |
+| 记录粒度 | 一次切换 | 一轮（含多步） |
+| 一天执行次数 | 无约束 | 一天最多一轮（数据库唯一索引） |
+
+所以 v27 另建三张表，`origin_*` 与 journal **完全分开**：
+
+```text
+workbuddy_rotation_plan   用户配置（单行）
+workbuddy_rotation_run    一轮：窗口、最初账号与快照、状态、光标
+workbuddy_rotation_step   这一轮里的一个账号：模式、结果、活跃证据
+```
+
+`run.origin_snapshot_*` 指向的是一份**独立复制**的快照文件
+（`<数据目录>/workbuddy-switch/rotation/origin-*.json`），
+不是 journal 快照的引用 —— 那些 journal 会被后续切换结算、更新，不应牵连这一轮。
+
+### 快照怎么拍
+
+沿用切换本身的机制：**先关客户端，再读认证文件**。客户端退出时会把内存里的最新
+令牌写回文件；不关它就可能在半夜存下一份马上过期的旧令牌。
+
+```text
+预检（有没有可切目标）
+  → 关客户端
+  → 读 workbuddy-desktop.info（逐字节）
+  → 存 origin 快照（0600 + sha256）
+  → 启动客户端
+```
+
+**一个可切目标都没有时不拍快照、不关客户端**：一次纯跳过的轮次不该让用户多等一次重启。
+
+---
+
+## 3. 状态机
+
+```text
+scheduled ──► prechecking ──► switching ──► dwelling ──┐
+                   │              │              │      │
+                   ├─► skipped    ├─► restoring ◄┘      │
+                   └─► failed     │                     │
+                                  └─► recovery_required ◄┘
+restoring ──► completed / recovery_required / failed
+```
+
+| 状态 | 含义 | 谁推进 |
+| --- | --- | --- |
+| `scheduled` | 本轮已建立，尚未预检 | tick |
+| `prechecking` | 读客户端登录、算每个账号能不能切、拍原账号快照 | tick |
+| `switching` | 正在切 `cursor` 指向的账号 | tick |
+| `dwelling` | 已切过去，在停留 | tick |
+| `restoring` | 正在写回原账号快照 | tick |
+| `completed` | 正常收尾（含"用户自己切回去了"） | — |
+| `skipped` | 本轮没执行（迟到 / 没登录 / 全都不可切） | — |
+| `failed` | 预检或执行阶段彻底失败 | — |
+| `recovery_required` | 该恢复但不敢自动覆盖，等用户确认 | 用户 |
+
+所有推进都是 **`state` 的 CAS**：`UPDATE ... WHERE id=? AND state=?`。
+两个 worker 同时 tick 时只有一个能赢，另一个拿到 0 行、这一轮什么都不做。
+
+`open_slot`（唯一索引）仍然是最后一道闸：同一时刻只允许一条未完成的**切换**。
+
+### 步骤状态
+
+`planned` → `switching` → `done` / `dwelling`（写入未确认时）/ `failed` / `skipped` / `already_live`。
+
+`already_live` 是"客户端当前登录的就是它"：不写文件、不拍快照、只留一条记录。
+
+---
+
+## 4. 时间窗
+
+| 规则 | 实现 |
+| --- | --- |
+| 明确时区 | 只接受 `Asia/Shanghai` / `UTC`（没有 `chrono-tz`，手写 DST 一定会错；保存时直接拒绝其它值） |
+| 跨午夜 | `end <= start` 视为次日结束；`active_window` 同时看"昨天开始、今天结束" |
+| 星期 | 按**窗口开始那天**的星期判断 |
+| 一天最多一轮 | `UNIQUE(plan_id, plan_date)`，插入冲突 = 今天已经跑过 |
+| 迟到不补跑 | 超过开始时间 10 分钟（`LATE_START_TOLERANCE_SECS`）→ 建一条 `skipped`，**同一晚不再尝试** |
+| 窗口不够 | 每次切换前算"现在 + 停留 + 恢复余量"，不够就收尾而不是硬塞 |
+
+`RESTORE_RESERVE_SECS = 5 分钟`：恢复要关客户端、写文件、等它起来。
+`USER_ACTIVE_IDLE_SECS = 120`：HID 空闲低于 2 分钟视为"用户在键盘前"，这一跳推迟。
+
+---
+
+## 5. 两种授权模式
+
+写进客户端的登录按**固定优先级**挑（与手动切换同一个 `plan::resolve`）：
+
+1. 自有授权且带 refresh → `own_refresh`（客户端自己续期）；
+2. 否则 Magpie 可用 → `magpie_access_temporary`（借来的 access，会过期）。
+
+`auth_preferred_source` **不影响**这里：它只决定 AICC 读签到 / 额度 / 成长时用哪份令牌。
+
+### 5.1 自有授权：真的探一次，而不是看数据库
+
+**「库里有 `refresh_ref`」不等于「这份授权今天还能用」。** WorkBuddy 客户端自己刷新
+时会轮换 refresh token，AICC 手里那份可能已经作废。
+
+所以每一跳之前：
+
+1. 从凭据库读出 access（只读，不写、不刷）；
+2. 发一次**只读**探针；
+3. `rejected`（401/403）→ **跳过这个账号**，记 `own_grant_rejected`，界面提示重新授权；
+4. `unknown`（网络/超时）→ 允许继续，但 step 的 `authPrecheck` 如实记 `unknown`；
+5. 读不到令牌 → 跳过，记 `own_grant_unreadable`。
+
+**不会**为了"把这一晚跑完"去覆盖用户授权、静默换来源或自动重新登录。
+
+### 5.2 Magpie 临时授权
+
+- 每次切换前**现读** `plugin-auth.json`，严格匹配 `source_key` + UID + 国内版 provider；
+- **不读、不复制、不修改** Magpie 的 refresh token；
+- 算剩余有效期，要求覆盖 `停留时长 + 恢复余量`，不够就跳过（`magpie_too_short_for_dwell`）；
+- 原始 Magpie 文件只读：`docs/WORKBUDDY_CLIENT_SWITCH.md` §10 有"运行前后字节一致"的单测；
+- access 过期时不伪造、不续期，直接跳过。
+
+### 5.3 Refresh Token 风险（如实说明）
+
+| 事实 | 影响 |
+| --- | --- |
+| 客户端用自有授权登录后会自己刷新，可能**轮换** refresh token | AICC 手里那份会变旧 |
+| 变旧之后，AICC 的签到 / 额度 / 成长查询会失效 | 下一跳的预检会发现 401 → 跳过并提示重新授权 |
+| 客户端当前的登录**不受影响** | 它手里是最新的 |
+| 无法完全避免 | 只要"客户端用自有授权登录"，这件事就可能发生；能做的只有**发现并停下** |
+
+---
+
+## 6. 用户在场与打断
+
+| 场景 | 行为 |
+| --- | --- |
+| 用户在键盘前（HID 空闲 < 2 分钟） | 推迟这一跳，等下一次 tick；临近窗口结束仍要恢复时会执行恢复 |
+| 用户中途手动换了账号 | **立即停止**整轮，且**不覆盖**他的选择（`completed` + 说明） |
+| 用户中途自己切回最初账号 | 停止，视为已收尾 |
+| 客户端因 access 过期而登出（`uid` 为空） | **不算**用户干预：这正是要救的场景，继续恢复 |
+| 用户点「暂停并恢复原账号」 | 立刻走恢复流程，失败则 `recovery_required` |
+
+"用户正在跑长任务"**无法可靠判断**：AICC 只看进程存在，不能据此认为客户端空闲。
+所以打开计划时界面明确提示"切换会中断客户端里正在进行的对话"，默认保守（见上表第一行）。
+
+---
+
+## 7. Mac 休眠与 AICC 退出
+
+| 场景 | 实际行为 |
+| --- | --- |
+| 屏幕关闭、系统仍运行 | 心跳继续（60 秒一次），计划正常推进 |
+| Mac 真正休眠 | 心跳停止。**不会**在日志里记成"已执行" |
+| 醒来时已过开始时间 10 分钟 | 本轮 `skipped`，**不补跑**；同一晚不会重试 |
+| 醒来时仍在窗口内 | 继续按当前时间推进（可能少切几个账号） |
+| AICC 退出 | **调度器停止**。没有 launchd、没有常驻代理 |
+| AICC 重启 | 读 `active_rotation_run`：还在窗口内就接着推进；窗口已过就恢复原账号 |
+
+**没有独立调度服务**：`aicc-account-worker` 是 `AICC.app` 的子进程，这是既有架构。
+需要"App 关了也跑"必须引入 launchd LaunchAgent，那是另一件事（见 §12），本轮不做。
+
+---
+
+## 8. 崩溃恢复
+
+重启后的判定顺序（`advance` + `reconcile`）：
+
+1. 读客户端**实际**登录（`live.uid`），不信 AICC 的选中项；
+2. 判本轮是否还在窗口内（`window_end` + 是否迟到）；
+3. 若有一个 `switching` 的步骤：
+   - 客户端已是目标账号 → 视为成功，进入停留，**不重复切**；
+   - 客户端仍是最初账号 → 记该步失败，继续下一个；
+   - 客户端是第三个账号 → `recovery_required`，不猜；
+4. 需要恢复时先校验快照 sha256：
+   - 文件不在 → `snapshot_missing`，`recovery_required`；
+   - sha 不符 → `snapshot_corrupt`，`recovery_required`（**不删**损坏的快照，留给人工判断）；
+   - 客户端当前既不是最初账号、也不是本轮最后切到的账号，且不是登出 → `live_changed`，**不覆盖**；
+5. 恢复失败保持 `recovery_required`，可重试。
+
+---
+
+## 9. 活跃：只取证，不造假
+
+用户提这个功能的初衷是"改善多个账号的活跃"，但**没有证据**证明"切换成功 = 服务端活跃成功"。
+所以本功能只做三件事：
+
+1. 切换**前**只读查一次目标账号的活跃状态（`activity_before`）；
+2. 停留**结束**再查一次（`activity_after`）—— 不在刚切完就查，那时服务端还没记上；
+3. 三个结论**分开记**：`step.status`（切换成功）、`authPrecheck`（授权有效）、`activityAfter`（今日活跃）。
+
+界面上"今日活跃 / 连续天数 / 查询时间"分别展示；查询失败写"活跃查不到"，**不写"未活跃"**。
+
+禁止：自动发对话、伪造活跃事件、调未授权接口、把签到成功当活跃成功。
+
+如果实测证明"切换并不产生活跃"，照实报告并停止围绕这个目标加功能。
+
+---
+
+## 10. 接口
+
+| 方法 | 参数 | 说明 |
+| --- | --- | --- |
+| `workbuddy.rotation.status` | — | 计划、下一轮时间、当前轮、最近 5 轮 |
+| `workbuddy.rotation.save` | `timezone?` `weekdays?` `startMinutes?` `endMinutes?` `accountIds?` `dwellSeconds?` `enabled?` | 只覆盖出现的字段 |
+| `workbuddy.rotation.setEnabled` | `enabled` | 打开前校验计划；缺账号直接拒绝 |
+| `workbuddy.rotation.dryRun` | — | 只演算：会切谁、跳过谁、为什么；**不写库、不动客户端** |
+| `workbuddy.rotation.runNow` | `confirm: true` | 立即跑一轮（占用当天名额），用于用户在场的短时验证 |
+| `workbuddy.rotation.stop` | — | 暂停并恢复原账号 |
+| `workbuddy.rotation.restoreOrigin` | `runId?` `force?` | 手动恢复最初账号 |
+
+- 所有会动客户端的接口超时给 180 秒（关客户端 20s + 校验 25s + 恢复）。
+- 响应里**没有**任何令牌：只有 UID、时间、状态与原因码。
+- `status` 里的 `scheduler.runsWhileAppClosed = false` 是**事实**，界面据此写文案。
+
+---
+
+## 11. 数据库（v27）
+
+```sql
+workbuddy_rotation_plan(
+  id, enabled, timezone, weekdays, start_minutes, end_minutes,
+  account_ids, dwell_seconds, created_at, updated_at
+)
+workbuddy_rotation_run(
+  id, plan_id, plan_date, timezone, window_start, window_end,
+  origin_account_id, origin_uid, origin_snapshot_path, origin_snapshot_sha256,
+  origin_marker, origin_running,
+  state, cursor, current_journal_id, last_target_account_id, last_target_uid,
+  restore_attempts, restore_result, detail, created_at, updated_at
+)
+-- UNIQUE(plan_id, plan_date)：一天最多一轮
+workbuddy_rotation_step(
+  id, run_id, seq, account_id, uid, mode, planned_at, started_at, ended_at,
+  status, journal_id, skip_reason, detail, auth_precheck,
+  activity_before, activity_after, created_at, updated_at
+)
+-- UNIQUE(run_id, seq)：一轮里每个位置只有一个步骤
+```
+
+快照在 `<数据目录>/workbuddy-switch/rotation/origin-*.json`，`0600`、原子写、sha256 校验。
+**不要手动删**：恢复依赖它。
+
+---
+
+## 12. 本轮没做（以及为什么）
+
+| 项 | 原因 |
+| --- | --- |
+| launchd 常驻调度 | 需要长期驻留服务、额外的安装/卸载与失败可见性设计；先在 App 内跑通 |
+| 多套计划（工作日 / 周末不同） | 表已留 `id` 列；当前只有一套配置，减少认知负担 |
+| 每账号单独停留时长 | 统一停留时长已能表达"人均几分钟"；单独设置会让窗口演算复杂一倍 |
+| 国际版 | 认证文件结构未验证 |
+| 自动"补跑"错过的轮次 | 会让第二天一次性切好几次，风险大于收益 |
+| UI V4 精简 | 本轮只加必要区块；方案见 PR 描述 |
+
+---
+
+## 13. 验证清单（区分"测过"与"没测过"）
+
+### 自动化（确定性，CI 可跑）
+
+Fake Clock + Fake Client + 注入式预检与活跃取证，**不联网、不碰真实客户端**：
+
+| 用例 | 覆盖 |
+| --- | --- |
+| `one_account_switches_and_comes_back` | 单账号切换 + 恢复 |
+| `three_accounts_rotate_and_return_to_the_original` | A→B→C→**A** |
+| `magpie_access_that_cannot_cover_the_dwell_is_skipped` | Magpie 剩余不足跳过 |
+| `a_rejected_own_grant_is_skipped_and_the_client_is_restored` | 自有授权 401 安全停止 |
+| `an_unreadable_own_grant_is_skipped_too` | 读不到令牌跳过 |
+| `a_second_tick_in_the_same_night_does_not_start_another_run` | 重复触发只执行一次 |
+| `a_manual_switch_during_the_night_stops_the_plan_without_overwriting` | 手动换号不覆盖 |
+| `a_crash_after_writing_the_target_is_reconciled_on_restart` | 崩溃后识别并继续 |
+| `waking_up_late_skips_instead_of_catching_up` | 休眠错过不补跑 |
+| `a_corrupt_origin_snapshot_is_refused_and_kept_for_a_human` | 快照损坏拒绝恢复 |
+| `a_missing_origin_snapshot_is_a_human_decision_not_a_guess` | 快照丢失不猜 |
+| `an_expired_temporary_login_can_still_be_restored` | 临时授权过期仍能恢复 |
+| `tokens_never_appear_in_status_or_history` | 不泄漏令牌 |
+| `an_activity_probe_failure_does_not_block_the_restore` | 活跃查询失败不影响恢复 |
+| `dry_run_touches_nothing` | 预演零副作用 |
+| `stopping_a_run_puts_the_original_account_back` | 暂停即恢复 |
+| `a_disabled_plan_never_touches_the_client` | 关闭时零动作 |
+| `a_target_that_is_already_live_is_not_switched_again` | 已是当前账号不重复切 |
+| `a_client_that_rejects_the_login_does_not_wedge_the_run` | 客户端拒绝不会卡死 |
+| 窗口 / 时区 / 星期 / 跨午夜 | 时间计算 |
+
+并发：`state` CAS + `open_slot` 唯一索引 + 进程内互斥（单线程 runtime 的线程局部标志）。
+测试里用"连续两次 tick"验证幂等；真正的双进程并发由数据库约束兜底（与 #111/#112 同一套）。
+
+### 只经过 Fake Client 测试（**没有**真机验证）
+
+- 真实的"关客户端 → 拍快照 → 写认证 → 回读"整夜流程；
+- Mac 真实休眠/唤醒后的行为（只验证了逻辑分支）；
+- 真实 Magpie 文件在整夜运行中的字节不变（单测用临时目录 + 注入，未跑真机整夜）；
+- 用户在深夜真的在敲键盘时的推迟行为。
+
+### 需要用户在场的真机验证（短时）
+
+1. 打开面板 → 选 **2 个**账号 → 停留设 **5 分钟** → 预演，确认"会切谁 / 跳过谁"；
+2. 记下当前登录账号；`shasum -a 256 ~/.config/magpie/plugin-auth.json`；
+3. 「立即执行一轮」→ 观察客户端重启、切到第一个账号；
+4. 等 5 分钟 → 观察切到第二个账号；
+5. 点「暂停并恢复原账号」→ 确认回到第 2 步那个账号；
+6. 再取一次 Magpie 文件 sha256，**必须与第 2 步一致**；
+7. 第二天看「执行记录」：每个账号的切换结果与今日活跃是否分开显示。
+
+**禁止**在没有用户在场时开启无人值守的整夜计划。

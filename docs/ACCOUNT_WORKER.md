@@ -505,3 +505,24 @@ WorkBuddy AI 是另一个站点，拿它的授权请求这些接口，轻则 401
 两种模式的判定都在 `workbuddy_switch::plan::resolve()`，`status` 与 `switch` 同源，
 不会出现"界面说 Magpie、实际用自有授权"。理由与实测协议见
 [`docs/WORKBUDDY_CLIENT_SWITCH.md`](WORKBUDDY_CLIENT_SWITCH.md)。
+
+### 12.2 夜间账号轮换（#113，v27）
+
+一句话：**按时间窗依次切换若干账号，窗口结束时回到这一轮最初登录的那个。**
+
+与 12.1 最大的差别：`switch_journal` 的语义是"回到上一站"，一夜 A→B→C→D 之后只能带回 C。
+所以 v27 另建 `workbuddy_rotation_plan / run / step` 三张表，本轮最初的登录态存在
+`run.origin_*` 里，指向一份**独立复制**的快照文件。
+
+| 项 | 规则 |
+| --- | --- |
+| 开不开始 | 先看窗口（跨午夜按窗口开始那天算星期），再看"今天跑过没有"（`UNIQUE(plan_id, plan_date)`），最后看是否迟到（> 10 分钟直接 `skipped`，不补跑） |
+| 拍快照 | **只在有可切目标时**才关客户端拍快照；一个都切不了就不关 |
+| 每一步 | 现判 `plan::resolve` → 自有授权发一次只读探针（401 就跳过）→ Magpie 要求剩余 ≥ 停留 + 恢复余量 → 切换 |
+| 并发 | 状态 CAS + `open_slot` 唯一索引 + 进程内互斥；重复 tick 只会有一次生效 |
+| 用户打断 | 中途被手动换号 → 立即停止且**不覆盖**；登出（access 过期）不算打断，仍需恢复 |
+| 崩溃 | 有 `switching` 步骤时按客户端**现在是谁**决定：目标 / 原账号 / 第三个，三种三种处理 |
+| 活跃 | 切换前查一次、停留结束查一次，与"切换成功""授权有效"分开记；查不到写"查不到" |
+| 调度归属 | `AICC.app` 的子进程，**App 退出就停**；没有 launchd |
+
+细节见 [`docs/WORKBUDDY_ROTATION.md`](WORKBUDDY_ROTATION.md)。
