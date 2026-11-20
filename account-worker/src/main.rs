@@ -30,6 +30,9 @@ mod test_env;
 mod tls_certs;
 mod travel;
 mod version;
+// WorkBuddy 客户端账号切换：会关掉用户正在用的客户端，逻辑集中在 module 内，
+// 路径与进程控制都可注入（`workbuddy_switch::client::ClientControl`）。
+mod workbuddy_switch;
 
 use std::io::{BufRead, Write};
 use std::sync::Arc;

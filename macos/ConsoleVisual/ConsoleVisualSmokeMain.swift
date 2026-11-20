@@ -44,6 +44,10 @@ struct ConsoleVisualFixture {
     /// 成长活跃（PR #103）：总览页的「成长活跃」区块靠它渲染。
     var activity: ActivityFleetState = .empty
     var activityError: String?
+    /// WorkBuddy 客户端登录（WB-SWITCH-1）：账号页左栏顶部那行"当前登录"靠它渲染。
+    var wbClientStatus: WorkbuddyClientStatus?
+    var wbSwitchNotice: String?
+    var wbSwitchFailed = false
 }
 
 extension ConsoleVisualFixture {
@@ -277,6 +281,9 @@ extension ConsoleVisualFixture {
             ]),
         ].compactMap { $0 }
 
+        fixture.wbSwitchNotice =
+            "已写入并重启客户端，但没能确认客户端采用了它；请打开客户端确认，需要的话恢复原账号"
+
         // PR #98：奖励状态样本，挂到国内版主账号上（acc-wb-1）。
         if let reward = RewardStatusResult.mock(accountId: "acc-wb-1").account("acc-wb-1") {
             fixture.rewardStates["acc-wb-1"] = reward
@@ -284,6 +291,48 @@ extension ConsoleVisualFixture {
 
         // PR #103：成长活跃样本（已在 / 未活跃 / 疑似延迟 / 未知 四种现状）。
         fixture.activity = .mock()
+
+        // WB-SWITCH-1：客户端当前登录 = 主账号；「设计外包」只有 Magpie 授权（不可切）、
+        // 国际版不可切；上一次切换落在 unconfirmed，左栏要出现「恢复…」。
+        fixture.wbClientStatus = WorkbuddyClientStatus(json: [
+            "client": [
+                "installed": true,
+                "running": true,
+                "authFile": "~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info",
+                "authFileExists": true,
+                "logoutMarker": false,
+            ],
+            "live": [
+                "uid": "wb_9f3c1d7a4b2e5f6089abcdef12345678",
+                "loggedIn": true,
+                "tokenForm": "envelope",
+                "accountsInFile": 2,
+            ],
+            "candidates": [
+                ["accountId": "acc-wb-1", "uid": "wb_9f3c1d7a4b2e5f6089abcdef12345678",
+                 "nickname": "主账号", "switchable": false, "reason": "live"],
+                ["accountId": "acc-wb-2", "uid": "wb_1122334455667788",
+                 "nickname": "设计外包", "switchable": false, "reason": "magpie_no_refresh"],
+                ["accountId": "acc-wb-ai-1", "uid": "wbai_7788aabbccdd",
+                 "nickname": "International Demo", "switchable": false, "reason": "unsupported_provider"],
+                ["accountId": "acc-bulk-1", "uid": "wb_bulk_0001",
+                 "nickname": "批量账号 1", "switchable": true, "reason": "ok"],
+            ],
+            "pendingSwitch": NSNull(),
+            "lastSwitch": [
+                "id": "j-demo",
+                "targetAccountId": "acc-wb-1",
+                "targetUid": "wb_9f3c1d7a4b2e5f6089abcdef12345678",
+                "previousUid": "wb_1122334455667788",
+                "phase": "unconfirmed",
+                "detail": "认证文件已是目标账号，但 25 秒内没有确认到客户端进程",
+                "createdAt": "2026-11-14T13:58:00Z",
+                "activityBefore": ["state": "ok", "diagnosis": "inactive",
+                                   "serverDate": "2026-11-14", "todayActive": false, "streakDays": 0],
+                "activityAfter": ["state": "ok", "diagnosis": "inactive",
+                                  "serverDate": "2026-11-14", "todayActive": false, "streakDays": 0],
+            ],
+        ])
 
         fixture.tasksOverview = TasksOverview(json: [
             "today": "2026-11-14",
@@ -560,6 +609,11 @@ struct ConsoleVisualSmokeMain {
              { AnyView(consoleView(store: store, settings: settings, scheme: .dark,
                                    page: .accounts, account: "qoderProfile:qp-1")) },
              CGSize(width: 1120, height: 760), .dark),
+            // WB-SWITCH-1：可切换账号的详情（「切换到此账号」按钮 + 重试说明）。
+            ("wb-switch-1120x760-light",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
+                                   page: .accounts, account: "workbuddy:acc-bulk-1")) },
+             CGSize(width: 1120, height: 760), .light),
             ("quota-accounts-1120x760-light",
              { AnyView(consoleView(store: store, settings: settings, scheme: .light,
                                    page: .quota, quotaSource: "accounts")) },

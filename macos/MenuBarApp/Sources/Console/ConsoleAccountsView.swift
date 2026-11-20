@@ -23,6 +23,10 @@ struct ConsoleAccountsView: View {
     @State private var removingProfile: QoderProfile?
     @State private var showRecoverConfirm = false
 
+    // WorkBuddy 客户端切换的二次确认。切换会关闭并重启客户端，必须让用户先看到这句话。
+    @State private var switchingTo: ConsoleAccount?
+    @State private var restorePromptShown = false
+
     private var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
@@ -61,6 +65,30 @@ struct ConsoleAccountsView: View {
                 await store.scanQoderProfiles(announce: false)
             }
             ensureSelection()
+        }
+        .alert(
+            switchingTo.map { "切换到 \($0.nickname)？" } ?? "切换账号",
+            isPresented: Binding(
+                get: { switchingTo != nil },
+                set: { if !$0 { switchingTo = nil } }
+            )
+        ) {
+            Button("取消", role: .cancel) { switchingTo = nil }
+            Button("切换并重启客户端") {
+                if let account = switchingTo {
+                    switchingTo = nil
+                    Task { await store.switchWorkbuddy(to: account) }
+                }
+            }
+        } message: {
+            Text("AICC 会先备份当前登录态，把 WorkBuddy 关掉、写入目标账号、再重新启动。"
+                + "重启会中断客户端里正在进行的对话；失败时会自动恢复原账号。")
+        }
+        .alert("恢复到切换前的账号？", isPresented: $restorePromptShown) {
+            Button("取消", role: .cancel) {}
+            Button("恢复") { Task { await store.restoreWorkbuddyPrevious() } }
+        } message: {
+            Text("AICC 会用切换前保存的那份认证文件覆盖回去，并重新启动 WorkBuddy。")
         }
         // 全页只有一个 sheet 路由状态：所有流程从这里进，不并行声明多个 sheet。
         .sheet(item: $activeSheet) { sheet in
@@ -294,6 +322,9 @@ struct ConsoleAccountsView: View {
     private var listColumn: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 2, pinnedViews: []) {
+                workbuddyClientBanner
+                    .padding(.horizontal, 8)
+                    .padding(.top, 8)
                 if !store.qoderPendingSwitches.isEmpty {
                     pendingSwitchNotice
                         .padding(.horizontal, 8)
@@ -382,6 +413,96 @@ struct ConsoleAccountsView: View {
         .padding(.horizontal, 4)
     }
 
+    /// 左栏顶部：**客户端当前登录的是谁**。
+    ///
+    /// 这行字只能来自客户端自己的认证文件（`live.uid`）。AICC 列表里"选中了谁"
+    /// 不是登录状态，混用会让人以为已经切过去了。
+    @ViewBuilder
+    private var workbuddyClientBanner: some View {
+        if let status = store.wbClientStatus {
+            VStack(alignment: .leading, spacing: 5) {
+                // 左栏很窄：标签单独一行，账号名独占一行（最多两行）。
+                // 挤成一句会把最关键的"是哪个账号"截掉。
+                HStack(spacing: 5) {
+                    Image(systemName: "desktopcomputer")
+                        .font(.system(size: 10))
+                        .foregroundStyle(ConsoleTheme.secondaryText)
+                    Text("WorkBuddy 当前登录")
+                        .font(ConsoleType.caption)
+                        .foregroundStyle(ConsoleTheme.secondaryText)
+                    Spacer(minLength: 0)
+                }
+                Text(liveTitle(status))
+                    .font(ConsoleType.rowTitle)
+                    .foregroundStyle(ConsoleTheme.text)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(bannerDetail(status))
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let pending = status.pendingSwitch, pending.isPending {
+                    HStack(spacing: 8) {
+                        Text("上一次切换没走完（\(pending.phaseText)）")
+                            .font(ConsoleType.caption)
+                            .foregroundStyle(ConsoleTheme.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                        Button("恢复…") { restorePromptShown = true }
+                            .buttonStyle(ConsoleSecondaryButtonStyle())
+                            .disabled(store.wbSwitching != nil)
+                    }
+                } else if let last = status.lastSwitch,
+                          last.needsRestoreOffer,
+                          last.previousUid != status.live.uid {
+                    HStack(spacing: 8) {
+                        Text("上次：\(WorkbuddyLiveLogin.shortUID(last.targetUid))")
+                            .font(ConsoleType.caption)
+                            .foregroundStyle(ConsoleTheme.tertiaryText)
+                        Spacer(minLength: 0)
+                        Button("恢复上一个…") { restorePromptShown = true }
+                            .buttonStyle(ConsoleSecondaryButtonStyle())
+                            .disabled(store.wbSwitching != nil)
+                    }
+                }
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(ConsoleTheme.card, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(ConsoleTheme.border, lineWidth: 1)
+            )
+        } else if let error = store.wbClientError {
+            ConsoleInlineNotice(
+                kind: .warning,
+                message: "读不到客户端登录态：\(error)",
+                actionTitle: "重试"
+            ) {
+                Task { await store.refreshWorkbuddyClient() }
+            }
+        }
+    }
+
+    private func liveTitle(_ status: WorkbuddyClientStatus) -> String {
+        guard status.live.loggedIn, let uid = status.live.uid else { return "未登录" }
+        if let id = status.liveAccountID,
+           let account = store.accounts.first(where: { $0.id == id }) {
+            return "\(account.nickname)（\(WorkbuddyLiveLogin.shortUID(uid))）"
+        }
+        return "\(WorkbuddyLiveLogin.shortUID(uid))（不在 AICC 账号列表里）"
+    }
+
+    private func bannerDetail(_ status: WorkbuddyClientStatus) -> String {
+        var parts: [String] = []
+        parts.append(status.client.installed ? (status.client.running == true ? "客户端运行中" : "客户端未运行") : "未安装客户端")
+        if let last = status.lastSwitch {
+            parts.append("上次切换：\(last.phaseText)")
+        }
+        return parts.joined(separator: " · ")
+    }
+
     private var pendingSwitchNotice: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("检测到 \(store.qoderPendingSwitches.count) 条未完成的切换记录")
@@ -425,6 +546,15 @@ struct ConsoleAccountsView: View {
                 }
                 if let notice = store.qoderNotice {
                     ConsoleInlineNotice(kind: .info, message: notice)
+                }
+                if let notice = store.wbSwitchNotice {
+                    ConsoleInlineNotice(
+                        kind: store.wbSwitchFailed ? .error : .info,
+                        message: notice,
+                        actionTitle: "知道了"
+                    ) {
+                        store.clearWorkbuddySwitchNotice()
+                    }
                 }
                 detailContent
             }
@@ -524,6 +654,10 @@ struct ConsoleAccountsView: View {
                         value: ConsoleFormat.shortTimestamp(account.updatedAt)
                     )
                 }
+            }
+
+            ConsoleDetailGroup(title: "客户端登录") {
+                workbuddyClientRow(account)
             }
 
             ConsoleDetailGroup(title: "授权来源", detail: "共 \(account.authorizations.count) 份") {
@@ -659,6 +793,85 @@ struct ConsoleAccountsView: View {
             }
         }
         .task(id: account.id) { verifyNotice[account.id] = nil }
+    }
+
+    // MARK: WorkBuddy 客户端登录
+
+    /// 一个账号在"客户端登录"这一格的状态与动作。
+    ///
+    /// 四种情况必须分开说，不能都画成一个灰按钮：
+    /// 就是这个账号 / 不是这个账号但可切 / 不是但**不可切（带原因）** / 读不到客户端。
+    @ViewBuilder
+    private func workbuddyClientRow(_ account: ConsoleAccount) -> some View {
+        let status = store.wbClientStatus
+        let candidate = status?.candidate(forAccount: account.id)
+        let isLive = status?.live.loggedIn == true && status?.live.uid == account.uid
+        let busy = store.wbSwitching == account.id
+        let locked = store.wbSwitching != nil
+
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: isLive ? "checkmark.circle.fill" : "circle.dotted")
+                    .font(.system(size: 11))
+                    .foregroundStyle(isLive ? ConsoleTheme.success : ConsoleTheme.tertiaryText)
+                Text(clientRowTitle(isLive: isLive, status: status))
+                    .font(ConsoleType.small)
+                    .foregroundStyle(ConsoleTheme.text)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+
+            if isLive {
+                Text("切换会重启客户端，所以同一个账号不重复切。")
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+            } else if let candidate, !candidate.switchable {
+                Text(candidate.reason.explanation)
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                if candidate.reason == .missingRefresh || candidate.reason == .noCredential {
+                    Button("重新授权") {
+                        activeSheet = .addAccount(ConsoleAddRequest(
+                            platform: account.isWorkbuddyAI ? .workbuddyAI : .workbuddyCN,
+                            method: .browser
+                        ))
+                    }
+                    .buttonStyle(ConsoleSecondaryButtonStyle())
+                }
+            } else {
+                HStack(spacing: 8) {
+                    Button {
+                        switchingTo = account
+                    } label: {
+                        Label("切换到此账号", systemImage: "arrow.left.arrow.right")
+                    }
+                    .buttonStyle(ConsoleSecondaryButtonStyle())
+                    .disabled(busy || locked || status == nil)
+                    if busy {
+                        ProgressView().controlSize(.mini)
+                    }
+                    Spacer(minLength: 0)
+                }
+                Text("切换会关闭并重启 WorkBuddy；失败会自动恢复原账号。")
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func clientRowTitle(
+        isLive: Bool,
+        status: WorkbuddyClientStatus?
+    ) -> String {
+        if isLive { return "客户端当前登录的就是这个账号" }
+        guard let status else { return "还没读到客户端登录态" }
+        guard status.live.loggedIn else { return "客户端当前没有登录" }
+        if let uid = status.live.uid {
+            return "客户端当前登录的是 \(WorkbuddyLiveLogin.shortUID(uid))"
+        }
+        return "客户端当前登录账号读不到"
     }
 
     // MARK: Qoder 服务账号详情

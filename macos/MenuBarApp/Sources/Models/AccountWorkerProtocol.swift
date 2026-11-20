@@ -36,11 +36,15 @@ public struct AccountWorkerRPCError: Equatable, Error, LocalizedError {
     public let code: Int
     public let message: String
     public let kind: String?
+    /// 失败时后端**已经做了什么**。目前只有账号切换会带：`true` = 已恢复到切换前的登录态，
+    /// `false` = 恢复也失败了（必须让用户手动处理），`nil` = 这件事不涉及恢复。
+    public let restored: Bool?
 
-    public init(code: Int, message: String, kind: String? = nil) {
+    public init(code: Int, message: String, kind: String? = nil, restored: Bool? = nil) {
         self.code = code
         self.message = message
         self.kind = kind
+        self.restored = restored
     }
 
     public var errorDescription: String? { message }
@@ -102,8 +106,16 @@ public enum AccountWorkerJSON {
         guard let error = object["error"] as? [String: Any] else { return nil }
         let code = (error["code"] as? NSNumber)?.intValue ?? 0
         let message = error["message"] as? String ?? "未知错误"
-        let kind = (error["data"] as? [String: Any])?["kind"] as? String
-        return AccountWorkerRPCError(code: code, message: message, kind: kind)
+        let data = error["data"] as? [String: Any]
+        let kind = data?["kind"] as? String
+        // `restored` 只对账号切换有意义；其他错误不带这个字段，保持 nil。
+        let restored = data?["restored"] as? Bool
+        return AccountWorkerRPCError(
+            code: code,
+            message: message,
+            kind: kind,
+            restored: restored
+        )
     }
 }
 

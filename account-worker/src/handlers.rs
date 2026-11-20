@@ -19,6 +19,7 @@ use crate::securestore::SecretErrorKind;
 use crate::storage::{AccountFilter, AccountInput};
 use crate::travel::{scheduler as travel_scheduler, service::EventDraft};
 use crate::version;
+use crate::workbuddy_switch;
 use wb_switch_core::modules::{config as wb_config, variant::WbVariant};
 
 pub const METHODS: &[&str] = &[
@@ -139,6 +140,12 @@ pub const METHODS: &[&str] = &[
     // ---- 四平台额度看板（M4）----
     "quota.board",
     "quota.history",
+    // ---- WorkBuddy 客户端账号切换（WB-SWITCH-1）----
+    //
+    // `status` 只读；`switch` / `restore` 会关闭并重启 WorkBuddy 客户端。
+    "workbuddy.client.status",
+    "workbuddy.client.switch",
+    "workbuddy.client.restore",
     // ---- 局域网 HTTPS 身份（PR-B）----
     "tls.identity",
     "tls.ensure",
@@ -1257,6 +1264,46 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
             let parsed: crate::quota::HistoryParams = serde_json::from_value(params.clone())
                 .map_err(|e| RpcError::invalid_params(format!("额度参数非法：{e}")))?;
             crate::quota::history(app, parsed)
+        }
+
+        // ---- WorkBuddy 客户端账号切换（WB-SWITCH-1）----
+        //
+        // 只支持国内版；`switch` / `restore` 会**关闭并重启 WorkBuddy 客户端**，
+        // 所以它们的 RPC 超时必须远大于这里的预算（Swift 侧 120 秒）。
+        "workbuddy.client.status" => {
+            let control = workbuddy_switch::SystemControl::for_variant(WbVariant::Cn);
+            let env = workbuddy_switch::SwitchEnv::system(app);
+            workbuddy_switch::status(app, &control, &env)
+        }
+
+        "workbuddy.client.switch" => {
+            let account_id = require_str(params, "accountId")?;
+            let control = workbuddy_switch::SystemControl::for_variant(WbVariant::Cn);
+            let env = workbuddy_switch::SwitchEnv::system(app);
+            let request = workbuddy_switch::SwitchRequest {
+                account_id,
+                // 默认必须重启：客户端运行时会用内存里的登录态覆盖刚写进去的文件。
+                restart: params
+                    .get("restart")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                // 切换前后各查一次目标账号的服务端活跃状态（只读，失败不影响切换）。
+                observe_activity: params
+                    .get("observeActivity")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+            };
+            workbuddy_switch::switch(app, &request, &control, &env).await
+        }
+
+        "workbuddy.client.restore" => {
+            let journal_id = params
+                .get("journalId")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let control = workbuddy_switch::SystemControl::for_variant(WbVariant::Cn);
+            let env = workbuddy_switch::SwitchEnv::system(app);
+            workbuddy_switch::restore(app, journal_id.as_deref(), &control, &env)
         }
 
         "auth.magpie.import" => {
