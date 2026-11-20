@@ -26,6 +26,8 @@ struct ConsoleAccountsView: View {
     // WorkBuddy 客户端切换的二次确认。切换会关闭并重启客户端，必须让用户先看到这句话。
     @State private var switchingTo: ConsoleAccount?
     @State private var restorePromptShown = false
+    /// 夜间轮换的设置面板。
+    @State private var rotationSheetShown = false
 
     private var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -106,6 +108,9 @@ struct ConsoleAccountsView: View {
                 + "继续恢复会用切换前的认证文件覆盖它 —— 如果那是你手动换上的账号，请先取消。")
         }
         // 全页只有一个 sheet 路由状态：所有流程从这里进，不并行声明多个 sheet。
+        .sheet(isPresented: $rotationSheetShown) {
+            ConsoleWorkbuddyRotationSheet(store: store)
+        }
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
             case .addAccount(let request):
@@ -340,6 +345,9 @@ struct ConsoleAccountsView: View {
                 workbuddyClientBanner
                     .padding(.horizontal, 8)
                     .padding(.top, 8)
+                workbuddyRotationBanner
+                    .padding(.horizontal, 8)
+                    .padding(.top, 6)
                 if !store.qoderPendingSwitches.isEmpty {
                     pendingSwitchNotice
                         .padding(.horizontal, 8)
@@ -495,6 +503,66 @@ struct ConsoleAccountsView: View {
                 Task { await store.refreshWorkbuddyClient() }
             }
         }
+    }
+
+    /// 左栏第二块：**夜间轮换**。
+    ///
+    /// 只放日常要看的三件事：开没开、什么时候跑、现在跑到哪。设置与执行记录
+    /// 都在面板里——状态机、锁、快照这些词不该出现在主界面。
+    @ViewBuilder
+    private var workbuddyRotationBanner: some View {
+        Button {
+            rotationSheetShown = true
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 5) {
+                    Image(systemName: "moon.stars")
+                        .font(.system(size: 10))
+                        .foregroundStyle(ConsoleTheme.secondaryText)
+                    Text("夜间轮换")
+                        .font(ConsoleType.caption)
+                        .foregroundStyle(ConsoleTheme.secondaryText)
+                    Spacer(minLength: 0)
+                    if let status = store.wbRotationStatus {
+                        Text(status.plan.enabled ? "已开启" : "已关闭")
+                            .font(ConsoleType.caption)
+                            .foregroundStyle(status.plan.enabled ? ConsoleTheme.success : ConsoleTheme.tertiaryText)
+                    } else {
+                        Text("设置")
+                            .font(ConsoleType.caption)
+                            .foregroundStyle(ConsoleTheme.tertiaryText)
+                    }
+                }
+
+                if let status = store.wbRotationStatus {
+                    Text(status.plan.accountIds.isEmpty
+                        ? "还没有选择账号"
+                        : "\(status.plan.windowText) · \(status.plan.accountIds.count) 个账号")
+                        .font(ConsoleType.small)
+                        .foregroundStyle(ConsoleTheme.text)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(status.headline)
+                        .font(ConsoleType.caption)
+                        .foregroundStyle(status.current?.needsAttention == true
+                            ? ConsoleTheme.warning
+                            : ConsoleTheme.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("设置夜间自动切换账号，并在结束时恢复原账号")
+                        .font(ConsoleType.caption)
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(ConsoleTheme.card, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(ConsoleTheme.border, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     private func liveTitle(_ status: WorkbuddyClientStatus) -> String {

@@ -43,6 +43,34 @@ enum WorkbuddyTime {
         formatter.dateFormat = "MM-dd HH:mm"
         return formatter.string(from: date)
     }
+
+    /// `HH:mm`，用于"几点几分"。
+    static func clock(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: date)
+    }
+
+    /// `MM-dd HH:mm`，用于"哪天的几点"。
+    static func dayTime(_ date: Date) -> String { short(date) }
+
+    /// 计划时间用本地时区显示：用户设的是 22:30，就该看到 22:30。
+    static func minutes(from date: Date) -> Int {
+        let parts = Calendar.current.dateComponents([.hour, .minute], from: date)
+        return (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
+    }
+
+    static func date(fromMinutes minutes: Int) -> Date {
+        let hour = max(0, min(23, minutes / 60))
+        let minute = max(0, min(59, minutes % 60))
+        return Calendar.current.date(
+            bySettingHour: hour,
+            minute: minute,
+            second: 0,
+            of: Date()
+        ) ?? Date()
+    }
 }
 
 // MARK: - 客户端
