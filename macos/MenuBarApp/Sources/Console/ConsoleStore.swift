@@ -104,6 +104,18 @@ final class ConsoleStore: ObservableObject {
     /// 删除成功的一次性提示。
     @Published private(set) var qoderDeleteNotice: String?
 
+    // MARK: WorkBuddy 客户端切换（WB-SWITCH-1）
+
+    /// 客户端状态 + 当前登录账号 + 每个账号能不能切。`nil` = 还没查过。
+    @Published private(set) var wbClientStatus: WorkbuddyClientStatus?
+    @Published private(set) var wbClientError: String?
+    /// 正在切换的账号 id；`restore` 用固定标记。
+    @Published private(set) var wbSwitching: String?
+    /// 一次切换/恢复的结论。只保留最近一条，切号时覆盖。
+    @Published private(set) var wbSwitchNotice: String?
+    /// 结论是失败还是成功（决定提示的色调）。
+    @Published private(set) var wbSwitchFailed = false
+
     let worker: AccountWorkerManager
     private let settings: AppSettings
 
@@ -151,19 +163,22 @@ final class ConsoleStore: ObservableObject {
         let needAccounts = lastAccountsRefresh == nil && !loadingAccounts
         let needQoder = qoderEditions.isEmpty && !qoderLoading
         let needWorkerQuota = workerQuotaRows.isEmpty && !loadingWorkerQuota
+        let needWbClient = wbClientStatus == nil
 
         async let quota: Void = needQuota ? refreshQuota(force: false) : ()
         async let accounts: Void = needAccounts ? refreshAccounts() : ()
         async let qoder: Void = needQoder ? refreshQoder(silent: true) : ()
         async let workerQuota: Void = needWorkerQuota ? refreshWorkerQuota(force: false) : ()
-        _ = await (quota, accounts, qoder, workerQuota)
+        async let wbClient: Void = needWbClient ? refreshWorkbuddyClient(silent: true) : ()
+        _ = await (quota, accounts, qoder, workerQuota, wbClient)
     }
 
     func refreshAll() async {
         async let accountsTask: Void = refreshAccounts()
         async let quotaTask: Void = refreshQuota(force: true)
         async let qoderTask: Void = refreshQoder(silent: true)
-        _ = await (accountsTask, quotaTask, qoderTask)
+        async let wbTask: Void = refreshWorkbuddyClient(silent: true)
+        _ = await (accountsTask, quotaTask, qoderTask, wbTask)
     }
 
     // MARK: - Qoder 双版本多账号（PR #70）
@@ -444,6 +459,80 @@ final class ConsoleStore: ObservableObject {
         }
     }
 
+    // MARK: - WorkBuddy 客户端切换（WB-SWITCH-1）
+
+    /// 只读查询客户端状态与"当前登录是谁"。
+    ///
+    /// `silent` 用于自动刷新：失败时保留上一次结果，不用一条过期错误盖掉界面。
+    func refreshWorkbuddyClient(silent: Bool = false) async {
+        guard await ensureWorkerReady() else {
+            if !silent { wbClientError = workerFailureText }
+            return
+        }
+        do {
+            wbClientStatus = try await worker.workbuddyClientStatus()
+            wbClientError = nil
+        } catch {
+            // 老助手没有这条 RPC 时如实说，不显示成"客户端状态未知"。
+            wbClientError = message(for: error)
+            if !silent { wbSwitchNotice = nil }
+        }
+    }
+
+    /// 把客户端切到指定账号。**会关闭并重启 WorkBuddy**，所以只由用户点按钮触发。
+    func switchWorkbuddy(to account: ConsoleAccount) async {
+        guard wbSwitching == nil else { return }
+        wbSwitching = account.id
+        wbSwitchNotice = nil
+        wbSwitchFailed = false
+        defer { wbSwitching = nil }
+        do {
+            let outcome = try await worker.workbuddyClientSwitch(accountId: account.id)
+            wbSwitchFailed = outcome.changed && !outcome.verified
+            wbSwitchNotice = outcome.summary
+            await refreshWorkbuddyClient(silent: true)
+            // 用户要看的正是"切过去之后算不算活跃"，所以顺手刷一遍活跃状态。
+            await loadActivity()
+        } catch {
+            let text = message(for: error)
+            // 失败分两种：已回滚 / 回滚也失败。含混成一句会让人以为账号已经切过去了。
+            switch (error as? AccountWorkerRPCError)?.restored {
+            case .some(true):
+                wbSwitchFailed = true
+                wbSwitchNotice = "切换失败，已恢复到切换前的账号：\(text)"
+            case .some(false):
+                wbSwitchFailed = true
+                wbSwitchNotice = "切换失败，恢复也没成功：\(text)。请在客户端里手动登录。"
+            default:
+                wbSwitchFailed = true
+                wbSwitchNotice = text
+            }
+            await refreshWorkbuddyClient(silent: true)
+        }
+    }
+
+    /// 把登录态放回某一轮切换之前。`journalId` 为空时由助手挑（未完成优先）。
+    func restoreWorkbuddyPrevious(journalId: String? = nil) async {
+        guard wbSwitching == nil else { return }
+        wbSwitching = "restore"
+        wbSwitchFailed = false
+        defer { wbSwitching = nil }
+        do {
+            let outcome = try await worker.workbuddyClientRestore(journalId: journalId)
+            wbSwitchFailed = !outcome.restored
+            wbSwitchNotice = outcome.summary
+            await refreshWorkbuddyClient(silent: true)
+        } catch {
+            wbSwitchFailed = true
+            wbSwitchNotice = message(for: error)
+            await refreshWorkbuddyClient(silent: true)
+        }
+    }
+
+    func clearWorkbuddySwitchNotice() {
+        wbSwitchNotice = nil
+    }
+
     private func message(for error: Error) -> String {
         (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
@@ -484,6 +573,8 @@ final class ConsoleStore: ObservableObject {
             accountsError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
         lastAccountsRefresh = Date()
+        // 账号增删会改变"哪些账号可以切"，顺手刷新客户端状态（只读，本地文件 + pgrep）。
+        await refreshWorkbuddyClient(silent: true)
     }
 
     /// 助手侧四平台额度。`refresh=false` 时助手优先用快照缓存（不打网络）。
@@ -1119,6 +1210,10 @@ extension ConsoleStore {
         activity = fixture.activity
         activityError = fixture.activityError
         lastActivityRefresh = fixture.lastAccountsRefresh
+
+        wbClientStatus = fixture.wbClientStatus
+        wbSwitchNotice = fixture.wbSwitchNotice
+        wbSwitchFailed = fixture.wbSwitchFailed
     }
 }
 #endif

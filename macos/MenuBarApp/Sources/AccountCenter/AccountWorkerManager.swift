@@ -720,6 +720,48 @@ final class AccountWorkerManager: ObservableObject {
         return try await client.call("auth.workbuddy.status", params: ["id": accountId], timeout: 20)
     }
 
+    // MARK: - WorkBuddy 客户端账号切换（WB-SWITCH-1）
+
+    /// 只读：客户端装没装、在不在跑、**当前登录的是谁**、每个账号能不能切。
+    ///
+    /// "当前登录"来自客户端自己的认证文件；这里不拿 AICC 的选中项替代它。
+    func workbuddyClientStatus() async throws -> WorkbuddyClientStatus {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        let result = try await client.call("workbuddy.client.status", timeout: 20)
+        return WorkbuddyClientStatus(json: result)
+    }
+
+    /// 切换会**关闭并重启 WorkBuddy 客户端**，最坏情况要等关进程 20 秒 + 校验 25 秒，
+    /// 外加两次活跃查询，所以超时给到 180 秒。
+    func workbuddyClientSwitch(
+        accountId: String,
+        observeActivity: Bool = true
+    ) async throws -> WorkbuddySwitchOutcome {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        let result = try await client.call(
+            "workbuddy.client.switch",
+            params: ["accountId": accountId, "observeActivity": observeActivity],
+            timeout: 180
+        )
+        return WorkbuddySwitchOutcome(json: result)
+    }
+
+    /// 把某一轮切换之前的登录态放回去。不传 `journalId` 时由助手挑（未完成优先）。
+    func workbuddyClientRestore(journalId: String? = nil) async throws -> WorkbuddyRestoreOutcome {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        var params: [String: Any] = [:]
+        if let journalId { params["journalId"] = journalId }
+        let result = try await client.call(
+            "workbuddy.client.restore",
+            params: params,
+            timeout: 180
+        )
+        return WorkbuddyRestoreOutcome(json: result)
+    }
+
     // MARK: - Buddy 旅行（PR1c）
 
     /// 本地快照，**不打接口**。界面轮询用这个，几秒一次也不会有网络开销。

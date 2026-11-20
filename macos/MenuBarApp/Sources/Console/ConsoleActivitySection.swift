@@ -147,7 +147,7 @@ struct ConsoleActivityBlock: View {
                     .disabled(!WorkBuddyClient.isInstalled)
                     .frame(width: 96, alignment: .trailing)
                     .help(WorkBuddyClient.isInstalled
-                          ? "打开 WorkBuddy 客户端（不自动切换账号）；做一次真实任务后回来点「刷新」回查"
+                          ? "打开 WorkBuddy 客户端；需要换登录账号请去「AI 账号」页切换。做一次真实任务后回来点「刷新」回查"
                           : "没找到 WorkBuddy 客户端；请先安装再回来点「刷新」")
             } else {
                 Text(account.diagnosis.needsAction ? account.diagnosis.shortAction : "")
@@ -182,7 +182,7 @@ struct ConsoleActivityBlock: View {
                     .foregroundStyle(ConsoleTheme.warning)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Text("签到只记账，不点亮热力墙；活跃要在 WorkBuddy 客户端里真实使用一次。AICC 不切换账号，打开后请确认登录的是要补的那个。")
+            Text("签到只记账，不点亮热力墙；活跃要在 WorkBuddy 客户端里真实使用一次。客户端登录的是哪个账号，看「AI 账号」页顶部那一行。")
                 .font(ConsoleType.caption)
                 .foregroundStyle(ConsoleTheme.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
@@ -214,8 +214,9 @@ struct ConsoleActivityBlock: View {
 
 /// 打开本机的 WorkBuddy 客户端。
 ///
-/// 只做"打开"这一件事：AICC **不切换账号**（仓库没有账号切换能力，见
-/// `docs/UI_CONSOLE_V3.md`），所以打开后由用户自己确认当前登录的是哪个账号。
+/// 只做"打开"这一件事。换登录账号是「AI 账号」页的能力
+/// （`workbuddy.client.switch`，见 `docs/WORKBUDDY_CLIENT_SWITCH.md`），
+/// 不在这一排按钮里悄悄做：切换会重启客户端，必须由用户显式确认。
 ///
 /// 找不到客户端时按钮禁用并给出说明 —— 比点了没反应好。
 enum WorkBuddyClient {

@@ -996,3 +996,73 @@ fn activity_status_is_registered_and_read_only() {
 
     session.call(3, "worker.shutdown", json!({}));
 }
+
+// ---------------------------------------------------------------------------
+// WorkBuddy 客户端账号切换（WB-SWITCH-1）
+// ---------------------------------------------------------------------------
+
+/// `workbuddy.client.status` 只报告，不给令牌、不留下未完成记录。
+///
+/// 这台机器上有没有装客户端、有没有登录都不影响断言：只看**形状**与"没有令牌"。
+#[test]
+fn workbuddy_client_status_is_read_only_and_token_free() {
+    let mut session = Session::start();
+    let reply = session.call(1, "workbuddy.client.status", json!({}));
+    let result = &reply["result"];
+    assert!(result["client"]["installed"].is_boolean(), "{reply}");
+    assert!(result["live"].is_object(), "{reply}");
+    assert!(
+        result["candidates"].as_array().is_some(),
+        "空库也要给数组，不能是 null：{reply}"
+    );
+    assert_eq!(
+        result["pendingSwitch"],
+        Value::Null,
+        "临时库里不该有未完成切换：{reply}"
+    );
+    // 只给指纹；明文令牌一个字都不能出现在响应里。
+    let text = reply.to_string();
+    assert!(
+        !text.contains("accessToken"),
+        "响应里出现了令牌字段：{text}"
+    );
+    assert!(
+        !text.contains("refreshToken"),
+        "响应里出现了刷新令牌字段：{text}"
+    );
+    session.call(2, "worker.shutdown", json!({}));
+}
+
+/// 账号不存在时直接拒绝，**不能**留下一条未完成切换或碰客户端文件。
+#[test]
+fn workbuddy_client_switch_rejects_unknown_account_without_side_effects() {
+    let mut session = Session::start();
+    let reply = session.call(1, "workbuddy.client.switch", json!({"accountId": "nope"}));
+    assert_eq!(
+        reply["error"]["code"],
+        json!(1003),
+        "应当是 not_found：{reply}"
+    );
+
+    let status = session.call(2, "workbuddy.client.status", json!({}));
+    assert_eq!(
+        status["result"]["pendingSwitch"],
+        Value::Null,
+        "被拒绝的切换不能留下未完成记录：{status}"
+    );
+    session.call(3, "worker.shutdown", json!({}));
+}
+
+/// 没有可恢复记录时返回 `restored:false`，不是错误。
+#[test]
+fn workbuddy_client_restore_without_history_is_not_an_error() {
+    let mut session = Session::start();
+    let reply = session.call(1, "workbuddy.client.restore", json!({}));
+    assert_eq!(reply["result"]["restored"], json!(false), "{reply}");
+    assert_eq!(
+        reply["result"]["reason"],
+        json!("nothing_to_restore"),
+        "{reply}"
+    );
+    session.call(2, "worker.shutdown", json!({}));
+}

@@ -105,6 +105,9 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `checkin.records` | 签到历史与每次尝试（`checkin_records` + `task_executions`） | 否 |
 | `quota.board` | 四平台额度看板（`days` / `provider` / `accountId` / `refresh`）。WorkBuddy CN/AI 走官方只读接口，**Qoder 两版零请求返回 `unverified`**；`refresh=false` 时优先用 `quota_snapshots` 缓存 | 是（只读语义） |
 | `quota.history` | 某账号的额度快照历史（`days` 默认 30，上限 90），按时间升序 | 否 |
+| `workbuddy.client.status` | 客户端的**当前登录账号**（读认证文件）、进程状态、每个账号能不能切与原因、未完成的切换记录。**只读**，不读令牌、不写文件 | 否 |
+| `workbuddy.client.switch` | 把一个账号写进客户端并重启它：关进程 → 快照 → 写认证 → 启动 → **回读确认**。失败自动按快照逐字节回滚，错误里带 `restored` | 否 |
+| `workbuddy.client.restore` | 把某一轮切换之前的登录态放回去（校验快照 sha256 后才写）；没有可恢复记录时返回 `restored:false` 而不是报错 | 否 |
 
 `health` **故意不做**钥匙串探针：否则每次启动 App 都会弹一次系统授权框。
 需要验证凭据存储时显式调 `secure.status`（设置页有按钮）。探针的读写删三步全成功才报 `ok`，
@@ -468,3 +471,23 @@ WorkBuddy AI 是另一个站点，拿它的授权请求这些接口，轻则 401
    一条晚到的快照会被当成"这个新账号刚取过"。账号删除时另有一条显式清理。
 7. **只读**：`quota.board` / `quota.history` 不写 `last_used_at`、不改 `auth_status`、
    不刷新令牌。取数失败只影响这一行。
+
+## 12. WorkBuddy 客户端账号切换（WB-SWITCH-1，v25）
+
+一句话：**把 AICC 里授权过的账号写进 WorkBuddy 客户端的登录态，必要时重启客户端；
+失败按快照逐字节还原，并如实报告"恢没恢复"。**
+
+细节、时序、边界与实测协议全在
+[`docs/WORKBUDDY_CLIENT_SWITCH.md`](WORKBUDDY_CLIENT_SWITCH.md)。这里只记五条最容易踩的：
+
+1. **"当前登录"只认客户端的认证文件**（`live.uid`）。AICC 列表里选中了谁、
+   查询接口优先用哪份授权，都不能代替这个状态。
+2. **只有自带 refresh 的自有授权能切**。Magpie 来源只有 access，切过去无法续期，
+   直接标 `magpie_no_refresh` 并禁用。
+3. **快照在关掉客户端之后才拍**：客户端退出时可能把刚刷新的令牌写回文件。
+4. **校验是三态**：确认 / 被拒绝（回滚）/ 说不清（`unconfirmed`，不回滚）。
+   把"文件写对了"说成"客户端接受了"是错的。
+5. `workbuddy_switch_journal.open_slot` 的唯一索引保证**同一时刻只有一条未完成切换**；
+   进程中途被杀时，下次启动会在 `status.pendingSwitch` 里如实报告，由用户点「恢复」。
+
+只支持国内版；国际版与"仅 access"的授权都保持禁用，理由写在文档 §1。

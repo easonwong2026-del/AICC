@@ -23,6 +23,7 @@ pub mod qoder_switch;
 pub mod quota;
 pub mod reward_ops;
 pub mod travel;
+pub mod wb_switch;
 
 pub use authz::AuthorizationRecord;
 
@@ -375,6 +376,42 @@ CREATE INDEX IF NOT EXISTS idx_reward_ops_account \
 CREATE INDEX IF NOT EXISTS idx_reward_ops_phase \
     ON reward_operations (phase);";
 
+/// v25：WorkBuddy **客户端**账号切换日志（不是 Qoder Profile 那张表）。
+///
+/// 切换要写客户端的 `workbuddy-desktop.info` 并重启它，中途失败必须能把文件
+/// 逐字节还原。所以每次切换先存一份快照，再在库里记一条 journal：
+///
+/// - `open_slot`：**同一时刻只允许一条未完成切换**。完成 / 失败 / 回滚后置 NULL，
+///   SQLite 的唯一索引把 NULL 当互不相等，正好表达"历史可以有很多条，未完成只能一条"。
+/// - `snapshot_*`：快照路径与 sha256。恢复前必须核对 sha，快照被改过就拒绝恢复，
+///   不能用一份不知道是什么的文件覆盖客户端登录态。
+/// - `activity_before` / `activity_after`：切换前后目标账号的服务端活跃状态
+///   （只读快照，JSON）。**只作证据**，不参与任何判定。
+const MIGRATION_V25_SQL: &str = "\
+CREATE TABLE IF NOT EXISTS workbuddy_switch_journal (\
+    id                TEXT PRIMARY KEY,\
+    target_account_id TEXT NOT NULL,\
+    target_uid        TEXT NOT NULL,\
+    previous_uid      TEXT,\
+    previous_running  INTEGER NOT NULL DEFAULT 1 CHECK (previous_running IN (0, 1)),\
+    previous_marker   INTEGER NOT NULL DEFAULT 0 CHECK (previous_marker IN (0, 1)),\
+    phase             TEXT NOT NULL CHECK (phase IN (\
+                          'prepared','written','launched','verified','unconfirmed',                          'failed','restored')),\
+    open_slot         INTEGER,\
+    snapshot_path     TEXT NOT NULL,\
+    snapshot_sha256   TEXT NOT NULL,\
+    token_form        TEXT CHECK (token_form IN ('plaintext','envelope')),\
+    detail            TEXT,\
+    activity_before   TEXT,\
+    activity_after    TEXT,\
+    created_at        TEXT NOT NULL,\
+    updated_at        TEXT NOT NULL\
+);\
+CREATE UNIQUE INDEX IF NOT EXISTS ux_wb_switch_open \
+    ON workbuddy_switch_journal (open_slot);\
+CREATE INDEX IF NOT EXISTS idx_wb_switch_created \
+    ON workbuddy_switch_journal (created_at DESC);";
+
 /// 一次迁移里的一步：纯 SQL，或者需要 Rust 参与的数据迁移。
 ///
 /// v16 起的 Qoder 迁移都是 Rust 步骤：它们要先检测现状再动手，重复执行必须是
@@ -525,9 +562,14 @@ const MIGRATIONS: &[Migration] = &[
         version: 24,
         steps: &[MigrationStep::Sql(MIGRATION_V24_SQL)],
     },
+    // v25：WorkBuddy 客户端账号切换日志。只建新表 + 索引，不碰 accounts。
+    Migration {
+        version: 25,
+        steps: &[MigrationStep::Sql(MIGRATION_V25_SQL)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 24;
+pub const LATEST_VERSION: i64 = 25;
 
 pub struct Db {
     conn: Connection,
