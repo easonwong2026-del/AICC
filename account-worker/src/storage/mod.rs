@@ -663,9 +663,15 @@ const MIGRATIONS: &[Migration] = &[
         version: 27,
         steps: &[MigrationStep::Sql(MIGRATION_V27_SQL)],
     },
+    // v28：轮次记住"谁发起的"。关闭自动计划只该收尾自动轮次，
+    // 不能把用户手动跑的那一轮也当成遗留清掉。
+    Migration {
+        version: 28,
+        steps: &[MigrationStep::Rust(rotation::migrate_v28)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 27;
+pub const LATEST_VERSION: i64 = 28;
 
 pub struct Db {
     conn: Connection,

@@ -59,6 +59,13 @@ pub const TERMINAL_STATES: &[&str] = &[
     STATE_RECOVERY_REQUIRED,
 ];
 
+/// 这一轮是谁发起的。
+///
+/// 区别很要紧：**关闭自动计划不该打断用户手动跑的那一轮**。没有这个字段时，
+/// `runNow` 起来的一轮会在下一次心跳被当成"关闭开关后遗留的轮次"直接收尾。
+pub const TRIGGER_SCHEDULED: &str = "scheduled";
+pub const TRIGGER_MANUAL: &str = "manual";
+
 pub const STEP_PLANNED: &str = "planned";
 pub const STEP_SWITCHING: &str = "switching";
 pub const STEP_DWELLING: &str = "dwelling";
@@ -114,6 +121,8 @@ pub struct RotationRun {
     pub timezone: String,
     pub window_start: String,
     pub window_end: String,
+    /// `scheduled`（自动计划）或 `manual`（用户点「立即执行一轮」）。
+    pub trigger: String,
     pub origin_account_id: Option<String>,
     pub origin_uid: Option<String>,
     pub origin_snapshot_path: Option<String>,
@@ -170,6 +179,8 @@ pub struct NewRotationRun<'a> {
     pub timezone: &'a str,
     pub window_start: &'a str,
     pub window_end: &'a str,
+    /// [`TRIGGER_SCHEDULED`] 或 [`TRIGGER_MANUAL`]。
+    pub trigger: &'a str,
 }
 
 /// 切换 journal 与轮次之间的**唯一**关联点。
@@ -235,6 +246,9 @@ fn map_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RotationRun> {
         timezone: row.get("timezone")?,
         window_start: row.get("window_start")?,
         window_end: row.get("window_end")?,
+        trigger: row
+            .get::<_, Option<String>>("trigger")?
+            .unwrap_or_else(|| TRIGGER_SCHEDULED.to_string()),
         origin_account_id: row.get("origin_account_id")?,
         origin_uid: row.get("origin_uid")?,
         origin_snapshot_path: row.get("origin_snapshot_path")?,
@@ -277,6 +291,25 @@ fn map_step(row: &rusqlite::Row<'_>) -> rusqlite::Result<RotationStep> {
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
+}
+
+/// v28：给轮次加"谁发起的"。
+///
+/// 逐列判断后再 `ADD COLUMN`：迁移事务已提交但版本号没写下去时，重跑必须不炸。
+pub fn migrate_v28(tx: &rusqlite::Transaction<'_>) -> RpcResult<()> {
+    let mut stmt = tx.prepare("PRAGMA table_info(workbuddy_rotation_run)")?;
+    let existing: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+    if !existing.iter().any(|column| column == "trigger") {
+        tx.execute(
+            "ALTER TABLE workbuddy_rotation_run
+                ADD COLUMN trigger TEXT NOT NULL DEFAULT 'scheduled'",
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 impl super::Db {
@@ -355,9 +388,9 @@ impl super::Db {
         let now = now_rfc3339();
         let result = self.conn.execute(
             "INSERT INTO workbuddy_rotation_run (
-                 id, plan_id, plan_date, timezone, window_start, window_end,
+                 id, plan_id, plan_date, timezone, window_start, window_end, trigger,
                  state, cursor, restore_attempts, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, ?8, ?8)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, 0, ?9, ?9)",
             params![
                 new.id,
                 new.plan_id,
@@ -365,6 +398,7 @@ impl super::Db {
                 new.timezone,
                 new.window_start,
                 new.window_end,
+                new.trigger,
                 STATE_SCHEDULED,
                 now,
             ],
@@ -712,6 +746,7 @@ mod tests {
             timezone: DEFAULT_TIMEZONE,
             window_start: "2026-11-20T14:30:00Z",
             window_end: "2026-11-21T23:00:00Z",
+            trigger: TRIGGER_SCHEDULED,
         };
         assert!(db.begin_rotation_run(&new).unwrap());
         let again = db
@@ -735,6 +770,7 @@ mod tests {
             timezone: DEFAULT_TIMEZONE,
             window_start: "2026-11-20T14:30:00Z",
             window_end: "2026-11-21T23:00:00Z",
+            trigger: TRIGGER_SCHEDULED,
         })
         .unwrap();
 
@@ -762,6 +798,7 @@ mod tests {
             timezone: DEFAULT_TIMEZONE,
             window_start: "2026-11-20T14:30:00Z",
             window_end: "2026-11-21T23:00:00Z",
+            trigger: TRIGGER_SCHEDULED,
         })
         .unwrap();
 

@@ -1027,3 +1027,108 @@ fn two_concurrent_ticks_switch_only_once() {
         h.control.closes()
     );
 }
+
+// ---------------------------------------------------------------------------
+// 第三轮复审（2026-11-21）
+// ---------------------------------------------------------------------------
+
+/// 自动计划关闭时，**手动发起的一轮**仍要按自己的窗口走完并恢复。
+///
+/// 这一条防的是"点了立即执行，下一次心跳就把账号切回去"：那一轮
+/// `trigger=manual`，关闭开关只该收尾自动轮次。
+#[test]
+fn a_manual_run_keeps_going_after_the_plan_is_switched_off() {
+    let h = Harness::new();
+    // 只写配置，**不打开**自动开关。
+    let mut plan = RotationPlan::defaults();
+    plan.weekdays = vec![5];
+    plan.dwell_seconds = 300;
+    plan.account_ids = vec![h.b.id.clone(), h.c.id.clone()];
+    h.app.with_db(|db| db.save_rotation_plan(&plan)).unwrap();
+
+    let started = h.tick(true);
+    assert_eq!(started["status"], STATE_DWELLING, "{started}");
+    assert_eq!(h.live_uid().as_deref(), Some("uid-b"), "手动第一跳");
+    let run = h.run();
+    assert_eq!(run.trigger, "manual");
+
+    // 普通心跳（不是 force）在 enabled=false 下继续推进这一轮。
+    h.clock.advance_secs(300);
+    let second = h.tick(false);
+    assert_eq!(second["status"], STATE_DWELLING, "{second}");
+    assert_eq!(h.live_uid().as_deref(), Some("uid-c"), "手动轮次应当继续切");
+
+    h.clock.advance_secs(300);
+    let finished = h.tick(false);
+    assert_eq!(finished["status"], STATE_COMPLETED, "{finished}");
+    assert_eq!(h.live_uid().as_deref(), Some("uid-a"), "最终必须回 A");
+
+    // 自动开关始终是关的。
+    assert!(
+        !h.app
+            .with_db(|db| db.rotation_plan_or_default())
+            .unwrap()
+            .enabled
+    );
+    assert_eq!(h.tick(false)["status"], "disabled", "之后不再开新轮次");
+}
+
+/// 等待用户期间时钟越过窗口：再恢复执行时不能再切下一个账号。
+#[test]
+fn the_window_is_rechecked_after_waiting_for_the_user() {
+    let h = Harness::new();
+    h.plan(&[&h.b, &h.c], 300);
+    h.tick(false); // 切到 B
+    assert_eq!(h.live_uid().as_deref(), Some("uid-b"));
+
+    // B 的停留结束，但用户正在用：这一跳推迟，状态停在 switching。
+    h.clock.advance_secs(300);
+    h.idle.0.store(10, Ordering::SeqCst);
+    let waiting = h.tick(false);
+    assert_eq!(waiting["status"], STATE_SWITCHING, "{waiting}");
+    assert_eq!(h.live_uid().as_deref(), Some("uid-b"), "等待期间不该切走");
+
+    // 用户走开，但已经过了窗口结束时间。
+    h.clock.set(beijing(2026, 11, 21, 7, 10));
+    h.idle.0.store(3600, Ordering::SeqCst);
+    let report = h.tick(false);
+    assert_eq!(report["status"], STATE_COMPLETED, "{report}");
+    assert_eq!(h.live_uid().as_deref(), Some("uid-a"), "必须恢复，不能切 C");
+
+    let run = h.run();
+    let steps = h.app.with_db(|db| db.rotation_steps(&run.id)).unwrap();
+    assert!(
+        steps
+            .iter()
+            .filter(|step| step.uid == "uid-c")
+            .all(|step| step.status != "done"),
+        "C 从未被切入：{steps:?}"
+    );
+}
+
+/// 人工把故障排除后恢复成功，`recovery_required` 必须收口成 `completed`。
+#[test]
+fn a_successful_manual_restore_reopens_a_recovery_required_run() {
+    let h = Harness::new();
+    h.plan(&[&h.b], 300);
+    h.tick(false);
+
+    let run = h.run();
+    let path = PathBuf::from(run.origin_snapshot_path.clone().unwrap());
+    let pristine = std::fs::read(&path).unwrap();
+    std::fs::write(&path, [&pristine[..], b" "].concat()).unwrap();
+
+    h.clock.advance_secs(300);
+    assert_eq!(h.tick(false)["status"], "recovery_required");
+    assert_eq!(h.run().state, "recovery_required");
+
+    // 排除故障：快照恢复成原样。
+    std::fs::write(&path, &pristine).unwrap();
+    let report = rotation::restore_now(&h.app, &h.control, &h.env, None, false).unwrap();
+    assert_eq!(report["restored"], true, "{report}");
+    assert_eq!(h.live_uid().as_deref(), Some("uid-a"));
+
+    let run = h.run();
+    assert_eq!(run.state, STATE_COMPLETED, "恢复成功必须收口");
+    assert_eq!(run.restore_result.as_deref(), Some("restored"));
+}

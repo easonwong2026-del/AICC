@@ -451,6 +451,12 @@ pub async fn run_tick_with(app: &App, deps: &RotationDeps<'_>, force: bool) -> R
     // 「停止后续计划 + 立刻恢复原账号」，界面文案与它一致。
     if !plan.enabled && !force {
         if let Some(run) = app.with_db(|db| db.active_rotation_run())? {
+            // 用户手动发起的一轮**不受自动开关影响**：它有自己算出来的窗口，
+            // 会按停留时长走完再恢复。把它当成"关闭后的遗留"直接收尾，
+            // 就会出现"点了立即执行，下一次心跳就把账号切回去"。
+            if run.trigger == crate::storage::rotation::TRIGGER_MANUAL {
+                return advance_with_depth(app, deps, &plan, run, now, 0).await;
+            }
             if run.state != STATE_RESTORING {
                 app.with_db(|db| {
                     db.set_rotation_state(
@@ -517,6 +523,7 @@ pub async fn run_tick_with(app: &App, deps: &RotationDeps<'_>, force: bool) -> R
                 timezone: &plan.timezone,
                 window_start: &ms_to_rfc3339(window.start_ms),
                 window_end: &ms_to_rfc3339(window.end_ms),
+                trigger: crate::storage::rotation::TRIGGER_SCHEDULED,
             })?;
             db.set_rotation_state(
                 &id,
@@ -541,6 +548,11 @@ pub async fn run_tick_with(app: &App, deps: &RotationDeps<'_>, force: bool) -> R
             timezone: &plan.timezone,
             window_start: &ms_to_rfc3339(window.start_ms),
             window_end: &ms_to_rfc3339(window.end_ms),
+            trigger: if force {
+                crate::storage::rotation::TRIGGER_MANUAL
+            } else {
+                crate::storage::rotation::TRIGGER_SCHEDULED
+            },
         })
     })?;
     let run = app
@@ -1034,17 +1046,20 @@ async fn switch_current(
         return advance_cursor(app, run);
     }
 
-    // 用户正在用：推迟，不突然关客户端。
+    // **窗口检查独立于空闲检查**。
     //
-    // 接近窗口结束时**不再强行开始新的一跳**：那时候切过去只剩几分钟停留，
-    // 却要关一次客户端、再关一次来恢复，代价全给用户，收益接近零。
+    // 等待用户、Mac 休眠、进程重启都会让 `now` 往前跳；如果只在"用户还忙"的
+    // 分支里看窗口，那么"忙 → 等 → 用户走开但已经超窗"这条路会直接切过去。
+    // 所以每次准备开始新的一跳，都用当前时间重新判断一次。
+    if near_window_end(run, plan, now) {
+        return Ok(StepGate::Restore {
+            detail: "窗口剩余时间不足以再停留一次，不再开始新的切换，直接恢复原账号".to_string(),
+        });
+    }
+
+    // 用户正在用：推迟，不突然关客户端。
     if let Some(idle) = deps.idle.idle_secs() {
         if idle < USER_ACTIVE_IDLE_SECS {
-            if near_window_end(run, plan, now) {
-                return Ok(StepGate::Restore {
-                    detail: "用户在忙且窗口快结束，不再开始新的切换，直接恢复原账号".to_string(),
-                });
-            }
             return Ok(StepGate::Wait {
                 detail: format!("检测到正在使用（空闲 {} 秒），这一跳推迟", idle),
             });
@@ -1581,10 +1596,15 @@ pub fn restore_now(
     let outcome = restore_origin(app, &deps, &run, force)?;
     app.with_db(|db| {
         db.note_rotation_restore(&run.id, run.restore_attempts + 1, &outcome.code)?;
-        if outcome.ok && !run.is_terminal() {
-            db.set_rotation_state(&run.id, STATE_COMPLETED, Some(&outcome.detail))?;
-        }
-        if !outcome.ok {
+        if outcome.ok {
+            // `recovery_required` 的含义是"等人处理"，不是"永远结束"。
+            // 人工把故障排除后恢复成功，就必须收口成 completed，否则状态页
+            // 会一直挂着"需要你确认"，历史记录里也永远看不到这次恢复。
+            let reopenable = run.state == STATE_RECOVERY_REQUIRED || !run.is_terminal();
+            if reopenable {
+                db.set_rotation_state(&run.id, STATE_COMPLETED, Some(&outcome.detail))?;
+            }
+        } else {
             db.set_rotation_state(&run.id, STATE_RECOVERY_REQUIRED, Some(&outcome.detail))?;
         }
         Ok::<(), RpcError>(())
@@ -1711,6 +1731,7 @@ fn run_view(run: &RotationRun, steps: &[RotationStep], plan: &RotationPlan) -> V
         "id": run.id,
         "planDate": run.plan_date,
         "timezone": run.timezone,
+        "trigger": run.trigger,
         "windowStart": run.window_start,
         "windowEnd": run.window_end,
         "state": run.state,
