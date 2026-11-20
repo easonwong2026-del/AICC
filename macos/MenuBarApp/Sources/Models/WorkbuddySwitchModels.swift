@@ -480,9 +480,18 @@ struct WorkbuddySwitchOutcome: Equatable {
     var summary: String {
         if !changed { return "客户端本来就是这个账号，没有改动任何文件" }
         var parts: [String] = []
-        parts.append(verified
-            ? "已切换，客户端已接受这个登录（重启后仍然是它）"
-            : "已写入并重启客户端，但没能确认客户端采用了它；请打开客户端确认")
+        // 「客户端停在这个账号」与「服务端接受这份令牌」是两件事。
+        // 服务端已明确拒绝时，第一句不能再写成"已接受"——那会让用户以为切换成功，
+        // 实际上客户端接下来任何请求都会 401。
+        if authAccepted == .rejected {
+            parts.append(verified
+                ? "客户端已重启并停在这个账号，但服务端拒绝了这次登录"
+                : "客户端没有确认采用这次登录，服务端也拒绝了这份令牌")
+        } else {
+            parts.append(verified
+                ? "已切换，客户端已接受这个登录（重启后仍然是它）"
+                : "已写入并重启客户端，但没能确认客户端采用了它；请打开客户端确认")
+        }
         if temporary {
             let expiry = accessExpiresAt.map { WorkbuddyTime.short($0) } ?? "未知时间"
             parts.append("临时登录有效至 \(expiry)（\(WorkbuddyTime.remaining(remainingSeconds))），"

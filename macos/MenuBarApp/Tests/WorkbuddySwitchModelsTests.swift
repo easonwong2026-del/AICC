@@ -250,6 +250,10 @@ final class WorkbuddySwitchModelsTests: XCTestCase {
             "authAcceptedDetail": "服务端拒绝了这份令牌（HTTP 401）",
         ])
         XCTAssertTrue(rejected.summary.contains("401"), rejected.summary)
+        // 服务端明确拒绝时，文案不能还说"客户端已接受"——那是把客户端回读
+        // 当成服务端接受了这份令牌，用户会以为切换成功、实际每次请求都 401。
+        XCTAssertFalse(rejected.summary.contains("已接受"), rejected.summary)
+        XCTAssertTrue(rejected.summary.contains("服务端拒绝"), rejected.summary)
 
         let unconfirmed = WorkbuddySwitchOutcome(json: [
             "changed": true,
