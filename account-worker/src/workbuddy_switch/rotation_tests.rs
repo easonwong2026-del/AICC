@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use chrono::TimeZone;
 use serde_json::{json, Value};
@@ -158,12 +158,32 @@ impl OwnPrecheck for TestPrecheck {
     }
 }
 
-struct TestActivity(Mutex<Value>);
+struct TestActivity {
+    value: Mutex<Value>,
+    clock: Arc<TestClock>,
+    /// 下一次查询"耗时"多少毫秒：返回前把时钟推进这么多，只生效一次。
+    /// 用来覆盖"等网络/等休眠期间窗口已经过去"那条路。
+    next_delay_ms: AtomicI64,
+}
+
+impl TestActivity {
+    fn new(clock: Arc<TestClock>) -> Self {
+        Self {
+            value: Mutex::new(json!({ "state": "ok", "todayActive": true, "streakDays": 2 })),
+            clock,
+            next_delay_ms: AtomicI64::new(0),
+        }
+    }
+}
 
 impl ActivityProbe for TestActivity {
     fn snapshot<'a>(&'a self, _app: &'a App, _account_id: &'a str) -> BoxFut<'a, Value> {
+        let delay = self.next_delay_ms.swap(0, Ordering::SeqCst);
+        if delay != 0 {
+            self.clock.advance_secs(delay / 1000);
+        }
         Box::pin(async move {
-            self.0
+            self.value
                 .lock()
                 .map(|slot| slot.clone())
                 .unwrap_or_else(|_| json!({ "state": "failed" }))
@@ -204,7 +224,7 @@ struct Harness {
     app: App,
     env: SwitchEnv,
     control: TestControl,
-    clock: TestClock,
+    clock: Arc<TestClock>,
     idle: TestIdle,
     precheck: TestPrecheck,
     activity: TestActivity,
@@ -239,18 +259,17 @@ impl Harness {
         let auth_path = dir.path().join("workbuddy-desktop.info");
         std::fs::write(&auth_path, auth_json("uid-a", "AT-A")).unwrap();
 
+        let clock = Arc::new(TestClock(AtomicI64::new(beijing(2026, 11, 20, 22, 30))));
         Self {
             env: SwitchEnv {
                 auth_path: auth_path.clone(),
                 snapshot_dir: data.join("workbuddy-switch"),
             },
             control: TestControl::new(auth_path),
-            clock: TestClock(AtomicI64::new(beijing(2026, 11, 20, 22, 30))),
             idle: TestIdle(AtomicI64::new(3600)),
             precheck: TestPrecheck(Mutex::new(Ok("accepted".to_string()))),
-            activity: TestActivity(Mutex::new(json!({
-                "state": "ok", "todayActive": true, "streakDays": 2
-            }))),
+            activity: TestActivity::new(clock.clone()),
+            clock,
             a,
             b,
             c,
@@ -263,7 +282,7 @@ impl Harness {
         RotationDeps {
             control: &self.control,
             env: &self.env,
-            clock: &self.clock,
+            clock: self.clock.as_ref(),
             idle: &self.idle,
             precheck: &self.precheck,
             activity: &self.activity,
@@ -699,7 +718,7 @@ fn tokens_never_appear_in_status_or_history() {
     h.clock.advance_secs(300);
     h.tick(false);
 
-    let status = rotation::status(&h.app, &h.control, &h.env, &h.clock).unwrap();
+    let status = rotation::status(&h.app, &h.control, &h.env, h.clock.as_ref()).unwrap();
     let text = serde_json::to_string(&status).unwrap();
     for forbidden in ["AT-uid-b", "RT-uid-b", "AT-A", "RT-uid-a"] {
         assert!(!text.contains(forbidden), "响应里出现了令牌：{forbidden}");
@@ -711,7 +730,7 @@ fn tokens_never_appear_in_status_or_history() {
 fn an_activity_probe_failure_does_not_block_the_restore() {
     let h = Harness::new();
     h.plan(&[&h.b], 300);
-    *h.activity.0.lock().unwrap() = json!({ "state": "failed", "error": "timeout" });
+    *h.activity.value.lock().unwrap() = json!({ "state": "failed", "error": "timeout" });
 
     assert_eq!(h.tick(false)["status"], STATE_DWELLING);
     h.clock.advance_secs(300);
@@ -733,7 +752,7 @@ fn dry_run_touches_nothing() {
     h.plan(&[&h.b, &h.c], 300);
     let before = std::fs::read(&h.env.auth_path).unwrap();
 
-    let report = rotation::dry_run(&h.app, &h.control, &h.env, &h.clock).unwrap();
+    let report = rotation::dry_run(&h.app, &h.control, &h.env, h.clock.as_ref()).unwrap();
     assert_eq!(report["dryRun"], true);
     assert_eq!(report["steps"].as_array().unwrap().len(), 2);
     assert_eq!(report["steps"][0]["outcome"], "switch");
@@ -1131,4 +1150,86 @@ fn a_successful_manual_restore_reopens_a_recovery_required_run() {
     let run = h.run();
     assert_eq!(run.state, STATE_COMPLETED, "恢复成功必须收口");
     assert_eq!(run.restore_result.as_deref(), Some("restored"));
+}
+
+// ---------------------------------------------------------------------------
+// 第四轮复审（2026-11-21）
+// ---------------------------------------------------------------------------
+
+/// 关闭开关时锁正忙：停止请求必须先落库，下一次心跳不能继续切下一个账号。
+///
+/// 反过来说就是这条测试防的事：`stop()` 拿不到锁就返回 `busy`，请求丢了，
+/// 而 `trigger=manual` 的轮次在下一次心跳会被豁免放行 —— 用户看到的是
+/// "关掉了、结束会恢复"，实际却在继续切。
+#[test]
+fn a_stop_request_survives_a_busy_lock() {
+    let h = Harness::new();
+    h.plan(&[&h.b, &h.c], 300);
+    h.tick(false); // A → B，停留中，下一个是 C
+    assert_eq!(h.live_uid().as_deref(), Some("uid-b"));
+
+    // 另一个进程占着轮换锁（同一个文件、另一个 open）。
+    std::fs::create_dir_all(&h.env.snapshot_dir).unwrap();
+    let lock_path = h.env.snapshot_dir.join("rotation.lock");
+    let holder = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap();
+    holder.try_lock().expect("测试里应当能独占这把锁");
+
+    let stopped = rotation::stop(&h.app, &h.control, &h.env).unwrap();
+    assert_eq!(stopped["status"], "stop_requested", "{stopped}");
+    assert!(h.run().stop_requested, "停止请求必须落库");
+
+    // 锁空出来：下一次心跳只收尾，不再切 C。
+    drop(holder);
+    h.clock.advance_secs(300);
+    let report = h.tick(false);
+    assert_eq!(report["status"], STATE_COMPLETED, "{report}");
+    assert_eq!(h.live_uid().as_deref(), Some("uid-a"), "必须回到原账号");
+
+    let run = h.run();
+    let steps = h.app.with_db(|db| db.rotation_steps(&run.id)).unwrap();
+    assert!(
+        steps
+            .iter()
+            .filter(|step| step.uid == "uid-c")
+            .all(|step| step.status != "done"),
+        "停止后不该再切 C：{steps:?}"
+    );
+    assert_eq!(run.restore_result.as_deref(), Some("restored"));
+}
+
+/// 活跃查询在等待中耗掉了窗口：复核用的是**当下**时间，不是入口那一个。
+#[test]
+fn a_slow_probe_cannot_switch_into_a_closed_window() {
+    let h = Harness::new();
+    h.plan(&[&h.b, &h.c], 300);
+    h.tick(false); // A → B
+
+    // B 的停留到点，准备切 C；这一次活跃查询"耗时" 9 小时，直接跨过 07:00。
+    h.clock.advance_secs(300);
+    h.activity
+        .next_delay_ms
+        .store(9 * 3600 * 1000, Ordering::SeqCst);
+
+    let report = h.tick(false);
+    assert_eq!(report["status"], STATE_COMPLETED, "{report}");
+    assert_eq!(
+        h.live_uid().as_deref(),
+        Some("uid-a"),
+        "必须恢复 A，不能切 C"
+    );
+
+    let run = h.run();
+    let steps = h.app.with_db(|db| db.rotation_steps(&run.id)).unwrap();
+    let last = steps.iter().find(|step| step.uid == "uid-c").unwrap();
+    assert_eq!(last.status, "skipped", "{steps:?}");
+    assert_eq!(
+        last.skip_reason.as_deref(),
+        Some("window_elapsed_during_wait")
+    );
 }

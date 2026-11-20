@@ -124,6 +124,11 @@ restoring ──► completed / recovery_required / failed
 所以每次准备开始新的一跳，都用当前时间重新算一次"现在 + 停留 + 恢复余量"；
 不够就恢复本轮最初账号，不切入一个已经结束的窗口。
 
+**同一次 tick 内也要复核**：入口的 `now` 在预检（一次真实 HTTP 探针）和活跃查询
+之后已经过时。所以真正动客户端之前再读一次 `deps.clock.now_ms()`，超窗就把这一步
+记成 `skipped / window_elapsed_during_wait` 并进入恢复 —— 而不是拿着入口的时间戳
+去切一个已经过期的窗口。
+
 ### 关闭开关 ≠ 只是"别再开新的"
 
 | 动作 | 后续计划 | 当前这一轮 |
@@ -134,6 +139,18 @@ restoring ──► completed / recovery_required / failed
 两者对**当轮**的行为一样，区别只在"明天还跑不跑"。之所以让"关闭"也立刻恢复：
 把客户端留在某个轮换账号上过夜，是这条链路上最坏的结果。
 界面文案与这张表一致（关闭后显示"并把账号恢复到…"，没恢复成功就说没成功）。
+
+**停止请求必须先落库**（v29 `rotation_run.stop_requested`）。`stop()` 拿不到跨进程锁时
+只返回 `busy` 并把请求丢掉，下一次心跳会以为没人要停 —— 而手动轮次本来就有
+"开关关了也继续跑"的豁免，于是会接着切下一个账号。现在的顺序是：
+
+```text
+找到活动轮次 → 写 stop_requested=1 → 抢锁
+  拿不到 → 返回 stop_requested（"已请求暂停，当前操作结束后会自动恢复"）
+  拿到   → 立刻恢复并收尾
+```
+
+`advance` 最前面检查这个标记：一旦为真，**优先于手动轮次的豁免**，直接进 `restoring`。
 
 **手动发起的一轮不受开关影响**：`rotation_run.trigger`（v28）区分 `scheduled` / `manual`。
 关闭开关只会收尾自动轮次；用户点「立即执行一轮」起来的那一轮有自己的窗口，
@@ -371,6 +388,8 @@ Fake Clock + Fake Client + 注入式预检与活跃取证，**不联网、不碰
 | `a_pending_run_is_still_finished_when_the_switch_is_already_off` | 开关已关但轮次遗留 → 仍会收尾 |
 | `activity_after_is_recorded_only_after_the_dwell_ends` | 停留结束前不取证 |
 | `two_concurrent_ticks_switch_only_once` | **两个线程**同时 tick，只执行一次 |
+| `a_stop_request_survives_a_busy_lock` | 锁被占时按暂停：请求落库，锁放开后只收尾不切下一个 |
+| `a_slow_probe_cannot_switch_into_a_closed_window` | 活跃查询"耗时" 9 小时：复核用当下时间，不切 C |
 | `a_manual_run_keeps_going_after_the_plan_is_switched_off` | 关闭自动计划后，手动一轮仍走完 B→C→A |
 | `the_window_is_rechecked_after_waiting_for_the_user` | 等待用户后已超窗 → 不切 C，直接恢复 A |
 | `a_successful_manual_restore_reopens_a_recovery_required_run` | 人工恢复成功 → `recovery_required` 收口为 `completed` |

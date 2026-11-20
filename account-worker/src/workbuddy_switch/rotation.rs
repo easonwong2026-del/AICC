@@ -579,6 +579,20 @@ async fn advance_with_depth(
     now: i64,
     depth: u32,
 ) -> RpcResult<Value> {
+    // 用户明确要求停止（暂停 / 关闭开关）：**优先于手动轮次的豁免**。
+    // 请求在 `stop()` 里先落库，所以哪怕当时拿不到锁，下一次心跳也会照办。
+    if run.stop_requested && !run.is_terminal() && run.state != STATE_RESTORING {
+        app.with_db(|db| {
+            db.set_rotation_state(
+                &run.id,
+                STATE_RESTORING,
+                Some("已请求停止，正在恢复这一轮最初登录的账号"),
+            )
+        })?;
+        let run = reload(app, &run.id)?;
+        return Box::pin(advance_with_depth(app, deps, plan, run, now, depth + 1)).await;
+    }
+
     if depth > MAX_ADVANCE_DEPTH {
         return Err(RpcError::internal(format!(
             "夜间轮换推进层数过深（state={}，cursor={}），已停止本次 tick",
@@ -1129,7 +1143,7 @@ async fn switch_current(
                         Some(&ms_to_rfc3339(deps.clock.now_ms())),
                     )
                 })?;
-                return Ok(StepGate::Continue);
+                return advance_cursor(app, run);
             }
         }
     }
@@ -1157,6 +1171,25 @@ async fn switch_current(
     }
 
     let activity_before = deps.activity.snapshot(app, &account.id).await;
+
+    // 预检和活跃查询都可能等网络（或让 Mac 在等待中睡过去）。等完之后 `now`
+    // 已经不是入口那个值了，所以真正动客户端之前用**当下**时间再确认一次窗口。
+    let now = deps.clock.now_ms();
+    if near_window_end(run, plan, now) {
+        app.with_db(|db| {
+            db.finish_rotation_step(
+                &step.id,
+                STEP_SKIPPED,
+                Some("等待预检/活跃查询后窗口已不足，未切换"),
+                Some("window_elapsed_during_wait"),
+                Some(&ms_to_rfc3339(now)),
+            )
+        })?;
+        return Ok(StepGate::Restore {
+            detail: "等待期间窗口已经结束，不再切换，直接恢复原账号".to_string(),
+        });
+    }
+
     app.with_db(|db| {
         db.set_rotation_step_activity(&step.id, Some(&activity_before), None)?;
         db.start_rotation_step(
@@ -1526,11 +1559,19 @@ pub fn stop(app: &App, control: &dyn ClientControl, env: &SwitchEnv) -> RpcResul
         activity: &SystemActivity,
     };
     // 与 tick 抢**同一把跨进程锁**：不能一边恢复一边被另一个进程切走。
-    let Some(_gate) = acquire_gate(&deps)? else {
-        return Ok(json!({ "ok": false, "status": "busy", "detail": "另一项轮换操作正在执行" }));
-    };
     let Some(run) = app.with_db(|db| db.active_rotation_run())? else {
         return Ok(json!({ "ok": true, "status": "nothing_to_stop" }));
+    };
+    // 先落库，再抢锁。反过来的话，锁被别人占着时用户的停止意图就丢了，
+    // 下一次心跳会认为这一轮没人要停，继续切下一个账号。
+    app.with_db(|db| db.request_rotation_stop(&run.id))?;
+    let Some(_gate) = acquire_gate(&deps)? else {
+        return Ok(json!({
+            "ok": false,
+            "status": "stop_requested",
+            "runId": run.id,
+            "detail": "已请求暂停；当前操作结束后会自动恢复原账号",
+        }));
     };
     if run.origin_snapshot_path.is_none() {
         app.with_db(|db| {

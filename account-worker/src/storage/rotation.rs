@@ -137,6 +137,11 @@ pub struct RotationRun {
     pub last_target_uid: Option<String>,
     pub restore_attempts: i64,
     pub restore_result: Option<String>,
+    /// 用户显式按过「暂停」或关了开关：**必须持久化**。
+    ///
+    /// 只在内存/响应里表达是不够的：`stop()` 拿不到跨进程锁时请求就丢了，
+    /// 下一次心跳会把手动轮次当"用户还想继续"接着切。
+    pub stop_requested: bool,
     pub detail: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -262,6 +267,7 @@ fn map_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RotationRun> {
         last_target_uid: row.get("last_target_uid")?,
         restore_attempts: row.get("restore_attempts")?,
         restore_result: row.get("restore_result")?,
+        stop_requested: row.get::<_, Option<i64>>("stop_requested")?.unwrap_or(0) != 0,
         detail: row.get("detail")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
@@ -312,7 +318,38 @@ pub fn migrate_v28(tx: &rusqlite::Transaction<'_>) -> RpcResult<()> {
     Ok(())
 }
 
+/// v29：持久化"用户要求停止这一轮"。
+///
+/// 与 `enabled` 是两件事：开关只管**还开不开新轮次**；手动发起的一轮要能自己走完。
+/// 但用户一旦明确按了暂停/关闭，这个意图必须盖过手动豁免。
+pub fn migrate_v29(tx: &rusqlite::Transaction<'_>) -> RpcResult<()> {
+    let mut stmt = tx.prepare("PRAGMA table_info(workbuddy_rotation_run)")?;
+    let existing: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+    if !existing.iter().any(|column| column == "stop_requested") {
+        tx.execute(
+            "ALTER TABLE workbuddy_rotation_run
+                ADD COLUMN stop_requested INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 impl super::Db {
+    /// 记下"这一轮要停"。幂等，重复调用无副作用。
+    pub fn request_rotation_stop(&self, run_id: &str) -> RpcResult<()> {
+        self.conn.execute(
+            "UPDATE workbuddy_rotation_run
+                SET stop_requested = 1, updated_at = ?2
+              WHERE id = ?1 AND stop_requested = 0",
+            params![run_id, now_rfc3339()],
+        )?;
+        Ok(())
+    }
+
     pub fn rotation_plan(&self) -> RpcResult<Option<RotationPlan>> {
         Ok(self
             .conn

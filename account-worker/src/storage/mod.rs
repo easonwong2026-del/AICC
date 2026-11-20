@@ -669,9 +669,14 @@ const MIGRATIONS: &[Migration] = &[
         version: 28,
         steps: &[MigrationStep::Rust(rotation::migrate_v28)],
     },
+    // v29：显式停止请求要落库，否则 `stop()` 遇到忙就丢了。
+    Migration {
+        version: 29,
+        steps: &[MigrationStep::Rust(rotation::migrate_v29)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 28;
+pub const LATEST_VERSION: i64 = 29;
 
 pub struct Db {
     conn: Connection,
