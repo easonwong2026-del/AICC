@@ -298,7 +298,8 @@ struct ConsoleRewardsBlock: View {
                 }
                 Spacer(minLength: 0)
             }
-            Text("点击后先拉一次实时余额，再让你确认；确认后写账本、只发一次请求。未知结果只能回查，不会自动重发。")
+            Text("点击后先显示当前余额，再让你确认；确认后只执行一次。"
+                + "结果没有立刻确认时可以回查，不会重复执行。")
                 .font(ConsoleType.caption)
                 .foregroundStyle(ConsoleTheme.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)

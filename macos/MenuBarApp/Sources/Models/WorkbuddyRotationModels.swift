@@ -160,10 +160,38 @@ struct WorkbuddyRotationStep: Equatable, Identifiable {
         }
     }
 
-    /// 「今日活跃」只作证据：查不到就说查不到，不说"未活跃"。
+    /// 活跃证据的**时点**。切换成功与活跃确认是两件事，不能合并成一句。
+    enum ActivityPhase: Equatable {
+        /// 停留还没结束，还没查（大多数时候是这个）。
+        case pendingAfterDwell
+        /// 只有切换前的数据：明确标"切换前"。
+        case beforeSwitch
+        /// 停留结束后查过了。
+        case afterDwell
+        /// 查过但失败／判不出来。
+        case failed
+    }
+
+    var activityPhase: ActivityPhase {
+        if let after = activityAfter {
+            return after.state == "failed" ? .failed : .afterDwell
+        }
+        if activityBefore != nil { return .beforeSwitch }
+        return .pendingAfterDwell
+    }
+
+    /// 表格/记录里的一格。**不把切换前的结果冒充成切换后的。**
     var activityText: String {
-        guard let after = activityAfter ?? activityBefore else { return "活跃未查" }
-        return after.summary
+        switch activityPhase {
+        case .pendingAfterDwell:
+            return "停留后尚未查询"
+        case .beforeSwitch:
+            return "切换前：\(activityBefore?.summary ?? "未知")"
+        case .afterDwell:
+            return activityAfter?.summary ?? "未知"
+        case .failed:
+            return "查询失败／未知"
+        }
     }
 }
 
@@ -172,6 +200,8 @@ struct WorkbuddyRotationStep: Equatable, Identifiable {
 struct WorkbuddyRotationRun: Equatable, Identifiable {
     let id: String
     let planDate: String
+    /// `scheduled`（自动计划）或 `manual`（用户点「立即执行一轮」）。
+    let trigger: String
     let state: String
     let cursor: Int
     let originUid: String?
@@ -192,6 +222,7 @@ struct WorkbuddyRotationRun: Equatable, Identifiable {
     init(json: [String: Any]) {
         id = json["id"] as? String ?? ""
         planDate = json["planDate"] as? String ?? ""
+        trigger = json["trigger"] as? String ?? "scheduled"
         state = json["state"] as? String ?? "scheduled"
         cursor = (json["cursor"] as? NSNumber)?.intValue ?? 0
         originUid = json["originUid"] as? String
@@ -249,12 +280,15 @@ struct WorkbuddyRotationRun: Equatable, Identifiable {
         }
     }
 
+    var triggerText: String { trigger == "manual" ? "手动" : "自动" }
+
     /// 最近一条能解释"现在在干什么"的话。
     var summary: String {
         if let detail, !detail.isEmpty { return detail }
         if let nextSwitchAt {
             return "\(stateText) · 下次 \(WorkbuddyTime.clock(nextSwitchAt))"
         }
+        if state == "dwelling" { return stateText }
         if let currentUid, !isTerminal {
             return "\(stateText) · \(String(currentUid.prefix(8)))"
         }
@@ -276,6 +310,10 @@ struct WorkbuddyRotationStatus: Equatable {
     let runsWhileAppClosed: Bool
     /// 支持 / 不支持的边界，界面上只说必要的那几条。
     let supportedTimezones: [String]
+    /// 错过开始多久就不再补跑（秒）。来自后端 `limits`，界面只读展示。
+    let lateStartToleranceSeconds: Int
+    /// 每次切换预留的恢复余量（秒）。
+    let restoreReserveSeconds: Int
 
     init(json: [String: Any]) {
         plan = WorkbuddyRotationPlan(json: json["plan"] as? [String: Any] ?? [:])
@@ -288,8 +326,10 @@ struct WorkbuddyRotationStatus: Equatable {
         lastRun = (json["lastRun"] as? [String: Any]).map(WorkbuddyRotationRun.init)
         history = (json["history"] as? [[String: Any]] ?? []).map(WorkbuddyRotationRun.init)
         runsWhileAppClosed = (json["scheduler"] as? [String: Any])?["runsWhileAppClosed"] as? Bool ?? false
-        supportedTimezones = (json["limits"] as? [String: Any])?["supportedTimezones"] as? [String]
-            ?? ["Asia/Shanghai"]
+        let limits = json["limits"] as? [String: Any] ?? [:]
+        supportedTimezones = limits["supportedTimezones"] as? [String] ?? ["Asia/Shanghai"]
+        lateStartToleranceSeconds = (limits["lateStartToleranceSeconds"] as? NSNumber)?.intValue ?? 600
+        restoreReserveSeconds = (limits["restoreReserveSeconds"] as? NSNumber)?.intValue ?? 300
     }
 
     /// 主界面那一行状态：一句话说清"会不会动、什么时候动"。

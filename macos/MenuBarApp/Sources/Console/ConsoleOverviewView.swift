@@ -298,13 +298,13 @@ struct ConsoleOverviewView: View {
 
     private var recentSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ConsoleSectionHeader(title: "最近记录", detail: nil) { EmptyView() }
+            ConsoleSectionHeader(title: "最近操作", detail: nil) { EmptyView() }
             ConsoleCard(padding: 0) {
                 let records = recentRecords
                 if records.isEmpty {
                     ConsoleEmptyState(
                         symbol: "clock",
-                        title: "暂无执行记录",
+                        title: "暂无操作",
                         message: "签到、成长或旅行执行过一次后，这里会显示最近结果。"
                     )
                 } else {

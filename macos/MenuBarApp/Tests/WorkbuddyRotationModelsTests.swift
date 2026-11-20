@@ -60,15 +60,33 @@ final class WorkbuddyRotationModelsTests: XCTestCase {
         XCTAssertEqual(step.skipText, "Magpie 令牌剩余时间不够覆盖停留时长")
     }
 
-    func testActivityUnknownStaysUnknown() {
-        let step = WorkbuddyRotationStep(json: ["status": "done"])
-        XCTAssertEqual(step.activityText, "活跃未查")
+    func testActivityDistinguishesBeforeAfterAndUnknown() {
+        // 还没到停留结束：不能说"未活跃"，只能说还没查。
+        let pending = WorkbuddyRotationStep(json: [
+            "status": "done",
+            "activityBefore": ["state": "ok", "todayActive": false, "streakDays": 1],
+        ])
+        XCTAssertEqual(pending.activityPhase, .beforeSwitch)
+        XCTAssertTrue(pending.activityText.hasPrefix("切换前："), pending.activityText)
+
+        let nothing = WorkbuddyRotationStep(json: ["status": "planned"])
+        XCTAssertEqual(nothing.activityPhase, .pendingAfterDwell)
+        XCTAssertEqual(nothing.activityText, "停留后尚未查询")
+
+        let after = WorkbuddyRotationStep(json: [
+            "status": "done",
+            "activityBefore": ["state": "ok", "todayActive": false, "streakDays": 1],
+            "activityAfter": ["state": "ok", "todayActive": true, "streakDays": 2],
+        ])
+        XCTAssertEqual(after.activityPhase, .afterDwell)
+        XCTAssertFalse(after.activityText.hasPrefix("切换前"), after.activityText)
 
         let failed = WorkbuddyRotationStep(json: [
             "status": "done",
             "activityAfter": ["state": "failed", "error": "timeout"],
         ])
-        XCTAssertTrue(failed.activityText.contains("查不到"), failed.activityText)
+        XCTAssertEqual(failed.activityPhase, .failed)
+        XCTAssertEqual(failed.activityText, "查询失败／未知")
     }
 
     func testRunExplainsTheRestoreOutcomeWithoutPretending() {
