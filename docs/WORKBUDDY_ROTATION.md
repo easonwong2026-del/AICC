@@ -86,7 +86,7 @@ restoring ──► completed / recovery_required / failed
 | `switching` | 正在切 `cursor` 指向的账号 | tick |
 | `dwelling` | 已切过去，在停留 | tick |
 | `restoring` | 正在写回原账号快照 | tick |
-| `completed` | 正常收尾（含"用户自己切回去了"） | — |
+| `completed` | 正常收尾（含"用户自己切回去了"、人工恢复成功） | — |
 | `skipped` | 本轮没执行（迟到 / 没登录 / 全都不可切） | — |
 | `failed` | 预检或执行阶段彻底失败 | — |
 | `recovery_required` | 该恢复但不敢自动覆盖，等用户确认 | 用户 |
@@ -120,6 +120,10 @@ restoring ──► completed / recovery_required / failed
 `RESTORE_RESERVE_SECS = 5 分钟`：恢复要关客户端、写文件、等它起来。
 `USER_ACTIVE_IDLE_SECS = 120`：HID 空闲低于 2 分钟视为"用户在键盘前"。
 
+**窗口检查独立于空闲检查**：等待用户、休眠、进程重启都会让 `now` 往前跳，
+所以每次准备开始新的一跳，都用当前时间重新算一次"现在 + 停留 + 恢复余量"；
+不够就恢复本轮最初账号，不切入一个已经结束的窗口。
+
 ### 关闭开关 ≠ 只是"别再开新的"
 
 | 动作 | 后续计划 | 当前这一轮 |
@@ -130,6 +134,10 @@ restoring ──► completed / recovery_required / failed
 两者对**当轮**的行为一样，区别只在"明天还跑不跑"。之所以让"关闭"也立刻恢复：
 把客户端留在某个轮换账号上过夜，是这条链路上最坏的结果。
 界面文案与这张表一致（关闭后显示"并把账号恢复到…"，没恢复成功就说没成功）。
+
+**手动发起的一轮不受开关影响**：`rotation_run.trigger`（v28）区分 `scheduled` / `manual`。
+关闭开关只会收尾自动轮次；用户点「立即执行一轮」起来的那一轮有自己的窗口，
+会按停留时长走完再恢复。这个标记存在数据库里，助手重启后仍然有效。
 
 ---
 
@@ -244,7 +252,10 @@ restoring ──► completed / recovery_required / failed
    - 文件不在 → `snapshot_missing`，`recovery_required`；
    - sha 不符 → `snapshot_corrupt`，`recovery_required`（**不删**损坏的快照，留给人工判断）；
    - 客户端当前既不是最初账号、也不是本轮最后切到的账号，且不是登出 → `live_changed`，**不覆盖**；
-5. 恢复失败保持 `recovery_required`，可重试。
+5. 恢复失败保持 `recovery_required`，可重试；
+6. **人工把故障排除后恢复成功**（`restoreOrigin`）会把 `recovery_required` 收口成 `completed`，
+   状态页、历史记录与 `restore_result` 一起更新——`recovery_required` 是"等人处理"，
+   不是"永远结束"。
 
 ---
 
@@ -360,6 +371,9 @@ Fake Clock + Fake Client + 注入式预检与活跃取证，**不联网、不碰
 | `a_pending_run_is_still_finished_when_the_switch_is_already_off` | 开关已关但轮次遗留 → 仍会收尾 |
 | `activity_after_is_recorded_only_after_the_dwell_ends` | 停留结束前不取证 |
 | `two_concurrent_ticks_switch_only_once` | **两个线程**同时 tick，只执行一次 |
+| `a_manual_run_keeps_going_after_the_plan_is_switched_off` | 关闭自动计划后，手动一轮仍走完 B→C→A |
+| `the_window_is_rechecked_after_waiting_for_the_user` | 等待用户后已超窗 → 不切 C，直接恢复 A |
+| `a_successful_manual_restore_reopens_a_recovery_required_run` | 人工恢复成功 → `recovery_required` 收口为 `completed` |
 
 并发：`state` CAS + `open_slot` 唯一索引 + 进程内互斥（单线程 runtime 的线程局部标志）。
 测试里用"连续两次 tick"验证幂等；真正的双进程并发由数据库约束兜底（与 #111/#112 同一套）。
