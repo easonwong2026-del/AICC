@@ -128,7 +128,7 @@ extension ConsoleVisualFixture {
             at: 0
         )
 
-        return [
+        var payload: [String: Any] = [
             "plan": [
                 "enabled": true,
                 "timezone": "Asia/Shanghai",
@@ -162,6 +162,14 @@ extension ConsoleVisualFixture {
                 "supportedTimezones": ["Asia/Shanghai", "UTC"],
             ],
         ]
+        // 真实后端把 `recovery_required` 排除在"活动轮次"之外：恢复失败后
+        // `current` 是 nil，只有 `lastRun` 停在待处理。样本必须一样，
+        // 否则截出来的界面比线上好看。
+        if state == "recovery_required" {
+            payload.removeValue(forKey: "current")
+            payload["lastRun"] = current
+        }
+        return payload
     }
 
     /// 恢复失败的样本：用来渲染"需要你确认"的界面。
@@ -773,6 +781,11 @@ struct ConsoleVisualSmokeMain {
         // 关键状态与弹层
         // 用闭包延迟构造：视图必须在渲染前一刻创建，否则 QA 钩子读到的会是最后一组参数。
         let extras: [(String, () -> AnyView, CGSize, ColorScheme)] = [
+            // 恢复失败落在 lastRun（current 为 nil）时的账号页：警示区与「去处理」必须出现。
+            ("console-accounts-recovery-1120x760-light",
+             { AnyView(consoleView(store: recoveryStore, settings: settings, scheme: .light,
+                                   page: .accounts)) },
+             CGSize(width: 1120, height: 760), .light),
             ("accounts-qoder-detail-1120x760-light",
              { AnyView(consoleView(store: store, settings: settings, scheme: .light,
                                    page: .accounts, account: "qoderService:qsa-cn-1")) },

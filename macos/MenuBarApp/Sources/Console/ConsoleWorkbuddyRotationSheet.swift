@@ -131,12 +131,14 @@ struct ConsoleWorkbuddyRotationSheet: View {
                 get: { status?.plan.enabled ?? false },
                 set: { enabled in
                     Task {
-                        // 有未保存的修改就先落盘；**保存失败必须中止**，
-                        // 否则会用旧配置把计划打开，用户以为开的是刚才改的那份。
-                        if dirty {
-                            guard await save(notify: nil) else { return }
-                        }
-                        await store.setWorkbuddyRotationEnabled(enabled)
+                        // 开启才需要先把表单落盘（否则会用旧配置打开计划）；
+                        // 关闭是独立动作，不能被一个无效表单挡住。
+                        await RotationFeedbackText.applyToggle(
+                            enabled: enabled,
+                            dirty: dirty,
+                            save: { await save(notify: nil) },
+                            setEnabled: { await store.setWorkbuddyRotationEnabled($0) }
+                        )
                     }
                 }
             )) {
@@ -336,7 +338,7 @@ struct ConsoleWorkbuddyRotationSheet: View {
                         .foregroundStyle(ConsoleTheme.danger)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                if let run = status.current, run.needsAttention {
+                if status.attentionRun != nil {
                     Text("自动恢复没有完成。请先确认客户端现在登录的是谁，再决定是否点「恢复最初账号」。")
                         .font(ConsoleType.caption)
                         .foregroundStyle(ConsoleTheme.warning)
@@ -386,6 +388,8 @@ struct ConsoleWorkbuddyRotationSheet: View {
                 .buttonStyle(ConsoleSecondaryButtonStyle())
                 .disabled(store.wbRotationBusy || (status?.current?.isTerminal ?? true))
 
+                // 恢复失败时 `current` 是 nil（后端只把它留在 lastRun），
+                // 所以这里也要认 attentionRun，否则"去处理"进去后按钮是灰的。
                 Button("恢复最初账号…") { confirmRestore = true }
                     .buttonStyle(ConsoleSecondaryButtonStyle())
                     .disabled(store.wbRotationBusy)

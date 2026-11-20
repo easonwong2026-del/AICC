@@ -58,7 +58,11 @@ enum RotationFeedbackText {
     static func stop(status: String, restored: Bool?, detail: String?) -> RotationFeedback {
         switch status {
         case "busy":
+            // 拿不到执行权、也没记下停止请求：这一步什么都没发生。
             return .init("尚未暂停：另一个轮换操作正在执行，请稍后重试。", isFailure: true)
+        case "stop_requested":
+            // 请求已经落库，下一次心跳会照办——可以说"等待收尾"。
+            return .init("已请求暂停；当前操作结束后会自动恢复原账号。")
         case "nothing_to_stop":
             return .init("当前没有正在执行的一轮。")
         default:
@@ -88,6 +92,8 @@ enum RotationFeedbackText {
         switch (stopStatus, restored) {
         case ("busy", _):
             return .init("计划已关闭；当前还有一个轮换操作在执行，结束后会自动恢复原账号。")
+        case ("stop_requested", _):
+            return .init("计划已关闭；已请求停止这一轮，当前操作结束后会自动恢复原账号。")
         case (_, .some(true)):
             return .init("已关闭，并且已恢复原账号。")
         case (_, .some(false)):
@@ -95,6 +101,44 @@ enum RotationFeedbackText {
         default:
             return .init("已关闭，不会再自动切换客户端。")
         }
+    }
+
+    /// 开关的**执行步骤**。视图照着跑，测试照着断言。
+    ///
+    /// 关键一条：**关闭不需要保存表单**。用户可能在编辑一个已经无效的配置
+    /// （星期全空、起止时间相同），这时点关闭是想让它停下来，不能被
+    /// "保存失败" 挡住 —— 旧实现就是这么把关闭请求吞掉的。
+    enum ToggleStep: Equatable {
+        case save
+        case enable
+        case disable
+    }
+
+    static func toggleSteps(enabled: Bool, dirty: Bool) -> [ToggleStep] {
+        guard enabled else { return [.disable] }
+        return dirty ? [.save, .enable] : [.enable]
+    }
+
+    /// 执行开关动作。放在这里而不是视图里，是为了让测试跑的是同一条路径。
+    /// 返回 `false` = 中止（保存失败）。
+    @discardableResult
+    static func applyToggle(
+        enabled: Bool,
+        dirty: Bool,
+        save: () async -> Bool,
+        setEnabled: (Bool) async -> Void
+    ) async -> Bool {
+        for step in toggleSteps(enabled: enabled, dirty: dirty) {
+            switch step {
+            case .save:
+                guard await save() else { return false }
+            case .enable:
+                await setEnabled(true)
+            case .disable:
+                await setEnabled(false)
+            }
+        }
+        return true
     }
 
     /// 表单门禁：有未保存的修改时，预演与立即执行都必须禁用。

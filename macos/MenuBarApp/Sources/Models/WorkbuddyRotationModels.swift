@@ -332,8 +332,20 @@ struct WorkbuddyRotationStatus: Equatable {
         restoreReserveSeconds = (limits["restoreReserveSeconds"] as? NSNumber)?.intValue ?? 300
     }
 
+    /// 需要人处理的那一轮。
+    ///
+    /// 后端把 `recovery_required` 排除在"活动轮次"之外，所以恢复失败时
+    /// `current` 是 nil、只有 `lastRun` 停在待处理。只看 `current` 会让
+    /// 警示区和"去处理"入口一起消失 —— 界面看起来一切正常。
+    var attentionRun: WorkbuddyRotationRun? {
+        if let current, current.needsAttention { return current }
+        if let lastRun, lastRun.needsAttention { return lastRun }
+        return nil
+    }
+
     /// 主界面那一行状态：一句话说清"会不会动、什么时候动"。
     var headline: String {
+        if let attention = attentionRun { return attention.summary }
         if !clientInstalled { return "没找到 WorkBuddy 客户端" }
         if plan.accountIds.isEmpty { return "还没有选择参与轮换的账号" }
         if !plan.enabled { return "已关闭" }

@@ -499,7 +499,7 @@ struct ConsoleAccountsView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Text(rotationNextLine(rotation))
                     .font(ConsoleType.caption)
-                    .foregroundStyle(rotation.current?.needsAttention == true
+                    .foregroundStyle(rotation.attentionRun != nil
                         ? ConsoleTheme.warning
                         : ConsoleTheme.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
@@ -529,12 +529,19 @@ struct ConsoleAccountsView: View {
                 }
             }
 
-            if rotation?.current?.needsAttention == true {
+            if let attention = rotation?.attentionRun {
                 Divider().overlay(ConsoleTheme.border)
                 Text("上一轮没能自动恢复原账号")
                     .font(ConsoleType.caption)
                     .foregroundStyle(ConsoleTheme.warning)
                     .fixedSize(horizontal: false, vertical: true)
+                if let detail = attention.detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(ConsoleType.caption)
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 HStack(spacing: 8) {
                     Spacer(minLength: 0)
                     Button("去处理…") { rotationSheetShown = true }

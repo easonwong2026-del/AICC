@@ -148,4 +148,28 @@ final class WorkbuddyRotationModelsTests: XCTestCase {
         XCTAssertTrue(dry.steps[2].summary.contains("已经登录"))
         XCTAssertEqual(dry.warnings.count, 1)
     }
+
+    /// 恢复失败时后端把这一轮排除在 `current` 之外，只有 `lastRun` 停在待处理。
+    /// 界面必须靠 `attentionRun` 同时认这两个位置，否则警示区和入口会一起消失。
+    func testRecoveryInLastRunStillNeedsAttention() {
+        let status = WorkbuddyRotationStatus(json: [
+            "plan": ["enabled": true, "accountIds": ["a"]],
+            "lastRun": [
+                "id": "r1",
+                "state": "recovery_required",
+                "detail": "已写回快照，但客户端当前登录是别人",
+                "restoreResult": "restore_failed",
+            ],
+        ])
+
+        XCTAssertNil(status.current, "后端不把 recovery_required 算作活动轮次")
+        XCTAssertEqual(status.attentionRun?.id, "r1")
+        XCTAssertEqual(status.headline, "已写回快照，但客户端当前登录是别人")
+
+        let healthy = WorkbuddyRotationStatus(json: [
+            "plan": ["enabled": true, "accountIds": ["a"]],
+            "lastRun": ["id": "r2", "state": "completed", "restoreResult": "restored"],
+        ])
+        XCTAssertNil(healthy.attentionRun, "正常收尾不该报异常")
+    }
 }

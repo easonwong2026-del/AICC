@@ -75,4 +75,78 @@ final class WorkbuddyRotationFeedbackTests: XCTestCase {
         XCTAssertFalse(RotationFeedbackText.shouldApplyEnableAfterSave(saveSucceeded: false))
         XCTAssertTrue(RotationFeedbackText.shouldApplyEnableAfterSave(saveSucceeded: true))
     }
+
+    /// 关闭是一个独立动作：哪怕表单已经无效、保存会失败，也必须把关闭发出去。
+    /// 这条跑的是视图用的同一个 `applyToggle`，不是布尔辅助函数。
+    func testClosingSendsTheRequestEvenWhenTheFormIsInvalid() async {
+        var saves = 0
+        var enableCalls: [Bool] = []
+
+        let finished = await RotationFeedbackText.applyToggle(
+            enabled: false,
+            dirty: true,
+            save: {
+                saves += 1
+                return false // 后端会拒绝（星期全空 / 起止相同）
+            },
+            setEnabled: { enableCalls.append($0) }
+        )
+
+        XCTAssertTrue(finished)
+        XCTAssertEqual(saves, 0, "关闭不该先去保存一个无效表单")
+        XCTAssertEqual(enableCalls, [false], "关闭请求必须真的发出去")
+    }
+
+    /// 开启时保存失败：不能继续打开，否则等于用旧配置开计划。
+    func testEnablingWithAFailedSaveNeverTurnsThePlanOn() async {
+        var saves = 0
+        var enableCalls: [Bool] = []
+
+        let finished = await RotationFeedbackText.applyToggle(
+            enabled: true,
+            dirty: true,
+            save: {
+                saves += 1
+                return false
+            },
+            setEnabled: { enableCalls.append($0) }
+        )
+
+        XCTAssertFalse(finished)
+        XCTAssertEqual(saves, 1)
+        XCTAssertTrue(enableCalls.isEmpty, "保存失败后不能发开启请求")
+    }
+
+    func testEnablingWithoutEditsSkipsTheSave() async {
+        var saves = 0
+        var enableCalls: [Bool] = []
+
+        _ = await RotationFeedbackText.applyToggle(
+            enabled: true,
+            dirty: false,
+            save: {
+                saves += 1
+                return true
+            },
+            setEnabled: { enableCalls.append($0) }
+        )
+
+        XCTAssertEqual(saves, 0)
+        XCTAssertEqual(enableCalls, [true])
+    }
+
+    /// 停止请求已落库（stop_requested）才可以说"等待收尾"；busy 仍是"尚未暂停"。
+    func testStopRequestedVersusBusy() {
+        let requested = RotationFeedbackText.stop(status: "stop_requested", restored: nil, detail: nil)
+        XCTAssertFalse(requested.isFailure)
+        XCTAssertTrue(requested.text.contains("已请求暂停"), requested.text)
+
+        let busy = RotationFeedbackText.stop(status: "busy", restored: nil, detail: nil)
+        XCTAssertTrue(busy.isFailure)
+        XCTAssertTrue(busy.text.contains("尚未暂停"), busy.text)
+
+        let off = RotationFeedbackText.toggle(enabled: false, stopStatus: "stop_requested", restored: nil)
+        XCTAssertTrue(off.text.contains("计划已关闭"), off.text)
+        XCTAssertTrue(off.text.contains("已请求停止"), off.text)
+    }
 }
