@@ -5,6 +5,17 @@
 //! 备份 → 关客户端 → 写认证 → 起客户端 → **回读确认客户端真的用上了**；
 //! 任何一步失败都按备份逐字节还原，并把结果如实报给调用方。
 //!
+//! ## 两种授权，两种生命周期
+//!
+//! | 模式 | 写进客户端的令牌 | 谁续期 | 结束条件 |
+//! | --- | --- | --- | --- |
+//! | [`plan::Mode::OwnRefresh`] | 自有 access + refresh | WorkBuddy 自己刷新 | 用户退出或切走 |
+//! | [`plan::Mode::MagpieTemporary`] | **只有** Magpie 的 access | 没人续期 | access 过期 |
+//!
+//! 临时模式不碰 Magpie 的 refresh（那是它的凭据），所以必然过期。因此：
+//! 切换前按 Magpie 文件里的 `expires` 算剩余时间，不够就拒绝；切换成功后
+//! `restore_state` 一直是 `pending`，界面必须持续提供「恢复原账号」，直到用户真的恢复。
+//!
 //! ## 为什么 AICC 要自己做回滚
 //!
 //! 上游 `switch_account` 的顺序是「关进程 → 写认证 → 启动」，写认证或启动失败时
@@ -18,13 +29,10 @@
 //! 查询接口优先用哪份授权，都**不能**代替这个状态。所以 [`status`] 的 `live.uid`
 //! 是唯一可信来源，界面上那句"当前登录：X"必须用它。
 //!
-//! ## 已知边界（写进 `docs/WORKBUDDY_CLIENT_SWITCH.md`）
+//! ## 客户端成功 ≠ 服务端接受
 //!
-//! - **只有同时持有 access + refresh 的账号可切换**。Magpie 来源只有 access，
-//!   写进去之后客户端没有可用来续期的凭据，过期即掉线 —— 所以先禁用，等实测。
-//! - 只支持国内版。国际版的认证文件与客户端行为都没有实测证据。
-//! - 写出去的是**明文令牌**（AICC 自有 OAuth 拿到的就是明文），客户端启动后会
-//!   自己重新封装。是否被接受由 [`verify`] 回读判断，不靠假设。
+//! 回读只能证明"客户端把文件读进去并停在这个 UID"。令牌是否被服务端接受是另一件事，
+//! 由一次只读探针单独记录（`authAccepted`）。没有证据时如实返回 `unknown`。
 
 use std::path::{Path, PathBuf};
 
@@ -32,33 +40,22 @@ use serde_json::{json, Map, Value};
 use wb_switch_core::modules::auth_file;
 
 use crate::app::App;
+use crate::auth::probe::{self, Probe};
 use crate::auth::service as auth_service;
+use crate::providers::magpie;
 use crate::rpc::{RpcError, RpcResult};
 use crate::storage::wb_switch::{
     NewSwitchJournal, SwitchJournal, PHASE_FAILED, PHASE_LAUNCHED, PHASE_RESTORED,
-    PHASE_UNCONFIRMED, PHASE_VERIFIED, PHASE_WRITTEN,
+    PHASE_UNCONFIRMED, PHASE_VERIFIED, PHASE_WRITTEN, RESTORE_DONE,
 };
 use crate::storage::AccountRecord;
 
 use super::client::{self, ClientControl};
+use super::plan::{self, Mode, Plan, PlanOutcome};
 
 /// 关客户端 / 恢复时各自允许的等待。
 const CLOSE_TIMEOUT_SECS: i64 = 20;
 const ROLLBACK_CLOSE_SECS: i64 = 15;
-
-/// 切换目标不可用的稳定分类。界面按这个显示原因，不要解析中文。
-pub mod reason {
-    pub const OK: &str = "ok";
-    /// 客户端当前登录的就是它。
-    pub const LIVE: &str = "live";
-    pub const UNSUPPORTED_PROVIDER: &str = "unsupported_provider";
-    pub const CLIENT_NOT_INSTALLED: &str = "client_not_installed";
-    pub const NO_CREDENTIAL: &str = "no_credential";
-    /// 自有授权里没有 refresh。
-    pub const MISSING_REFRESH: &str = "missing_refresh";
-    /// 只有 Magpie 那份授权，天然没有 refresh。
-    pub const MAGPIE_NO_REFRESH: &str = "magpie_no_refresh";
-}
 
 /// 路径注入点：生产用系统真实路径，测试用临时目录。
 #[derive(Debug, Clone)]
@@ -82,50 +79,36 @@ pub struct SwitchRequest {
     pub account_id: String,
     pub restart: bool,
     pub observe_activity: bool,
+    /// 切换后用只读探针确认服务端是否接受这份 access。失败不影响切换结论。
+    pub verify_server: bool,
 }
 
-/// 写进客户端的材料。`access` / `refresh` 用 `Value`：AICC 目前只会拿到明文串，
-/// 但上游也支持原样回写信封，这里不为将来设限。
+/// 写进客户端的凭据。**两种模式的差别就在这里**。
+pub enum TargetCredential {
+    /// 自有授权：access + refresh，客户端会自己续期。
+    OwnRefresh { access: String, refresh: String },
+    /// Magpie：只有 access。**不碰 refresh**，也因此必然过期。
+    MagpieAccess { access: String },
+}
+
+impl TargetCredential {
+    fn access(&self) -> &str {
+        match self {
+            Self::OwnRefresh { access, .. } | Self::MagpieAccess { access } => access,
+        }
+    }
+}
+
+/// 写进客户端的材料。
 pub struct TargetSession {
     pub uid: String,
     pub nickname: Value,
-    pub access: Value,
-    pub refresh: Value,
     pub domain: String,
     pub expires_at_ms: Option<i64>,
+    pub credential: TargetCredential,
 }
 
-/// 这个账号能不能切，以及为什么不能。纯读库，**不读令牌**（读令牌会弹钥匙串授权）。
-pub fn plan(
-    app: &App,
-    account: &AccountRecord,
-    live_uid: Option<&str>,
-    installed: bool,
-) -> (bool, &'static str) {
-    if account.platform != "workbuddy" || account.provider != "workbuddy" {
-        return (false, reason::UNSUPPORTED_PROVIDER);
-    }
-    if live_uid == Some(account.uid.as_str()) {
-        return (false, reason::LIVE);
-    }
-    if !installed {
-        return (false, reason::CLIENT_NOT_INSTALLED);
-    }
-    let rows = match app.with_db(|db| db.list_authorizations(&account.id)) {
-        Ok(rows) => rows,
-        Err(_) => return (false, reason::NO_CREDENTIAL),
-    };
-    let own = rows.iter().find(|row| row.kind == "own");
-    match own {
-        // 有自有授权但缺 refresh：登录材料不完整，写进去只能撑到 access 过期。
-        Some(row) if row.refresh_ref.is_none() => (false, reason::MISSING_REFRESH),
-        Some(_) => (true, reason::OK),
-        None if rows.iter().any(|row| row.kind == "magpie") => (false, reason::MAGPIE_NO_REFRESH),
-        None => (false, reason::NO_CREDENTIAL),
-    }
-}
-
-/// 整体状态：客户端、当前登录、每个账号能不能切、有没有未完成的切换。
+/// 整体状态：客户端、当前登录、每个账号能不能切、有没有未完成的切换、有没有待还原的临时登录。
 pub fn status(app: &App, control: &dyn ClientControl, env: &SwitchEnv) -> RpcResult<Value> {
     let installed = control.installed();
     let running = installed.then(|| control.is_running());
@@ -137,20 +120,44 @@ pub fn status(app: &App, control: &dyn ClientControl, env: &SwitchEnv) -> RpcRes
         if account.platform != "workbuddy" {
             continue;
         }
-        let (switchable, why) = plan(app, account, live.uid.as_deref(), installed);
+        let (switchable, reason, detail, mode, access_expires_at_ms, remaining) =
+            match plan::resolve(app, account, installed, live.uid.as_deref()) {
+                PlanOutcome::Ready(plan) => (
+                    true,
+                    plan::reason::OK,
+                    plan.degraded.clone().unwrap_or_default(),
+                    plan.mode.as_str(),
+                    plan.access_expires_at_ms,
+                    plan.remaining_secs,
+                ),
+                PlanOutcome::Blocked { reason, detail } => (false, reason, detail, "", None, None),
+            };
         candidates.push(json!({
             "accountId": account.id,
             "uid": account.uid,
             "nickname": account.nickname,
             "provider": account.provider,
             "switchable": switchable,
-            "reason": why,
+            "reason": reason,
+            "reasonDetail": detail,
+            // `own_refresh` / `magpie_access_temporary`；不可切时是空串。
+            "mode": mode,
+            "temporary": mode == Mode::MagpieTemporary.as_str(),
+            "accessExpiresAt": access_expires_at_ms.map(ms_to_rfc3339),
+            "remainingSeconds": remaining,
         }));
     }
 
     let open = app.with_db(|db| db.open_wb_switch())?;
     let latest = app.with_db(|db| db.latest_wb_switch())?;
     let recent = app.with_db(|db| db.wb_switch_journals(5))?;
+    let temporary_restore = app.with_db(|db| db.pending_temporary_restore())?;
+
+    // 临时登录是否正作用在当前登录账号上：是的话界面要标"临时登录"，并且一直给恢复入口。
+    let live_temporary = temporary_restore
+        .as_ref()
+        .filter(|journal| live.uid.as_deref() == Some(journal.target_uid.as_str()));
+    let restore_available = open.is_some() || temporary_restore.is_some();
 
     Ok(json!({
         "ok": true,
@@ -166,8 +173,6 @@ pub fn status(app: &App, control: &dyn ClientControl, env: &SwitchEnv) -> RpcRes
         "live": {
             "uid": live.uid,
             "loggedIn": live.logged_in(),
-            // 令牌形态只是诊断信息：`plaintext` 说明上一次切换写的是明文，
-            // 客户端还没重新封装。
             "tokenForm": live.token_form,
             "tokenFingerprint": live.token_fingerprint,
             "accountsInFile": live.accounts_len,
@@ -175,15 +180,27 @@ pub fn status(app: &App, control: &dyn ClientControl, env: &SwitchEnv) -> RpcRes
             "modifiedAtMs": live.modified_ms,
             "sha256": live.sha256,
             "error": live.parse_error,
+            // 当前这份登录是临时借来的：界面必须显示到期时间与"恢复原账号"。
+            "temporary": live_temporary.is_some(),
+            "temporaryAccountId": live_temporary.map(|journal| journal.target_account_id.clone()),
+            "accessExpiresAt": live_temporary
+                .and_then(|journal| journal.access_expires_at.clone()),
+            "remainingSeconds": live_temporary
+                .and_then(|journal| remaining_seconds(journal.access_expires_at.as_deref())),
+            // 建议最晚什么时候恢复：到期前留出安全余量。
+            "safeRestoreUntil": live_temporary
+                .and_then(|journal| safe_restore_at(journal.access_expires_at.as_deref())),
         },
         "candidates": candidates,
         "pendingSwitch": open,
+        "temporaryRestore": temporary_restore,
+        "restoreAvailable": restore_available,
         "lastSwitch": latest,
         "recent": recent,
     }))
 }
 
-/// 切换。成功返回 `{ok:true, changed:true, verified:…, journalId:…, activityBefore/After}`；
+/// 切换。成功返回 `{ok:true, changed:true, verified:…, journalId:…}`；
 /// 失败返回错误，`data` 里带 `restored` —— 界面必须把这两个状态分开显示。
 pub async fn switch(
     app: &App,
@@ -203,35 +220,6 @@ pub async fn switch(
     if account.platform != "workbuddy" {
         return Err(RpcError::invalid_params("目前只支持 WorkBuddy 账号切换"));
     }
-    if account.provider != "workbuddy" {
-        return Err(RpcError::invalid_params(
-            "WorkBuddy AI（国际版）的客户端切换尚未接通，AICC 没有改动任何文件",
-        ));
-    }
-    if !control.installed() {
-        return Err(
-            RpcError::not_found("未找到 WorkBuddy 客户端，无法切换").with_data(json!({
-                "kind": reason::CLIENT_NOT_INSTALLED,
-            })),
-        );
-    }
-
-    let rows = app.with_db(|db| db.list_authorizations(&account.id))?;
-    let own = rows.iter().find(|row| row.kind == "own").ok_or_else(|| {
-        let why = plan(app, &account, None, true).1;
-        RpcError::new(
-            crate::rpc::E_AUTH,
-            "该账号没有 AICC 自有授权，不能用于客户端切换",
-        )
-        .with_data(json!({ "kind": why }))
-    })?;
-    if own.refresh_ref.is_none() {
-        return Err(RpcError::new(
-            crate::rpc::E_AUTH,
-            "该授权只有访问令牌、没有刷新令牌，切过去之后无法续期；请用浏览器登录重新授权",
-        )
-        .with_data(json!({ "kind": reason::MISSING_REFRESH })));
-    }
 
     // 未完成的切换必须先处理：否则"当前登录"到底该还原到哪一份就说不清了。
     if app.with_db(|db| db.open_wb_switch())?.is_some() {
@@ -243,16 +231,35 @@ pub async fn switch(
     }
 
     let before = client::read_live(&env.auth_path);
-    if before.uid.as_deref() == Some(account.uid.as_str()) && !before.logout_marker {
-        return Ok(json!({
-            "ok": true,
-            "changed": false,
-            "alreadyLive": true,
-            "target": { "accountId": account.id, "uid": account.uid, "nickname": account.nickname },
-        }));
-    }
+    let outcome = plan::resolve(app, &account, control.installed(), before.uid.as_deref());
 
-    let target = target_session(app, &account, before.json.as_ref())?;
+    // 「客户端已经登录的就是它」不是错误：界面按 `changed:false` 处理。
+    if let PlanOutcome::Blocked { reason, .. } = &outcome {
+        if *reason == plan::reason::LIVE && before.logged_in() {
+            return Ok(json!({
+                "ok": true,
+                "changed": false,
+                "alreadyLive": true,
+                "target": { "accountId": account.id, "uid": account.uid, "nickname": account.nickname },
+            }));
+        }
+    }
+    let plan = match outcome {
+        PlanOutcome::Ready(plan) => plan,
+        PlanOutcome::Blocked { reason, detail } => {
+            let code = if reason == plan::reason::NO_CREDENTIAL
+                || reason == plan::reason::MISSING_REFRESH
+                || reason.starts_with("magpie_")
+            {
+                crate::rpc::E_AUTH
+            } else {
+                crate::rpc::E_SWITCH
+            };
+            return Err(RpcError::new(code, detail).with_data(json!({ "kind": reason })));
+        }
+    };
+
+    let target = target_session(app, &account, &plan, before.json.as_ref())?;
 
     // 活跃取证放在关客户端之前：它要联网，客户端这时还能正常用。
     let activity_before = if request.observe_activity {
@@ -261,7 +268,15 @@ pub async fn switch(
         None
     };
 
-    let outcome = apply(app, &account, &target, control, env)?;
+    let applied = apply(app, &account, &plan, &target, control, env)?;
+
+    let auth_accepted = if request.verify_server {
+        let outcome = probe_server(&account, target.credential.access(), &target.domain).await;
+        let _ = app.with_db(|db| db.set_switch_auth_accepted(&applied.journal_id, &outcome.0));
+        Some(outcome)
+    } else {
+        None
+    };
 
     let activity_after = if request.observe_activity {
         Some(activity_snapshot(app, &account.id).await)
@@ -271,36 +286,49 @@ pub async fn switch(
     if activity_before.is_some() || activity_after.is_some() {
         let _ = app.with_db(|db| {
             db.set_wb_switch_activity(
-                &outcome.journal_id,
+                &applied.journal_id,
                 activity_before.as_ref(),
                 activity_after.as_ref(),
             )
         });
     }
 
+    // 新的一次切换已经成功，更早的临时记录就此结算：
+    // 「恢复原账号」永远指"回到最近一次切换之前那一站"，不会攒出一堆待还原条目。
+    let _ = app.with_db(|db| db.settle_pending_temporary_except(&applied.journal_id));
+
     log_note(&format!(
-        "WorkBuddy 账号切换：{} → {}，phase={}",
-        outcome.previous_uid.as_deref().unwrap_or("—"),
+        "WorkBuddy 账号切换：{} → {}（{}），phase={}",
+        applied.previous_uid.as_deref().unwrap_or("—"),
         account.uid,
-        outcome.phase
+        plan.mode.as_str(),
+        applied.phase
     ));
 
     Ok(json!({
         "ok": true,
         "changed": true,
-        "journalId": outcome.journal_id,
-        "phase": outcome.phase,
-        "verified": outcome.verified,
-        "verifyDetail": outcome.verify_detail,
-        "clientRunning": outcome.running,
-        "clientRewroteFile": outcome.client_rewrote,
+        "journalId": applied.journal_id,
+        "phase": applied.phase,
+        "verified": applied.verified,
+        "verifyDetail": applied.verify_detail,
+        "clientRunning": applied.running,
+        "clientRewroteFile": applied.client_rewrote,
+        "mode": plan.mode.as_str(),
+        "temporary": plan.temporary(),
+        "accessExpiresAt": plan.access_expires_at_ms.map(ms_to_rfc3339),
+        "remainingSeconds": plan.remaining_secs,
+        "safeRestoreUntil": plan.safe_restore_until_ms.map(ms_to_rfc3339),
+        // 客户端层面已确认；服务端层面对这份 access 的结论单独给。
+        "authAccepted": auth_accepted.as_ref().map(|(state, _)| state.clone()).unwrap_or_else(|| "unknown".to_string()),
+        "authAcceptedDetail": auth_accepted.and_then(|(_, detail)| detail),
         "target": {
             "accountId": account.id,
             "uid": account.uid,
             "nickname": account.nickname,
         },
-        "previousUid": outcome.previous_uid,
-        "snapshotSha256": outcome.snapshot_sha,
+        "previousUid": applied.previous_uid,
+        "snapshotSha256": applied.snapshot_sha,
         "activityBefore": activity_before,
         "activityAfter": activity_after,
     }))
@@ -322,6 +350,7 @@ struct ApplyOutcome {
 fn apply(
     app: &App,
     account: &AccountRecord,
+    plan: &Plan,
     target: &TargetSession,
     control: &dyn ClientControl,
     env: &SwitchEnv,
@@ -384,6 +413,8 @@ fn apply(
         )));
     }
 
+    let access_fingerprint = crate::securestore::fingerprint(target.credential.access().as_bytes());
+    let access_expires_at = plan.access_expires_at_ms.map(ms_to_rfc3339);
     let opened = app.with_db(|db| {
         db.begin_wb_switch(&NewSwitchJournal {
             id: &journal_id,
@@ -395,6 +426,15 @@ fn apply(
             snapshot_path: &snapshot_path.to_string_lossy(),
             snapshot_sha256: &snapshot_sha,
             token_form: Some("plaintext"),
+            auth_source: if plan.mode == Mode::OwnRefresh {
+                "own"
+            } else {
+                "magpie"
+            },
+            temporary: plan.temporary(),
+            access_expires_at: access_expires_at.as_deref(),
+            access_fingerprint: Some(&access_fingerprint),
+            source_key: plan.source_key.as_deref(),
         })
     });
     if let Err(err) = opened {
@@ -492,10 +532,14 @@ fn apply(
 
 /// 恢复：把某一轮切换之前的登录态放回去（自动回滚也是走这套）。
 ///
-/// 不带 `journal_id` 时按"未完成 → 最近一次成功的切换"顺序挑一条。
+/// 不带 `journal_id` 时按「未完成的切换 → 待还原的临时登录 → 最近一次成功切换」挑一条。
+///
+/// `force` 只影响一件事：当前客户端登录的既不是目标账号、也不是原账号（用户手动换过），
+/// 默认拒绝，避免静默覆盖用户的新登录态；界面确认后可以 `force=true` 再调一次。
 pub fn restore(
     app: &App,
     journal_id: Option<&str>,
+    force: bool,
     control: &dyn ClientControl,
     env: &SwitchEnv,
 ) -> RpcResult<Value> {
@@ -503,33 +547,42 @@ pub fn restore(
         Some(id) => app
             .with_db(|db| db.wb_switch_journal(id))?
             .ok_or_else(|| RpcError::not_found(format!("切换记录不存在：{id}")))?,
-        None => match app.with_db(|db| db.open_wb_switch())? {
-            Some(open) => open,
+        None => match pick_restorable(app)? {
+            Some(row) => row,
             None => {
-                let recent = app.with_db(|db| db.wb_switch_journals(10))?;
-                match recent.into_iter().find(|row| {
-                    row.previous_uid.is_some()
-                        && matches!(
-                            row.phase.as_str(),
-                            PHASE_VERIFIED | PHASE_UNCONFIRMED | PHASE_FAILED
-                        )
-                }) {
-                    Some(row) => row,
-                    None => {
-                        return Ok(json!({
-                            "ok": true,
-                            "restored": false,
-                            "reason": "nothing_to_restore",
-                            "message": "没有可恢复的切换记录",
-                        }))
-                    }
-                }
+                return Ok(json!({
+                    "ok": true,
+                    "restored": false,
+                    "reason": "nothing_to_restore",
+                    "message": "没有可恢复的切换记录",
+                }))
             }
         },
     };
 
     let previous_uid = journal.previous_uid.clone();
     let snapshot = read_snapshot(&journal)?;
+
+    // 用户手动换了别的账号：默认不动，交回去让界面确认。
+    let live = client::read_live(&env.auth_path);
+    if !force && live.logged_in() && live.uid.as_deref() != Some(journal.target_uid.as_str()) {
+        return Err(RpcError::new(
+            crate::rpc::E_SWITCH,
+            format!(
+                "客户端当前登录的是 {}，不是这一轮切换的目标账号；恢复会覆盖它，需要确认",
+                live.uid
+                    .as_deref()
+                    .map(|uid| format!("「{}」", short_uid(uid)))
+                    .unwrap_or_else(|| "另一个账号".to_string())
+            ),
+        )
+        .with_data(json!({
+            "kind": plan::reason::LIVE_CHANGED,
+            "journalId": journal.id,
+            "currentUid": live.uid,
+            "targetUid": journal.target_uid,
+        })));
+    }
 
     let running = control.is_running();
     if running {
@@ -565,7 +618,12 @@ pub fn restore(
             &journal.id,
             if ok { PHASE_RESTORED } else { PHASE_FAILED },
             Some(&detail),
-        )
+        )?;
+        // 恢复成功就把"临时登录"这件事收掉；失败则保持 pending，允许再试。
+        if ok {
+            db.set_restore_state(&journal.id, RESTORE_DONE)?;
+        }
+        Ok(())
     })?;
     log_note(&format!(
         "WorkBuddy 账号恢复：journal={}，uid={}，ok={ok}",
@@ -585,9 +643,24 @@ pub fn restore(
     }))
 }
 
-// ---------------------------------------------------------------------------
-// 内部
-// ---------------------------------------------------------------------------
+/// 没指定 journal 时挑一条：未完成切换优先，其次待还原的临时登录，最后是最近一次成功切换。
+fn pick_restorable(app: &App) -> RpcResult<Option<SwitchJournal>> {
+    if let Some(open) = app.with_db(|db| db.open_wb_switch())? {
+        return Ok(Some(open));
+    }
+    if let Some(temporary) = app.with_db(|db| db.pending_temporary_restore())? {
+        return Ok(Some(temporary));
+    }
+    let recent = app.with_db(|db| db.wb_switch_journals(10))?;
+    Ok(recent.into_iter().find(|row| {
+        row.previous_uid.is_some()
+            && matches!(
+                row.phase.as_str(),
+                PHASE_VERIFIED | PHASE_UNCONFIRMED | PHASE_FAILED
+            )
+            && row.restore_state != RESTORE_DONE
+    }))
+}
 
 struct Verdict {
     confirmed: bool,
@@ -773,25 +846,14 @@ fn apply_marker(auth_path: &Path, present: bool) {
 }
 
 /// 取出目标账号的登录材料。只走 `own` 授权：Magpie 那份天然没有 refresh。
+
+/// 取出目标账号的登录材料。**Magpie 模式现读文件**，不用数据库里的旧值。
 fn target_session(
     app: &App,
     account: &AccountRecord,
+    plan: &Plan,
     existing: Option<&Value>,
 ) -> RpcResult<TargetSession> {
-    let access = auth_service::read_access(app, account, "own")?
-        .filter(|token| !token.trim().is_empty())
-        .ok_or_else(|| {
-            RpcError::new(crate::rpc::E_AUTH, "读取自有授权失败：没有访问令牌")
-                .with_data(json!({ "kind": reason::NO_CREDENTIAL }))
-        })?;
-    let refresh = auth_service::read_own_refresh(app, account)?
-        .filter(|token| !token.trim().is_empty())
-        .ok_or_else(|| {
-            RpcError::new(crate::rpc::E_AUTH, "读取自有授权失败：没有刷新令牌")
-                .with_data(json!({ "kind": reason::MISSING_REFRESH }))
-        })?;
-
-    // 昵称优先沿用客户端自己那份（可能是信封，解开才有值；不要用明文覆盖）。
     let nickname = existing
         .and_then(|root| client::find_account_entry(root, &account.uid))
         .and_then(|entry| entry.get("nickname").cloned())
@@ -813,26 +875,91 @@ fn target_session(
                 .to_string()
         });
 
-    let expires_at_ms = account
-        .token_expires_at
-        .as_deref()
-        .and_then(auth_service::parse_rfc3339)
-        .map(|time| time.timestamp_millis());
+    match plan.mode {
+        Mode::OwnRefresh => {
+            let access = auth_service::read_access(app, account, "own")?
+                .filter(|token| !token.trim().is_empty())
+                .ok_or_else(|| {
+                    RpcError::new(crate::rpc::E_AUTH, "读取自有授权失败：没有访问令牌")
+                        .with_data(json!({ "kind": plan::reason::NO_CREDENTIAL }))
+                })?;
+            let refresh = auth_service::read_own_refresh(app, account)?
+                .filter(|token| !token.trim().is_empty())
+                .ok_or_else(|| {
+                    RpcError::new(crate::rpc::E_AUTH, "读取自有授权失败：没有刷新令牌")
+                        .with_data(json!({ "kind": plan::reason::MISSING_REFRESH }))
+                })?;
+            let expires_at_ms = account
+                .token_expires_at
+                .as_deref()
+                .and_then(auth_service::parse_rfc3339)
+                .map(|time| time.timestamp_millis())
+                .or(plan.access_expires_at_ms);
+            Ok(TargetSession {
+                uid: account.uid.clone(),
+                nickname,
+                domain,
+                expires_at_ms,
+                credential: TargetCredential::OwnRefresh { access, refresh },
+            })
+        }
+        Mode::MagpieTemporary => {
+            // 现读一次：计划阶段到真正写文件之间，Magpie 可能已经刷新或退登。
+            let (access, expires_at_ms) = magpie_access_now(account, plan)?;
+            Ok(TargetSession {
+                uid: account.uid.clone(),
+                nickname,
+                domain,
+                expires_at_ms: Some(expires_at_ms),
+                credential: TargetCredential::MagpieAccess { access },
+            })
+        }
+    }
+}
 
-    Ok(TargetSession {
-        uid: account.uid.clone(),
-        nickname,
-        access: Value::String(access),
-        refresh: Value::String(refresh),
-        domain,
-        expires_at_ms,
-    })
+/// 现读 Magpie 文件，拿 access 与到期时间。**不读 refresh**。
+fn magpie_access_now(account: &AccountRecord, plan: &Plan) -> RpcResult<(String, i64)> {
+    let source_key = plan.source_key.clone().ok_or_else(|| {
+        RpcError::new(crate::rpc::E_AUTH, "这条 Magpie 授权没有来源键")
+            .with_data(json!({ "kind": plan::reason::MAGPIE_SOURCE_MISSING }))
+    })?;
+    let logins = magpie::read_logins().map_err(|err| {
+        RpcError::new(
+            crate::rpc::E_AUTH,
+            format!(
+                "Magpie 登录态不可读（{}）",
+                crate::rpc::sanitize(&err.message())
+            ),
+        )
+        .with_data(json!({ "kind": plan::reason::MAGPIE_UNAVAILABLE }))
+    })?;
+    let login =
+        crate::auth::magpie_link::find_link(&logins, account, &source_key, Some(magpie::now_ms()))
+            .map_err(|problem| {
+                RpcError::new(
+                    crate::rpc::E_AUTH,
+                    format!("Magpie 关联不可用：{}", problem.as_str()),
+                )
+                .with_data(json!({ "kind": problem.as_str() }))
+            })?;
+    if login.access_token.trim().is_empty() {
+        return Err(RpcError::new(crate::rpc::E_AUTH, "Magpie 访问令牌是空的")
+            .with_data(json!({ "kind": plan::reason::MAGPIE_ACCESS_EMPTY })));
+    }
+    let expires_at = login.expires_at_ms.ok_or_else(|| {
+        RpcError::new(crate::rpc::E_AUTH, "Magpie 没有提供访问令牌的有效期")
+            .with_data(json!({ "kind": plan::reason::MAGPIE_EXPIRY_UNKNOWN }))
+    })?;
+    Ok((login.access_token.clone(), expires_at))
 }
 
 /// 生成写进客户端的完整 JSON。**沿用客户端已有的结构**，只替换认证与当前账号。
 ///
 /// 复用的意义：客户端里的账号对象带着 `uin` / `avatarUrl` / `uniqueUserId` /
 /// 昵称信封等字段，凭 AICC 库里那点信息重建只会得到一个缺字段的账号。
+///
+/// 自有授权走上游的 `build_auth_obj`（access + refresh）；Magpie 临时授权走
+/// [`build_access_only_auth`]，**绝不把上一账号的 refresh 留给目标账号**。
 pub fn build_session(existing: Option<&Value>, target: &TargetSession) -> Value {
     let mut root: Map<String, Value> = existing
         .and_then(Value::as_object)
@@ -854,12 +981,16 @@ pub fn build_session(existing: Option<&Value>, target: &TargetSession) -> Value 
     let mut acc = json!({
         "uid": target.uid,
         "nickname": target.nickname,
-        "access_token": target.access,
-        "refresh_token": target.refresh,
         "token_type": "Bearer",
         "domain": target.domain,
         "profile_raw": Value::Object(profile),
     });
+    if let TargetCredential::OwnRefresh { access, refresh } = &target.credential {
+        acc["access_token"] = json!(access);
+        acc["refresh_token"] = json!(refresh);
+    } else {
+        acc["access_token"] = json!(target.credential.access());
+    }
     if let Some(expires_at) = target.expires_at_ms {
         acc["expiresAt"] = json!(expires_at);
     }
@@ -869,7 +1000,12 @@ pub fn build_session(existing: Option<&Value>, target: &TargetSession) -> Value 
         // `build_account_obj` 只在缺失时补 `lastLogin`：旧列表项是 false 时要盖掉。
         map.insert("lastLogin".to_string(), Value::Bool(true));
     }
-    let auth_obj = auth_file::build_auth_obj(&acc);
+    let auth_obj = match &target.credential {
+        TargetCredential::OwnRefresh { .. } => auth_file::build_auth_obj(&acc),
+        TargetCredential::MagpieAccess { .. } => {
+            build_access_only_auth(&acc["access_token"], &target.domain, target.expires_at_ms)
+        }
+    };
 
     let mut all: Vec<Value> = existing_list
         .into_iter()
@@ -884,7 +1020,39 @@ pub fn build_session(existing: Option<&Value>, target: &TargetSession) -> Value 
     Value::Object(root)
 }
 
-/// 目标账号的服务端活跃快照（只读）。失败只记一句原因，绝不影响切换本身。
+/// Access-only 的 `auth` 段：**只有 access，没有任何 refresh 字段**。
+///
+/// 刻意不用 `build_auth_obj`：它在缺 refresh 时会写一个空串 `refreshToken`
+/// 并补 `refreshExpiresAt`，那是"没有刷新令牌"和"刷新令牌是空"两件不同的事。
+/// 对一个只借来 access 的临时登录，写空 refresh 会让客户端去做一次必然失败的刷新，
+/// 更糟的是让人误以为这份登录可以续期。
+///
+/// 已知风险（`docs/WORKBUDDY_CLIENT_SWITCH.md` §8）：客户端遇到"没有 refreshToken"
+/// 会怎么处理**没有实测证据**。保守预期是"用到 access 过期为止"，到期后可能被登出。
+/// 所以临时模式必须配合 `restore_state=pending` 与到期提醒，不能当成长期登录。
+pub fn build_access_only_auth(access: &Value, domain: &str, expires_at_ms: Option<i64>) -> Value {
+    let now = wb_switch_core::modules::config::now_ms();
+    let mut auth = Map::new();
+    auth.insert("accessToken".to_string(), access.clone());
+    auth.insert("tokenType".to_string(), json!("Bearer"));
+    auth.insert("domain".to_string(), json!(domain));
+    auth.insert("lastRefreshTime".to_string(), json!(now));
+    auth.insert(
+        "scope".to_string(),
+        json!("openid profile offline_access email"),
+    );
+    auth.insert("notBeforePolicy".to_string(), json!(0));
+    auth.insert("sessionState".to_string(), json!(""));
+    if let Some(expires_at) = expires_at_ms {
+        auth.insert("expiresAt".to_string(), json!(expires_at));
+        auth.insert(
+            "expiresIn".to_string(),
+            json!(((expires_at - now) / 1000).max(0)),
+        );
+    }
+    Value::Object(auth)
+}
+
 pub async fn activity_snapshot(app: &App, account_id: &str) -> Value {
     match crate::growth::activity::fleet(app, &[account_id.to_string()]).await {
         Ok(fleet) => match fleet.accounts.first() {
@@ -909,6 +1077,74 @@ fn log_note(message: &str) {
     eprintln!("[aicc-account-worker] {}", crate::rpc::sanitize(message));
 }
 
+/// 一次只读探针：服务端到底认不认这份 access。
+///
+/// 只回答"这份令牌能不能用"，**不写任何状态、不刷令牌、不改授权行**。
+/// 网络抖动一律 `unknown` —— 不能把"没问到"说成"被拒绝"。
+async fn probe_server(
+    account: &AccountRecord,
+    access: &str,
+    domain: &str,
+) -> (String, Option<String>) {
+    let report = probe::probe(
+        wb_switch_core::modules::variant::WbVariant::Cn,
+        access,
+        &account.uid,
+        domain,
+    )
+    .await;
+    match report.outcome {
+        Probe::Valid => ("accepted".to_string(), None),
+        Probe::Unauthorized => (
+            "rejected".to_string(),
+            Some(format!(
+                "服务端拒绝了这份令牌（HTTP {}）",
+                report
+                    .http_status
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "?".to_string())
+            )),
+        ),
+        Probe::Transient => (
+            "unknown".to_string(),
+            Some("网络或服务端瞬时失败，未能确认服务端是否接受".to_string()),
+        ),
+    }
+}
+
+fn ms_to_rfc3339(ms: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
+        .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_default()
+}
+
+/// 从 journal 里的 RFC3339 到期时间算剩余秒数。读不到就是 `None`（未知 ≠ 已过期）。
+fn remaining_seconds(expires_at: Option<&str>) -> Option<i64> {
+    let at = expires_at.and_then(auth_service::parse_rfc3339)?;
+    Some((at.timestamp_millis() - magpie::now_ms()).max(0) / 1000)
+}
+
+/// 建议恢复截止 = access 到期 − [`plan::RESTORE_SAFETY_MARGIN_SECS`]。
+fn safe_restore_at(expires_at: Option<&str>) -> Option<String> {
+    let at = expires_at.and_then(auth_service::parse_rfc3339)?;
+    Some(ms_to_rfc3339(
+        at.timestamp_millis() - plan::RESTORE_SAFETY_MARGIN_SECS * 1000,
+    ))
+}
+
+fn short_uid(uid: &str) -> String {
+    uid.chars().take(8).collect()
+}
+
+/// `Display` 适配：错误文案里要一个短 UID，不想在 format! 里套函数。
+struct WorkbuddyUidLabel<'a>(&'a str);
+
+impl std::fmt::Display for WorkbuddyUidLabel<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", short_uid(self.0))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -930,10 +1166,12 @@ mod tests {
         let target = TargetSession {
             uid: "uid-b".to_string(),
             nickname: existing["allAccounts"][0]["nickname"].clone(),
-            access: json!("AT-B"),
-            refresh: json!("RT-B"),
             domain: "www.codebuddy.cn".to_string(),
             expires_at_ms: Some(1_800_000_000_000),
+            credential: TargetCredential::OwnRefresh {
+                access: "AT-B".to_string(),
+                refresh: "RT-B".to_string(),
+            },
         };
 
         let session = build_session(Some(&existing), &target);
@@ -960,10 +1198,12 @@ mod tests {
         let target = TargetSession {
             uid: "uid-new".to_string(),
             nickname: json!("新账号"),
-            access: json!("AT"),
-            refresh: json!("RT"),
             domain: "www.codebuddy.cn".to_string(),
             expires_at_ms: None,
+            credential: TargetCredential::OwnRefresh {
+                access: "AT".to_string(),
+                refresh: "RT".to_string(),
+            },
         };
         let session = build_session(None, &target);
         assert_eq!(session["account"]["uid"], "uid-new");
@@ -1129,14 +1369,38 @@ mod tests {
         )
     }
 
+    fn own_plan() -> Plan {
+        Plan {
+            mode: Mode::OwnRefresh,
+            source_key: None,
+            access_expires_at_ms: None,
+            safe_restore_until_ms: None,
+            remaining_secs: None,
+            degraded: None,
+        }
+    }
+
+    fn magpie_plan() -> Plan {
+        Plan {
+            mode: Mode::MagpieTemporary,
+            source_key: Some("workbuddy".to_string()),
+            access_expires_at_ms: Some(1_800_000_000_000),
+            safe_restore_until_ms: Some(1_800_000_000_000),
+            remaining_secs: Some(3600),
+            degraded: None,
+        }
+    }
+
     fn target() -> TargetSession {
         TargetSession {
             uid: "uid-b".to_string(),
             nickname: json!("新账号"),
-            access: json!("AT-B"),
-            refresh: json!("RT-B"),
             domain: "www.codebuddy.cn".to_string(),
             expires_at_ms: Some(1_800_000_000_000),
+            credential: TargetCredential::OwnRefresh {
+                access: "AT-B".to_string(),
+                refresh: "RT-B".to_string(),
+            },
         }
     }
 
@@ -1144,7 +1408,7 @@ mod tests {
     #[test]
     fn apply_confirms_when_the_client_accepts_the_login() {
         let (h, control) = harness(true, Launch::Works);
-        let outcome = apply(&h.app, &h.account, &target(), &control, &h.env).unwrap();
+        let outcome = apply(&h.app, &h.account, &own_plan(), &target(), &control, &h.env).unwrap();
 
         assert!(outcome.verified, "{:?}", outcome.verify_detail);
         assert_eq!(outcome.phase, PHASE_VERIFIED);
@@ -1169,7 +1433,7 @@ mod tests {
     #[test]
     fn a_rejecting_client_triggers_a_byte_exact_rollback() {
         let (h, control) = harness(true, Launch::RewritesTo("uid-a"));
-        let err = apply(&h.app, &h.account, &target(), &control, &h.env).unwrap_err();
+        let err = apply(&h.app, &h.account, &own_plan(), &target(), &control, &h.env).unwrap_err();
 
         let data = err.data.clone().expect("失败必须带恢复结果");
         assert_eq!(data["kind"], "switch_failed");
@@ -1187,7 +1451,7 @@ mod tests {
     #[test]
     fn a_logout_marker_is_treated_as_rejection() {
         let (h, control) = harness(true, Launch::LogsOut);
-        let err = apply(&h.app, &h.account, &target(), &control, &h.env).unwrap_err();
+        let err = apply(&h.app, &h.account, &own_plan(), &target(), &control, &h.env).unwrap_err();
         assert_eq!(err.data.unwrap()["restored"], true);
         assert!(
             !client::logout_marker_path(&h.env.auth_path).exists(),
@@ -1203,7 +1467,7 @@ mod tests {
     #[test]
     fn a_client_that_never_starts_is_unconfirmed_not_rolled_back() {
         let (h, control) = harness(true, Launch::NeverStarts);
-        let outcome = apply(&h.app, &h.account, &target(), &control, &h.env).unwrap();
+        let outcome = apply(&h.app, &h.account, &own_plan(), &target(), &control, &h.env).unwrap();
 
         assert!(!outcome.verified);
         assert_eq!(outcome.phase, PHASE_UNCONFIRMED);
@@ -1225,7 +1489,7 @@ mod tests {
     #[test]
     fn restore_refuses_a_tampered_snapshot() {
         let (h, control) = harness(true, Launch::Works);
-        let outcome = apply(&h.app, &h.account, &target(), &control, &h.env).unwrap();
+        let outcome = apply(&h.app, &h.account, &own_plan(), &target(), &control, &h.env).unwrap();
         let journal = h
             .app
             .with_db(|db| db.wb_switch_journal(&outcome.journal_id))
@@ -1233,7 +1497,7 @@ mod tests {
             .unwrap();
         std::fs::write(&journal.snapshot_path, b"{}").unwrap();
 
-        let err = restore(&h.app, Some(&outcome.journal_id), &control, &h.env).unwrap_err();
+        let err = restore(&h.app, Some(&outcome.journal_id), false, &control, &h.env).unwrap_err();
         assert_eq!(err.data.unwrap()["kind"], "snapshot_corrupt");
         assert_eq!(
             client::read_live(&h.env.auth_path).uid.as_deref(),
@@ -1246,9 +1510,9 @@ mod tests {
     #[test]
     fn restore_puts_the_previous_login_back() {
         let (h, control) = harness(true, Launch::Works);
-        let outcome = apply(&h.app, &h.account, &target(), &control, &h.env).unwrap();
+        let outcome = apply(&h.app, &h.account, &own_plan(), &target(), &control, &h.env).unwrap();
         // 恢复时客户端应当按上一次记录的"原本在跑"重新启动。
-        let value = restore(&h.app, Some(&outcome.journal_id), &control, &h.env).unwrap();
+        let value = restore(&h.app, Some(&outcome.journal_id), false, &control, &h.env).unwrap();
 
         assert_eq!(value["restored"], true);
         assert_eq!(value["uid"], "uid-a");
@@ -1262,7 +1526,7 @@ mod tests {
     #[test]
     fn restore_with_nothing_to_do_is_not_an_error() {
         let (h, control) = harness(true, Launch::Works);
-        let value = restore(&h.app, None, &control, &h.env).unwrap();
+        let value = restore(&h.app, None, false, &control, &h.env).unwrap();
         assert_eq!(value["restored"], false);
         assert_eq!(value["reason"], "nothing_to_restore");
     }
@@ -1284,16 +1548,633 @@ mod tests {
                     snapshot_path: "/tmp/snapshot.json",
                     snapshot_sha256: "sha",
                     token_form: Some("plaintext"),
+                    auth_source: "own",
+                    temporary: false,
+                    access_expires_at: None,
+                    access_fingerprint: None,
+                    source_key: None,
                 })
             })
             .unwrap();
 
-        let err = apply(&h.app, &h.account, &target(), &control, &h.env).unwrap_err();
+        let err = apply(&h.app, &h.account, &own_plan(), &target(), &control, &h.env).unwrap_err();
         assert_eq!(err.data.unwrap()["kind"], "switch_busy");
         assert_eq!(
             std::fs::read_to_string(&h.env.auth_path).unwrap(),
             h.original,
             "被拒时不能动客户端文件"
+        );
+    }
+
+    // ---- Magpie access-only 临时切换（PR #112）----
+
+    use crate::storage::authz::AuthorizationRecord;
+
+    fn grant(
+        app: &App,
+        account_id: &str,
+        kind: &str,
+        source_key: Option<&str>,
+        with_refresh: bool,
+    ) {
+        let now = crate::clock::now_rfc3339();
+        let record = AuthorizationRecord {
+            id: format!("{account_id}-{kind}"),
+            account_id: account_id.to_string(),
+            kind: kind.to_string(),
+            access_ref: if kind == "magpie" {
+                format!("magpie:v1:{}", source_key.unwrap_or("workbuddy"))
+            } else {
+                "localjson:v1:own".to_string()
+            },
+            refresh_ref: if kind == "own" && with_refresh {
+                Some("localjson:v1:own".to_string())
+            } else {
+                None
+            },
+            auth_domain: Some("www.codebuddy.cn".to_string()),
+            token_expires_at: None,
+            status: "valid".to_string(),
+            version: 0,
+            key_migration_state: "ready".to_string(),
+            source_key: source_key.map(str::to_string),
+            last_used_at: None,
+            last_error: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        app.with_db(|db| db.upsert_authorization(&record)).unwrap();
+    }
+
+    fn login(
+        key: &str,
+        uid: &str,
+        provider: &str,
+        access: &str,
+        expires_in_secs: Option<i64>,
+    ) -> magpie::MagpieLogin {
+        magpie::MagpieLogin {
+            key: key.to_string(),
+            provider: magpie::provider_of(provider).expect("provider"),
+            uid: uid.to_string(),
+            nickname: None,
+            domain: "www.codebuddy.cn".to_string(),
+            access_token: access.to_string(),
+            expires_at_ms: expires_in_secs.map(|secs| magpie::now_ms() + secs * 1000),
+        }
+    }
+
+    fn resolve(h: &Harness) -> PlanOutcome {
+        plan::resolve(&h.app, &h.account, true, Some("uid-a"))
+    }
+
+    fn ready(h: &Harness) -> Plan {
+        match resolve(h) {
+            PlanOutcome::Ready(plan) => plan,
+            PlanOutcome::Blocked { reason, detail } => panic!("应当可切，实际 {reason}：{detail}"),
+        }
+    }
+
+    fn blocked(h: &Harness) -> (&'static str, String) {
+        match resolve(h) {
+            PlanOutcome::Ready(_) => panic!("应当被拒绝，实际可切"),
+            PlanOutcome::Blocked { reason, detail } => (reason, detail),
+        }
+    }
+
+    /// 1) 有效期充足时，Magpie 账号给出「临时」计划，且知道还能用多久。
+    #[test]
+    fn magpie_access_is_accepted_when_fresh() {
+        let (h, _control) = harness(true, Launch::Works);
+        grant(&h.app, &h.account.id, "magpie", Some("workbuddy"), false);
+        magpie::test_set_logins(Some(vec![login(
+            "workbuddy",
+            "uid-b",
+            "workbuddy",
+            "AT-MAG",
+            Some(3600),
+        )]));
+
+        let plan = ready(&h);
+        assert_eq!(plan.mode, Mode::MagpieTemporary);
+        assert!(plan.temporary());
+        assert_eq!(plan.source_key.as_deref(), Some("workbuddy"));
+        assert!(plan.remaining_secs.unwrap_or(0) >= 3590);
+        assert!(plan.access_expires_at_ms.is_some());
+        assert!(plan.safe_restore_until_ms.unwrap() < plan.access_expires_at_ms.unwrap());
+        magpie::test_reset();
+    }
+
+    /// 1b) 同时有自有授权和 Magpie 关联时，**用自有授权**（长期），不是借来的 access。
+    ///
+    /// 第一版照抄了 `auth_preferred_source`（默认 magpie），结果双授权账号全被标成
+    /// "临时登录"，与用户"我明明有 AICC 登录权限"的认知冲突。
+    #[test]
+    fn own_long_lived_login_wins_over_a_borrowed_access() {
+        let (h, _control) = harness(true, Launch::Works);
+        grant(&h.app, &h.account.id, "magpie", Some("workbuddy"), false);
+        grant(&h.app, &h.account.id, "own", None, true);
+        magpie::test_set_logins(Some(vec![login(
+            "workbuddy",
+            "uid-b",
+            "workbuddy",
+            "AT-MAG",
+            Some(3600),
+        )]));
+
+        let plan = ready(&h);
+        assert_eq!(plan.mode, Mode::OwnRefresh);
+        assert!(!plan.temporary());
+        assert!(plan.degraded.is_none(), "首选就是自有授权，不该有降级说明");
+        magpie::test_reset();
+    }
+
+    /// 自有授权缺 refresh 时才退回临时模式，并且要说明原因。
+    #[test]
+    fn a_refreshless_own_grant_falls_back_to_temporary_with_a_reason() {
+        let (h, _control) = harness(true, Launch::Works);
+        grant(&h.app, &h.account.id, "own", None, false);
+        grant(&h.app, &h.account.id, "magpie", Some("workbuddy"), false);
+        magpie::test_set_logins(Some(vec![login(
+            "workbuddy",
+            "uid-b",
+            "workbuddy",
+            "AT-MAG",
+            Some(3600),
+        )]));
+
+        let plan = ready(&h);
+        assert_eq!(plan.mode, Mode::MagpieTemporary);
+        let why = plan.degraded.unwrap_or_default();
+        assert!(why.contains("自有授权不可用"), "{why}");
+        assert!(why.contains("临时"), "{why}");
+        magpie::test_reset();
+    }
+
+    /// 2) 同一个 provider 的多个账号：来源键必须一一对应，不能"取第一条"。
+    #[test]
+    fn source_keys_are_not_interchangeable_between_accounts() {
+        let (h, _control) = harness(true, Launch::Works);
+        grant(&h.app, &h.account.id, "magpie", Some("workbuddy#b"), false);
+        magpie::test_set_logins(Some(vec![
+            login("workbuddy#a", "uid-a", "workbuddy", "AT-A", Some(3600)),
+            login("workbuddy#b", "uid-b", "workbuddy", "AT-B", Some(3600)),
+        ]));
+        assert_eq!(ready(&h).source_key.as_deref(), Some("workbuddy#b"));
+
+        // 把来源键指到另一个账号的那条：UID 对不上，必须拒绝。
+        grant(&h.app, &h.account.id, "magpie", Some("workbuddy#a"), false);
+        let (why, detail) = blocked(&h);
+        assert_eq!(why, plan::reason::MAGPIE_UID_MISMATCH);
+        assert!(detail.contains("UID"), "{detail}");
+        magpie::test_reset();
+    }
+
+    /// 3) 只有 UID 对得上还不够，平台/provider 也必须一致。
+    #[test]
+    fn an_international_login_is_refused_for_the_cn_account() {
+        let (h, _control) = harness(true, Launch::Works);
+        grant(&h.app, &h.account.id, "magpie", Some("workbuddy-ai"), false);
+        magpie::test_set_logins(Some(vec![login(
+            "workbuddy-ai",
+            "uid-b",
+            "workbuddy-ai",
+            "AT-AI",
+            Some(3600),
+        )]));
+        let (why, _) = blocked(&h);
+        assert_eq!(why, plan::reason::MAGPIE_PLATFORM_MISMATCH);
+        magpie::test_reset();
+    }
+
+    /// 4) 已过期 / 剩余不足 / 没写有效期：三种都必须拒绝，且不能猜。
+    #[test]
+    fn expired_short_and_unknown_expiry_are_all_refused() {
+        let (h, _control) = harness(true, Launch::Works);
+        grant(&h.app, &h.account.id, "magpie", Some("workbuddy"), false);
+
+        magpie::test_set_logins(Some(vec![login(
+            "workbuddy",
+            "uid-b",
+            "workbuddy",
+            "AT",
+            Some(-60),
+        )]));
+        assert_eq!(blocked(&h).0, plan::reason::MAGPIE_ACCESS_EXPIRED);
+
+        magpie::test_set_logins(Some(vec![login(
+            "workbuddy",
+            "uid-b",
+            "workbuddy",
+            "AT",
+            Some(600),
+        )]));
+        let (why, detail) = blocked(&h);
+        assert_eq!(why, plan::reason::MAGPIE_TOO_SHORT);
+        assert!(detail.contains("分钟"), "{detail}");
+        assert!(detail.contains("30"), "要说明门槛是多久：{detail}");
+
+        magpie::test_set_logins(Some(vec![login(
+            "workbuddy",
+            "uid-b",
+            "workbuddy",
+            "AT",
+            None,
+        )]));
+        assert_eq!(blocked(&h).0, plan::reason::MAGPIE_EXPIRY_UNKNOWN);
+
+        magpie::test_set_logins(Some(vec![login(
+            "workbuddy",
+            "uid-b",
+            "workbuddy",
+            "   ",
+            Some(3600),
+        )]));
+        assert_eq!(blocked(&h).0, plan::reason::MAGPIE_ACCESS_EMPTY);
+        magpie::test_reset();
+    }
+
+    /// 5) Magpie 文件读不出来 ≠ 没有授权：原因要分开，界面才知道该让用户去做什么。
+    #[test]
+    fn an_unreadable_magpie_file_is_reported_as_such() {
+        let (h, _control) = harness(true, Launch::Works);
+        grant(&h.app, &h.account.id, "magpie", Some("workbuddy"), false);
+        magpie::test_set_unreadable();
+        let (why, detail) = blocked(&h);
+        assert_eq!(why, plan::reason::MAGPIE_UNAVAILABLE);
+        assert!(detail.contains("Magpie"), "{detail}");
+        magpie::test_reset();
+    }
+
+    /// 6) Access-only 的 auth 段：只有 access，**一个 refresh 字段都没有**。
+    #[test]
+    fn access_only_auth_has_no_refresh_fields() {
+        let auth = build_access_only_auth(
+            &json!("AT-MAG"),
+            "www.codebuddy.cn",
+            Some(magpie::now_ms() + 3_600_000),
+        );
+        assert_eq!(auth["accessToken"], "AT-MAG");
+        assert_eq!(auth["tokenType"], "Bearer");
+        assert!(auth.get("refreshToken").is_none(), "{auth}");
+        assert!(auth.get("refreshExpiresAt").is_none(), "{auth}");
+        assert!(auth.get("refreshExpiresIn").is_none(), "{auth}");
+        assert!(auth["expiresIn"].as_i64().unwrap() > 3_000);
+    }
+
+    /// 7) 关键一条：临时切换写出去的文件里**不能有上一账号的 refresh**。
+    #[test]
+    fn temporary_switch_writes_access_only_and_never_leaks_the_old_refresh() {
+        let (h, control) = harness(true, Launch::Works);
+        grant(&h.app, &h.account.id, "magpie", Some("workbuddy"), false);
+        magpie::test_set_logins(Some(vec![login(
+            "workbuddy",
+            "uid-b",
+            "workbuddy",
+            "AT-MAG",
+            Some(3600),
+        )]));
+
+        let plan = ready(&h);
+        let before = client::read_live(&h.env.auth_path);
+        let target = target_session(&h.app, &h.account, &plan, before.json.as_ref()).unwrap();
+        assert!(matches!(
+            target.credential,
+            TargetCredential::MagpieAccess { .. }
+        ));
+        apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
+
+        let text = std::fs::read_to_string(&h.env.auth_path).unwrap();
+        assert!(
+            !text.contains("RT-OLD"),
+            "上一账号的 refresh 泄漏了：{text}"
+        );
+        let written: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(written["auth"]["accessToken"], "AT-MAG");
+        assert!(written["auth"].get("refreshToken").is_none(), "{written}");
+        assert_eq!(written["account"]["uid"], "uid-b");
+        magpie::test_reset();
+    }
+
+    /// 8) journal 要记下"这是临时登录、什么时候过期"，但**不记令牌**。
+    #[test]
+    fn the_journal_records_the_temporary_window_without_tokens() {
+        let (h, control) = harness(true, Launch::Works);
+        grant(&h.app, &h.account.id, "magpie", Some("workbuddy"), false);
+        magpie::test_set_logins(Some(vec![login(
+            "workbuddy",
+            "uid-b",
+            "workbuddy",
+            "AT-SECRET-VALUE",
+            Some(3600),
+        )]));
+        let plan = ready(&h);
+        let before = client::read_live(&h.env.auth_path);
+        let target = target_session(&h.app, &h.account, &plan, before.json.as_ref()).unwrap();
+        let outcome = apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
+
+        let journal = h
+            .app
+            .with_db(|db| db.wb_switch_journal(&outcome.journal_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(journal.auth_source.as_deref(), Some("magpie"));
+        assert!(journal.temporary);
+        assert_eq!(
+            journal.restore_state,
+            crate::storage::wb_switch::RESTORE_PENDING
+        );
+        assert!(journal.access_expires_at.is_some());
+        assert_eq!(
+            journal.access_fingerprint.as_ref().map(String::len),
+            Some(8)
+        );
+        assert_eq!(journal.source_key.as_deref(), Some("workbuddy"));
+        // 令牌本身一个字都不许落库。
+        let dump = serde_json::to_string(&journal).unwrap();
+        assert!(!dump.contains("AT-SECRET-VALUE"), "{dump}");
+        magpie::test_reset();
+    }
+
+    /// 9) 临时登录成功后必须还能回到原账号（即使客户端已经登出）。
+    #[test]
+    fn restoring_a_temporary_login_puts_the_previous_account_back() {
+        let (h, control) = harness(true, Launch::Works);
+        grant(&h.app, &h.account.id, "magpie", Some("workbuddy"), false);
+        magpie::test_set_logins(Some(vec![login(
+            "workbuddy",
+            "uid-b",
+            "workbuddy",
+            "AT-MAG",
+            Some(3600),
+        )]));
+        let plan = ready(&h);
+        let before = client::read_live(&h.env.auth_path);
+        let target = target_session(&h.app, &h.account, &plan, before.json.as_ref()).unwrap();
+        let outcome = apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
+
+        // 模拟"客户端因 access 过期被登出"：文件没了。
+        std::fs::remove_file(&h.env.auth_path).unwrap();
+
+        let value = restore(&h.app, Some(&outcome.journal_id), false, &control, &h.env).unwrap();
+        assert_eq!(value["restored"], true);
+        assert_eq!(
+            std::fs::read_to_string(&h.env.auth_path).unwrap(),
+            h.original,
+            "必须逐字节回到切换前"
+        );
+        let journal = h
+            .app
+            .with_db(|db| db.wb_switch_journal(&outcome.journal_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            journal.restore_state,
+            crate::storage::wb_switch::RESTORE_DONE
+        );
+        magpie::test_reset();
+    }
+
+    /// 10) 用户手动切到别的账号后，恢复不能静默覆盖；确认（force）才动手。
+    #[test]
+    fn restore_refuses_to_overwrite_a_manually_changed_login() {
+        let (h, control) = harness(true, Launch::Works);
+        grant(&h.app, &h.account.id, "magpie", Some("workbuddy"), false);
+        magpie::test_set_logins(Some(vec![login(
+            "workbuddy",
+            "uid-b",
+            "workbuddy",
+            "AT-MAG",
+            Some(3600),
+        )]));
+        let plan = ready(&h);
+        let before = client::read_live(&h.env.auth_path);
+        let target = target_session(&h.app, &h.account, &plan, before.json.as_ref()).unwrap();
+        let outcome = apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
+
+        // 用户自己在客户端里换成了 uid-c。
+        std::fs::write(&h.env.auth_path, auth_json("uid-c", "AT-C")).unwrap();
+
+        let err = restore(&h.app, Some(&outcome.journal_id), false, &control, &h.env).unwrap_err();
+        assert_eq!(err.data.clone().unwrap()["kind"], "live_changed");
+        assert_eq!(
+            client::read_live(&h.env.auth_path).uid.as_deref(),
+            Some("uid-c"),
+            "拒绝时不能动文件"
+        );
+
+        let forced = restore(&h.app, Some(&outcome.journal_id), true, &control, &h.env).unwrap();
+        assert_eq!(forced["restored"], true);
+        assert_eq!(
+            std::fs::read_to_string(&h.env.auth_path).unwrap(),
+            h.original
+        );
+        magpie::test_reset();
+    }
+
+    /// 11) 连续临时切换不会攒下一堆"待还原"：只保留最近一次的记录。
+    ///
+    /// 第一版在这里用的是"按最新 pending 结算旧记录"，结果最新那条正是刚写入的自己，
+    /// 旧记录一条都清不掉 —— 真机连续切两次后，别的账号全被 `temporary_pending` 挡住。
+    #[test]
+    fn only_the_latest_temporary_switch_stays_pending() {
+        let (h, control) = harness(true, Launch::Works);
+        grant(&h.app, &h.account.id, "magpie", Some("workbuddy"), false);
+        magpie::test_set_logins(Some(vec![login(
+            "workbuddy",
+            "uid-b",
+            "workbuddy",
+            "AT-MAG",
+            Some(3600),
+        )]));
+        let plan = ready(&h);
+        let before = client::read_live(&h.env.auth_path);
+        let target = target_session(&h.app, &h.account, &plan, before.json.as_ref()).unwrap();
+
+        let first = apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
+        // 第二次切换（同一套夹具下等价于"又切了一次"）。
+        let second = apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
+        h.app
+            .with_db(|db| db.settle_pending_temporary_except(&second.journal_id))
+            .unwrap();
+
+        let pending = h
+            .app
+            .with_db(|db| db.pending_temporary_restore())
+            .unwrap()
+            .expect("最近一次仍待还原");
+        assert_eq!(pending.id, second.journal_id);
+        assert_ne!(pending.id, first.journal_id);
+
+        let first_row = h
+            .app
+            .with_db(|db| db.wb_switch_journal(&first.journal_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first_row.restore_state,
+            crate::storage::wb_switch::RESTORE_DONE,
+            "更早的临时记录必须被结算，不能一直 pending"
+        );
+        magpie::test_reset();
+    }
+
+    /// 12) AICC 重启后（新连接同一份库）仍能认出这次临时登录。
+    #[test]
+    fn the_pending_temporary_login_survives_a_restart() {
+        let (h, control) = harness(true, Launch::Works);
+        grant(&h.app, &h.account.id, "magpie", Some("workbuddy"), false);
+        magpie::test_set_logins(Some(vec![login(
+            "workbuddy",
+            "uid-b",
+            "workbuddy",
+            "AT-MAG",
+            Some(3600),
+        )]));
+        let plan = ready(&h);
+        let before = client::read_live(&h.env.auth_path);
+        let target = target_session(&h.app, &h.account, &plan, before.json.as_ref()).unwrap();
+        apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
+        drop(control);
+
+        // 另一个连接 = 进程重启后的视角。
+        let mut reopened = Db::open(&h.app.paths.db_path).unwrap();
+        reopened.migrate().unwrap();
+        let pending = reopened
+            .pending_temporary_restore()
+            .unwrap()
+            .expect("应当还在");
+        assert_eq!(pending.target_uid, "uid-b");
+        assert_eq!(pending.previous_uid.as_deref(), Some("uid-a"));
+        magpie::test_reset();
+    }
+
+    /// 9b) 自有授权缺 refresh 时走 Magpie，**完全不碰自有凭据**：
+    /// 把它做成读不出来的坏引用也不影响。
+    #[test]
+    fn magpie_switch_never_reads_the_own_refresh() {
+        let (h, control) = harness(true, Launch::Works);
+        // own 行故意指向一个不存在的本地文件：只要被读一次就会报错。
+        let now = crate::clock::now_rfc3339();
+        h.app
+            .with_db(|db| {
+                db.upsert_authorization(&AuthorizationRecord {
+                    id: format!("{}-own", h.account.id),
+                    account_id: h.account.id.clone(),
+                    kind: "own".to_string(),
+                    // 缺 refresh → 计划阶段就落到 Magpie；access 引用也是坏的，
+                    // 只要有任何一处真去读了自有凭据，这个用例就会失败。
+                    access_ref: "localjson:v1:does-not-exist".to_string(),
+                    refresh_ref: None,
+                    auth_domain: None,
+                    token_expires_at: None,
+                    status: "valid".to_string(),
+                    version: 0,
+                    key_migration_state: "ready".to_string(),
+                    source_key: None,
+                    last_used_at: None,
+                    last_error: None,
+                    created_at: now.clone(),
+                    updated_at: now,
+                })
+            })
+            .unwrap();
+        grant(&h.app, &h.account.id, "magpie", Some("workbuddy"), false);
+        magpie::test_set_logins(Some(vec![login(
+            "workbuddy",
+            "uid-b",
+            "workbuddy",
+            "AT-MAG",
+            Some(3600),
+        )]));
+
+        // 自有授权缺 refresh → 临时模式，取凭据时只读 Magpie 文件。
+        let plan = ready(&h);
+        assert_eq!(plan.mode, Mode::MagpieTemporary);
+        assert!(plan
+            .degraded
+            .as_deref()
+            .unwrap_or_default()
+            .contains("自有授权不可用"));
+        let before = client::read_live(&h.env.auth_path);
+        let target = target_session(&h.app, &h.account, &plan, before.json.as_ref()).unwrap();
+        assert_eq!(target.credential.access(), "AT-MAG");
+
+        // 走完整个写入也不该碰到那份坏引用。
+        apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
+        magpie::test_reset();
+    }
+
+    /// 14) status 要把"模式 / 临时 / 能不能恢复"一次说清，界面不再自己推断。
+    #[test]
+    fn status_reports_mode_and_restore_availability() {
+        let (h, control) = harness(true, Launch::Works);
+        grant(&h.app, &h.account.id, "magpie", Some("workbuddy"), false);
+        magpie::test_set_logins(Some(vec![login(
+            "workbuddy",
+            "uid-b",
+            "workbuddy",
+            "AT-MAG",
+            Some(3600),
+        )]));
+
+        let before = status(&h.app, &control, &h.env).unwrap();
+        assert_eq!(before["restoreAvailable"], false);
+        assert_eq!(before["temporaryRestore"], Value::Null);
+        let candidate = before["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["accountId"] == h.account.id)
+            .unwrap();
+        assert_eq!(candidate["switchable"], true);
+        assert_eq!(candidate["mode"], "magpie_access_temporary");
+        assert_eq!(candidate["temporary"], true);
+        assert!(candidate["accessExpiresAt"].is_string());
+        assert!(candidate["remainingSeconds"].as_i64().unwrap() > 3000);
+
+        // 切过去之后：标记临时登录 + 一直可恢复。
+        let plan = ready(&h);
+        let live = client::read_live(&h.env.auth_path);
+        let target = target_session(&h.app, &h.account, &plan, live.json.as_ref()).unwrap();
+        apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
+
+        let after = status(&h.app, &control, &h.env).unwrap();
+        assert_eq!(after["restoreAvailable"], true);
+        assert_eq!(after["live"]["temporary"], true);
+        assert_eq!(after["live"]["uid"], "uid-b");
+        assert!(after["live"]["accessExpiresAt"].is_string());
+        assert_eq!(
+            after["temporaryRestore"]["targetUid"], "uid-b",
+            "待还原的临时登录必须能被界面找到"
+        );
+        magpie::test_reset();
+    }
+
+    /// 13) 读 Magpie 文件是只读的：不能顺手改写别人的登录态。
+    #[test]
+    fn reading_magpie_logins_never_rewrites_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugin-auth.json");
+        let body = json!({
+            "workbuddy": {
+                "access": "AT-MAG",
+                "refresh": "RT-MAGPIE",
+                "uid": "uid-b",
+                "domain": "www.codebuddy.cn",
+                "expires": magpie::now_ms() + 3_600_000,
+            }
+        })
+        .to_string();
+        std::fs::write(&path, &body).unwrap();
+
+        let logins = magpie::read_logins_from(dir.path()).unwrap();
+        assert_eq!(logins.len(), 1);
+        assert_eq!(logins[0].access_token, "AT-MAG");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            body,
+            "读取不能改动 Magpie 的文件"
         );
     }
 

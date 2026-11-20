@@ -1,226 +1,282 @@
-# WorkBuddy 客户端账号切换（WB-SWITCH-1）
+# WorkBuddy 客户端账号切换（WB-SWITCH-1 / #112 Magpie 临时模式）
 
-一句话：**把 AICC 里已经授权过的账号写进 WorkBuddy 客户端的登录态，必要时重启客户端；
+一句话：**把 AICC 里授权过的账号写进 WorkBuddy 客户端的登录态，必要时重启客户端；
 失败按快照逐字节还原，并把"到底恢没恢复"如实告诉用户。**
 
-这份文档是这一步的唯一口径。界面文案、RPC 返回、数据库字段都以这里为准。
+两种授权，两种生命周期：
+
+| 模式 | 写进客户端的令牌 | 谁续期 | 结束条件 |
+| --- | --- | --- | --- |
+| `own_refresh`（AICC 自有授权） | access + refresh | WorkBuddy 自己刷新 | 用户退出或切走 |
+| `magpie_access_temporary`（Magpie 借用） | **只有** access | 没人续期 | access 过期 |
+
+> 本文档是这两种模式的唯一口径。界面文案、RPC 返回、数据库字段都以这里为准。
 
 ---
 
-## 1. 边界（先说不能做什么）
+## 1. 边界
 
 | 能力 | 状态 | 原因 |
 | --- | --- | --- |
-| 国内版（`provider = workbuddy`）客户端切换 | **已接通** | 认证文件结构、退出标记、启停方式都实测过 |
-| 国际版（`workbuddy_ai`） | **未开放** | 认证文件、客户端行为都没有实测证据，不拿用户登录态冒险 |
-| Magpie 来源账号 | **未开放** | 只有 access、没有 refresh；切过去之后无法续期 |
-| 只有 access 的自有授权 | **未开放** | 同上，缺刷新凭据 |
-| 复制聊天会话 / 迁移 `main.sqlite` | **不做** | 只换"登录是谁"，不搬业务数据（Qoder Profile 的教训：只换认证文件 ≠ 账号隔离） |
-| 伪造活跃、模拟对话 | **不做** | 官方条款里属于取消资格情形，AICC 只做只读判断 + 提醒 |
+| 国内版 + 自有授权（有 refresh） | **已接通** | 长期登录，客户端自己续期 |
+| 国内版 + Magpie 关联（只有 access） | **已接通（临时）** | 借来的 access 必然过期，到期前必须恢复 |
+| 国际版（`workbuddy_ai`） | **未开放** | 认证文件、客户端行为都没有实测证据 |
+| 复制聊天会话 / 迁移 `main.sqlite` | **不做** | 只换"登录是谁"，不搬业务数据 |
+| 接管 / 同步 Magpie 的 refresh | **不做** | 那是 Magpie 的凭据；两边各自刷新会互相踢下线 |
+| 伪造活跃、模拟对话 | **不做** | 官方条款里属于取消资格情形 |
 
-`plan()`（`account-worker/src/workbuddy_switch/service.rs`）是唯一的可切换判定入口，
-它只读库、**不读令牌**（读令牌会弹钥匙串授权框）。界面显示的"为什么不能切"就是它给出的
-`reason`，不要在前端另写一套判断。
+稳定原因码（Rust `workbuddy_switch::plan::reason`，界面按这个分支，不解析中文）：
 
-稳定原因码：
-
-| code | 含义 | 界面动作 |
+| code | 含义 | 下一步 |
 | --- | --- | --- |
-| `ok` | 可以切 | 显示「切换到此账号」 |
-| `live` | 客户端当前登录的就是它 | 显示"就是当前账号"，不给按钮 |
-| `unsupported_provider` | 国际版 | 说明未开放 |
-| `client_not_installed` | 没找到客户端 | 说明先安装 |
-| `no_credential` | 没有任何授权 | 引导重新授权 |
-| `missing_refresh` | 自有授权缺 refresh | 引导重新用浏览器登录 |
-| `magpie_no_refresh` | 只有 Magpie 关联 | 说明暂不支持 |
+| `ok` | 可以切 | 按钮 |
+| `live` | 客户端当前登录的就是它 | 不显示按钮 |
+| `unsupported_provider` | 国际版 | 暂不开放 |
+| `client_not_installed` | 没找到客户端 | 先安装 |
+| `no_credential` | 没有任何授权 | 重新授权 |
+| `missing_refresh` | 自有授权缺 refresh | 重新用浏览器登录 |
+| `magpie_unavailable` | Magpie 文件读不出来 | 确认 Magpie 在运行并已登录 |
+| `magpie_source_missing` | 文件里没有这条来源键 | 重新导入 / 在 Magpie 重新登录 |
+| `magpie_uid_mismatch` | 来源键对应的 UID 不是这个账号 | 重新导入 |
+| `magpie_platform_mismatch` | 那条登录态不属于国内版 | — |
+| `magpie_access_empty` | access 是空串 | 在 Magpie 重新登录 |
+| `magpie_access_expired` | access 已过期 | 在 Magpie 重新登录 |
+| `magpie_expiry_unknown` | 没写 `expires`，不猜 | — |
+| `magpie_too_short` | 剩余有效期低于门槛 | 换账号 / 等 Magpie 刷新 |
+| `live_changed` | 客户端当前登录已不是这一轮的目标 | 确认后再恢复 |
+
+`plan::resolve()` 是**唯一**的可切换判定入口：`status` 用它给界面答案，`switch` 用它决定
+实际写哪份令牌。界面显示 `magpie_access_temporary`、实际却用了自有授权，是这一层最不能犯的错。
+
+### 来源选择：长期优先，借用兜底
+
+写进客户端的登录按**固定优先级**挑：
+
+1. 自有授权且带 refresh → `own_refresh`：客户端自己续期，长期有效；
+2. 否则 Magpie 关联可用 → `magpie_access_temporary`：借来的 access，会过期。
+
+**为什么不跟 `auth_preferred_source` 走**：那个设置决定"AICC 读接口时用哪份令牌"
+（签到 / 额度 / 成长），默认 `magpie` 是为了少碰钥匙串、避免两边各自刷新。
+"写进客户端的登录"是另一件事 —— 能用长期凭据时，没有理由写一份必然过期的。
+
+第一版照抄了 Broker 的顺序，结果**所有双授权账号都被标成"临时登录"**，用户第一反应
+就是"我明明有 AICC 登录权限，为什么还是临时"。这是错的，已改为长期优先。
+
+代价（已写进 §8）：用自有授权登录后，**客户端会自己刷新并轮换 refresh**，
+AICC 手里那份可能因此变旧；真出现时 AICC 会提示该授权需要重新登录，不影响客户端当前使用。
 
 ---
 
-## 2. 客户端认证文件长什么样（2026-11 实测）
-
-路径（国内版）：
+## 2. 客户端认证文件（2026-11 实测）
 
 ```
 ~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info
-同目录还有 workbuddy-desktop.info.logged-out   ← 退出标记（存在即视为未登录）
+同目录 workbuddy-desktop.info.logged-out   ← 退出标记（存在即视为未登录）
 ```
-
-结构：
 
 ```json
 {
-  "auth":    { "accessToken": {"$wbEncrypted":1, "...": "..."},
-               "refreshToken": {"$wbEncrypted":1, "...": "..."},
-               "tokenType": "Bearer", "domain": "www.workbuddy.cn",
-               "expiresAt": 1797552874249, "lastRefreshTime": 1795... },
-  "account":  { "uid": "...", "nickname": {"$wbEncrypted":1, ...}, "uin": "...", ... },
-  "accounts":    [ { "uid": "...", "nickname": {"$wbEncrypted":1, ...} } ],
-  "allAccounts": [ 同上 ]
+  "auth":    { "accessToken": "…", "refreshToken": "…", "tokenType": "Bearer",
+               "domain": "www.workbuddy.cn", "expiresAt": 1797552874249, … },
+  "account":  { "uid": "…", "nickname": {"$wbEncrypted":1, …}, "uin": "…", … },
+  "accounts":    [ … ],   // 客户端自己的多账号列表：**只有身份字段，没有令牌**
+  "allAccounts": [ … ]
 }
 ```
 
 三条要点：
 
-1. **令牌只有当前账号那一份**（`auth.accessToken` / `auth.refreshToken`）。
-   `accounts` / `allAccounts` 里只有身份字段，没有令牌 —— 所以"切换"必须重写 `auth`。
+1. **令牌只有当前账号那一份**（`auth.accessToken` / `auth.refreshToken`），
+   所以"切换"必须重写 `auth`。
 2. `nickname` / `phoneNumber` 是 AES-GCM 信封，密钥只在客户端运行时里。
-   AICC **不解密、不覆盖**：目标账号如果已经在客户端列表里，原样复用那一条账号对象。
-3. AICC 写出去的是**明文** access / refresh（自有 OAuth 拿到的就是明文）。
-   客户端启动后会自己重新封装 —— 所以 `live.tokenForm` 从 `plaintext` 变成 `envelope`
-   本身就是"客户端读进去并接受了"的强证据，见 §3 的校验。
+   AICC **不解密、不覆盖**：目标账号如果已经在客户端列表里，原样复用那条账号对象。
+3. AICC 写出去的是**明文** access（自有 OAuth 拿到的就是明文）。
+   `live.tokenForm` 从 `plaintext` 变 `envelope` 是"客户端读进去并重新封装了"的强证据。
 
-> 写文件走 `write_private()`：临时文件 `0600` → fsync → rename → fsync 目录。
-> 里面是明文令牌，权限不能靠 umask 碰运气。
+### 2.1 Access-only 的 `auth` 段（本 PR 新增）
+
+```json
+{
+  "accessToken": "…",
+  "tokenType": "Bearer",
+  "domain": "www.codebuddy.cn",
+  "lastRefreshTime": 1795…,
+  "scope": "openid profile offline_access email",
+  "notBeforePolicy": 0,
+  "sessionState": "",
+  "expiresAt": 1795…,
+  "expiresIn": 2700
+}
+```
+
+**没有** `refreshToken` / `refreshExpiresAt` / `refreshExpiresIn` —— 连空串都不写。
+
+为什么单独实现（`build_access_only_auth`）而不复用上游 `build_auth_obj`：
+
+- `build_auth_obj` 在缺 refresh 时会写 `"refreshToken": ""` 并补 `refreshExpiresAt`。
+  "没有刷新令牌"和"刷新令牌是空串"是两件事：后者会让客户端去做一次必然失败的刷新，
+  而且看起来像"这份登录可以续期"。
+- 更要紧的是安全：如果只是"把 refresh 留空"而漏了某个字段，上一账号的 refresh
+  就可能被带到目标账号上。独立构造函数让"没有 refresh 字段"成为**结构保证**，
+  并有单测钉住（`access_only_auth_has_no_refresh_fields`、
+  `temporary_switch_writes_access_only_and_never_leaks_the_old_refresh`）。
+
+写文件仍走 `write_private()`：临时文件 `0600` → fsync → rename → fsync 目录。
 
 ---
 
 ## 3. 切换流程
 
 ```text
-1. 预检       账号存在 / 国内版 / 客户端已安装 / 自有授权带 refresh / 没有未完成切换
-2. 活跃取证   目标账号 growth /heatmap + /streak（只读，失败只记一句原因）
-3. 关客户端   osascript 优雅退出 → 超时 pkill → 等进程消失（20s）
-4. 快照       关掉之后再读一次认证文件，逐字节存到 <数据目录>/workbuddy-switch/<id>.json
-5. 写 journal phase=prepared（open_slot=1）
-6. 写认证     合并 account + auth，保留客户端已有的账号对象与其它顶层字段
-7. 启动       open -a，等进程起来
-8. 回读校验   至少观察 2.5 秒，最多 25 秒
-9. 活跃取证   再查一次
-10. 收尾      phase=verified / unconfirmed，释放 open_slot
+1. 预检    账号存在 / 国内版 / 客户端已安装 / 没有未完成切换 / 没有待还原的临时登录
+2. 判定    plan::resolve → 模式(own|magpie) + 到期时间 + 剩余时间（Magpie 现读文件）
+3. 取料    own：读库里的 access+refresh；magpie：**现读 Magpie 文件**，只取 access
+4. 活跃取证 目标账号 growth /heatmap + /streak（只读）
+5. 关客户端 osascript quit → 超时 pkill → 等进程消失（20s）
+6. 快照    关掉之后再读认证文件，逐字节存到 <数据目录>/workbuddy-switch/<id>.json
+7. journal phase=prepared（open_slot=1）
+8. 写认证  复用客户端账号对象，替换 auth + account
+9. 启动    open -a，等进程起来
+10. 回读   至少观察 2.5s，最多 25s
+11. 服务端探针 一次只读请求，记录 authAccepted
+12. 收尾   phase=verified/unconfirmed，释放 open_slot；临时登录 restore_state=pending
 ```
 
-### 为什么快照必须在**关客户端之后**
+### 校验三态
 
-客户端退出时会做一次收尾写入，可能把刚刷新过的令牌写回文件。关之前拍的那份，
-恢复回去可能是一份已经作废的 refresh。所以第 4 步在第 3 步之后。
-
-### 校验为什么是三态而不是"成功/失败"
-
-| 观察到的情况 | 结论 | 动作 |
+| 观察到 | 结论 | 动作 |
 | --- | --- | --- |
-| 文件里 UID = 目标 + 无退出标记 + 进程在跑（≥2.5s） | **confirmed**（`verified`） | 收尾，报成功 |
-| 文件里 UID ≠ 目标，或出现退出标记 | **rejected** | **自动回滚**，报失败 + `restored` |
-| 文件已是目标，但 25 秒内没确认到进程 | **unconfirmed** | **不回滚**，`phase=unconfirmed`，让用户确认 |
+| UID=目标 + 无退出标记 + 进程在跑（≥2.5s） | **confirmed**（`verified`） | 收尾，报成功 |
+| UID≠目标，或出现退出标记 | **rejected** | **自动回滚**，报失败 + `restored` |
+| 文件已是目标，但没确认到进程 | **unconfirmed** | **不回滚**，让用户确认 |
 
 第三态的理由：冷启动慢是常态。把一次大概率成功的切换回滚掉，比"晚点再确认"更糟；
 但也不能把"文件写对了"说成"客户端接受了"。
 
+### 客户端成功 ≠ 服务端接受
+
+回读只能证明"客户端停在这个 UID"。令牌是否被服务端接受由**一次只读探针**单独记录：
+
+| `authAccepted` | 含义 |
+| --- | --- |
+| `accepted` | 探针拿到正常响应 |
+| `rejected` | 401/403（明确的认证失败） |
+| `unknown` | 网络/超时/判不出来 —— **"没问到"不是"被拒绝"** |
+
+探针不写任何状态、不刷令牌、不改授权行（复用 `auth::probe`，与 `auth.workbuddy.status` 同一条路）。
+
 ---
 
-## 4. 失败与恢复
+## 4. 临时授权的有效期
 
-### 4.1 自动回滚（切换过程中）
+| 常量 | 值 | 用途 |
+| --- | --- | --- |
+| `MIN_SWITCH_REMAINING_SECS` | **30 分钟** | 低于此值禁止临时切换 |
+| `RESTORE_SAFETY_MARGIN_SECS` | **15 分钟** | 建议恢复截止 = 到期 − 15 分钟 |
 
-触发条件：启动失败、客户端把文件改回别的账号、客户端写退出标记。
+两条都是**设计取舍，不是实测结论**，所以做成常量，后续按真机数据调整。
 
-回滚动作，顺序固定：
+判定顺序（任何一步不满足就拒绝，原因码见 §1）：
+
+1. access 为空 → `magpie_access_empty`
+2. 没有 `expires` → `magpie_expiry_unknown`（不猜）
+3. 已过期 → `magpie_access_expired`
+4. 剩余 < 30 分钟 → `magpie_too_short`
+5. 其余 → 允许，并把 `accessExpiresAt` / `remainingSeconds` / `safeRestoreUntil` 一并返回
+
+切换时**再读一次** Magpie 文件：计划阶段到真正写文件之间可能已经刷新或退登。
+
+---
+
+## 5. 失败与恢复
+
+### 5.1 自动回滚（切换过程中）
+
+触发：启动失败、客户端把文件改回别的账号、客户端写退出标记。
 
 1. 关掉可能已经起来的客户端；
-2. 把快照**逐字节**写回认证文件（不重建，避免丢字段）；
-3. 按切换前的状态恢复退出标记（原来有就写回，原来没有就删掉）；
-4. 如果切换前客户端在跑，按原状重新启动；
-5. 落 `phase=restored`（恢复成功）或 `phase=failed`（恢复也失败）。
+2. 把快照**逐字节**写回（不重建，避免丢字段）；
+3. 按切换前状态恢复退出标记；
+4. 切换前在跑就按原状重新启动；
+5. `phase=restored`（恢复成功）或 `failed`（恢复也失败）。
 
-写入本身失败（`write_private` 报错）时文件一个字节都没改，走 `finish_without_write`：
-重启客户端、落 `restored`、错误里 `restored=true`。
+写入本身失败时文件一个字节都没改，走 `finish_without_write`：重启客户端、落 `restored`。
 
-**错误里必须带 `restored`**：`true` = 登录态没变；`false` = 需要用户手动登录。
-界面把这两种分开显示，不许合并成"切换失败"。
+**错误里必须带 `restored`**：`true` = 登录态没变；`false` = 需要手动登录。
 
-### 4.2 显式恢复（用户点按钮）
+### 5.2 显式恢复
 
-`workbuddy.client.restore`：不传 `journalId` 时按"未完成 → 最近一次成功切换"挑一条。
+`workbuddy.client.restore { journalId?, force? }`：
 
-- 恢复前必须校验快照 sha256；被改动过就拒绝（`kind=snapshot_corrupt`），
-  绝不用一份来源不明的文件覆盖登录态。
-- 没有任何可恢复记录时返回 `restored=false, reason=nothing_to_restore`（**不是错误**）。
+- 不传 id 时按「未完成切换 → 待还原的临时登录 → 最近一次成功切换」挑一条。
+- 先校验快照 sha256；被改动过就拒绝（`snapshot_corrupt`）。
+- **客户端当前登录的既不是目标账号、也不是原账号**（用户手动换过）时默认拒绝
+  （`live_changed`，带 `currentUid`）；界面确认后用 `force=true` 再调一次。
+- 客户端因为 access 过期而登出（文件缺失/无 uid）时**不需要 force**：那正是要救的场景。
+- 成功 → `restore_state=done`；失败 → 保持 `pending`，可重试。
 
-### 4.3 崩溃恢复
+### 5.3 崩溃恢复与两把"锁"
 
-`workbuddy_switch_journal.open_slot` 上有唯一索引：**未完成的切换至多一条**。
-AICC 或助手在切换中间被杀掉时，下次 `workbuddy.client.status` 会带 `pendingSwitch`，
-界面显示"上一次切换没走完（已写入，未确认）"+「恢复…」。恢复成功即释放槽位。
+| 字段 | 管什么 | 释放时机 |
+| --- | --- | --- |
+| `open_slot`（唯一索引） | **切换正在执行**（prepared/written/launched） | 收尾时置 NULL |
+| `restore_state=pending` | **临时授权还没还原** | 恢复成功（或切回原账号）→ `done` |
 
-未完成期间不允许再发起切换（`E_SWITCH` / `kind=switch_busy`）：
-否则"当前登录该还原到哪一份"就说不清了。
+刻意分开：临时登录成功后 `open_slot` 立刻释放（不再并发阻塞），但 `restore_state`
+一直是 `pending`，界面必须持续给「恢复原账号」。
 
----
+同时只保留**一条** `pending` 的临时记录：任何一次成功的切换都会把更早的临时记录结算成
+`done`（`settle_pending_temporary_except`）。
 
-## 5. 接口
+于是「恢复原账号」的语义是**回到最近一次切换之前的那一站**——不是"回到最初那个账号"。
+连续切 A→B→C，恢复只能回到 B；再点一次才回到 A 需要那条记录还在，所以界面只保留"上一站"。
 
-| 方法 | 参数 | 返回 | 何时调用 |
-| --- | --- | --- | --- |
-| `workbuddy.client.status` | 无 | `client` / `live` / `candidates[]` / `pendingSwitch` / `lastSwitch` / `recent[]` | 只读；进账号页、切换后刷新 |
-| `workbuddy.client.switch` | `accountId`、`restart`（默认 true，传 false 直接拒绝）、`observeActivity`（默认 true） | `changed` / `phase` / `verified` / `verifyDetail` / `previousUid` / `activityBefore` / `activityAfter` | 用户点「切换到此账号」 |
-| `workbuddy.client.restore` | `journalId`（可选） | `restored` / `uid` / `detail` | 用户点「恢复…」 |
-
-- `live.uid` 是**唯一可信的"当前登录"**。AICC 账号列表里选中了谁、查询优先用哪份授权，
-  都不能替代它。
-- `switch` 超时预算：关进程 20s + 校验 25s + 两次活跃查询，Swift 侧给 180s。
-- 错误码：`E_SWITCH = 1008`（已有未完成切换）；其余失败用 `INTERNAL`，靠 `data.kind` 分类：
-  `switch_failed` / `close_failed` / `no_snapshot` / `snapshot_corrupt` / `switch_busy`。
+> 第一版这里写的是"有待还原的临时登录时，只允许切回原账号"，真机上一轮
+> 卡里→高亮→卡里 之后其余账号全被挡住（`temporary_pending`）。那条规则已经删掉：
+> 它把"防止旧快照被悄悄取代"错误地实现成了"禁止切别的账号"，而真正的保护在
+> `restore` 的 `live_changed` 上（覆盖前必须确认）。
 
 ---
 
-## 6. 数据库（v25）
+## 6. 接口
+
+| 方法 | 参数 | 关键返回 |
+| --- | --- | --- |
+| `workbuddy.client.status` | 无 | `client` / `live`（含 `temporary`、`accessExpiresAt`、`remainingSeconds`）/ `candidates[]`（`switchable`、`reason`、`reasonDetail`、`mode`、`temporary`、`accessExpiresAt`、`remainingSeconds`）/ `pendingSwitch` / `temporaryRestore` / `restoreAvailable` / `lastSwitch` |
+| `workbuddy.client.switch` | `accountId`、`restart`(默认 true)、`observeActivity`(默认 true)、`verifyServer`(默认 true) | `changed`、`phase`、`verified`、`mode`、`temporary`、`accessExpiresAt`、`remainingSeconds`、`safeRestoreUntil`、`authAccepted`、`activityBefore/After` |
+| `workbuddy.client.restore` | `journalId?`、`force?` | `restored`、`uid`、`detail`、`clientRunning` |
+
+- `live.uid` 是**唯一可信的"当前登录"**。
+- `switch` 超时预算：关进程 20s + 校验 25s + 探针 + 两次活跃查询，Swift 侧给 180s。
+- 错误码：`E_SWITCH=1008`（busy / pending / live_changed）；`E_AUTH`（凭据问题），
+  分类看 `data.kind`（就是 §1 的原因码）。
+
+---
+
+## 7. 数据库（v25 + v26）
 
 ```sql
 workbuddy_switch_journal(
   id, target_account_id, target_uid,
   previous_uid, previous_running, previous_marker,
-  phase,            -- prepared / written / launched / verified / unconfirmed / failed / restored
-  open_slot,        -- 1 = 未完成；NULL = 已收尾（唯一索引保证至多一条）
+  phase,            -- prepared/written/launched/verified/unconfirmed/failed/restored
+  open_slot,        -- 1 = 切换在执行（唯一索引，至多一条）
   snapshot_path, snapshot_sha256, token_form, detail,
-  activity_before, activity_after,   -- 只作证据，不参与判定
+  -- v26
+  auth_source,      -- own / magpie
+  temporary,        -- 1 = 临时登录
+  access_expires_at,-- RFC3339
+  access_fingerprint, -- access 的 SHA-256 前 8 位（**不存令牌**）
+  source_key,       -- Magpie 来源键
+  restore_state,    -- pending / done
+  auth_accepted,    -- accepted / rejected / unknown
+  activity_before, activity_after,
   created_at, updated_at
 )
 ```
 
-快照文件默认在 `~/Library/Application Support/AICC-Dashboard/accounts/workbuddy-switch/`。
-**不要手动删**：`restore` 依赖它；确认不需要恢复后再清。
-
----
-
-## 7. 切换对"活跃"到底有没有用（实测协议，**尚未完成**）
-
-### 7.1 已知事实
-
-`docs/activity-rules-2026-11-17.md` 已经证明：**签到成功 ≠ 今日活跃**。
-四个账号连续签到 5 天，其中三个热力墙仍是 `score=0 / is_active=false`。
-
-但"**仅切换登录 = 计入活跃**"这件事，**本项目没有任何证据**。上游 WorkBuddy Switch
-的"切换成功"也不包含服务端活跃校验。所以下面的实测是这一步的必做项。
-
-### 7.2 步骤（需要一个当天尚未活跃的账号）
-
-1. 挑目标账号：账号页 → 活跃页确认它今天 `is_active=false` 且 `score=0`。
-2. 记录基线：`workbuddy.client.status` 的 `live.uid`（切换前是谁）+
-   `growth.activity.status` 里目标账号的 `todayActive` / `streakDays`。
-3. 在账号页点「切换到此账号」并等它报"已确认切换"。
-4. **不做任何其它操作**，等 2 分钟，点活跃页「刷新」，记录一次。
-5. 再等 10 分钟，再刷新一次，记录。
-6. 打开客户端真实用一次（发一条对话），再刷新一次作为对照。
-7. 把三个时点的 `is_active` / `score` / `streak.days` 记进下表。
-
-> 切换时 AICC 会自动把 `activityBefore` / `activityAfter` 写进 journal，
-> 这是 T+0 的证据；T+2min / T+10min 需要手动点刷新。
-
-### 7.3 判定
-
-| 观察 | 结论 | 下一步 |
-| --- | --- | --- |
-| T+0 起 `is_active` 变 true 且 `score > 0` | **登录即计入活跃** | 定时切换可以直接围绕"切号 + 打开客户端"做 |
-| 只在 T+10min 后才 true | 计入，但有延迟 | 定时任务要留回查窗口，别当场判失败 |
-| 一直 false，用一次对话后 true | **登录不计入**，真实使用才计入 | 定时切换只是"换号"，活跃问题要另说；界面不许暗示切换能点亮热力墙 |
-| 一直 false，用对话也不变 | 活跃与客户端行为无关（另有规则） | 停止在这条路上投入，回到"只读判断 + 提醒" |
-
-**禁止**把"自动换号已完成"写成"活跃问题已解决"。这两件事在证据不足时必须分开说。
-
-### 7.4 干扰项
-
-- 服务端日期按 `Asia/Shanghai`，00:00–08:00 之间会先翻页；跨日测试要避开。
-- 目标账号当天可能已经在别处活跃过（手机端、网页端）——先确认基线是 `false`。
-- `/heatmap` 的 `updated_at` 只是服务端最后更新时间，**不能**当作"刚发生了活跃"。
+快照默认在 `~/Library/Application Support/AICC-Dashboard/accounts/workbuddy-switch/`。
+**不要手动删**：`restore` 依赖它。
 
 ---
 
@@ -228,32 +284,59 @@ workbuddy_switch_journal(
 
 | 项 | 现状 | 影响 |
 | --- | --- | --- |
-| 明文令牌是否被所有客户端版本接受 | 只有"回读确认"证据，没有"服务端会话"证据 | 个别版本可能要求重新登录；回滚可用 |
-| 账号不在客户端 `allAccounts` 里时 | 只能用 AICC 的信息拼一个最小账号对象（缺 `uin` / `avatarUrl` / `uniqueUserId`） | 头像与 UIN 可能显示为空，不影响登录 |
-| 授权没有到期时间（`token_expires_at` 为空） | 不写 `expiresAt`，`expiresIn=0` | 客户端会立刻刷新一次令牌（正常行为，会重写文件）；刷新失败则会掉线 |
-| 客户端启动很慢（>25s） | 落 `unconfirmed`，不回滚 | 界面要提示"打开客户端后刷新状态" |
-| 切换会中断正在进行的对话 | 已知 | 二次确认里写明；夜间计划要处理"还在执行任务" |
-| 写客户端目录的权限 | 需要「App 管理」或「完全磁盘访问」 | 写入失败会报权限错误并保持原登录态 |
-| 国际版 | 完全未接 | 界面显示"未开放"，不要试 |
+| 客户端遇到"没有 `refreshToken`"会怎么处理 | **真机已验一半**（2026-11-20 19:11–19:15，4 次临时切换）：客户端正常重启并停在目标账号，回读 `verified`，服务端探针 `accepted`；**没有**立刻登出、也没有触发刷新失败 | 仍未跨过 access 到期，到期后的行为仍未知 |
+| Access 到期后客户端会不会自己登出 | 未知 | 两种预期见下 |
+| 明文令牌是否被所有版本接受 | 只有"回读确认"证据 | 首次切换若被拒会走回滚 |
+| 客户端是否轮换 AICC 那份 refresh | **未验证** | 若轮换，AICC 侧该授权会变旧（客户端不受影响），重新在 AICC 登录即可 |
+| 服务端是否会因换设备/换 IP 让 access 提前失效 | 未知 | 到期时间只是乐观上界 |
+| 账号不在客户端 `allAccounts` 里 | 只能拼最小账号对象 | 头像 / UIN 可能为空 |
+| 客户端启动很慢（>25s） | 落 `unconfirmed`，不回滚 | 提示"打开客户端后刷新状态" |
+| 切换会中断正在进行的对话 | 已知 | 二次确认里写明 |
+| 写客户端目录权限 | 需要「App 管理」或「完全磁盘访问」 | 写入失败会保持原登录态 |
+| 国际版 | 完全未接 | 显示"未开放" |
+
+### 到期后会发生什么（预期，未实测）
+
+- `live.uid` 可能仍然显示目标账号（客户端不主动清理），但任何服务端请求都会 401；
+- 也可能客户端自己写下 `.logged-out` 并把文件清空；
+- **两种情况下 `restore` 都能把原账号写回去**：它只依赖快照与 `previous_uid`，
+  不依赖当前登录是否有效。
 
 ---
 
-## 9. 手工验收清单
+## 9. 真机验收步骤（必须用户在在场时做）
 
-```bash
-# 1) 只看不写：能读到"当前登录是谁"
-printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"workbuddy.client.status","params":{}}' \
-  | AICC_ACCOUNT_DATA_DIR=$(mktemp -d) account-worker/target/debug/aicc-account-worker
+前置：Magpie 里已登录一个**国内版** WorkBuddy 账号，且它在 AICC 账号列表里只有 Magpie 关联。
 
-# 2) 全量单测（含切换/回滚/恢复，全部用假客户端，不会碰真实 WorkBuddy）
-env -u https_proxy -u http_proxy \
-  ~/.cargo/bin/cargo test --manifest-path account-worker/Cargo.toml
+1. 在 AICC「AI 账号」页选中该账号，确认按钮是「**临时**切换到此账号」，
+   旁边显示"只借用 Magpie 的访问令牌 · 剩余 X"。
+2. 记下**当前** WorkBuddy 登录账号（左栏顶部那行）。
+3. 记录 `~/.config/magpie/plugin-auth.json` 的 sha256：
+   `shasum -a 256 ~/.config/magpie/plugin-auth.json`
+4. 点「临时切换到此账号」→ 确认弹层（会写明有效期与"不会交出刷新令牌"）。
+5. 观察 WorkBuddy 重启；AICC 应报"已切换 / 临时登录有效至 …（剩余 …）"。
+6. 在客户端里确认登录的是目标账号；做一次真实操作（发一句话），确认服务端接受。
+7. 再取一次 Magpie 文件的 sha256 —— **必须与第 3 步完全一致**。
+8. 点左栏「恢复原账号…」→ 确认；客户端应重启并回到第 2 步那个账号。
+9. 复查：AICC 左栏不再显示"临时登录"，`cat` 客户端认证文件里 `account.uid` 是原账号。
+10. 若第 5 步后客户端立刻登出：说明 Access-only 不被接受 —— 记录现象，仍按第 8 步恢复。
 
-# 3) 真机：在 App 里切换一个账号，确认
-#    - 切换后 live.uid 变成目标账号
-#    - 客户端重启后仍停在目标账号（不是被改回去）
-#    - 点「恢复…」能回到原账号，且客户端重新启动
-```
+**禁止**把"模拟客户端测试通过"写成"真机验证成功"。
 
-真机验收时**不要**在 AICC 正在被使用的时间段做（切换会退出客户端）。
+---
+
+## 10. 本 PR 能回答 / 不能回答的问题
+
+> 2026-11-20 19:11–19:15 真机实测（卡里 ⇄ 高亮，4 次临时切换，全部 `restore_state=pending`、
+> `auth_accepted=accepted`）：**Access-only 被客户端与服务端同时接受**，没有立刻登出。
+> 这段结论只覆盖"切换后几分钟"，不覆盖"到期之后"。
+
+| 问题 | 结论 | 依据 |
+| --- | --- | --- |
+| Magpie access-only 为什么**可能**被接受 | 客户端认证文件里 access 是独立字段，没有 refresh 也能构成一个"有令牌的登录" | 文件结构 + 代码测试 |
+| 是否**真的**被接受 | **是**（真机 4/4：客户端回读 `verified` + 服务端探针 `accepted`） | `workbuddy_switch_journal` 2026-11-20 19:1x |
+| 客户端会不会立刻登出 | **不会**（观察窗口内） | 同上 |
+| 到期后客户端表现 | **未知**，两种预期都写在 §8 | 仍需等到 access 到期 |
+| 原账号能否可靠恢复 | **能**（代码层保证）：快照按 sha256 校验、逐字节写回、登出状态下也可恢复 | `restoring_a_temporary_login_puts_the_previous_account_back` 等 6 个用例 |
+| Magpie 原始登录态是否保持不变 | **是**：只 `read_logins`，从不写；有单测比对文件字节 | `reading_magpie_logins_never_rewrites_the_file` |
+| 有没有 refresh 泄漏 / 刷新冲突 | **没有**：Magpie 路径不读 refresh；Access-only 结构上不含 refresh 字段 | 两个单测 + 独立构造函数 |

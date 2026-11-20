@@ -115,6 +115,8 @@ final class ConsoleStore: ObservableObject {
     @Published private(set) var wbSwitchNotice: String?
     /// 结论是失败还是成功（决定提示的色调）。
     @Published private(set) var wbSwitchFailed = false
+    /// 恢复被"当前登录已变"挡住：非 nil 时界面弹确认，用户同意后走 force。
+    @Published private(set) var wbRestoreNeedsConfirm: String?
 
     let worker: AccountWorkerManager
     private let settings: AppSettings
@@ -512,21 +514,46 @@ final class ConsoleStore: ObservableObject {
     }
 
     /// 把登录态放回某一轮切换之前。`journalId` 为空时由助手挑（未完成优先）。
-    func restoreWorkbuddyPrevious(journalId: String? = nil) async {
+    ///
+    /// 当前登录已经不是"切过去的那个账号"时，助手会拒绝（`live_changed`）并带上
+    /// 当前的 UID。界面据此弹出确认，用户同意后再以 `force = true` 调一次 —— 
+    /// 绝不静默覆盖用户手动换上的登录态。
+    func restoreWorkbuddyPrevious(journalId: String? = nil, force: Bool = false) async {
         guard wbSwitching == nil else { return }
         wbSwitching = "restore"
         wbSwitchFailed = false
         defer { wbSwitching = nil }
         do {
-            let outcome = try await worker.workbuddyClientRestore(journalId: journalId)
+            let outcome = try await worker.workbuddyClientRestore(
+                journalId: journalId,
+                force: force
+            )
             wbSwitchFailed = !outcome.restored
             wbSwitchNotice = outcome.summary
             await refreshWorkbuddyClient(silent: true)
         } catch {
+            if let rpc = error as? AccountWorkerRPCError, rpc.kind == "live_changed" {
+                // 交给界面确认；这里只留一句提示，不改任何文件。
+                wbRestoreNeedsConfirm = wbClientStatus?.restoreOffer?.id ?? journalId
+                wbSwitchFailed = false
+                wbSwitchNotice = rpc.message
+                return
+            }
             wbSwitchFailed = true
             wbSwitchNotice = message(for: error)
             await refreshWorkbuddyClient(silent: true)
         }
+    }
+
+    /// 用户在确认弹层里点了"仍然恢复"。
+    func confirmWorkbuddyRestore() async {
+        let target = wbRestoreNeedsConfirm
+        wbRestoreNeedsConfirm = nil
+        await restoreWorkbuddyPrevious(journalId: target, force: true)
+    }
+
+    func cancelWorkbuddyRestore() {
+        wbRestoreNeedsConfirm = nil
     }
 
     func clearWorkbuddySwitchNotice() {

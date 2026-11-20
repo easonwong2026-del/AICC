@@ -749,10 +749,16 @@ final class AccountWorkerManager: ObservableObject {
     }
 
     /// 把某一轮切换之前的登录态放回去。不传 `journalId` 时由助手挑（未完成优先）。
-    func workbuddyClientRestore(journalId: String? = nil) async throws -> WorkbuddyRestoreOutcome {
+    ///
+    /// `force = true` 只在用户**明确确认**"当前登录已经不是我切过去的那个账号，
+    /// 仍然要覆盖它"时使用；不传时助手会拒绝并返回 `live_changed`。
+    func workbuddyClientRestore(
+        journalId: String? = nil,
+        force: Bool = false
+    ) async throws -> WorkbuddyRestoreOutcome {
         try await ensureRunning()
         guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
-        var params: [String: Any] = [:]
+        var params: [String: Any] = ["force": force]
         if let journalId { params["journalId"] = journalId }
         let result = try await client.call(
             "workbuddy.client.restore",
