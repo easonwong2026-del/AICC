@@ -1665,6 +1665,52 @@ mod tests {
         magpie::test_reset();
     }
 
+    /// 1b) 同时有自有授权和 Magpie 关联时，**用自有授权**（长期），不是借来的 access。
+    ///
+    /// 第一版照抄了 `auth_preferred_source`（默认 magpie），结果双授权账号全被标成
+    /// "临时登录"，与用户"我明明有 AICC 登录权限"的认知冲突。
+    #[test]
+    fn own_long_lived_login_wins_over_a_borrowed_access() {
+        let (h, _control) = harness(true, Launch::Works);
+        grant(&h.app, &h.account.id, "magpie", Some("workbuddy"), false);
+        grant(&h.app, &h.account.id, "own", None, true);
+        magpie::test_set_logins(Some(vec![login(
+            "workbuddy",
+            "uid-b",
+            "workbuddy",
+            "AT-MAG",
+            Some(3600),
+        )]));
+
+        let plan = ready(&h);
+        assert_eq!(plan.mode, Mode::OwnRefresh);
+        assert!(!plan.temporary());
+        assert!(plan.degraded.is_none(), "首选就是自有授权，不该有降级说明");
+        magpie::test_reset();
+    }
+
+    /// 自有授权缺 refresh 时才退回临时模式，并且要说明原因。
+    #[test]
+    fn a_refreshless_own_grant_falls_back_to_temporary_with_a_reason() {
+        let (h, _control) = harness(true, Launch::Works);
+        grant(&h.app, &h.account.id, "own", None, false);
+        grant(&h.app, &h.account.id, "magpie", Some("workbuddy"), false);
+        magpie::test_set_logins(Some(vec![login(
+            "workbuddy",
+            "uid-b",
+            "workbuddy",
+            "AT-MAG",
+            Some(3600),
+        )]));
+
+        let plan = ready(&h);
+        assert_eq!(plan.mode, Mode::MagpieTemporary);
+        let why = plan.degraded.unwrap_or_default();
+        assert!(why.contains("自有授权不可用"), "{why}");
+        assert!(why.contains("临时"), "{why}");
+        magpie::test_reset();
+    }
+
     /// 2) 同一个 provider 的多个账号：来源键必须一一对应，不能"取第一条"。
     #[test]
     fn source_keys_are_not_interchangeable_between_accounts() {
@@ -2003,7 +2049,8 @@ mod tests {
         magpie::test_reset();
     }
 
-    /// 9b) Magpie 路径**完全不碰自有 refresh**：把它做成读不出来的坏引用也不影响。
+    /// 9b) 自有授权缺 refresh 时走 Magpie，**完全不碰自有凭据**：
+    /// 把它做成读不出来的坏引用也不影响。
     #[test]
     fn magpie_switch_never_reads_the_own_refresh() {
         let (h, control) = harness(true, Launch::Works);
@@ -2015,8 +2062,10 @@ mod tests {
                     id: format!("{}-own", h.account.id),
                     account_id: h.account.id.clone(),
                     kind: "own".to_string(),
+                    // 缺 refresh → 计划阶段就落到 Magpie；access 引用也是坏的，
+                    // 只要有任何一处真去读了自有凭据，这个用例就会失败。
                     access_ref: "localjson:v1:does-not-exist".to_string(),
-                    refresh_ref: Some("localjson:v1:does-not-exist".to_string()),
+                    refresh_ref: None,
                     auth_domain: None,
                     token_expires_at: None,
                     status: "valid".to_string(),
@@ -2039,9 +2088,14 @@ mod tests {
             Some(3600),
         )]));
 
-        // 默认首选 magpie：计划走临时模式，取凭据时只读 Magpie 文件。
+        // 自有授权缺 refresh → 临时模式，取凭据时只读 Magpie 文件。
         let plan = ready(&h);
         assert_eq!(plan.mode, Mode::MagpieTemporary);
+        assert!(plan
+            .degraded
+            .as_deref()
+            .unwrap_or_default()
+            .contains("自有授权不可用"));
         let before = client::read_live(&h.env.auth_path);
         let target = target_session(&h.app, &h.account, &plan, before.json.as_ref()).unwrap();
         assert_eq!(target.credential.access(), "AT-MAG");

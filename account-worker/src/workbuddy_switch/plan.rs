@@ -13,11 +13,21 @@
 //! Magpie 模式刻意不碰 refresh：那是 Magpie 的凭据，AICC 只借无状态 access。
 //! 代价是它必然过期，所以这里要算清"还能用多久"，并给界面一个保守的恢复截止。
 //!
-//! ## 来源选择必须跟 Broker 一致
+//! ## 来源选择：长期优先，借用兜底
 //!
-//! 账号可以同时有 own / magpie 两份授权，`auth_preferred_source` 决定优先用哪份。
-//! 这里的顺序完全照抄 [`crate::auth::broker`]：先首选、后另一份，首选不可用时用
-//! 另一份并标 `degraded`，不静默换源。
+//! 账号可以同时有 own / magpie 两份授权。**写进客户端**的登录按固定优先级挑：
+//!
+//! 1. 自有授权且带 refresh → [`Mode::OwnRefresh`]（客户端自己续期，长期有效）；
+//! 2. 否则 Magpie 关联可用 → [`Mode::MagpieTemporary`]（借来的 access，会过期）。
+//!
+//! 为什么**不跟** `auth_preferred_source` 走：那个设置决定的是"AICC 读接口时用哪份
+//! 令牌"（签到 / 额度 / 成长），默认 `magpie` 是为了少碰钥匙串、避免两边各自刷新。
+//! 但"写进客户端的登录"是另一件事：能用长期凭据时没有理由写一份必然过期的。
+//! 第一版照抄了 Broker 的顺序，结果所有"双授权"账号都被标成临时登录，用户第一反应
+//! 就是"我明明有 AICC 登录权限，为什么还是临时"。
+//!
+//! 代价要说清：用自有授权登录后，**客户端会自己刷新并轮换 refresh token**，
+//! AICC 手里那份可能因此变旧；真出现时 AICC 会提示重新登录，不影响客户端当前使用。
 
 use crate::app::App;
 use crate::auth::magpie_link::{self, LinkProblem};
@@ -167,52 +177,62 @@ pub fn resolve(
         return PlanOutcome::blocked(reason::NO_CREDENTIAL, "这个账号还没有登记任何授权来源");
     }
 
-    // 顺序照抄 broker：首选在前，另一份兜底。
-    let preferred = crate::auth::broker::preferred_source(app);
-    let magpie_first = preferred == crate::auth::ids::KIND_MAGPIE;
-    let order: [&str; 2] = if magpie_first {
-        [crate::auth::ids::KIND_MAGPIE, crate::auth::ids::KIND_OWN]
-    } else {
-        [crate::auth::ids::KIND_OWN, crate::auth::ids::KIND_MAGPIE]
-    };
+    // 长期优先：自有授权（带 refresh）在前，Magpie 借用兜底。
+    let order: [&str; 2] = [crate::auth::ids::KIND_OWN, crate::auth::ids::KIND_MAGPIE];
 
-    let mut first_block: Option<(String, String)> = None;
-    for (index, kind) in order.iter().enumerate() {
-        let attempt = if *kind == crate::auth::ids::KIND_OWN {
-            own.map(try_own)
-                .unwrap_or_else(|| Err((reason::NO_CREDENTIAL, "这个账号没有自有授权".to_string())))
+    // 只记录**这次真的尝试过**的那一份失败：自有授权不存在时不该报"缺自有授权"，
+    // 那会把 Magpie 的具体原因（过期 / 串号 / 文件不可读）挤掉。
+    let mut own_fail: Option<(String, String)> = None;
+    let mut magpie_fail: Option<(String, String)> = None;
+
+    for kind in order {
+        let is_own = kind == crate::auth::ids::KIND_OWN;
+        let attempt = if is_own {
+            match own {
+                Some(row) => try_own(row),
+                None => continue,
+            }
         } else {
-            magpie_row
-                .map(|row| try_magpie(account, row))
-                .unwrap_or_else(|| {
-                    Err((
-                        reason::NO_CREDENTIAL,
-                        "这个账号没有 Magpie 关联".to_string(),
-                    ))
-                })
+            match magpie_row {
+                Some(row) => try_magpie(account, row),
+                None => continue,
+            }
         };
         match attempt {
             Ok(mut plan) => {
-                if index > 0 {
-                    // 首选不可用：把原因带出去，界面要能说明"为什么这次用的是另一份"。
-                    let (why, _) = first_block.clone().unwrap_or_default();
-                    plan.degraded =
-                        Some(format!("首选 {preferred} 不可用（{why}），已改用 {}", kind));
+                // 走到第二份说明自有授权不可用（通常是缺 refresh）：把原因说出来，
+                // 界面才知道"为什么这次是临时的"。
+                if !is_own {
+                    if let Some((why, _)) = own_fail.as_ref() {
+                        plan.degraded =
+                            Some(format!("自有授权不可用（{why}），已改用 Magpie 临时登录"));
+                    }
                 }
                 return PlanOutcome::Ready(plan);
             }
             Err((why, detail)) => {
-                if first_block.is_none() {
-                    first_block = Some((why.to_string(), detail));
+                if is_own {
+                    own_fail = Some((why.to_string(), detail));
+                } else {
+                    magpie_fail = Some((why.to_string(), detail));
                 }
             }
         }
     }
 
-    let (why, detail) = first_block.unwrap_or((
-        reason::NO_CREDENTIAL.to_string(),
-        "没有可用的授权".to_string(),
-    ));
+    // 有自有授权就优先报它的问题（用户最该先去修那份）；两份都有问题就一起说。
+    let (why, detail) = match (own_fail, magpie_fail) {
+        (Some((why, own_detail)), Some((_, magpie_detail))) => (
+            why,
+            format!("{own_detail}；Magpie 那份也不可用：{magpie_detail}"),
+        ),
+        (Some((why, detail)), None) => (why, detail),
+        (None, Some((why, detail))) => (why, detail),
+        (None, None) => (
+            reason::NO_CREDENTIAL.to_string(),
+            "这个账号还没有可用的授权".to_string(),
+        ),
+    };
     PlanOutcome::Blocked {
         reason: leak_static(&why),
         detail,
