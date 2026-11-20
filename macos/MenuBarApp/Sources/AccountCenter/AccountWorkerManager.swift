@@ -787,15 +787,22 @@ final class AccountWorkerManager: ObservableObject {
     }
 
     /// 开 / 关。打开时会先校验配置（缺账号会直接拒绝），不会悄悄打开一个跑不起来的计划。
-    func workbuddyRotationSetEnabled(_ enabled: Bool) async throws -> WorkbuddyRotationStatus {
+    ///
+    /// 关闭时会顺带**安全收尾**：还在跑的那一轮立刻恢复原账号。`stopResult`
+    /// 就是那次收尾的结论（`restored` = 是否真的回到原账号），不能吞掉——
+    /// 用户需要知道"关掉了"和"账号回来了"是两件事。
+    func workbuddyRotationSetEnabled(
+        _ enabled: Bool
+    ) async throws -> (status: WorkbuddyRotationStatus, stopResult: [String: Any]?) {
         try await ensureRunning()
         guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
         let result = try await client.call(
             "workbuddy.rotation.setEnabled",
             params: ["enabled": enabled],
-            timeout: 20
+            timeout: 180
         )
-        return WorkbuddyRotationStatus(json: result)
+        let stopResult = result["stopResult"] as? [String: Any]
+        return (WorkbuddyRotationStatus(json: result), stopResult)
     }
 
     /// 预演：只演算会做什么、会跳过什么，不动客户端、不读令牌。

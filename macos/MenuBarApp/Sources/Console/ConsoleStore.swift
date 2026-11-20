@@ -609,11 +609,28 @@ final class ConsoleStore: ObservableObject {
         wbRotationFailed = false
         wbRotationNotice = nil
         do {
-            wbRotationStatus = try await worker.workbuddyRotationSetEnabled(enabled)
+            let result = try await worker.workbuddyRotationSetEnabled(enabled)
+            wbRotationStatus = result.status
             wbRotationError = nil
-            wbRotationNotice = enabled
-                ? "已打开。计划只在 AICC 运行时执行；开始前会先检查凭据，凭据不对就跳过那个账号。"
-                : "已关闭，不会再自动切换客户端。"
+            if enabled {
+                wbRotationNotice = "已打开。计划只在 AICC 运行时执行；"
+                    + "开始前会先检查凭据，凭据不对就跳过那个账号。"
+                wbRotationFailed = false
+            } else {
+                // 关闭 = 停止后续计划 + 把账号恢复回来。两件事都要如实说。
+                let restored = result.stopResult?["restored"] as? Bool
+                switch restored {
+                case .some(true):
+                    wbRotationNotice = "已关闭，并把账号恢复到这一轮最初登录的那个。"
+                    wbRotationFailed = false
+                case .some(false):
+                    wbRotationNotice = "已关闭，但账号没能自动恢复；请点「恢复最初账号…」并确认。"
+                    wbRotationFailed = true
+                case .none:
+                    wbRotationNotice = "已关闭，不会再自动切换客户端。"
+                    wbRotationFailed = false
+                }
+            }
         } catch {
             wbRotationFailed = true
             wbRotationNotice = message(for: error)
