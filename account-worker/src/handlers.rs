@@ -1292,6 +1292,11 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                     .get("observeActivity")
                     .and_then(Value::as_bool)
                     .unwrap_or(true),
+                // 切换后用只读探针确认服务端是否接受这份 access；失败只记 unknown。
+                verify_server: params
+                    .get("verifyServer")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
             };
             workbuddy_switch::switch(app, &request, &control, &env).await
         }
@@ -1301,9 +1306,14 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                 .get("journalId")
                 .and_then(Value::as_str)
                 .map(str::to_string);
+            // 用户手动换过账号时，恢复会覆盖新登录态：默认拒绝，确认后由界面带 force 再来。
+            let force = params
+                .get("force")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let control = workbuddy_switch::SystemControl::for_variant(WbVariant::Cn);
             let env = workbuddy_switch::SwitchEnv::system(app);
-            workbuddy_switch::restore(app, journal_id.as_deref(), &control, &env)
+            workbuddy_switch::restore(app, journal_id.as_deref(), force, &control, &env)
         }
 
         "auth.magpie.import" => {

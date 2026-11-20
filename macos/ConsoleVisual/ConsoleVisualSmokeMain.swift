@@ -51,6 +51,13 @@ struct ConsoleVisualFixture {
 }
 
 extension ConsoleVisualFixture {
+    /// 相对 `now` 的 RFC3339，给"临时登录到期时间"这类样本用。
+    static func iso(_ now: Date, _ seconds: TimeInterval) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: now.addingTimeInterval(seconds))
+    }
+
     /// 完整样本：4 个平台都有账号，含超长昵称、过期授权、失败任务。
     static var sample: ConsoleVisualFixture {
         var fixture = ConsoleVisualFixture()
@@ -107,6 +114,24 @@ extension ConsoleVisualFixture {
                 ],
             ]),
         ].compactMap { $0 }
+        // 只有一个 Magpie 关联的账号：临时切换的"目标"样本（授权来源与模式才自洽）。
+        if let magpieOnly = ConsoleAccount(json: [
+            "id": "acc-mag-1",
+            "platform": "workbuddy",
+            "provider": "workbuddy",
+            "uid": "wb_mag_0001",
+            "nickname": "Magpie 导入账号",
+            "authStatus": "valid",
+            "updatedAt": "2026-11-14T12:00:00Z",
+            "authSource": "magpie",
+            "authorizations": [
+                ["id": "auth-mag-1", "kind": "magpie", "status": "valid",
+                 "tokenExpiresAt": "2026-11-14T15:00:00Z"],
+            ],
+        ]) {
+            fixture.accounts.append(magpieOnly)
+        }
+
         // 20 个额外账号：验证列表能独立滚动、筛选不卡。
         for index in 1...20 {
             if let account = ConsoleAccount(json: [
@@ -292,8 +317,8 @@ extension ConsoleVisualFixture {
         // PR #103：成长活跃样本（已在 / 未活跃 / 疑似延迟 / 未知 四种现状）。
         fixture.activity = .mock()
 
-        // WB-SWITCH-1：客户端当前登录 = 主账号；「设计外包」只有 Magpie 授权（不可切）、
-        // 国际版不可切；上一次切换落在 unconfirmed，左栏要出现「恢复…」。
+        // WB-SWITCH-1 / #112：客户端当前登录 = 一次 Magpie 临时登录（acc-wb-2），
+        // 原账号是主账号（acc-wb-1）。左栏要同时出现"临时登录 + 到期 + 恢复原账号"。
         fixture.wbClientStatus = WorkbuddyClientStatus(json: [
             "client": [
                 "installed": true,
@@ -303,36 +328,72 @@ extension ConsoleVisualFixture {
                 "logoutMarker": false,
             ],
             "live": [
-                "uid": "wb_9f3c1d7a4b2e5f6089abcdef12345678",
+                "uid": "wb_1122334455667788",
                 "loggedIn": true,
-                "tokenForm": "envelope",
+                "tokenForm": "plaintext",
                 "accountsInFile": 2,
+                "temporary": true,
+                "temporaryAccountId": "acc-wb-2",
+                "accessExpiresAt": ConsoleVisualFixture.iso(now, 2400),
+                "remainingSeconds": 2400,
+                "safeRestoreUntil": ConsoleVisualFixture.iso(now, 1500),
             ],
             "candidates": [
                 ["accountId": "acc-wb-1", "uid": "wb_9f3c1d7a4b2e5f6089abcdef12345678",
-                 "nickname": "主账号", "switchable": false, "reason": "live"],
+                 "nickname": "主账号", "switchable": true, "reason": "ok",
+                 "mode": "own_refresh", "temporary": false],
                 ["accountId": "acc-wb-2", "uid": "wb_1122334455667788",
-                 "nickname": "设计外包", "switchable": false, "reason": "magpie_no_refresh"],
+                 "nickname": "设计外包", "switchable": false, "reason": "live",
+                 "mode": "", "temporary": false],
                 ["accountId": "acc-wb-ai-1", "uid": "wbai_7788aabbccdd",
-                 "nickname": "International Demo", "switchable": false, "reason": "unsupported_provider"],
+                 "nickname": "International Demo", "switchable": false,
+                 "reason": "unsupported_provider", "mode": "", "temporary": false],
                 ["accountId": "acc-bulk-1", "uid": "wb_bulk_0001",
-                 "nickname": "批量账号 1", "switchable": true, "reason": "ok"],
+                 "nickname": "批量账号 1", "switchable": true, "reason": "ok",
+                 "mode": "own_refresh", "temporary": false],
+                ["accountId": "acc-mag-1", "uid": "wb_mag_0001",
+                 "nickname": "Magpie 导入账号", "switchable": true, "reason": "ok",
+                 "mode": "magpie_access_temporary", "temporary": true,
+                 "accessExpiresAt": ConsoleVisualFixture.iso(now, 3000),
+                 "remainingSeconds": 3000],
             ],
             "pendingSwitch": NSNull(),
-            "lastSwitch": [
+            "temporaryRestore": [
                 "id": "j-demo",
-                "targetAccountId": "acc-wb-1",
-                "targetUid": "wb_9f3c1d7a4b2e5f6089abcdef12345678",
-                "previousUid": "wb_1122334455667788",
-                "phase": "unconfirmed",
-                "detail": "认证文件已是目标账号，但 25 秒内没有确认到客户端进程",
+                "targetAccountId": "acc-wb-2",
+                "targetUid": "wb_1122334455667788",
+                "previousUid": "wb_9f3c1d7a4b2e5f6089abcdef12345678",
+                "phase": "verified",
+                "authSource": "magpie",
+                "temporary": true,
+                "accessExpiresAt": ConsoleVisualFixture.iso(now, 2400),
+                "restoreState": "pending",
+                "authAccepted": "accepted",
+                "detail": "客户端已启动并重写了认证文件（说明它接受了这次登录）",
                 "createdAt": "2026-11-14T13:58:00Z",
                 "activityBefore": ["state": "ok", "diagnosis": "inactive",
                                    "serverDate": "2026-11-14", "todayActive": false, "streakDays": 0],
                 "activityAfter": ["state": "ok", "diagnosis": "inactive",
                                   "serverDate": "2026-11-14", "todayActive": false, "streakDays": 0],
             ],
+            "restoreAvailable": true,
+            "lastSwitch": [
+                "id": "j-demo",
+                "targetAccountId": "acc-wb-2",
+                "targetUid": "wb_1122334455667788",
+                "previousUid": "wb_9f3c1d7a4b2e5f6089abcdef12345678",
+                "phase": "verified",
+                "authSource": "magpie",
+                "temporary": true,
+                "accessExpiresAt": ConsoleVisualFixture.iso(now, 2400),
+                "restoreState": "pending",
+                "authAccepted": "accepted",
+                "createdAt": "2026-11-14T13:58:00Z",
+            ],
         ])
+        fixture.wbSwitchNotice =
+            "已切换，客户端已接受这个登录（重启后仍然是它）；临时登录有效至 11-14 14:38"
+            + "（剩余 40 分钟），到期前请点「恢复原账号」"
 
         fixture.tasksOverview = TasksOverview(json: [
             "today": "2026-11-14",
@@ -612,7 +673,7 @@ struct ConsoleVisualSmokeMain {
             // WB-SWITCH-1：可切换账号的详情（「切换到此账号」按钮 + 重试说明）。
             ("wb-switch-1120x760-light",
              { AnyView(consoleView(store: store, settings: settings, scheme: .light,
-                                   page: .accounts, account: "workbuddy:acc-bulk-1")) },
+                                   page: .accounts, account: "workbuddy:acc-mag-1")) },
              CGSize(width: 1120, height: 760), .light),
             ("quota-accounts-1120x760-light",
              { AnyView(consoleView(store: store, settings: settings, scheme: .light,

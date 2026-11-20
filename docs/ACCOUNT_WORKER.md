@@ -105,9 +105,9 @@ stdin/stdout，一行一条 JSON-RPC 2.0。**stdout 只放协议消息**，日�
 | `checkin.records` | 签到历史与每次尝试（`checkin_records` + `task_executions`） | 否 |
 | `quota.board` | 四平台额度看板（`days` / `provider` / `accountId` / `refresh`）。WorkBuddy CN/AI 走官方只读接口，**Qoder 两版零请求返回 `unverified`**；`refresh=false` 时优先用 `quota_snapshots` 缓存 | 是（只读语义） |
 | `quota.history` | 某账号的额度快照历史（`days` 默认 30，上限 90），按时间升序 | 否 |
-| `workbuddy.client.status` | 客户端的**当前登录账号**（读认证文件）、进程状态、每个账号能不能切与原因、未完成的切换记录。**只读**，不读令牌、不写文件 | 否 |
-| `workbuddy.client.switch` | 把一个账号写进客户端并重启它：关进程 → 快照 → 写认证 → 启动 → **回读确认**。失败自动按快照逐字节回滚，错误里带 `restored` | 否 |
-| `workbuddy.client.restore` | 把某一轮切换之前的登录态放回去（校验快照 sha256 后才写）；没有可恢复记录时返回 `restored:false` 而不是报错 | 否 |
+| `workbuddy.client.status` | 客户端的**当前登录账号**（读认证文件）、进程状态、每个账号能不能切与原因、模式（`own_refresh` / `magpie_access_temporary`）、临时登录到期、未完成切换与待还原的临时登录。**只读**，不读令牌、不写文件 | 否 |
+| `workbuddy.client.switch` | 把一个账号写进客户端并重启它：关进程 → 快照 → 写认证 → 启动 → **回读确认** → 只读探针。Magpie 账号走 **access-only 临时模式**。失败自动按快照逐字节回滚，错误里带 `restored` | 探针会联网 |
+| `workbuddy.client.restore` | 把某一轮切换之前的登录态放回去（校验快照 sha256 后才写）；当前登录被手动换过时默认拒绝（`live_changed`），确认后带 `force` 再来；没有可恢复记录时返回 `restored:false` 而不是报错 | 否 |
 
 `health` **故意不做**钥匙串探针：否则每次启动 App 都会弹一次系统授权框。
 需要验证凭据存储时显式调 `secure.status`（设置页有按钮）。探针的读写删三步全成功才报 `ok`，
@@ -472,7 +472,7 @@ WorkBuddy AI 是另一个站点，拿它的授权请求这些接口，轻则 401
 7. **只读**：`quota.board` / `quota.history` 不写 `last_used_at`、不改 `auth_status`、
    不刷新令牌。取数失败只影响这一行。
 
-## 12. WorkBuddy 客户端账号切换（WB-SWITCH-1，v25）
+## 12. WorkBuddy 客户端账号切换（WB-SWITCH-1，v25 → v26）
 
 一句话：**把 AICC 里授权过的账号写进 WorkBuddy 客户端的登录态，必要时重启客户端；
 失败按快照逐字节还原，并如实报告"恢没恢复"。**
@@ -490,4 +490,18 @@ WorkBuddy AI 是另一个站点，拿它的授权请求这些接口，轻则 401
 5. `workbuddy_switch_journal.open_slot` 的唯一索引保证**同一时刻只有一条未完成切换**；
    进程中途被杀时，下次启动会在 `status.pendingSwitch` 里如实报告，由用户点「恢复」。
 
-只支持国内版；国际版与"仅 access"的授权都保持禁用，理由写在文档 §1。
+### 12.1 Magpie access-only 临时切换（#112，v26）
+
+| 项 | 规则 |
+| --- | --- |
+| 能切的前提 | Magpie 文件里那条登录态的 source_key / UID / provider 都对得上，access 非空，**有 `expires`**，剩余 ≥ 30 分钟 |
+| 写什么 | 只写 access；`auth` 段**没有** refresh 字段（`build_access_only_auth`，独立实现并单测） |
+| 不写什么 | 不读 / 不存 / 不同步 Magpie 的 refresh；不把上一账号的 refresh 带给目标账号 |
+| 有效期 | 以 Magpie 文件里的 `expires` 为准，**不用数据库里的旧 `token_expires_at`**；切换时现读一次 |
+| 恢复 | 成功后 `restore_state=pending`，界面必须一直给「恢复原账号」；`open_slot` 同时释放 |
+| 冲突 | 有 `pending` 临时登录时，只允许切回那个原账号；切别的账号先拒绝（`temporary_pending`） |
+| 服务端有效性 | 一次只读探针记 `auth_accepted`；`unknown` 就是未知，不冒充成功 |
+
+两种模式的判定都在 `workbuddy_switch::plan::resolve()`，`status` 与 `switch` 同源，
+不会出现"界面说 Magpie、实际用自有授权"。理由与实测协议见
+[`docs/WORKBUDDY_CLIENT_SWITCH.md`](WORKBUDDY_CLIENT_SWITCH.md)。

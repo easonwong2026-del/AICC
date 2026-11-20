@@ -12,6 +12,7 @@
 //! access + refresh 的自有授权可切换；写完必须回读确认，不能"写了就算成功"。
 
 pub mod client;
+pub mod plan;
 pub mod service;
 
 pub use client::SystemControl;

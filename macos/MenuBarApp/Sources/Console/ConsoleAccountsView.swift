@@ -67,7 +67,7 @@ struct ConsoleAccountsView: View {
             ensureSelection()
         }
         .alert(
-            switchingTo.map { "切换到 \($0.nickname)？" } ?? "切换账号",
+            switchAlertTitle,
             isPresented: Binding(
                 get: { switchingTo != nil },
                 set: { if !$0 { switchingTo = nil } }
@@ -81,14 +81,29 @@ struct ConsoleAccountsView: View {
                 }
             }
         } message: {
-            Text("AICC 会先备份当前登录态，把 WorkBuddy 关掉、写入目标账号、再重新启动。"
-                + "重启会中断客户端里正在进行的对话；失败时会自动恢复原账号。")
+            Text(switchAlertMessage)
         }
         .alert("恢复到切换前的账号？", isPresented: $restorePromptShown) {
             Button("取消", role: .cancel) {}
             Button("恢复") { Task { await store.restoreWorkbuddyPrevious() } }
         } message: {
-            Text("AICC 会用切换前保存的那份认证文件覆盖回去，并重新启动 WorkBuddy。")
+            Text("AICC 会用切换前保存的那份认证文件覆盖回去，并重新启动 WorkBuddy。"
+                + "临时登录（Magpie）恢复后，客户端的登录态回到切换之前的账号。")
+        }
+        .alert(
+            "客户端登录已经变了，仍然恢复？",
+            isPresented: Binding(
+                get: { store.wbRestoreNeedsConfirm != nil },
+                set: { if !$0 { store.cancelWorkbuddyRestore() } }
+            )
+        ) {
+            Button("取消", role: .cancel) { store.cancelWorkbuddyRestore() }
+            Button("仍然恢复", role: .destructive) {
+                Task { await store.confirmWorkbuddyRestore() }
+            }
+        } message: {
+            Text("检测到客户端当前的登录账号已经不是你切换过去的那个。"
+                + "继续恢复会用切换前的认证文件覆盖它 —— 如果那是你手动换上的账号，请先取消。")
         }
         // 全页只有一个 sheet 路由状态：所有流程从这里进，不并行声明多个 sheet。
         .sheet(item: $activeSheet) { sheet in
@@ -442,28 +457,25 @@ struct ConsoleAccountsView: View {
                     .font(ConsoleType.caption)
                     .foregroundStyle(ConsoleTheme.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
-                if let pending = status.pendingSwitch, pending.isPending {
+                // 临时登录：到期时间必须在左栏一直看得见，不能只留在详情里。
+                if let temporary = status.live.temporarySummary {
+                    Text(temporary)
+                        .font(ConsoleType.caption)
+                        .foregroundStyle(ConsoleTheme.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let offer = status.restoreOffer {
                     HStack(spacing: 8) {
-                        Text("上一次切换没走完（\(pending.phaseText)）")
+                        Text(restoreOfferLabel(offer))
                             .font(ConsoleType.caption)
-                            .foregroundStyle(ConsoleTheme.warning)
+                            .foregroundStyle(offer.isPending ? ConsoleTheme.warning : ConsoleTheme.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
                         Spacer(minLength: 0)
-                        Button("恢复…") { restorePromptShown = true }
-                            .buttonStyle(ConsoleSecondaryButtonStyle())
-                            .disabled(store.wbSwitching != nil)
-                    }
-                } else if let last = status.lastSwitch,
-                          last.needsRestoreOffer,
-                          last.previousUid != status.live.uid {
-                    HStack(spacing: 8) {
-                        Text("上次：\(WorkbuddyLiveLogin.shortUID(last.targetUid))")
-                            .font(ConsoleType.caption)
-                            .foregroundStyle(ConsoleTheme.tertiaryText)
-                        Spacer(minLength: 0)
-                        Button("恢复上一个…") { restorePromptShown = true }
-                            .buttonStyle(ConsoleSecondaryButtonStyle())
-                            .disabled(store.wbSwitching != nil)
+                        Button(offer.temporary ? "恢复原账号…" : "恢复…") {
+                            restorePromptShown = true
+                        }
+                        .buttonStyle(ConsoleSecondaryButtonStyle())
+                        .disabled(store.wbSwitching != nil)
                     }
                 }
             }
@@ -497,10 +509,47 @@ struct ConsoleAccountsView: View {
     private func bannerDetail(_ status: WorkbuddyClientStatus) -> String {
         var parts: [String] = []
         parts.append(status.client.installed ? (status.client.running == true ? "客户端运行中" : "客户端未运行") : "未安装客户端")
+        // 有临时登录时要显示到期，不再重复"上次切换"。
+        if status.live.temporary {
+            return parts.joined(separator: " · ")
+        }
         if let last = status.lastSwitch {
             parts.append("上次切换：\(last.phaseText)")
         }
         return parts.joined(separator: " · ")
+    }
+
+    private func restoreOfferLabel(_ offer: WorkbuddySwitchJournal) -> String {
+        if offer.isPending {
+            return "上一次切换没走完（\(offer.phaseText)）"
+        }
+        if offer.temporary {
+            // 到期时间已经在上面那行显示过，这里只说"恢复会回到谁"，避免重复。
+            let previous = offer.previousUid.map(WorkbuddyLiveLogin.shortUID) ?? "原账号"
+            return "切换前：\(previous)"
+        }
+        return "上次：\(WorkbuddyLiveLogin.shortUID(offer.targetUid))"
+    }
+
+    private var switchAlertTitle: String {
+        guard let account = switchingTo else { return "切换账号" }
+        let mode = store.wbClientStatus?.candidate(forAccount: account.id)?.mode
+        return mode == .magpieTemporary ? "临时切换到 \(account.nickname)？" : "切换到 \(account.nickname)？"
+    }
+
+    private var switchAlertMessage: String {
+        guard let account = switchingTo else { return "" }
+        let candidate = store.wbClientStatus?.candidate(forAccount: account.id)
+        if candidate?.mode == .magpieTemporary {
+            let remaining = WorkbuddyTime.remaining(candidate?.remainingSeconds)
+            let expiry = candidate?.accessExpiresAt.map(WorkbuddyTime.short) ?? "未知时间"
+            return "AICC 会先备份当前登录态，关掉 WorkBuddy，只把 Magpie 的访问令牌写进去再启动"
+                + "（不会把刷新令牌交给客户端，也不改动 Magpie 自己的登录态）。"
+                + "这次登录是临时的：有效至 \(expiry)（\(remaining)），到期前请点「恢复原账号」。"
+                + "重启会中断客户端里正在进行的对话；失败会自动恢复原账号。"
+        }
+        return "AICC 会先备份当前登录态，把 WorkBuddy 关掉、写入目标账号、再重新启动。"
+            + "重启会中断客户端里正在进行的对话；失败时会自动恢复原账号。"
     }
 
     private var pendingSwitchNotice: some View {
@@ -826,7 +875,8 @@ struct ConsoleAccountsView: View {
                     .font(ConsoleType.caption)
                     .foregroundStyle(ConsoleTheme.tertiaryText)
             } else if let candidate, !candidate.switchable {
-                Text(candidate.reason.explanation)
+                // Rust 已经算好了原因；`reasonDetail` 里有更具体的一句话（例如"首选来源不可用"）。
+                Text(candidate.reasonDetail ?? candidate.reason.explanation)
                     .font(ConsoleType.caption)
                     .foregroundStyle(ConsoleTheme.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
@@ -840,11 +890,12 @@ struct ConsoleAccountsView: View {
                     .buttonStyle(ConsoleSecondaryButtonStyle())
                 }
             } else {
+                let mode = candidate?.mode
                 HStack(spacing: 8) {
                     Button {
                         switchingTo = account
                     } label: {
-                        Label("切换到此账号", systemImage: "arrow.left.arrow.right")
+                        Label(mode?.buttonTitle ?? "切换到此账号", systemImage: "arrow.left.arrow.right")
                     }
                     .buttonStyle(ConsoleSecondaryButtonStyle())
                     .disabled(busy || locked || status == nil)
@@ -853,10 +904,25 @@ struct ConsoleAccountsView: View {
                     }
                     Spacer(minLength: 0)
                 }
-                Text("切换会关闭并重启 WorkBuddy；失败会自动恢复原账号。")
-                    .font(ConsoleType.caption)
-                    .foregroundStyle(ConsoleTheme.tertiaryText)
-                    .fixedSize(horizontal: false, vertical: true)
+                if mode == .magpieTemporary {
+                    // 临时模式必须把"能用多久"和"什么时候回去"写在按钮旁边。
+                    if let note = candidate?.temporaryNote {
+                        Text(note)
+                            .font(ConsoleType.caption)
+                            .foregroundStyle(ConsoleTheme.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Text("只借用 Magpie 的访问令牌，不会把刷新令牌交给客户端；"
+                        + "到期前请点「恢复原账号」，否则这个登录会失效。")
+                        .font(ConsoleType.caption)
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("切换会关闭并重启 WorkBuddy；失败会自动恢复原账号。")
+                        .font(ConsoleType.caption)
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }

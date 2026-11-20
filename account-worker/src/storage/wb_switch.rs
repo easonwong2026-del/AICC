@@ -53,12 +53,32 @@ pub struct SwitchJournal {
     pub snapshot_path: String,
     pub snapshot_sha256: String,
     pub token_form: Option<String>,
+    /// 这次切换用的是哪份授权：`own` / `magpie`。v26 之前的记录为 NULL。
+    pub auth_source: Option<String>,
+    /// 是不是**临时**登录（Magpie access-only）。临时登录成功后仍要保留恢复入口。
+    pub temporary: bool,
+    /// 写进客户端的 access 到期时间（RFC3339）。只有 Magpie 模式必然有值。
+    pub access_expires_at: Option<String>,
+    /// access 的摘要（8 hex）。**只存摘要，不存令牌。**
+    pub access_fingerprint: Option<String>,
+    /// Magpie 来源键，便于事后核对"当时借的是哪一条"。
+    pub source_key: Option<String>,
+    /// `pending` / `done` / `superseded`。与 `open_slot` 无关：
+    /// `open_slot` 管"切换正在执行"，这个管"临时授权还没还原"。
+    pub restore_state: String,
+    /// 服务端是否接受这份 access：`accepted` / `rejected` / `unknown`。
+    pub auth_accepted: Option<String>,
     pub detail: Option<String>,
     pub activity_before: Option<Value>,
     pub activity_after: Option<Value>,
     pub created_at: String,
     pub updated_at: String,
 }
+
+/// 临时授权还没还原：要给界面一个持续的「恢复原账号」入口。
+pub const RESTORE_PENDING: &str = "pending";
+/// 已经还原过（或本来就回到了原账号）。
+pub const RESTORE_DONE: &str = "done";
 
 /// 新建一条切换记录。`open_slot` 恒为 1，由唯一索引挡住第二条。
 pub struct NewSwitchJournal<'a> {
@@ -71,6 +91,11 @@ pub struct NewSwitchJournal<'a> {
     pub snapshot_path: &'a str,
     pub snapshot_sha256: &'a str,
     pub token_form: Option<&'a str>,
+    pub auth_source: &'a str,
+    pub temporary: bool,
+    pub access_expires_at: Option<&'a str>,
+    pub access_fingerprint: Option<&'a str>,
+    pub source_key: Option<&'a str>,
 }
 
 fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SwitchJournal> {
@@ -87,6 +112,15 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SwitchJournal> {
         snapshot_path: row.get("snapshot_path")?,
         snapshot_sha256: row.get("snapshot_sha256")?,
         token_form: row.get("token_form")?,
+        auth_source: row.get("auth_source")?,
+        temporary: row.get::<_, i64>("temporary")? != 0,
+        access_expires_at: row.get("access_expires_at")?,
+        access_fingerprint: row.get("access_fingerprint")?,
+        source_key: row.get("source_key")?,
+        restore_state: row
+            .get::<_, Option<String>>("restore_state")?
+            .unwrap_or_else(|| RESTORE_PENDING.to_string()),
+        auth_accepted: row.get("auth_accepted")?,
         detail: row.get("detail")?,
         // 证据字段解析不出来不该让整行读不出来：坏 JSON 当没记过。
         activity_before: activity_before.and_then(|text| serde_json::from_str(&text).ok()),
@@ -104,6 +138,45 @@ fn is_unique_violation(err: &rusqlite::Error) -> bool {
     )
 }
 
+/// v26：临时授权（Magpie access-only）要记的东西。
+///
+/// 逐列 `ADD COLUMN`，每一列都先查 `table_info`：迁移事务已提交但版本号没写下去时，
+/// 重跑必须不炸在 `duplicate column name` 上。
+pub fn migrate_v26(tx: &rusqlite::Transaction<'_>) -> RpcResult<()> {
+    const COLUMNS: &[(&str, &str)] = &[
+        ("auth_source", "TEXT"),
+        ("temporary", "INTEGER NOT NULL DEFAULT 0"),
+        ("access_expires_at", "TEXT"),
+        ("access_fingerprint", "TEXT"),
+        ("source_key", "TEXT"),
+        ("restore_state", "TEXT NOT NULL DEFAULT 'pending'"),
+        ("auth_accepted", "TEXT"),
+    ];
+
+    let mut stmt = tx.prepare("PRAGMA table_info(workbuddy_switch_journal)")?;
+    let existing: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    for (name, decl) in COLUMNS {
+        if existing.iter().any(|column| column == name) {
+            continue;
+        }
+        tx.execute(
+            &format!("ALTER TABLE workbuddy_switch_journal ADD COLUMN {name} {decl}"),
+            [],
+        )?;
+    }
+
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wb_switch_temporary
+            ON workbuddy_switch_journal (temporary, restore_state)",
+        [],
+    )?;
+    Ok(())
+}
+
 impl super::Db {
     /// 开一条切换记录。已有未完成切换时返回 `switch_busy`，**不覆盖**那一条。
     pub fn begin_wb_switch(&self, new: &NewSwitchJournal<'_>) -> RpcResult<()> {
@@ -112,8 +185,10 @@ impl super::Db {
             "INSERT INTO workbuddy_switch_journal (
                  id, target_account_id, target_uid, previous_uid, previous_running,
                  previous_marker, phase, open_slot, snapshot_path, snapshot_sha256,
-                 token_form, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10, ?11, ?11)",
+                 token_form, auth_source, temporary, access_expires_at,
+                 access_fingerprint, source_key, restore_state, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                       'pending', ?16, ?16)",
             params![
                 new.id,
                 new.target_account_id,
@@ -125,6 +200,11 @@ impl super::Db {
                 new.snapshot_path,
                 new.snapshot_sha256,
                 new.token_form,
+                new.auth_source,
+                i64::from(new.temporary),
+                new.access_expires_at,
+                new.access_fingerprint,
+                new.source_key,
                 now,
             ],
         );
@@ -230,6 +310,48 @@ impl super::Db {
             .optional()?)
     }
 
+    /// 还没还原的**临时**登录（Magpie access-only）。
+    ///
+    /// 与 `open_slot` 刻意分开：切换早就结束了，但这份临时登录还在生效，
+    /// 必须一直保留"能回到原账号"的记录。
+    pub fn pending_temporary_restore(&self) -> RpcResult<Option<SwitchJournal>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT * FROM workbuddy_switch_journal
+                  WHERE temporary = 1 AND restore_state = ?1
+                  ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                params![RESTORE_PENDING],
+                map_row,
+            )
+            .optional()?)
+    }
+
+    /// 改恢复状态。`done` 表示"这条不再提供恢复"。
+    pub fn set_restore_state(&self, id: &str, state: &str) -> RpcResult<()> {
+        let changed = self.conn.execute(
+            "UPDATE workbuddy_switch_journal
+                SET restore_state = ?2, updated_at = ?3
+              WHERE id = ?1",
+            params![id, state, now_rfc3339()],
+        )?;
+        if changed == 0 {
+            return Err(RpcError::not_found(format!("切换记录不存在：{id}")));
+        }
+        Ok(())
+    }
+
+    /// 记服务端验证结论：`accepted` / `rejected` / `unknown`。
+    pub fn set_switch_auth_accepted(&self, id: &str, outcome: &str) -> RpcResult<()> {
+        self.conn.execute(
+            "UPDATE workbuddy_switch_journal
+                SET auth_accepted = ?2, updated_at = ?3
+              WHERE id = ?1",
+            params![id, outcome, now_rfc3339()],
+        )?;
+        Ok(())
+    }
+
     pub fn wb_switch_journals(&self, limit: u32) -> RpcResult<Vec<SwitchJournal>> {
         let mut stmt = self.conn.prepare(
             "SELECT * FROM workbuddy_switch_journal ORDER BY created_at DESC, rowid DESC LIMIT ?1",
@@ -266,6 +388,44 @@ mod tests {
             snapshot_path: "/tmp/snap.json",
             snapshot_sha256: "deadbeef",
             token_form: Some("plaintext"),
+            auth_source: "own",
+            temporary: false,
+            access_expires_at: None,
+            access_fingerprint: None,
+            source_key: None,
+        }
+    }
+
+    /// v26 必须能重跑：迁移事务已提交、版本号没写下去时不能炸在 `duplicate column`。
+    #[test]
+    fn v26_migration_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = rusqlite::Connection::open(dir.path().join("accounts.sqlite")).unwrap();
+        conn.execute_batch(super::super::MIGRATION_V25_SQL).unwrap();
+        for _ in 0..2 {
+            let tx = conn.transaction().unwrap();
+            migrate_v26(&tx).unwrap();
+            tx.commit().unwrap();
+        }
+
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(workbuddy_switch_journal)")
+            .unwrap();
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        for expected in [
+            "auth_source",
+            "temporary",
+            "access_expires_at",
+            "access_fingerprint",
+            "source_key",
+            "restore_state",
+            "auth_accepted",
+        ] {
+            assert!(columns.iter().any(|c| c == expected), "缺列 {expected}");
         }
     }
 

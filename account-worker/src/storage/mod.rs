@@ -567,9 +567,17 @@ const MIGRATIONS: &[Migration] = &[
         version: 25,
         steps: &[MigrationStep::Sql(MIGRATION_V25_SQL)],
     },
+    // v26：临时授权（Magpie access-only）的切换记录。只加列 + 一个索引。
+    //
+    // 「切换正在执行」由 `open_slot` 管，「临时授权还没还原」由 `restore_state` 管。
+    // 两者分开，成功后的临时登录才不会一直占着并发槽位。
+    Migration {
+        version: 26,
+        steps: &[MigrationStep::Rust(wb_switch::migrate_v26)],
+    },
 ];
 
-pub const LATEST_VERSION: i64 = 25;
+pub const LATEST_VERSION: i64 = 26;
 
 pub struct Db {
     conn: Connection,
