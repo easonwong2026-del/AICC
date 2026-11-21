@@ -18,6 +18,8 @@ struct ConsoleAccountsView: View {
     @State private var switchingTo: ConsoleAccount?
     @State private var restorePromptShown = false
     @State private var rotationSheetShown = false
+    /// QA 钩子：离屏渲染需要一张“奖励已展开”的真实详情图；生产环境永远默认收起。
+    @State private var rewardsExpanded = UserDefaults.standard.bool(forKey: "AICCConsoleExpandRewards")
 
     private var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -38,6 +40,12 @@ struct ConsoleAccountsView: View {
         .task { await refreshWbClient() }
         .onChange(of: visibleEntries.map(\.selection)) { _, _ in reconcileSelection() }
         .onAppear { reconcileSelection() }
+        .onChange(of: nav.openRotationSheet) { _, requested in
+            // 总览待处理事项的一次性导航请求：打开既有轮换管理面板，不自动恢复。
+            guard requested else { return }
+            nav.openRotationSheet = false
+            rotationSheetShown = true
+        }
     }
 
     private var sheetPresentation: some View {
@@ -348,40 +356,70 @@ struct ConsoleAccountsView: View {
         .background(ConsoleTheme.sidebar)
     }
 
+    /// 左栏顶部的客户端入口：只回答"现在登录的是谁、要不要人处理"。
+    ///
+    /// 三种状态严格区分：
+    /// - 还没读到客户端状态 →「正在读取」，不能说「未登录」；
+    /// - 明确 `loggedIn == false` →「未登录」；
+    /// - 轮换的 `attentionRun` 存在 → 优先显示恢复异常与「去处理」，点击只打开管理面板。
     private var clientEntry: some View {
         let status = store.wbClientStatus
+        let attention = store.wbRotationStatus?.attentionRun
         let current = store.accounts.first { $0.id == status?.liveAccountID }
-        let title = status?.live.loggedIn == true ? (current?.nickname ?? status?.live.uid.map(WorkbuddyLiveLogin.shortUID) ?? "未识别账号") : "未登录"
-        let detail = status?.restoreOffer?.temporaryNote ?? (store.wbRotationStatus?.plan.enabled == true ? "夜间轮换已开启" : "登录与夜间轮换")
-        return Button { rotationSheetShown = true } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "desktopcomputer")
-                    .font(ConsoleType.body)
-                    .foregroundStyle(ConsoleTheme.secondaryText)
-                    .frame(width: 20)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("当前客户端")
-                        .font(ConsoleType.micro)
-                        .foregroundStyle(ConsoleTheme.tertiaryText)
-                    Text(title)
-                        .font(ConsoleType.rowTitle)
-                        .foregroundStyle(ConsoleTheme.text)
-                        .lineLimit(1)
-                    Text(detail)
-                        .font(ConsoleType.micro)
-                        .foregroundStyle(status?.restoreOffer == nil ? ConsoleTheme.tertiaryText : ConsoleTheme.warning)
-                        .lineLimit(1)
+        let title: String
+        if status == nil {
+            title = "正在读取"
+        } else if status?.live.loggedIn == true {
+            title = current?.nickname ?? status?.live.uid.map(WorkbuddyLiveLogin.shortUID) ?? "未识别账号"
+        } else {
+            title = "未登录"
+        }
+        let detail = attention?.restoreText
+            ?? status?.restoreOffer?.temporaryNote
+            ?? (store.wbRotationStatus?.plan.enabled == true ? "夜间轮换已开启" : "登录与夜间轮换")
+        let warning = attention != nil || status?.restoreOffer != nil
+        return HStack(spacing: 10) {
+            Button { rotationSheetShown = true } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "desktopcomputer")
+                        .font(ConsoleType.body)
+                        .foregroundStyle(warning ? ConsoleTheme.warning : ConsoleTheme.secondaryText)
+                        .frame(width: 20)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("当前客户端")
+                            .font(ConsoleType.micro)
+                            .foregroundStyle(ConsoleTheme.tertiaryText)
+                        Text(title)
+                            .font(ConsoleType.rowTitle)
+                            .foregroundStyle(ConsoleTheme.text)
+                            .lineLimit(1)
+                        Text(detail)
+                            .font(ConsoleType.micro)
+                            .foregroundStyle(warning ? ConsoleTheme.warning : ConsoleTheme.tertiaryText)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 4)
                 }
-                Spacer(minLength: 4)
+                .padding(.vertical, 12)
+                .padding(.trailing, 8)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(attention != nil ? "上一轮轮换没有完成恢复，需要人工确认" : "管理 WorkBuddy 登录与夜间轮换")
+
+            if attention != nil {
+                Button("去处理") { rotationSheetShown = true }
+                    .buttonStyle(ConsoleSecondaryButtonStyle())
+                    .help("打开轮换管理面板，按原有确认流程恢复；不会自动覆盖当前登录")
+            } else {
                 Image(systemName: "chevron.right")
                     .font(ConsoleType.caption)
                     .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .padding(.trailing, 16)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .padding(.leading, 16)
     }
 
     private func accountRow(_ entry: Entry) -> some View {
@@ -443,23 +481,8 @@ struct ConsoleAccountsView: View {
         case nil:
             if store.loadingAccounts {
                 VStack { Spacer(); ConsoleLoadingRow(text: "正在读取账号"); Spacer() }.frame(maxWidth: .infinity)
-            } else if let error = store.accountsError ?? store.qoderError, visibleEntries.isEmpty {
-                VStack {
-                    Spacer()
-                    ConsoleInlineNotice(kind: .error, message: error, actionTitle: "重试") {
-                        Task {
-                            await store.refreshAccounts()
-                            await store.refreshQoder(silent: false)
-                            await refreshWbClient()
-                        }
-                    }
-                    .frame(maxWidth: 360)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity)
-                .padding(ConsoleTheme.pagePadding)
             } else if visibleEntries.isEmpty {
-                // 左栏已经给出空状态与添加入口；右栏不再重复一遍。
+                // 错误与空状态都只在左栏出现一次（含重试入口）；右栏保持安静。
                 Color.clear
             } else {
                 emptyDetail
@@ -632,8 +655,10 @@ struct ConsoleAccountsView: View {
             .font(ConsoleType.sectionTitle)
             .foregroundStyle(ConsoleTheme.text)
             if account.supportsCNTasks {
-                DisclosureGroup("奖励") {
+                DisclosureGroup(isExpanded: $rewardsExpanded) {
                     rewardsBlock(for: account).padding(.top, ConsoleTheme.groupSpacing)
+                } label: {
+                    Text("奖励")
                 }
                 .font(ConsoleType.sectionTitle)
                 .foregroundStyle(ConsoleTheme.text)

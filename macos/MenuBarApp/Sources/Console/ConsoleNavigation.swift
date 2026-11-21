@@ -14,6 +14,10 @@ final class ConsoleNavigation: ObservableObject {
     /// 账号页当前选中的账号。切页后保留，异步刷新不会覆盖用户的选择。
     @Published var accountSelection: ConsoleAccountSelection?
 
+    /// 总览/账号页请求打开「WorkBuddy 登录与夜间轮换」管理面板的一次性信号。
+    /// 只承载导航意图，不承载业务状态；账号页消费后立即复位。
+    @Published var openRotationSheet = false
+
     /// 额度页的来源：Magpie 额度 / 账号额度。
     @Published var quotaSource: ConsoleQuotaSource = .magpie
     /// 额度页的服务商筛选（Magpie 来源用）。

@@ -195,6 +195,31 @@ AICC 的问题不是“卡片不够漂亮”，而是把数据库字段、机制
 | 3 | 错误态提示贴在列表底部、右栏空白 | 无结果时错误在左右两栏居中并带“重试”；有结果时保持列表底部 |
 | 4 | 960×640 下 `4597.75 credits` 数字被压成省略号 | 数字与单位的最小缩放放宽到 0.6；复查后完整可读且基线一致 |
 
+## 7. 第一轮验收收口（#115 review 修复）
+
+### 修复项
+
+| 问题 | 处理 |
+|---|---|
+| P0：`console-accounts-recovery` 与普通账号页截图相同，恢复异常不可见 | 账号页「当前客户端」入口消费 `WorkbuddyRotationStatus.attentionRun`：橙色“恢复异常”副行 + 「去处理」按钮，点击只打开既有轮换管理面板（恢复仍走原有确认流程，不自动强制恢复、不覆盖当前登录）；总览 `attentionCount` 与待处理事项纳入该异常，点击带上下文直达账号页并打开面板。恢复成功（`lastRun` 收口为 `completed`）后警示自动消失。模型测试：`testAttentionRunSurfacesLastRunRecoveryRequired` / `testAttentionRunDisappearsAfterSuccessfulRestore` / `testAttentionRunPrefersCurrentWhenBothNeedAttention` |
+| P1：`wbClientStatus == nil` 时误显示“未登录” | 严格区分三态：状态未读到 →「正在读取」；明确 `loggedIn == false` →「未登录」；读到登录 → 显示账号名 |
+| P1：空账号 + 加载失败时左右两栏显示相同错误 | 错误只在左栏居中显示一次并带「重试」；右栏保持安静 |
+| P1：`console-accounts-current` 与 `expired`、`console-accounts` 与 `recovery`、`console-accounts` 与 `rewards-detail` 截图重复 | `expired` 使用独立样本（acc-bulk-1 令牌过期、非当前登录）；`recovery` 经 P0 修复后真实显示警示；`rewards-detail` 增加 `AICCConsoleExpandRewards` QA 钩子的真实展开态截图（生产默认收起） |
+
+### 截图收敛
+
+- 仓库只保留：核心页面 3 尺寸 × 浅深色的前后对比、关键状态（当前/过期/恢复异常/长名称/奖励展开）、空/加载/错误、主要弹层（轮换、切换、Qoder 详情/Profile）。
+- `before/` 20 张，`after/` 34 张，合计约 7 MiB。
+- 完整渲染图（69 张）由 CI Artifact `console-ui-visuals`（swift-test job）承载，不进仓库。
+- 复查：三张重复 SHA 场景已消除——recovery 出现警示与「去处理」、expired 与 current 是不同账号不同状态、rewards-detail 为真实展开内容。
+
+### 复查结论
+
+- 恢复异常在账号页左栏与总览待处理均可见；「去处理」只导航，不执行恢复。
+- 状态未知、未登录、正常登录三种客户端状态不再混淆。
+- 全部写路径与危险确认未改动；Rust / SQLite / RPC 无变更（`git diff --stat origin/main -- account-worker server.py collectors tests` 为空）。
+
+
 ### 复查结论（第三轮渲染后）
 
 - 三个窗口尺寸下按钮、数字、长名称均无裁切或重叠；页面与左右列表可滚动。

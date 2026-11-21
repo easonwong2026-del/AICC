@@ -108,6 +108,62 @@ final class WorkbuddyRotationModelsTests: XCTestCase {
         XCTAssertEqual(corrupt.stateText, "需要你确认")
     }
 
+    /// P0（UI V5 #115 收口）：恢复失败后 `current` 是 nil、只有 `lastRun` 停在
+    /// `recovery_required`。`attentionRun` 必须从 `lastRun` 里把异常捞出来，
+    /// 否则总览/账号页会把它显示成"一切正常"。
+    func testAttentionRunSurfacesLastRunRecoveryRequired() {
+        let needsHelp = WorkbuddyRotationStatus(json: [
+            "plan": ["enabled": true, "accountIds": ["a"]],
+            "client": ["installed": true],
+            "lastRun": [
+                "id": "run-1",
+                "state": "recovery_required",
+                "restoreResult": "snapshot_corrupt",
+                "steps": [],
+            ],
+        ])
+        XCTAssertEqual(needsHelp.attentionRun?.id, "run-1")
+        XCTAssertEqual(needsHelp.attentionRun?.stateText, "需要你确认")
+        XCTAssertTrue(needsHelp.headline.contains("需要你确认"))
+    }
+
+    /// 恢复成功后 `lastRun` 收口为 `completed`，警示必须消失，不能一直挂在那。
+    func testAttentionRunDisappearsAfterSuccessfulRestore() {
+        let recovered = WorkbuddyRotationStatus(json: [
+            "plan": ["enabled": true, "accountIds": ["a"]],
+            "client": ["installed": true],
+            "lastRun": [
+                "id": "run-1",
+                "state": "completed",
+                "restoreResult": "restored",
+                "steps": [],
+            ],
+        ])
+        XCTAssertNil(recovered.attentionRun)
+        XCTAssertFalse(recovered.headline.contains("需要你确认"))
+    }
+
+    /// `current` 自己需要处理时优先于 `lastRun`，两个都是异常也不能互相顶掉。
+    func testAttentionRunPrefersCurrentWhenBothNeedAttention() {
+        let both = WorkbuddyRotationStatus(json: [
+            "plan": ["enabled": true, "accountIds": ["a"]],
+            "client": ["installed": true],
+            "current": [
+                "id": "run-current",
+                "state": "recovery_required",
+                "restoreResult": "live_changed",
+                "steps": [],
+            ],
+            "lastRun": [
+                "id": "run-last",
+                "state": "recovery_required",
+                "restoreResult": "snapshot_corrupt",
+                "steps": [],
+            ],
+        ])
+        XCTAssertEqual(both.attentionRun?.id, "run-current")
+    }
+
     func testHeadlineCoversDisabledEmptyAndUnloggedCases() {
         let disabled = WorkbuddyRotationStatus(json: [
             "plan": ["enabled": false, "accountIds": ["a"]],

@@ -673,6 +673,36 @@ extension ConsoleVisualFixture {
         return fixture
     }
 
+    /// 异常授权样本：acc-bulk-1 令牌已过期且不是当前登录账号。
+    /// 与「当前登录 = acc-wb-2」的正常样本刻意分开，避免两张截图冒充两种状态。
+    static var expiredAuth: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.accounts = fixture.accounts.map { account in
+            guard account.id == "acc-bulk-1" else { return account }
+            return ConsoleAccount(
+                id: "acc-bulk-1",
+                platform: "workbuddy",
+                provider: "workbuddy",
+                uid: "wb_bulk_0001",
+                nickname: "批量账号 1",
+                authStatus: "expired",
+                checkinEnabled: true,
+                updatedAt: "2026-11-10T08:00:00Z",
+                tokenExpiresAt: "2026-11-12T08:00:00Z",
+                authSource: "own",
+                authorizations: [
+                    ConsoleAuthorization(
+                        id: "auth-bulk-1",
+                        kind: "own",
+                        status: "expired",
+                        tokenExpiresAt: "2026-11-12T08:00:00Z"
+                    ),
+                ].compactMap { $0 }
+            )
+        }
+        return fixture
+    }
+
     /// 失败状态：账号读取失败 + 额度读取失败。
     static var failure: ConsoleVisualFixture {
         var fixture = sample
@@ -787,6 +817,10 @@ struct ConsoleVisualSmokeMain {
             }
         }
 
+        // 异常授权样本：与「当前登录」分开，避免两张相同截图冒充两种状态。
+        let expiredStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        expiredStore.applyVisualFixture(.expiredAuth)
+
         // 关键状态与弹层
         // 用闭包延迟构造：视图必须在渲染前一刻创建，否则 QA 钩子读到的会是最后一组参数。
         let extras: [(String, () -> AnyView, CGSize, ColorScheme)] = [
@@ -812,19 +846,16 @@ struct ConsoleVisualSmokeMain {
                                    page: .accounts, account: "workbuddy:acc-wb-2")) },
              CGSize(width: 1120, height: 760), .dark),
             ("console-accounts-expired-1120x760-light",
-             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
-                                   page: .accounts, account: "workbuddy:acc-wb-2")) },
+             { AnyView(consoleView(store: expiredStore, settings: settings, scheme: .light,
+                                   page: .accounts, account: "workbuddy:acc-bulk-1")) },
              CGSize(width: 1120, height: 760), .light),
             ("console-accounts-expired-1120x760-dark",
-             { AnyView(consoleView(store: store, settings: settings, scheme: .dark,
-                                   page: .accounts, account: "workbuddy:acc-wb-2")) },
+             { AnyView(consoleView(store: expiredStore, settings: settings, scheme: .dark,
+                                   page: .accounts, account: "workbuddy:acc-bulk-1")) },
              CGSize(width: 1120, height: 760), .dark),
-            ("accounts-rewards-detail-tall-1120x1500-light",
-             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
-                                   page: .accounts, account: "acc-wb-1")) },
-             CGSize(width: 1120, height: 1500), .light),
             ("rewards-block-760x560-light",
-             { AnyView(Self.rewardsBlock()) }, CGSize(width: 760, height: 560), .light),            ("rewards-block-stale-760x560-light",
+             { AnyView(Self.rewardsBlock()) }, CGSize(width: 760, height: 560), .light),
+            ("rewards-block-stale-760x560-light",
              { AnyView(Self.rewardsBlock(failure: "读取超时（60s）：account worker 未在时限内返回")) },
              CGSize(width: 760, height: 640), .light),
             ("rotation-sheet-560x660-light",
@@ -847,14 +878,6 @@ struct ConsoleVisualSmokeMain {
              { AnyView(Self.activityBlock()) }, CGSize(width: 1000, height: 420), .dark),
             ("rewards-block-760x560-dark",
              { AnyView(Self.rewardsBlock()) }, CGSize(width: 760, height: 560), .dark),
-            ("accounts-rewards-detail-1120x760-light",
-             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
-                                   page: .accounts, account: "acc-wb-1")) },
-             CGSize(width: 1120, height: 760), .light),
-            ("accounts-rewards-detail-1120x760-dark",
-             { AnyView(consoleView(store: store, settings: settings, scheme: .dark,
-                                   page: .accounts, account: "acc-wb-1")) },
-             CGSize(width: 1120, height: 760), .dark),
             ("accounts-profile-detail-1120x760-dark",
              { AnyView(consoleView(store: store, settings: settings, scheme: .dark,
                                    page: .accounts, account: "qoderProfile:qp-1")) },
@@ -894,6 +917,19 @@ struct ConsoleVisualSmokeMain {
             try render(makeView(), size: size, scheme: scheme, to: "\(outputDir)/\(name).png")
             count += 1
         }
+
+        // 奖励展开态：与默认收起的账号详情刻意区分。
+        // QA 钩子只在渲染这两张前后生效；生产构建永远默认收起。
+        UserDefaults.standard.set(true, forKey: "AICCConsoleExpandRewards")
+        for scheme in [ColorScheme.light, .dark] {
+            let view = consoleView(store: store, settings: settings, scheme: scheme,
+                                   page: .accounts, account: "acc-wb-1")
+                .frame(width: 1120, height: 1500)
+            try render(view, size: CGSize(width: 1120, height: 1500), scheme: scheme,
+                       to: "\(outputDir)/accounts-rewards-detail-expanded-1120x1500-\(schemeName(scheme)).png")
+            count += 1
+        }
+        UserDefaults.standard.set(false, forKey: "AICCConsoleExpandRewards")
 
         // 空状态与错误状态
         for (fixtureName, fixture) in [("empty", ConsoleVisualFixture.empty),

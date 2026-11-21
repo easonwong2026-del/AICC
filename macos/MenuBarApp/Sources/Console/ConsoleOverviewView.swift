@@ -46,6 +46,7 @@ struct ConsoleOverviewView: View {
         store.fleet.issues + (store.tasksOverview?.failureCount ?? 0)
             + (store.accountsError == nil ? 0 : 1)
             + (store.qoderError == nil ? 0 : 1)
+            + (store.wbRotationStatus?.attentionRun == nil ? 0 : 1)
     }
 
     private var summarySection: some View {
@@ -133,10 +134,25 @@ struct ConsoleOverviewView: View {
         let selection: ConsoleAccountSelection?
         let filter: ConsolePlatformFilter
         let destination: ConsolePage
+        /// 点开后是否直接打开 WorkBuddy 登录与夜间轮换管理面板（只导航，不执行任何恢复）。
+        var opensRotationSheet = false
     }
 
     private var pendingItems: [PendingItem] {
         var items: [PendingItem] = []
+        // P0：轮换上一轮没有恢复成功时，必须出现在首屏待处理里。
+        // 点击只带上下文进入账号页的轮换管理面板，恢复仍走原有确认流程。
+        if let attention = store.wbRotationStatus?.attentionRun {
+            items.append(PendingItem(
+                id: "wb-rotation-recovery",
+                title: "WorkBuddy 轮换未恢复",
+                detail: attention.restoreText,
+                selection: nil,
+                filter: .workbuddy,
+                destination: .accounts,
+                opensRotationSheet: true
+            ))
+        }
         for account in store.accounts where account.displayAuthTone == .error {
             items.append(PendingItem(
                 id: "wb-\(account.id)",
@@ -227,6 +243,7 @@ struct ConsoleOverviewView: View {
     private func open(_ item: PendingItem) {
         if item.destination == .accounts {
             nav.openAccounts(filter: item.filter, selection: item.selection)
+            if item.opensRotationSheet { nav.openRotationSheet = true }
         } else {
             nav.openCheckin(platform: .workbuddy)
         }
