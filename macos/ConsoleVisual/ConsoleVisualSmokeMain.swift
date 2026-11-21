@@ -25,12 +25,19 @@ struct ConsoleVisualFixture {
     var checkin: CheckinFleetStatus = .empty
     var checkinAuto: CheckinAutoStatus = .unknown
     var checkinError: String?
+    /// 视觉样本：某个账号正在签到 / 批量签到进行中。
+    var checkinActing: String?
+    var checkinBatching = false
     var growthResult: GrowthScanResult = .empty
     var growthError: String?
     var lastGrowthScan: Date?
+    var growthAuto: GrowthAutoStatus = GrowthAutoStatus(json: nil)
+    var growthRuns: [String: GrowthRuns] = [:]
+    var expandedGrowthAccount: String?
     var travelRows: [TravelAccountRow] = []
     var travelAuto: TravelAutoStatus?
     var travelError: String?
+    var travelActing: String?
     var qoderProfiles: [QoderProfile] = []
     var qoderServiceAccounts: [QoderServiceAccount] = []
     var qoderEditions: [QoderEditionInfo] = []
@@ -38,6 +45,9 @@ struct ConsoleVisualFixture {
     var qoderError: String?
     var qoderCreditsAuto: [QoderCreditsAutoItem] = []
     var qoderCreditsError: String?
+    var qoderCreditsReports: [String: QoderCreditsReport] = [:]
+    var qoderCreditsRuns: [String: [QoderCreditRun]] = [:]
+    var qoderCreditsBusy: String?
     /// 奖励状态（PR #98）：账号详情里的「奖励」区块靠它渲染。
     var rewardStates: [String: RewardAccountState] = [:]
     var rewardFailures: [String: String] = [:]
@@ -596,31 +606,38 @@ extension ConsoleVisualFixture {
         fixture.checkin = CheckinFleetStatus(json: [
             "today": "2026-11-14",
             "cached": true,
-            "counts": ["accounts": 12, "checked": 8, "enabled": 6, "unchecked": 3, "credit": 100],
+            "counts": ["accounts": 8, "checked": 3, "enabled": 5, "unchecked": 2, "credit": 200],
             "accounts": [
                 ["accountId": "acc-wb-1", "nickname": "王翊 · 融影（上海）实业有限公司市场部日常运营主账号",
                  "enabled": true, "state": "claimed", "credits": 100,
-                 "localCheckedAt": "2026-11-14T09:00:31Z", "claimedByAiccToday": true,
+                 "localCheckedAt": "2026-11-14T01:00:31Z", "claimedByAiccToday": true,
                  "streakDays": 12, "dailyCredit": 100],
                 ["accountId": "acc-wb-2", "nickname": "设计外包", "enabled": false,
                  "state": "failed", "errorKind": "unauthorized",
                  "errorDetail": "令牌已过期，需要重新登录"],
                 ["accountId": "acc-bulk-1", "nickname": "批量账号 1", "enabled": true,
-                 "state": "already", "credits": 50, "localCheckedAt": "2026-11-14T09:01:02Z"],
+                 "state": "already", "credits": 50, "localCheckedAt": "2026-11-14T01:01:02Z"],
                 ["accountId": "acc-bulk-2", "nickname": "批量账号 2", "enabled": true,
                  "state": "unchecked"],
                 ["accountId": "acc-bulk-3", "nickname": "批量账号 3", "enabled": false,
                  "state": "unchecked"],
+                ["accountId": "acc-bulk-4", "nickname": "批量账号 4", "enabled": true,
+                 "state": "claimed", "credits": 100, "claimedByAiccToday": true,
+                 "localCheckedAt": "2026-11-14T01:02:44Z"],
+                ["accountId": "acc-bulk-5", "nickname": "批量账号 5", "enabled": true,
+                 "state": "unknown"],
+                ["accountId": "acc-bulk-6", "nickname": "批量账号 6", "enabled": false,
+                 "state": "unauthorized"],
             ],
         ])
         fixture.checkinAuto = CheckinAutoStatus(json: [
             "enabled": true,
-            "enabledAccounts": 6,
-            "totalAccounts": 12,
+            "enabledAccounts": 5,
+            "totalAccounts": 8,
             "planTime": "09:00",
             "timezone": "UTC+8（北京时间）",
-            "lastTickAt": "2026-11-14T09:00:00Z",
-            "nextRunAt": "2026-11-15T09:00:00Z",
+            "lastTickAt": "2026-11-14T01:00:00Z",
+            "nextRunAt": "2026-11-15T01:00:00Z",
             "running": false,
         ])
 
@@ -629,21 +646,71 @@ extension ConsoleVisualFixture {
                 ["accountId": "acc-wb-1",
                  "nickname": "王翊 · 融影（上海）实业有限公司市场部日常运营主账号",
                  "state": "ok",
+                 "profile": ["level": 3, "completedTasks": 2, "totalTasks": 4,
+                             "energy": 120, "streakDays": 5, "makeupCards": 1, "lotteryChances": 2],
                  "tasks": [
-                    ["taskCode": "playbook_prompt", "title": "体验一次 Playbook",
-                     "acceptStatus": "accepted", "progress": NSNull(),
-                     "rewardCredit": 20, "rewardEnergy": 5],
-                    ["taskCode": "Library_read", "title": "阅读资料库",
-                     "acceptStatus": "pending", "progress": NSNull(),
-                     "rewardCredit": 10, "rewardEnergy": 2],
+                    ["code": "playbook_prompt", "title": "体验一次 Playbook",
+                     "condition": "在工作台完成一次 Playbook 对话",
+                     "current": 1, "target": 1, "rewardCredit": 20, "rewardEnergy": 5,
+                     "status": "completed", "rawStatus": "completed",
+                     "class": "automatic", "classReason": "本地可自动完成的只读任务"],
+                    ["code": "Library_read", "title": "阅读资料库",
+                     "condition": "打开资料库并阅读一篇文档",
+                     "current": 0, "target": 1, "rewardCredit": 10, "rewardEnergy": 2,
+                     "status": "in_progress", "rawStatus": "in_progress",
+                     "class": "realAction", "classReason": "需要在客户端里真实操作一次"],
+                    ["code": "Expert_lighthouse", "title": "体验专家灯塔",
+                     "condition": "与专家完成一次对话",
+                     "current": 0, "target": 1, "rewardCredit": 30, "rewardEnergy": 8,
+                     "status": "not_accepted", "rawStatus": "not_accepted",
+                     "class": "manual", "classReason": "需要人工判断，AICC 不会自动执行"],
+                    ["code": "brand_new_task", "title": "新的运营活动",
+                     "condition": "服务端新下发的任务类型",
+                     "current": 0, "target": 1, "rewardCredit": 15, "rewardEnergy": 0,
+                     "status": "unknown", "rawStatus": "pending_new",
+                     "class": "unknown", "classReason": "未识别的任务类型，不会被自动执行"],
                  ],
-                 "counts": ["claimable": 1, "acceptable": 1, "completed": 2],
+                 "counts": ["total": 4, "claimable": 1, "acceptable": 1, "inProgress": 1,
+                            "locked": 0, "automatic": 1, "realAction": 1, "manual": 1, "unknown": 1],
                  "scannedAt": "2026-11-14T13:00:00Z"],
-                ["accountId": "acc-bulk-1", "nickname": "批量账号 1", "state": "ok",
-                 "tasks": [], "counts": ["claimable": 0, "acceptable": 0, "completed": 0]],
+                ["accountId": "acc-wb-2", "nickname": "设计外包", "state": "partial",
+                 "tasks": [], "counts": ["total": 0],
+                 "errors": [["field": "streak", "kind": "http", "http": 500,
+                             "message": "连登接口暂时不可用"]],
+                 "scannedAt": "2026-11-14T13:00:00Z"],
+                ["accountId": "acc-bulk-1", "nickname": "批量账号 1", "state": "unauthorized",
+                 "tasks": [], "counts": ["total": 0],
+                 "errors": [["field": "tasks", "kind": "unauthorized", "http": 401,
+                             "message": "401 需要重新登录"]],
+                 "scannedAt": "2026-11-14T13:00:00Z"],
             ],
-            "overview": ["accounts": 2, "claimable": 1, "acceptable": 1],
+            "overview": ["accounts": 3, "claimable": 1, "acceptable": 1, "manual": 1,
+                         "unknown": 1, "needsAuth": 1],
         ])
+        fixture.growthAuto = GrowthAutoStatus(json: [
+            "enabled": true,
+            "intervalSeconds": 86_400,
+            "running": false,
+            "lastTickAt": ConsoleVisualFixture.iso(now, -7200),
+            "nextTickAt": ConsoleVisualFixture.iso(now, 21_600),
+            "lastResult": "接单 2 个，领奖 1 个 +20 积分",
+        ])
+        fixture.growthRuns = [
+            "acc-wb-1": GrowthRuns(json: [
+                "latestByTask": [[
+                    "id": 1, "taskCode": "playbook_prompt", "action": "claim",
+                    "outcome": "ok", "credit": 20, "energy": 5,
+                    "executedAt": "2026-11-14T05:58:00Z",
+                ]],
+                "recent": [[
+                    "id": 1, "taskCode": "playbook_prompt", "action": "claim",
+                    "outcome": "ok", "credit": 20, "energy": 5,
+                    "executedAt": "2026-11-14T05:58:00Z",
+                ]],
+                "grantedCredit": 20,
+            ]),
+        ]
+        fixture.expandedGrowthAccount = "acc-wb-1"
 
         fixture.travelRows = [
             TravelAccountRow(json: [
@@ -654,8 +721,19 @@ extension ConsoleVisualFixture {
                 "authSource": "own",
                 "travel": [
                     "label": "done_today", "locationName": "杭州", "claimed": true,
-                    "rewardCredits": 30, "claimedAt": "2026-11-14T11:20:00Z",
-                    "dailyLimitReached": true, "lastCheckedAt": "2026-11-14T11:20:00Z",
+                    "rewardCredits": 30, "claimedAt": "2026-11-14T03:20:00Z",
+                    "dailyLimitReached": true, "lastCheckedAt": "2026-11-14T03:20:00Z",
+                ],
+            ]),
+            TravelAccountRow(json: [
+                "accountId": "acc-wb-2",
+                "nickname": "设计外包",
+                "uid": "wb_2c4d6e80",
+                "travelEnabled": true,
+                "authSource": "magpie",
+                "travel": [
+                    "label": "arrived", "locationName": "杭州", "claimed": false,
+                    "rewardCredits": 25, "lastCheckedAt": "2026-11-14T03:10:00Z",
                 ],
             ]),
             TravelAccountRow(json: [
@@ -665,6 +743,18 @@ extension ConsoleVisualFixture {
                 "travelEnabled": false,
                 "authSource": "own",
                 "travel": ["label": "dispatchable", "locationName": "上海", "claimed": false],
+            ]),
+            TravelAccountRow(json: [
+                "accountId": "acc-bulk-2",
+                "nickname": "批量账号 2",
+                "uid": "wb_bulk_0002",
+                "travelEnabled": false,
+                "authSource": "own",
+                "travel": [
+                    "label": "failed", "locationName": "",
+                    "lastError": "旅行接口超时，稍后自动重试",
+                    "lastCheckedAt": "2026-11-14T03:00:00Z",
+                ],
             ]),
         ].compactMap { $0 }
         fixture.travelAuto = TravelAutoStatus(json: [
@@ -684,8 +774,17 @@ extension ConsoleVisualFixture {
                 "nickname": "Qoder CN 主账号",
                 "autoEnabled": false,
                 "supported": true,
-                "lastRun": ["trigger": "manual", "outcome": "claimed", "credits": 100,
-                            "executedAt": "2026-11-14T10:02:00Z"],
+                "lastRun": ["trigger": "manual", "outcome": "already", "credits": 100,
+                            "executedAt": "2026-11-13T02:02:00Z"],
+            ]),
+            QoderCreditsAutoItem(json: [
+                "accountId": "qsa-cn-2",
+                "edition": "qoder_cn",
+                "nickname": "Qoder CN 备用账号",
+                "autoEnabled": true,
+                "supported": true,
+                "lastRun": ["trigger": "auto", "outcome": "ok", "credits": 50,
+                            "executedAt": "2026-11-14T00:30:00Z"],
             ]),
             QoderCreditsAutoItem(json: [
                 "accountId": "qsa-global-1",
@@ -695,6 +794,29 @@ extension ConsoleVisualFixture {
                 "supported": false,
             ]),
         ].compactMap { $0 }
+        fixture.qoderCreditsReports = [
+            "qsa-cn-1": QoderCreditsReport(json: [
+                "accountId": "qsa-cn-1", "state": "claimable", "claimable": 1, "supported": true,
+                "today": ["credits": 100, "campaignId": "cmp-1", "claimStatus": "claimable",
+                          "windowEnd": 1_763_000_000],
+            ]),
+            "qsa-cn-2": QoderCreditsReport(json: [
+                "accountId": "qsa-cn-2", "state": "already", "claimable": 0, "supported": true,
+                "today": ["credits": 50, "campaignId": "cmp-1", "claimStatus": "claimed"],
+            ]),
+        ]
+        fixture.qoderCreditsRuns = [
+            "qsa-cn-1": [
+                QoderCreditRun(json: ["id": 3, "outcome": "already", "credits": 100,
+                                      "trigger": "manual", "executedAt": "2026-11-13T02:02:00Z"]),
+                QoderCreditRun(json: ["id": 2, "outcome": "network", "trigger": "auto",
+                                      "errorDetail": "请求超时", "executedAt": "2026-11-12T00:30:00Z"]),
+            ].compactMap { $0 },
+            "qsa-cn-2": [
+                QoderCreditRun(json: ["id": 1, "outcome": "ok", "credits": 50,
+                                      "trigger": "auto", "executedAt": "2026-11-14T00:30:00Z"]),
+            ].compactMap { $0 },
+        ]
 
         return fixture
     }
@@ -702,6 +824,142 @@ extension ConsoleVisualFixture {
     /// 空状态：一个账号都没有。
     static var empty: ConsoleVisualFixture {
         ConsoleVisualFixture(lastAccountsRefresh: Date().addingTimeInterval(-60))
+    }
+
+    // MARK: 签到任务中心的状态样本（Phase 2A-2）
+
+    /// 全部已完成：没有待处理、没有异常，自动签到全关。
+    static var tasksAllDone: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.checkin = CheckinFleetStatus(json: [
+            "today": "2026-11-14",
+            "counts": ["accounts": 4, "checked": 4, "enabled": 0, "unchecked": 0, "credit": 250],
+            "accounts": [
+                ["accountId": "acc-wb-1", "nickname": "王翊 · 融影（上海）实业有限公司市场部日常运营主账号",
+                 "enabled": false, "state": "claimed", "credits": 100,
+                 "localCheckedAt": "2026-11-14T01:00:31Z", "claimedByAiccToday": true],
+                ["accountId": "acc-bulk-1", "nickname": "批量账号 1", "enabled": false,
+                 "state": "already", "credits": 50, "localCheckedAt": "2026-11-14T01:01:02Z"],
+                ["accountId": "acc-bulk-2", "nickname": "批量账号 2", "enabled": false,
+                 "state": "already", "claimedByAiccToday": true],
+                ["accountId": "acc-bulk-3", "nickname": "批量账号 3", "enabled": false,
+                 "state": "already", "credits": 100, "localCheckedAt": "2026-11-14T01:03:10Z"],
+            ],
+        ])
+        fixture.checkinAuto = CheckinAutoStatus(json: [
+            "enabled": false, "enabledAccounts": 0, "totalAccounts": 4,
+            "planTime": "09:00", "timezone": "UTC+8（北京时间）",
+            "lastTickAt": "2026-11-14T01:00:00Z",
+        ])
+        return fixture
+    }
+
+    /// 执行中：某个账号正在提交，行按钮与开关全部禁用。
+    static var tasksExecuting: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.checkinActing = "acc-bulk-2"
+        return fixture
+    }
+
+    /// 批量签到进行中：主按钮换成进度提示。
+    static var tasksBatching: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.checkinBatching = true
+        return fixture
+    }
+
+    /// 自动签到全部关闭：表头应显示「自动未开启」。
+    static var tasksAutoOff: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.checkin = CheckinFleetStatus(json: [
+            "today": "2026-11-14",
+            "counts": ["accounts": 3, "checked": 1, "enabled": 0, "unchecked": 2, "credit": 100],
+            "accounts": [
+                ["accountId": "acc-wb-1", "nickname": "王翊 · 融影（上海）实业有限公司市场部日常运营主账号",
+                 "enabled": false, "state": "claimed", "credits": 100,
+                 "localCheckedAt": "2026-11-14T01:00:31Z", "claimedByAiccToday": true],
+                ["accountId": "acc-bulk-1", "nickname": "批量账号 1", "enabled": false,
+                 "state": "unchecked"],
+                ["accountId": "acc-bulk-2", "nickname": "批量账号 2", "enabled": false,
+                 "state": "unchecked"],
+            ],
+        ])
+        fixture.checkinAuto = CheckinAutoStatus(json: [
+            "enabled": false, "enabledAccounts": 0, "totalAccounts": 3,
+            "planTime": "09:00", "timezone": "UTC+8（北京时间）",
+        ])
+        return fixture
+    }
+
+    /// 异常态：失败 + 授权失效 + 待确认，全部是「需要人处理」。
+    static var tasksAttention: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.checkin = CheckinFleetStatus(json: [
+            "today": "2026-11-14",
+            "counts": ["accounts": 4, "checked": 0, "enabled": 2, "unchecked": 0, "credit": 0],
+            "accounts": [
+                ["accountId": "acc-wb-2", "nickname": "设计外包", "enabled": false,
+                 "state": "failed", "errorKind": "unauthorized",
+                 "errorDetail": "令牌已过期，需要重新登录"],
+                ["accountId": "acc-bulk-5", "nickname": "批量账号 5", "enabled": true,
+                 "state": "unknown"],
+                // 授权失效但**此前已开启**：开关必须仍然可以关闭。
+                ["accountId": "acc-bulk-6", "nickname": "批量账号 6", "enabled": true,
+                 "state": "unauthorized"],
+                // 不支持：开关不得再被打开。
+                ["accountId": "acc-bulk-7", "nickname": "批量账号 7", "enabled": false,
+                 "state": "unsupported"],
+            ],
+        ])
+        return fixture
+    }
+
+    /// 成长中心：自动管理关闭（仅手动），任务折叠；含需登录账号。
+    static var tasksGrowthReadOnly: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.growthAuto = GrowthAutoStatus(json: ["enabled": false, "intervalSeconds": 86_400])
+        fixture.expandedGrowthAccount = nil
+        return fixture
+    }
+
+    /// 成长中心：未扫描。
+    static var tasksGrowthUnscanned: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.growthResult = .empty
+        fixture.lastGrowthScan = nil
+        fixture.growthRuns = [:]
+        fixture.expandedGrowthAccount = nil
+        return fixture
+    }
+
+    /// 旅行：全部是空状态（没有账号）。
+    static var tasksTravelEmpty: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.travelRows = []
+        fixture.travelAuto = nil
+        return fixture
+    }
+
+    /// Credits：全部不支持（国际版）+ 一个读取失败。
+    static var tasksCreditsLimited: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.qoderCreditsReports = [:]
+        fixture.qoderCreditsRuns = [:]
+        fixture.qoderCreditsAuto = [
+            QoderCreditsAutoItem(json: [
+                "accountId": "qsa-global-1", "edition": "qoder_global",
+                "nickname": "Qoder International Demo", "supported": false,
+            ]),
+        ].compactMap { $0 }
+        return fixture
+    }
+
+    /// Credits：读取失败。
+    static var tasksCreditsError: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.qoderCreditsAuto = []
+        fixture.qoderCreditsError = "读取 Qoder 账号失败：账号助手未就绪"
+        return fixture
     }
 
     static var loading: ConsoleVisualFixture {
@@ -820,6 +1078,8 @@ extension ConsoleVisualFixture {
         fixture.workerQuotaRows = []
         fixture.tasksOverview = nil
         fixture.tasksOverviewError = "tasks.overview 读取失败"
+        // 签到：本地还有昨天的记录，但这次向服务端核对失败。
+        fixture.checkinError = "读取签到状态失败：账号助手未就绪"
         return fixture
     }
 
@@ -951,6 +1211,28 @@ struct ConsoleVisualSmokeMain {
         quotaLoadingStore.applyVisualFixture(.loading)
         let quotaLongStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
         quotaLongStore.applyVisualFixture(.quotaMagpieLongOnly)
+
+        // 签到任务中心：每个业务状态一个独立 store，避免样本互相污染。
+        let tasksDoneStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        tasksDoneStore.applyVisualFixture(.tasksAllDone)
+        let tasksExecutingStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        tasksExecutingStore.applyVisualFixture(.tasksExecuting)
+        let tasksBatchingStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        tasksBatchingStore.applyVisualFixture(.tasksBatching)
+        let tasksAutoOffStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        tasksAutoOffStore.applyVisualFixture(.tasksAutoOff)
+        let tasksAttentionStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        tasksAttentionStore.applyVisualFixture(.tasksAttention)
+        let growthReadOnlyStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        growthReadOnlyStore.applyVisualFixture(.tasksGrowthReadOnly)
+        let growthUnscannedStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        growthUnscannedStore.applyVisualFixture(.tasksGrowthUnscanned)
+        let travelEmptyStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        travelEmptyStore.applyVisualFixture(.tasksTravelEmpty)
+        let creditsLimitedStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        creditsLimitedStore.applyVisualFixture(.tasksCreditsLimited)
+        let creditsErrorStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        creditsErrorStore.applyVisualFixture(.tasksCreditsError)
 
         // 关键状态与弹层
         // 用闭包延迟构造：视图必须在渲染前一刻创建，否则 QA 钩子读到的会是最后一组参数。
@@ -1102,6 +1384,75 @@ struct ConsoleVisualSmokeMain {
              { AnyView(consoleView(store: store, settings: settings, scheme: .dark,
                                    page: .checkin, workbuddyTask: "growth")) },
              CGSize(width: 1120, height: 760), .dark),
+            // 签到任务中心：业务状态覆盖（真实 SwiftUI 渲染）。
+            ("checkin-all-done-1120x760-light",
+             { AnyView(consoleView(store: tasksDoneStore, settings: settings, scheme: .light,
+                                   page: .checkin)) },
+             CGSize(width: 1120, height: 760), .light),
+            ("checkin-executing-1120x760-light",
+             { AnyView(consoleView(store: tasksExecutingStore, settings: settings, scheme: .light,
+                                   page: .checkin)) },
+             CGSize(width: 1120, height: 760), .light),
+            ("checkin-batching-1120x760-light",
+             { AnyView(consoleView(store: tasksBatchingStore, settings: settings, scheme: .light,
+                                   page: .checkin)) },
+             CGSize(width: 1120, height: 760), .light),
+            ("checkin-auto-off-1120x760-light",
+             { AnyView(consoleView(store: tasksAutoOffStore, settings: settings, scheme: .light,
+                                   page: .checkin)) },
+             CGSize(width: 1120, height: 760), .light),
+            ("checkin-attention-1120x760-light",
+             { AnyView(consoleView(store: tasksAttentionStore, settings: settings, scheme: .light,
+                                   page: .checkin)) },
+             CGSize(width: 1120, height: 760), .light),
+            ("checkin-attention-1120x760-dark",
+             { AnyView(consoleView(store: tasksAttentionStore, settings: settings, scheme: .dark,
+                                   page: .checkin)) },
+             CGSize(width: 1120, height: 760), .dark),
+            ("growth-960x640-light",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
+                                   page: .checkin, workbuddyTask: "growth")) },
+             CGSize(width: 960, height: 640), .light),
+            ("growth-readonly-1120x760-light",
+             { AnyView(consoleView(store: growthReadOnlyStore, settings: settings, scheme: .light,
+                                   page: .checkin, workbuddyTask: "growth")) },
+             CGSize(width: 1120, height: 760), .light),
+            ("growth-unscanned-1120x760-light",
+             { AnyView(consoleView(store: growthUnscannedStore, settings: settings, scheme: .light,
+                                   page: .checkin, workbuddyTask: "growth")) },
+             CGSize(width: 1120, height: 760), .light),
+            ("travel-960x640-light",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
+                                   page: .checkin, workbuddyTask: "travel")) },
+             CGSize(width: 960, height: 640), .light),
+            ("travel-1120x760-light",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
+                                   page: .checkin, workbuddyTask: "travel")) },
+             CGSize(width: 1120, height: 760), .light),
+            ("travel-1120x760-dark",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .dark,
+                                   page: .checkin, workbuddyTask: "travel")) },
+             CGSize(width: 1120, height: 760), .dark),
+            ("travel-empty-1120x760-light",
+             { AnyView(consoleView(store: travelEmptyStore, settings: settings, scheme: .light,
+                                   page: .checkin, workbuddyTask: "travel")) },
+             CGSize(width: 1120, height: 760), .light),
+            ("credits-960x640-light",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
+                                   page: .checkin, checkinPlatform: "qoder")) },
+             CGSize(width: 960, height: 640), .light),
+            ("credits-1120x760-dark",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .dark,
+                                   page: .checkin, checkinPlatform: "qoder")) },
+             CGSize(width: 1120, height: 760), .dark),
+            ("credits-limited-1120x760-light",
+             { AnyView(consoleView(store: creditsLimitedStore, settings: settings, scheme: .light,
+                                   page: .checkin, checkinPlatform: "qoder")) },
+             CGSize(width: 1120, height: 760), .light),
+            ("credits-error-1120x760-light",
+             { AnyView(consoleView(store: creditsErrorStore, settings: settings, scheme: .light,
+                                   page: .checkin, checkinPlatform: "qoder")) },
+             CGSize(width: 1120, height: 760), .light),
             ("add-account-platform-960x640-light",
              { AnyView(sheet(ConsoleAddAccountSheet(store: store, request: ConsoleAddRequest()) {})) },
              CGSize(width: 480, height: 420), .light),
@@ -1138,10 +1489,12 @@ struct ConsoleVisualSmokeMain {
         for (fixtureName, fixture) in [("empty", ConsoleVisualFixture.empty),
                                        ("loading", ConsoleVisualFixture.loading),
                                        ("error", ConsoleVisualFixture.failure)] {
-            let stateStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
-            stateStore.applyVisualFixture(fixture)
             for scheme in [ColorScheme.light, .dark] {
                 for page in [ConsolePage.overview, .accounts, .checkin, .quota] {
+                    // 每次渲染一份新 store：页面的 .task 会触发真实 RPC（样本外层页面），
+                    // 共用 store 会把上一个页面的错误带进下一张截图。
+                    let stateStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+                    stateStore.applyVisualFixture(fixture)
                     UserDefaults.standard.set(page.rawValue, forKey: "AICCConsolePage")
                     let view = MainConsoleView(store: stateStore, openSettings: {})
                         .environmentObject(settings)

@@ -1,230 +1,251 @@
 import SwiftUI
 
-/// 签到任务页里的 **Buddy 旅行** 区域。
+/// Buddy 旅行（WorkBuddy CN）。
 ///
-/// 设计取向：一屏看完每个账号「现在在哪、要不要派、有没有可领的奖励」，
-/// 每个账号一个开关 + 两个按钮，不再新增菜单或弹窗。
-///
-/// 数据来源：`travel.summary`（本地快照，10 秒轮询一次，不打接口）。
-/// 只有点「派出 / 领取 / 刷新状态」才会真的请求服务端 —— 界面绝不偷偷提交。
+/// 一屏回答：现在在哪、到哪一步、能领多少、要不要派。
+/// 页面加载只读本地快照；只有行内「领取 / 派出 / 刷新」会真的请求服务端。
 struct ConsoleTravelSection: View {
     @ObservedObject var store: ConsoleStore
+    let rows: [TravelRowDisplay]
+    @EnvironmentObject private var nav: ConsoleNavigation
+
+    private enum Column {
+        static let statusMin: CGFloat = 120
+        static let reward: CGFloat = 64
+        static let auto: CGFloat = 56
+        static let action: CGFloat = 158
+        static let accountMin: CGFloat = 140
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            header
-            card
-            footerNote
+        VStack(alignment: .leading, spacing: ConsoleTheme.groupSpacing) {
+            ConsoleSectionHeader(
+                title: "Buddy 旅行",
+                detail: TaskCenterSummary.travel(rows)
+            ) {
+                EmptyView()
+            }
+
+            if let notice = store.travelNotice {
+                ConsoleInlineNotice(kind: .info, message: notice)
+            }
+            if let error = store.travelError, !rows.isEmpty {
+                ConsoleInlineNotice(kind: .error, message: error, actionTitle: "重试") {
+                    Task { await store.loadTravel() }
+                }
+            }
+
+            content
+            footer
         }
         .task { await poll() }
     }
 
-    // MARK: - 头部
+    // MARK: - 表格
+
+    @ViewBuilder
+    private var content: some View {
+        if rows.isEmpty {
+            if store.travelLoading {
+                ConsoleLoadingRow(text: "正在读取旅行快照")
+            } else if let error = store.travelError {
+                ConsoleEmptyState(
+                    symbol: "exclamationmark.triangle",
+                    title: "读不到旅行状态",
+                    message: error,
+                    actionTitle: "重试"
+                ) {
+                    Task { await store.loadTravel() }
+                }
+            } else {
+                ConsoleEmptyState(
+                    symbol: "airplane",
+                    title: "还没有 WorkBuddy 账号",
+                    message: "账号添加后，Buddy 旅行会出现在这里。",
+                    actionTitle: "打开 AI 账号"
+                ) {
+                    nav.page = .accounts
+                }
+            }
+        } else {
+            ConsoleListSurface(horizontalPadding: 0) {
+                VStack(spacing: 0) {
+                    header
+                    Divider().overlay(ConsoleTheme.border)
+                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                        tableRow(row)
+                        if index < rows.count - 1 {
+                            Divider().overlay(ConsoleTheme.border)
+                                .padding(.leading, TaskCenterColumn.inset)
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            ConsoleSectionTitle(
-                title: "Buddy 旅行",
-                detail: detailText
-            )
-            Spacer(minLength: 8)
-            if let auto = store.travelAuto {
-                ConsoleBadge(
-                    text: auto.enabledAccounts > 0 ? "自动 \(auto.enabledAccounts) 个账号" : "自动未开启",
-                    tint: auto.enabledAccounts > 0 ? ConsoleTheme.accent : ConsoleTheme.tertiaryText
-                )
-            }
-            Button {
-                Task { await store.loadTravel() }
-            } label: {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .buttonStyle(ConsoleIconButtonStyle())
-            .help("重新读取旅行快照（不打接口）")
-            .disabled(store.travelLoading)
+        HStack(spacing: TaskCenterColumn.spacing) {
+            TaskCenterHeaderCell(title: "账号", width: nil)
+            TaskCenterHeaderCell(title: "当前状态", width: nil)
+            TaskCenterHeaderCell(title: "奖励", width: Column.reward)
+            TaskCenterHeaderCell(title: "自动", width: Column.auto)
+            TaskCenterHeaderCell(title: "操作", width: Column.action)
         }
+        .padding(.horizontal, TaskCenterColumn.inset)
+        .padding(.vertical, 8)
     }
 
-    private var detailText: String {
-        if let error = store.travelError { return error }
-        if let auto = store.travelAuto { return auto.intervalText }
-        return "尚未读取"
-    }
-
-    // MARK: - 卡片
-
-    private var card: some View {
-        ConsoleCard(padding: 0) {
-            if store.travelRows.isEmpty {
-                emptyState
-            } else {
-                VStack(spacing: 0) {
-                    ForEach(Array(store.travelRows.enumerated()), id: \.element.id) { index, row in
-                        accountRow(row)
-                        if index < store.travelRows.count - 1 {
-                            Divider().overlay(ConsoleTheme.border).padding(.leading, 16)
-                        }
-                    }
-                }
+    private func tableRow(_ row: TravelRowDisplay) -> some View {
+        HStack(spacing: TaskCenterColumn.spacing) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.name)
+                    .font(ConsoleType.rowTitle)
+                    .foregroundStyle(ConsoleTheme.text)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(row.name)
+                Text(row.note)
+                    .font(ConsoleType.micro)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .lineLimit(1)
             }
-        }
-    }
+            .frame(minWidth: Column.accountMin, maxWidth: .infinity, alignment: .leading)
 
-    @ViewBuilder
-    private var emptyState: some View {
-        if let error = store.travelError {
-            ConsoleEmptyState(
-                symbol: "exclamationmark.triangle",
-                title: "读不到旅行状态",
-                message: error
-            )
-        } else {
-            ConsoleEmptyState(
-                symbol: "airplane",
-                title: "没有 WorkBuddy 账号",
-                message: "先去「AI 账号」页添加账号（可以从 Magpie 导入），旅行才会出现在这里。"
-            )
-        }
-    }
-
-    private func accountRow(_ row: TravelAccountRow) -> some View {
-        let status = row.status
-        let acting = store.travelActing == row.accountId
-        return VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(row.nickname)
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(ConsoleTheme.text)
-                            .lineLimit(1)
-                        if row.isBorrowed {
-                            ConsoleBadge(text: "Magpie", tint: ConsoleTheme.tertiaryText)
-                        }
-                    }
-                    Text(status?.secondaryText ?? "还没检查")
-                        .font(.system(size: 11))
-                        .foregroundStyle(ConsoleTheme.tertiaryText)
-                        .lineLimit(1)
-                }
-                .frame(width: 168, alignment: .leading)
-
-                ConsoleBadge(text: status?.stageText ?? "待检查", tint: tone(for: status))
-                    .frame(width: 74, alignment: .leading)
-
-                Text(status?.destinationText ?? "—")
-                    .font(.system(size: 11))
-                    .foregroundStyle(ConsoleTheme.secondaryText)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.statusText)
+                    .font(ConsoleType.body)
+                    .foregroundStyle(statusColor(row.status))
                     .lineLimit(1)
                     .truncationMode(.tail)
-
-                Spacer(minLength: 8)
-
-                Toggle(
-                    "",
-                    isOn: Binding(
-                        get: { row.travelEnabled },
-                        set: { newValue in
-                            Task { await store.setTravelEnabled(row, enabled: newValue) }
-                        }
-                    )
-                )
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .disabled(acting)
-                .help("开启后由 AICC 常驻助手自动派出并领取")
-
-                travelButton(
-                    title: "领取",
-                    enabled: status?.canClaim == true && !acting,
-                    prominent: status?.canClaim == true
-                ) {
-                    Task { await store.runTravel(.claim, row: row) }
+                    .help(row.help.isEmpty ? row.statusText : "\(row.statusText)\n\(row.help)")
+                if let warning = row.warning {
+                    Text(warning)
+                        .font(ConsoleType.micro)
+                        .foregroundStyle(ConsoleTheme.warning)
+                        .lineLimit(1)
+                        .help(warning)
                 }
-
-                travelButton(
-                    title: "派出",
-                    enabled: status?.canDepart == true && !acting,
-                    prominent: false
-                ) {
-                    Task { await store.runTravel(.depart, row: row) }
-                }
-
-                Button {
-                    Task { await store.runTravel(.refresh, row: row) }
-                } label: {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .font(.system(size: 11, weight: .medium))
-                }
-                .buttonStyle(ConsoleIconButtonStyle())
-                .disabled(acting)
-                .help("查一次真实状态")
             }
+            .frame(minWidth: Column.statusMin, maxWidth: .infinity, alignment: .leading)
 
-            if let warning = status?.warningText {
-                Text(warning)
-                    .font(.system(size: 11))
-                    .foregroundStyle(ConsoleTheme.warning)
-                    .lineLimit(2)
-                    .padding(.leading, 2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.reward)
+                    .font(ConsoleType.rowTitle)
+                    .monospacedDigit()
+                    .foregroundStyle(row.rewardNote == "待领取" ? ConsoleTheme.warning : ConsoleTheme.text)
+                    .lineLimit(1)
+                Text(row.rewardNote)
+                    .font(ConsoleType.micro)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .lineLimit(1)
             }
+            .frame(width: Column.reward, alignment: .leading)
+
+            Toggle("", isOn: Binding(
+                get: { row.autoEnabled },
+                set: { enabled in
+                    guard let raw = store.travelRows.first(where: { $0.accountId == row.accountId }) else { return }
+                    Task { await store.setTravelEnabled(raw, enabled: enabled) }
+                }
+            ))
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .labelsHidden()
+            .frame(width: Column.auto, alignment: .leading)
+            .disabled(!row.canToggleAuto)
+            // macOS 的 switch 在 disabled 时几乎不变色；显式降透明度，避免看起来还能点。
+            .opacity(row.canToggleAuto ? 1 : 0.45)
+            .help(toggleHelp(row))
+
+            actionCell(row)
+                .frame(width: Column.action, alignment: .leading)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, TaskCenterColumn.inset)
+        .padding(.vertical, 8)
+        .frame(minHeight: ConsoleTheme.rowHeight)
+    }
+
+    /// 开关的 help 必须与禁用状态说同一件事。
+    private func toggleHelp(_ row: TravelRowDisplay) -> String {
+        if let lock = row.autoLockReason { return lock }
+        return row.autoEnabled
+            ? "关闭后不再自动派出与领取"
+            : "开启后由 AICC 常驻助手自动派出并领取，仅在 AICC 运行时生效"
     }
 
     @ViewBuilder
-    private func travelButton(
-        title: String,
-        enabled: Bool,
-        prominent: Bool,
-        action: @escaping () -> Void
-    ) -> some View {
-        if prominent {
-            Button(title, action: action)
-                .buttonStyle(ConsolePrimaryButtonStyle(enabled: enabled))
-                .disabled(!enabled)
-                .frame(width: 46)
-        } else {
-            Button(title, action: action)
-                .buttonStyle(ConsoleSecondaryButtonStyle())
-                .disabled(!enabled)
-                .frame(width: 46)
-        }
-    }
-
-    private func tone(for status: TravelStatus?) -> Color {
-        switch status?.stage {
-        case .dispatchable: return ConsoleTheme.accent
-        case .traveling: return ConsoleTheme.accent
-        case .arrived: return ConsoleTheme.warning
-        case .doneToday: return ConsoleTheme.success
-        case .noBuddy, .unsupported: return ConsoleTheme.tertiaryText
-        case .failed: return ConsoleTheme.danger
-        case .unknown, .none: return ConsoleTheme.tertiaryText
-        }
-    }
-
-    // MARK: - 底部说明
-
-    private var footerNote: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            if let notice = store.travelNotice {
-                Text(notice)
-                    .font(.system(size: 11))
-                    .foregroundStyle(ConsoleTheme.secondaryText)
+    private func actionCell(_ row: TravelRowDisplay) -> some View {
+        HStack(spacing: 6) {
+            if row.isClaimable {
+                Button("领取") {
+                    run(.claim, row)
+                }
+                .buttonStyle(ConsolePrimaryButtonStyle(enabled: row.canClaim))
+                .disabled(!row.canClaim)
+                .help("领取到达奖励；服务端还会再校验一次，不会重复领取")
             }
-            Text(hostNote)
-                .font(.system(size: 11))
-                .foregroundStyle(ConsoleTheme.tertiaryText)
-                .fixedSize(horizontal: false, vertical: true)
+            if row.isDispatchable {
+                Button("派出") {
+                    run(.depart, row)
+                }
+                .buttonStyle(ConsoleSecondaryButtonStyle())
+                .disabled(!row.canDepart)
+                .help("派出 Buddy；服务端的每日上限仍然生效")
+            }
+            Button {
+                run(.refresh, row)
+            } label: {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .buttonStyle(ConsoleIconButtonStyle(size: 26))
+            .disabled(row.isBusy)
+            .help("向服务端查一次真实状态（只读）")
+
+            if row.isBusy {
+                ProgressView().controlSize(.mini)
+            }
         }
     }
 
-    /// 必须如实说明依赖关系：App 退出就没有自动旅行了。
+    private func run(_ method: TravelMethod, _ row: TravelRowDisplay) {
+        guard let raw = store.travelRows.first(where: { $0.accountId == row.accountId }) else { return }
+        Task { await store.runTravel(method, row: raw) }
+    }
+
+    private func statusColor(_ status: TaskCenterStatus) -> Color {
+        switch status {
+        case .failed: return ConsoleTheme.danger
+        case .claimable: return ConsoleTheme.warning
+        case .unsupported, .unknown: return ConsoleTheme.tertiaryText
+        default: return ConsoleTheme.secondaryText
+        }
+    }
+
+    // MARK: - 页脚
+
+    @ViewBuilder
+    private var footer: some View {
+        if !rows.isEmpty {
+            HStack(spacing: 6) {
+                Text(hostNote)
+                    .font(ConsoleType.micro)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .lineLimit(1)
+                    .help(fullHostNote)
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
     private var hostNote: String {
+        let cadence = store.travelAuto.map { "（\($0.intervalText)）" } ?? ""
+        return "自动旅行仅在 AICC 运行时执行\(cadence)"
+    }
+
+    /// App 退出就没有自动旅行了 —— 这句话必须能查到，但不占正文。
+    private var fullHostNote: String {
         let owner = store.travelAuto?.owner ?? "AICC 的账号助手进程"
         let lastTick = store.travelAuto?.lastTickText ?? ""
         let tail = lastTick.isEmpty ? "" : "，\(lastTick)"
@@ -233,8 +254,11 @@ struct ConsoleTravelSection: View {
 
     // MARK: - 轮询
 
-    /// 本地快照很便宜，但也不必太勤：助手 60 秒 tick 一次，10 秒刷新足够跟上。
+    /// 本地快照很便宜：助手 60 秒 tick 一次，10 秒刷新足够跟上，且不打接口。
     private func poll() async {
+        #if AICC_VISUAL_TEST && AICC_CONSOLE_VISUAL
+        if store.visualFixtureLoaded { return }
+        #endif
         await store.loadTravel()
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: 10 * 1_000_000_000)
