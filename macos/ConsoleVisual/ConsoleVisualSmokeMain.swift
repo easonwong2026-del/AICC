@@ -44,6 +44,8 @@ struct ConsoleVisualFixture {
     /// 成长活跃（PR #103）：总览页的「成长活跃」区块靠它渲染。
     var activity: ActivityFleetState = .empty
     var activityError: String?
+    /// 离屏加载态：只显示进度，不伪造空数据。
+    var isLoading = false
     /// WorkBuddy 客户端登录（WB-SWITCH-1）：账号页左栏顶部那行"当前登录"靠它渲染。
     var wbClientStatus: WorkbuddyClientStatus?
     var wbSwitchNotice: String?
@@ -664,6 +666,13 @@ extension ConsoleVisualFixture {
         ConsoleVisualFixture(lastAccountsRefresh: Date().addingTimeInterval(-60))
     }
 
+    static var loading: ConsoleVisualFixture {
+        var fixture = empty
+        fixture.lastAccountsRefresh = nil
+        fixture.isLoading = true
+        return fixture
+    }
+
     /// 失败状态：账号读取失败 + 额度读取失败。
     static var failure: ConsoleVisualFixture {
         var fixture = sample
@@ -790,6 +799,26 @@ struct ConsoleVisualSmokeMain {
              { AnyView(consoleView(store: store, settings: settings, scheme: .light,
                                    page: .accounts, account: "qoderService:qsa-cn-1")) },
              CGSize(width: 1120, height: 760), .light),
+            ("console-accounts-long-name-1120x760-light",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
+                                   page: .accounts, account: "workbuddy:acc-bulk-8")) },
+             CGSize(width: 1120, height: 760), .light),
+            ("console-accounts-current-1120x760-light",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
+                                   page: .accounts, account: "workbuddy:acc-wb-2")) },
+             CGSize(width: 1120, height: 760), .light),
+            ("console-accounts-current-1120x760-dark",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .dark,
+                                   page: .accounts, account: "workbuddy:acc-wb-2")) },
+             CGSize(width: 1120, height: 760), .dark),
+            ("console-accounts-expired-1120x760-light",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
+                                   page: .accounts, account: "workbuddy:acc-wb-2")) },
+             CGSize(width: 1120, height: 760), .light),
+            ("console-accounts-expired-1120x760-dark",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .dark,
+                                   page: .accounts, account: "workbuddy:acc-wb-2")) },
+             CGSize(width: 1120, height: 760), .dark),
             ("accounts-rewards-detail-tall-1120x1500-light",
              { AnyView(consoleView(store: store, settings: settings, scheme: .light,
                                    page: .accounts, account: "acc-wb-1")) },
@@ -868,6 +897,7 @@ struct ConsoleVisualSmokeMain {
 
         // 空状态与错误状态
         for (fixtureName, fixture) in [("empty", ConsoleVisualFixture.empty),
+                                       ("loading", ConsoleVisualFixture.loading),
                                        ("error", ConsoleVisualFixture.failure)] {
             let stateStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
             stateStore.applyVisualFixture(fixture)

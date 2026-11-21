@@ -1356,6 +1356,8 @@ extension ConsoleStore {
         accounts = fixture.accounts
         accountsError = fixture.accountsError
         lastAccountsRefresh = fixture.lastAccountsRefresh
+        loadingAccounts = fixture.isLoading
+        qoderLoading = fixture.isLoading
 
         snapshot = fixture.snapshot
         quotaError = fixture.quotaError
@@ -1367,6 +1369,7 @@ extension ConsoleStore {
 
         tasksOverview = fixture.tasksOverview
         tasksOverviewError = fixture.tasksOverviewError
+        tasksOverviewLoading = fixture.isLoading
 
         checkin = fixture.checkin
         checkinAuto = fixture.checkinAuto
@@ -1393,6 +1396,7 @@ extension ConsoleStore {
         rewardFailures = fixture.rewardFailures
         activity = fixture.activity
         activityError = fixture.activityError
+        activityLoading = fixture.isLoading
         lastActivityRefresh = fixture.lastAccountsRefresh
 
         wbClientStatus = fixture.wbClientStatus
