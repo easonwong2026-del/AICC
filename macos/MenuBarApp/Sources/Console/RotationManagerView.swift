@@ -505,7 +505,8 @@ struct RotationManagerView: View {
                 } else {
                     Button("仅保存") { model.requestSaveOnly() }
                         .buttonStyle(ConsoleSecondaryButtonStyle())
-                        .disabled(model.saving || !canSave)
+                        // 没有改动时"已保存"是句空话，不如直接不给点。
+                        .disabled(model.saving || !canSave || !model.dirty)
                     Button("保存并开启") { model.requestSaveAndEnable() }
                         .buttonStyle(ConsolePrimaryButtonStyle(enabled: canSave))
                         .disabled(model.saving || !canSave)

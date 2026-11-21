@@ -1583,18 +1583,16 @@ struct ConsoleVisualSmokeMain {
              { AnyView(Self.dirtyPreviewScene(store: previewStore)) },
              CGSize(width: 760, height: 620), .dark),
             ("rotation-save-failed-760x620-light",
-             { AnyView({
-                 var view = RotationManagerView(store: offStore, focus: .setup, initialStep: .preview)
-                 view.visualSaveFailure = "保存失败：计划缺少参与账号。设置没有改动。"
-                 return view
-             }()) },
+             { AnyView(Self.failedSaveScene(
+                 store: offStore,
+                 message: "保存失败：计划缺少参与账号。设置没有改动。"
+             )) },
              CGSize(width: 760, height: 620), .light),
             ("rotation-enable-failed-760x620-light",
-             { AnyView({
-                 var view = RotationManagerView(store: offStore, focus: .setup, initialStep: .preview)
-                 view.visualSaveFailure = "开启失败：计划配置不完整，服务端仍是关闭状态。"
-                 return view
-             }()) },
+             { AnyView(Self.failedSaveScene(
+                 store: offStore,
+                 message: "开启失败：计划配置不完整，服务端仍是关闭状态。"
+             )) },
              CGSize(width: 760, height: 620), .light),
             ("rotation-setup-no-account-760x620-light",
              { AnyView(RotationManagerView(store: noAccountStore, focus: .setup)) },
@@ -1781,6 +1779,17 @@ struct ConsoleVisualSmokeMain {
         }
 
         print("console visual QA: \(count) images -> \(outputDir)")
+    }
+
+    /// 保存/启用失败：草稿保持脏，底部才能重试。
+    @MainActor
+    private static func failedSaveScene(store: ConsoleStore, message: String) -> some View {
+        let plan = store.wbRotationStatus?.plan ?? WorkbuddyRotationPlan(json: [:])
+        var seed = RotationDraft(plan: plan)
+        seed.startMinutes = 21 * 60
+        var view = RotationManagerView(store: store, focus: .setup, initialStep: .preview, seedDraft: seed)
+        view.visualSaveFailure = message
+        return view
     }
 
     /// 已开启 + 未保存修改：验证"关闭自动轮换"不被表单挡住。
