@@ -89,7 +89,8 @@ final class SettingsModel: ObservableObject {
     }
 
     var credentialView: SettingsCredentialView {
-        SettingsCredentialView.resolve(worker.credentialStorage)
+        // 助手没跑起来是"暂时读不到"，老助手没有字段是"不支持"——两者文案不同。
+        SettingsCredentialView.resolve(worker.credentialStorage, helperRunning: workerPhase.isRunning)
     }
 
     var credentialAttention: SettingsCredentialAttention {
