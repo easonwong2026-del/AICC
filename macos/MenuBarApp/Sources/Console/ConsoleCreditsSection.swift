@@ -1,206 +1,273 @@
 import SwiftUI
 
-/// 「签到任务」页的 Qoder 段：每日 Credits 的查询、手动领取、自动开关。
+/// Qoder 每日 Credits（只有 Qoder CN 有已证实的活动接口）。
 ///
-/// 与 WorkBuddy 的签到不是一回事，所以**没有**塞进上面那张任务表：
-///
-/// | | WorkBuddy 签到 | Qoder Credits |
-/// | --- | --- | --- |
-/// | 结算 | 北京时间 09:00，错过可当天补 | 服务端活动窗口，窗口关了就没有 |
-/// | 接口 | `/v2/checkin` | `/sash/api/v1/me/campaigns`（仅有 CN 证据） |
-/// | 奖励 | 每日 credits | 活动发放的 Credits |
-///
-/// 三条界面纪律：
-/// 1. 自动开关**默认关闭**，且未验证的版本（International）开关是禁用的；
-/// 2. 只有真的"今天能领"时按钮才可点，避免点下去只得到一句 already；
-/// 3. 历史记录展示真实的 outcome，包括失败——不隐藏失败。
+/// 这里只说「今天的活动奖励」：可领取 / 已领取 / 暂无活动 / 暂不支持 / 需要登录。
+/// **不是账号余额**，所以页面上没有任何余额列，也不和额度相加。
 struct ConsoleCreditsSection: View {
     @ObservedObject var store: ConsoleStore
+    let rows: [CreditsRowDisplay]
+    @EnvironmentObject private var nav: ConsoleNavigation
+
+    @State private var runsAccountId: String?
+
+    private enum Column {
+        static let status: CGFloat = 92
+        static let reward: CGFloat = 60
+        static let auto: CGFloat = 56
+        static let lastRun: CGFloat = 88
+        static let action: CGFloat = 176
+        static let accountMin: CGFloat = 140
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                ConsoleSectionTitle(
-                    title: "Qoder 每日 Credits",
-                    detail: store.qoderCreditsAuto.isEmpty ? nil : "\(store.qoderCreditsAuto.count) 个账号"
-                )
-                Spacer(minLength: 8)
-                if store.qoderCreditsLoading {
-                    ProgressView().controlSize(.small)
-                }
-                Button("刷新") {
-                    Task { await store.refreshQoderCredits() }
-                }
-                .buttonStyle(ConsoleSecondaryButtonStyle())
-                .disabled(store.qoderCreditsLoading)
-            }
-
-            if let error = store.qoderCreditsError {
-                ConsoleCard {
-                    Text(error)
-                        .font(.system(size: 11))
-                        .foregroundStyle(ConsoleTheme.warning)
-                }
-            } else if store.qoderCreditsAuto.isEmpty {
-                ConsoleCard {
-                    Text("还没有 Qoder 账号。先在「AI 账号」里用浏览器授权或 PAT 添加一个，"
-                        + "再回来这里查看每日 Credits。")
-                        .font(.system(size: 11))
-                        .foregroundStyle(ConsoleTheme.secondaryText)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            } else {
-                ForEach(store.qoderCreditsAuto) { item in
-                    row(item)
-                }
+        VStack(alignment: .leading, spacing: ConsoleTheme.groupSpacing) {
+            ConsoleSectionHeader(
+                title: "每日 Credits",
+                detail: rows.isEmpty ? nil : TaskCenterSummary.credits(rows)
+            ) {
+                EmptyView()
             }
 
             if let notice = store.qoderCreditsNotice {
-                Text(notice)
-                    .font(.system(size: 11))
-                    .foregroundStyle(ConsoleTheme.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
+                ConsoleInlineNotice(kind: .info, message: notice)
+            }
+            if let error = store.qoderCreditsError, !rows.isEmpty {
+                ConsoleInlineNotice(kind: .error, message: error, actionTitle: "重试") {
+                    Task { await store.refreshQoderCredits() }
+                }
+            }
+
+            content
+            footer
+        }
+    }
+
+    // MARK: - 表格
+
+    @ViewBuilder
+    private var content: some View {
+        if rows.isEmpty {
+            if store.qoderCreditsLoading {
+                ConsoleLoadingRow(text: "正在读取每日 Credits")
+            } else if let error = store.qoderCreditsError {
+                ConsoleEmptyState(
+                    symbol: "exclamationmark.triangle",
+                    title: "没有读到 Credits 状态",
+                    message: error,
+                    actionTitle: "重试"
+                ) {
+                    Task { await store.refreshQoderCredits() }
+                }
+            } else {
+                ConsoleEmptyState(
+                    symbol: "circle.dotted.circle",
+                    title: "还没有 Qoder 账号",
+                    message: "Qoder CN 账号添加后会出现在这里；国际版没有已证实的接口。",
+                    actionTitle: "打开 AI 账号"
+                ) {
+                    nav.page = .accounts
+                }
+            }
+        } else {
+            ConsoleListSurface(horizontalPadding: 0) {
+                VStack(spacing: 0) {
+                    header
+                    Divider().overlay(ConsoleTheme.border)
+                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                        tableRow(row)
+                        if index < rows.count - 1 {
+                            Divider().overlay(ConsoleTheme.border)
+                                .padding(.leading, TaskCenterColumn.inset)
+                        }
+                    }
+                }
             }
         }
-        .task {
-            if store.qoderCreditsAuto.isEmpty {
-                await store.refreshQoderCredits(silent: true)
-            }
+    }
+
+    private var header: some View {
+        HStack(spacing: TaskCenterColumn.spacing) {
+            TaskCenterHeaderCell(title: "账号", width: nil)
+            TaskCenterHeaderCell(title: "今日", width: Column.status)
+            TaskCenterHeaderCell(title: "奖励", width: Column.reward)
+            TaskCenterHeaderCell(title: "自动领取", width: Column.auto)
+            TaskCenterHeaderCell(title: "最近执行", width: Column.lastRun)
+            TaskCenterHeaderCell(title: "操作", width: Column.action)
         }
+        .padding(.horizontal, TaskCenterColumn.inset)
+        .padding(.vertical, 8)
     }
 
-    /// 本次会话里服务端是否明确说"今天可领"。
-    private func canClaim(_ item: QoderCreditsAutoItem) -> Bool {
-        guard let report = store.qoderCreditsReports[item.accountId] else { return false }
-        return (report.claimable ?? 0) > 0
+    private func tableRow(_ row: CreditsRowDisplay) -> some View {
+        HStack(spacing: TaskCenterColumn.spacing) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.name)
+                    .font(ConsoleType.rowTitle)
+                    .foregroundStyle(ConsoleTheme.text)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(row.name)
+                Text(row.edition)
+                    .font(ConsoleType.micro)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .lineLimit(1)
+            }
+            .frame(minWidth: Column.accountMin, maxWidth: .infinity, alignment: .leading)
+
+            TaskCenterStatusCell(status: row.status, help: row.detail)
+                .frame(width: Column.status, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.reward)
+                    .font(ConsoleType.rowTitle)
+                    .monospacedDigit()
+                    .foregroundStyle(row.rewardNote == "待领取" ? ConsoleTheme.warning : ConsoleTheme.text)
+                    .lineLimit(1)
+                Text(row.rewardNote)
+                    .font(ConsoleType.micro)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .lineLimit(1)
+            }
+            .frame(width: Column.reward, alignment: .leading)
+
+            Toggle("", isOn: Binding(
+                get: { row.autoEnabled },
+                set: { enabled in
+                    Task { await store.setQoderCreditsAuto(accountId: row.accountId, enabled: enabled) }
+                }
+            ))
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .labelsHidden()
+            .frame(width: Column.auto, alignment: .leading)
+            .disabled(!row.supportsAuto || row.isBusy)
+            .help(row.supportsAuto
+                  ? "每天按服务端活动窗口检查一次；不会增加额外领取"
+                  : "该版本没有已证实的 Credits 接口")
+
+            lastRunCell(row)
+                .frame(width: Column.lastRun, alignment: .leading)
+
+            actionCell(row)
+                .frame(width: Column.action, alignment: .leading)
+        }
+        .padding(.horizontal, TaskCenterColumn.inset)
+        .padding(.vertical, 8)
+        .frame(minHeight: ConsoleTheme.rowHeight)
     }
 
-    private func claimHelp(_ item: QoderCreditsAutoItem) -> String {
-        if !item.supported { return "该版本没有已证实的 Credits 接口，不会发请求" }
-        if canClaim(item) { return "领取服务端当前标记为可领的活动" }
-        return "先点「检查今日」，服务端确认可领后这里才会亮起"
-    }
-
-    private func row(_ item: QoderCreditsAutoItem) -> some View {
-        ConsoleCard {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Text(item.displayName)
-                        .font(.system(size: 12, weight: .semibold))
+    @ViewBuilder
+    private func lastRunCell(_ row: CreditsRowDisplay) -> some View {
+        if row.lastRunOutcome == "—" {
+            Text("—")
+                .font(ConsoleType.body)
+                .foregroundStyle(ConsoleTheme.tertiaryText)
+        } else {
+            Button {
+                runsAccountId = row.accountId
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(row.lastRunOutcome)
+                        .font(ConsoleType.micro)
+                        .foregroundStyle(row.lastRunIsProblem ? ConsoleTheme.warning : ConsoleTheme.secondaryText)
                         .lineLimit(1)
-                    Text(item.editionName)
-                        .font(.system(size: 11))
+                    Text(row.lastRunTime)
+                        .font(ConsoleType.micro)
                         .foregroundStyle(ConsoleTheme.tertiaryText)
-                    Spacer(minLength: 8)
-                    if !item.supported {
-                        Text("未支持")
-                            .font(.system(size: 11, weight: .medium))
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
-                            .background(ConsoleTheme.tertiaryText.opacity(0.12), in: Capsule())
-                            .foregroundStyle(ConsoleTheme.secondaryText)
-                    } else if item.autoEnabled {
-                        Text("自动已开")
-                            .font(.system(size: 11, weight: .medium))
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
-                            .background(ConsoleTheme.accentSoft, in: Capsule())
-                            .foregroundStyle(ConsoleTheme.accent)
-                    } else {
-                        Text("自动关闭")
-                            .font(.system(size: 11, weight: .medium))
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
-                            .background(ConsoleTheme.tertiaryText.opacity(0.12), in: Capsule())
-                            .foregroundStyle(ConsoleTheme.secondaryText)
-                    }
+                        .lineLimit(1)
                 }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(row.runs.isEmpty)
+            .help(row.runs.isEmpty ? row.lastRunOutcome : "查看最近 \(row.runs.count) 次领取记录")
+            .popover(isPresented: Binding(
+                get: { runsAccountId == row.accountId },
+                set: { if !$0 { runsAccountId = nil } }
+            ), arrowEdge: .bottom) {
+                runsPopover(row)
+            }
+        }
+    }
 
-                HStack(spacing: 8) {
-                    Button("检查今日") {
-                        Task { await store.checkQoderCredits(accountId: item.accountId) }
-                    }
-                    .buttonStyle(ConsoleSecondaryButtonStyle())
-                    .disabled(store.qoderCreditsBusy == item.accountId || !item.supported)
+    private func actionCell(_ row: CreditsRowDisplay) -> some View {
+        HStack(spacing: 6) {
+            Button("检查今日") {
+                Task { await store.checkQoderCredits(accountId: row.accountId) }
+            }
+            .buttonStyle(ConsoleSecondaryButtonStyle())
+            .disabled(!row.canCheck)
+            .help(row.supportsAuto
+                  ? "只读：向服务端确认今天有没有可领的活动"
+                  : "该版本没有已证实的接口，不会发请求")
 
-                    // 只有本次会话里「检查今日」确认确实可领时才能点：
-                    // 避免用户点下去只得到一句 already（PRD §6.3）。
-                    Button("立即领取") {
-                        Task { await store.claimQoderCredits(accountId: item.accountId) }
-                    }
-                    .buttonStyle(ConsolePrimaryButtonStyle())
-                    .disabled(store.qoderCreditsBusy == item.accountId || !item.supported || !canClaim(item))
-                    .help(claimHelp(item))
+            // 只有本次会话确认「可领取」才可点：避免点下去只得到一句 already。
+            Button("立即领取") {
+                Task { await store.claimQoderCredits(accountId: row.accountId) }
+            }
+            .buttonStyle(ConsolePrimaryButtonStyle(enabled: row.canClaim))
+            .disabled(!row.canClaim)
+            .help(row.canClaim
+                  ? "领取服务端标记为可领的活动；领完会回查"
+                  : "先点「检查今日」，服务端确认可领后这里才会亮起")
 
-                    Toggle("自动领取", isOn: Binding(
-                        get: { item.autoEnabled },
-                        set: { value in
-                            Task { await store.setQoderCreditsAuto(accountId: item.accountId, enabled: value) }
-                        }
-                    ))
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .font(.system(size: 11))
-                    // 未验证的版本打开开关只会制造"为什么没领到"的假问题。
-                    .disabled(!item.supported || store.qoderCreditsBusy == item.accountId)
+            if row.isBusy {
+                ProgressView().controlSize(.mini)
+            }
+        }
+    }
 
-                    if store.qoderCreditsBusy == item.accountId {
-                        ProgressView().controlSize(.mini)
-                    }
-                    Spacer(minLength: 0)
-                }
-
-                if let last = item.lastRun {
-                    HStack(spacing: 6) {
-                        Text(last.triggerLabel)
-                            .font(.system(size: 11))
+    private func runsPopover(_ row: CreditsRowDisplay) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("领取记录")
+                .font(ConsoleType.sectionTitle)
+                .foregroundStyle(ConsoleTheme.text)
+            if row.runs.isEmpty {
+                Text("还没有记录")
+                    .font(ConsoleType.small)
+                    .foregroundStyle(ConsoleTheme.secondaryText)
+            } else {
+                ForEach(row.runs) { run in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(run.trigger)
+                            .font(ConsoleType.micro)
                             .foregroundStyle(ConsoleTheme.tertiaryText)
-                        Text(last.outcomeLabel)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(last.isSuccess ? ConsoleTheme.success : ConsoleTheme.warning)
-                        if let credits = last.credits {
-                            Text("+\(WorkerQuotaRow.format(credits)) Credits")
-                                .font(.system(size: 11))
-                                .foregroundStyle(ConsoleTheme.secondaryText)
+                            .frame(width: 28, alignment: .leading)
+                        Text(run.outcome)
+                            .font(ConsoleType.small)
+                            .foregroundStyle(run.isProblem ? ConsoleTheme.warning : ConsoleTheme.secondaryText)
+                        if !run.detail.isEmpty {
+                            Text(run.detail)
+                                .font(ConsoleType.micro)
+                                .foregroundStyle(ConsoleTheme.tertiaryText)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
                         }
-                        Text(ConsoleQuotaView.localTimestamp(last.executedAt))
-                            .font(.system(size: 11))
+                        Spacer(minLength: 8)
+                        Text(run.time)
+                            .font(ConsoleType.monoSmall)
                             .foregroundStyle(ConsoleTheme.tertiaryText)
-                        Spacer(minLength: 0)
                     }
-                } else {
-                    Text("还没有领取记录")
-                        .font(.system(size: 11))
-                        .foregroundStyle(ConsoleTheme.tertiaryText)
                 }
+            }
+        }
+        .padding(14)
+        .frame(width: 400)
+    }
 
-                if let runs = store.qoderCreditsRuns[item.accountId], !runs.isEmpty {
-                    VStack(alignment: .leading, spacing: 3) {
-                        ForEach(runs.prefix(5)) { run in
-                            HStack(spacing: 6) {
-                                Text(run.triggerLabel)
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(ConsoleTheme.tertiaryText)
-                                    .frame(width: 28, alignment: .leading)
-                                Text(run.outcomeLabel)
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(run.isSuccess ? ConsoleTheme.success : ConsoleTheme.warning)
-                                if let detail = run.errorDetail, !detail.isEmpty {
-                                    Text(detail)
-                                        .font(.system(size: 11))
-                                        .foregroundStyle(ConsoleTheme.tertiaryText)
-                                        .lineLimit(1)
-                                        .truncationMode(.tail)
-                                }
-                                Spacer(minLength: 0)
-                                Text(ConsoleQuotaView.localTimestamp(run.executedAt))
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundStyle(ConsoleTheme.tertiaryText)
-                            }
-                        }
-                    }
-                    .padding(.top, 2)
-                }
+    // MARK: - 页脚
+
+    @ViewBuilder
+    private var footer: some View {
+        if !rows.isEmpty {
+            HStack(spacing: 6) {
+                Text("每日 Credits 是活动奖励，不是账号余额，也不与额度相加。")
+                    .font(ConsoleType.micro)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .lineLimit(1)
+                    .help("活动窗口由服务端决定；窗口关闭后当天不能再领。此页只处理每日奖励，账号余额在额度看板。")
+                Spacer(minLength: 0)
             }
         }
     }

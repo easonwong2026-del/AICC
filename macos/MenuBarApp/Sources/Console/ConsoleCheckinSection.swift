@@ -1,111 +1,90 @@
 import SwiftUI
 
-/// 签到任务页里的 **WorkBuddy 每日签到** 区域（PR #69）。
+/// 每日签到（WorkBuddy CN）。
 ///
-/// 这一块负责三件事，别的都不做：
-/// 1. 显示每个账号今天签没签、拿了多少奖励（**以服务端为准**）；
-/// 2. 单账号自动开关（默认关）；
-/// 3. 用户点「立即签到」/「立即签到未完成账号」时如实执行并回报。
-///
-/// 不显示"可能""预计"这类猜测：不知道的奖励写破折号，说不清的状态写「状态未知」。
+/// 表格一屏回答：谁签了、谁没签、签了得多少、自动开没开、现在能不能补。
+/// 所有说明都压在一行；「谁签的 / 为什么失败」在行内一句，机制进 help。
 struct ConsoleCheckinSection: View {
     @ObservedObject var store: ConsoleStore
+    let rows: [CheckinRowDisplay]
+    @EnvironmentObject private var nav: ConsoleNavigation
 
-    private var status: CheckinFleetStatus { store.checkin }
-    private var auto: CheckinAutoStatus { store.checkinAuto }
+    private enum Column {
+        static let status: CGFloat = 96
+        static let reward: CGFloat = 56
+        static let lastRun: CGFloat = 92
+        static let auto: CGFloat = 56
+        static let action: CGFloat = 88
+        static let accountMin: CGFloat = 140
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            header
-            summary
-            card
+        VStack(alignment: .leading, spacing: ConsoleTheme.groupSpacing) {
+            ConsoleSectionHeader(
+                title: "每日签到",
+                detail: rows.isEmpty ? nil : TaskCenterSummary.checkin(rows)
+            ) {
+                // 常用操作放在标题行：960×640 下也不会被长列表挤到滚动区外。
+                if pendingCount > 0 {
+                    Button("签到未完成账号（\(pendingCount)）") {
+                        Task { await store.runPendingCheckins() }
+                    }
+                    .buttonStyle(ConsolePrimaryButtonStyle())
+                    .disabled(store.checkinBatching || store.checkinActing != nil)
+                    .help("先查每个账号的状态，只给服务端确认未签到的那些提交")
+                }
+            }
+
+            if let notice = store.checkinNotice {
+                ConsoleInlineNotice(kind: .info, message: notice)
+            }
+            if let error = store.checkinError, !rows.isEmpty {
+                ConsoleInlineNotice(kind: .error, message: error, actionTitle: "重试") {
+                    Task { await store.refreshCheckinStatus() }
+                }
+            }
+
+            content
             footer
         }
     }
 
-    // MARK: - 头部
+    // MARK: - 表格
 
-    private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            ConsoleSectionTitle(title: "WorkBuddy 每日签到", detail: headerDetail ?? "\(failedCount) 个需处理")
-            Spacer(minLength: 8)
-            if status.counts.unchecked > 0 {
-                ConsoleBadge(text: "\(status.counts.unchecked) 个未签到", tint: ConsoleTheme.warning)
-            }
-            if failedCount > 0 {
-                ConsoleBadge(text: "\(failedCount) 个需处理", tint: ConsoleTheme.danger)
-            }
-            Button {
-                Task { await store.refreshCheckinStatus() }
-            } label: {
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .buttonStyle(ConsoleIconButtonStyle())
-            .disabled(store.checkinLoading || store.checkinBatching)
-            .help("向服务端逐个账号查一次今日状态（只读，不会签到）")
-        }
-    }
-
-    /// 头部只说"在做什么"，数字留给下面的概览行，避免同一句话出现两次。
-    private var headerDetail: String? {
-        if store.checkinLoading { return "查询中…" }
-        if store.checkinBatching { return "执行中…" }
-        return nil
-    }
-
-    private var failedCount: Int {
-        status.rows.filter(\.state.isProblem).count
-    }
-
-    // MARK: - 概览
-
-    private var summary: some View {
-        HStack(spacing: 10) {
-            Text(status.headline)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(ConsoleTheme.text)
-            Text(status.enabledNote)
-                .font(.system(size: 11))
-                .foregroundStyle(ConsoleTheme.tertiaryText)
-            if let credit = status.creditNote {
-                ConsoleBadge(text: credit, tint: ConsoleTheme.success)
-            }
-            if status.cached {
-                Text("本地记录")
-                    .font(.system(size: 11))
-                    .foregroundStyle(ConsoleTheme.tertiaryText)
-                    .help("这一份来自本地签到记录，点右上角刷新才会向服务端核对")
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 2)
-    }
-
-    // MARK: - 账号表
-
-    private var card: some View {
-        ConsoleCard(padding: 0) {
-            if status.rows.isEmpty {
-                // 正在读 ≠ 没有账号：首屏助手还没回话时不能写成"还没有账号"。
-                if store.checkinLoading {
-                    ConsoleLoadingRow(text: "正在读取签到状态…")
-                        .padding(.horizontal, 4)
-                } else {
-                    ConsoleEmptyState(
-                        symbol: "calendar.badge.checkmark",
-                        title: "还没有可签到的账号",
-                        message: "先到「AI 账号」页添加或从 Magpie 导入 WorkBuddy 账号。"
-                    )
+    @ViewBuilder
+    private var content: some View {
+        if rows.isEmpty {
+            if store.checkinLoading {
+                ConsoleLoadingRow(text: "正在读取签到状态")
+            } else if let error = store.checkinError {
+                ConsoleEmptyState(
+                    symbol: "exclamationmark.triangle",
+                    title: "没有读到签到状态",
+                    message: error,
+                    actionTitle: "重试"
+                ) {
+                    Task { await store.refreshCheckinStatus() }
                 }
             } else {
+                ConsoleEmptyState(
+                    symbol: "calendar.badge.checkmark",
+                    title: "还没有可签到的账号",
+                    message: "WorkBuddy CN 账号添加后会出现在这里。",
+                    actionTitle: "打开 AI 账号"
+                ) {
+                    nav.page = .accounts
+                }
+            }
+        } else {
+            ConsoleListSurface(horizontalPadding: 0) {
                 VStack(spacing: 0) {
-                    columnHeader
+                    header
                     Divider().overlay(ConsoleTheme.border)
-                    ForEach(Array(status.sortedRows.enumerated()), id: \.element.id) { index, row in
-                        accountRow(row)
-                        if index < status.rows.count - 1 {
-                            Divider().overlay(ConsoleTheme.border).padding(.leading, 16)
+                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                        tableRow(row)
+                        if index < rows.count - 1 {
+                            Divider().overlay(ConsoleTheme.border)
+                                .padding(.leading, TaskCenterColumn.inset)
                         }
                     }
                 }
@@ -113,149 +92,133 @@ struct ConsoleCheckinSection: View {
         }
     }
 
-    private var columnHeader: some View {
-        HStack(spacing: 10) {
-            Text("账号")
-                .frame(width: 150, alignment: .leading)
-            Text("今日状态")
-                .frame(width: 96, alignment: .leading)
-            Text("奖励")
-                .frame(width: 56, alignment: .trailing)
-            Text("自动签到")
-                .frame(width: 74, alignment: .center)
-            Spacer(minLength: 0)
-            Text("操作")
-                .frame(width: 70, alignment: .trailing)
+    private var header: some View {
+        HStack(spacing: TaskCenterColumn.spacing) {
+            TaskCenterHeaderCell(title: "账号", width: nil)
+            TaskCenterHeaderCell(title: "今日", width: Column.status)
+            TaskCenterHeaderCell(title: "奖励", width: Column.reward)
+            TaskCenterHeaderCell(title: "最近执行", width: Column.lastRun)
+            TaskCenterHeaderCell(title: "自动签到", width: Column.auto)
+            TaskCenterHeaderCell(title: "操作", width: Column.action)
         }
-        .font(.system(size: 11))
-        .foregroundStyle(ConsoleTheme.tertiaryText)
-        .padding(.horizontal, 16)
+        .padding(.horizontal, TaskCenterColumn.inset)
         .padding(.vertical, 8)
-        .background(ConsoleTheme.cardSubtle)
     }
 
-    private func accountRow(_ row: CheckinAccountRow) -> some View {
-        let busy = store.checkinActing == row.accountId || row.running
-        return HStack(spacing: 10) {
+    private func tableRow(_ row: CheckinRowDisplay) -> some View {
+        HStack(spacing: TaskCenterColumn.spacing) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(row.nickname.isEmpty ? "未命名账号" : row.nickname)
-                    .font(.system(size: 12, weight: .medium))
+                Text(row.name)
+                    .font(ConsoleType.rowTitle)
                     .foregroundStyle(ConsoleTheme.text)
                     .lineLimit(1)
-                Text(row.detailText)
-                    .font(.system(size: 11))
-                    .foregroundStyle(ConsoleTheme.tertiaryText)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .truncationMode(.middle)
+                    .help(row.name)
+                Text(row.detail)
+                    .font(ConsoleType.micro)
+                    .foregroundStyle(row.status == .failed ? ConsoleTheme.danger : ConsoleTheme.tertiaryText)
+                    .lineLimit(1)
+                    .help(row.detail)
             }
-            .frame(width: 150, alignment: .leading)
+            .frame(minWidth: Column.accountMin, maxWidth: .infinity, alignment: .leading)
 
-            stateBadge(row).frame(width: 96, alignment: .leading)
+            TaskCenterStatusCell(status: row.status, help: row.detail)
+                .frame(width: Column.status, alignment: .leading)
 
-            Text(row.creditsText)
-                .font(.system(size: 11, weight: .medium))
+            Text(row.reward)
+                .font(ConsoleType.rowTitle)
                 .monospacedDigit()
-                .foregroundStyle(row.credits == nil ? ConsoleTheme.tertiaryText : ConsoleTheme.success)
-                .frame(width: 56, alignment: .trailing)
+                .foregroundStyle(row.hasReward ? ConsoleTheme.success : ConsoleTheme.tertiaryText)
+                .lineLimit(1)
+                .frame(width: Column.reward, alignment: .leading)
+                .help(row.hasReward ? "服务端确认的今日奖励" : "服务端没有返回奖励数额")
 
-            Toggle(
-                "",
-                isOn: Binding(
-                    get: { row.enabled },
-                    set: { enabled in
-                        Task { await store.setCheckinEnabled(row, enabled: enabled) }
-                    }
-                )
-            )
+            Text(row.lastRunText)
+                .font(ConsoleType.micro)
+                .foregroundStyle(ConsoleTheme.tertiaryText)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+                .frame(width: Column.lastRun, alignment: .leading)
+                .help(row.lastRunText == "—" ? "还没有今天的签到记录" : "最近一次签到：\(row.lastRunText)")
+
+            Toggle("", isOn: Binding(
+                get: { row.autoEnabled },
+                set: { enabled in
+                    guard let raw = store.checkin.row(row.accountId) else { return }
+                    Task { await store.setCheckinEnabled(raw, enabled: enabled) }
+                }
+            ))
             .toggleStyle(.switch)
             .controlSize(.mini)
             .labelsHidden()
-            .frame(width: 74, alignment: .center)
-            .disabled(store.checkinActing != nil || store.checkinBatching)
-            .help(row.enabled ? "关闭后会自动轮次跳过这个账号" : "开启后每天 09:00 后自动检查一次")
+            .frame(width: Column.auto, alignment: .leading)
+            .disabled(!row.canToggleAuto)
+            .help(row.autoEnabled
+                  ? "关闭后每天 09:00 的自动检查会跳过这个账号"
+                  : "开启后每天 09:00 自动检查一次；服务端已签到就跳过")
 
-            Spacer(minLength: 0)
-
-            Button(busy ? "执行中" : "立即签到") {
-                Task { await store.runCheckin(row) }
-            }
-            .buttonStyle(ConsoleSecondaryButtonStyle())
-            .disabled(busy || store.checkinActing != nil || store.checkinBatching)
-            .frame(width: 70, alignment: .trailing)
-            .help(
-                row.state.isChecked
-                    ? "今天已签到：会先查服务端，不会重复提交"
-                    : "先查服务端状态，确认未签到才会提交"
-            )
+            actionCell(row)
+                .frame(width: Column.action, alignment: .leading)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, TaskCenterColumn.inset)
+        .padding(.vertical, 8)
+        .frame(minHeight: ConsoleTheme.rowHeight)
     }
 
-    private func stateBadge(_ row: CheckinAccountRow) -> some View {
-        let tint: Color = {
-            if row.state.isChecked { return ConsoleTheme.success }
-            if row.state.isProblem { return ConsoleTheme.danger }
-            if row.state == .unchecked { return ConsoleTheme.warning }
-            return ConsoleTheme.tertiaryText
-        }()
-        return ConsoleBadge(text: row.state.title, tint: tint)
+    private func actionCell(_ row: CheckinRowDisplay) -> some View {
+        Button(row.isBusy ? "执行中" : "立即签到") {
+            guard let raw = store.checkin.row(row.accountId) else { return }
+            Task { await store.runCheckin(raw) }
+        }
+        .buttonStyle(ConsoleSecondaryButtonStyle())
+        .disabled(!row.canRun)
+        .help(helpText(row))
     }
 
-    // MARK: - 底部
+    private func helpText(_ row: CheckinRowDisplay) -> String {
+        if let blocked = row.blockedReason { return blocked }
+        return row.status.isDone
+            ? "今天已签到：会先查服务端，不会重复提交"
+            : "先查服务端状态，确认未签到才会提交"
+    }
 
+    // MARK: - 页脚
+
+    private var pendingCount: Int { store.checkin.pendingRows.count }
+
+    @ViewBuilder
     private var footer: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Button("刷新全部状态") {
-                    Task { await store.refreshCheckinStatus() }
+        if !rows.isEmpty {
+            HStack(spacing: 10) {
+                if store.checkinBatching {
+                    ProgressView().controlSize(.small)
+                    Text("正在逐个签到…")
+                        .font(ConsoleType.micro)
+                        .foregroundStyle(ConsoleTheme.secondaryText)
                 }
-                .buttonStyle(ConsoleSecondaryButtonStyle())
-                .disabled(store.checkinLoading || store.checkinBatching)
-                .help("只查状态，不签到")
 
-                Button("立即签到未完成账号") {
-                    Task { await store.runPendingCheckins() }
-                }
-                .buttonStyle(ConsoleSecondaryButtonStyle())
-                .disabled(
-                    store.checkinBatching
-                        || store.checkinActing != nil
-                        || status.pendingRows.isEmpty
-                )
-                .help(
-                    status.pendingRows.isEmpty
-                        ? "没有服务端确认未签到的账号"
-                        : "先查每个账号的状态，只给未签到的那些提交签到"
-                )
+                Spacer(minLength: 8)
 
-                Spacer(minLength: 0)
-
-                Text("最近检查：\(auto.lastTickText ?? "—")")
-                    .font(.system(size: 11))
+                Text(scheduleText)
+                    .font(ConsoleType.micro)
                     .foregroundStyle(ConsoleTheme.tertiaryText)
-                Text("下次自动检查：\(auto.nextRunText())")
-                    .font(.system(size: 11))
-                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .lineLimit(1)
+                    .help(ownershipHelp)
             }
-
-            if let notice = store.checkinNotice {
-                Text(notice)
-                    .font(.system(size: 11))
-                    .foregroundStyle(ConsoleTheme.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if let error = store.checkinError {
-                Text(error)
-                    .font(.system(size: 11))
-                    .foregroundStyle(ConsoleTheme.danger)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Text("计划 \(auto.planTime)（\(auto.timezone)）· 自动执行只在 AICC 运行时发生")
-                .font(ConsoleType.caption)
-                .foregroundStyle(ConsoleTheme.tertiaryText)
-                .lineLimit(1)
-                .help(auto.ownershipNote)
         }
+    }
+
+    /// 没有账号开自动时不要显示一个「下次检查」时间：那会让人以为它真的会跑。
+    private var scheduleText: String {
+        store.checkinAuto.enabledAccounts == 0
+            ? "自动签到未开启"
+            : "下次自动检查 \(store.checkinAuto.nextRunText())"
+    }
+
+    private var ownershipHelp: String {
+        let last = store.checkinAuto.lastTickText.map { "；上次检查 \($0)" } ?? ""
+        return "计划 \(store.checkinAuto.planTime)（\(store.checkinAuto.timezone)）\(last)。"
+            + store.checkinAuto.ownershipNote
     }
 }

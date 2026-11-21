@@ -136,6 +136,12 @@ final class ConsoleStore: ObservableObject {
     let worker: AccountWorkerManager
     private let settings: AppSettings
 
+    #if AICC_VISUAL_TEST && AICC_CONSOLE_VISUAL
+    /// 离屏渲染：样本已经灌好，页面不要再触发真实 RPC。
+    /// 否则 CLI 构建里找不到 account-worker，截图会带一条与界面无关的红色错误。
+    private(set) var visualFixtureLoaded = false
+    #endif
+
     init(worker: AccountWorkerManager, settings: AppSettings) {
         self.worker = worker
         self.settings = settings
@@ -1370,6 +1376,7 @@ final class ConsoleStore: ObservableObject {
 /// 编进设置页 / 看板的离屏渲染（它们引用不到 `ConsoleVisualFixture`）。
 extension ConsoleStore {
     func applyVisualFixture(_ fixture: ConsoleVisualFixture) {
+        visualFixtureLoaded = true
         accounts = fixture.accounts
         accountsError = fixture.accountsError
         lastAccountsRefresh = fixture.lastAccountsRefresh
@@ -1393,14 +1400,23 @@ extension ConsoleStore {
         checkin = fixture.checkin
         checkinAuto = fixture.checkinAuto
         checkinError = fixture.checkinError
+        checkinLoading = fixture.isLoading
+        checkinActing = fixture.checkinActing
+        checkinBatching = fixture.checkinBatching
 
         growthResult = fixture.growthResult
         growthError = fixture.growthError
         lastGrowthScan = fixture.lastGrowthScan
+        growthAuto = fixture.growthAuto
+        growthRuns = fixture.growthRuns
+        growthLoading = fixture.isLoading
+        expandedGrowthAccount = fixture.expandedGrowthAccount
 
         travelRows = fixture.travelRows
         travelAuto = fixture.travelAuto
         travelError = fixture.travelError
+        travelLoading = fixture.isLoading
+        travelActing = fixture.travelActing
 
         qoderProfiles = fixture.qoderProfiles
         qoderServiceAccounts = fixture.qoderServiceAccounts
@@ -1410,6 +1426,10 @@ extension ConsoleStore {
         qoderSyncedAt = fixture.lastAccountsRefresh
         qoderCreditsAuto = fixture.qoderCreditsAuto
         qoderCreditsError = fixture.qoderCreditsError
+        qoderCreditsLoading = fixture.isLoading
+        qoderCreditsReports = fixture.qoderCreditsReports
+        qoderCreditsRuns = fixture.qoderCreditsRuns
+        qoderCreditsBusy = fixture.qoderCreditsBusy
 
         rewardStates = fixture.rewardStates
         rewardFailures = fixture.rewardFailures

@@ -197,11 +197,21 @@ struct MainConsoleView: View {
                 await store.refreshWorkerQuota(force: true)
             }
         case .checkin:
-            async let overview: Void = store.refreshTasksOverview()
-            async let auto: Void = store.loadCheckinAuto()
-            _ = await (overview, auto)
-            // 任务状态只在用户点过对应区域的刷新时才联网，这里保持本地缓存。
-            await store.loadCheckin(cached: true, silent: true)
+            // 只刷新当前任务域的本地状态，全部只读；联网检查由页面上的「检查状态/扫描」触发。
+            switch nav.checkinPlatform {
+            case .workbuddy:
+                switch nav.workbuddyTask {
+                case .checkin:
+                    await store.loadCheckinAuto()
+                    await store.loadCheckin(cached: true, silent: true)
+                case .growth:
+                    await store.loadGrowthAuto()
+                case .travel:
+                    await store.loadTravel()
+                }
+            case .qoder:
+                await store.refreshQoderCredits(silent: true)
+            }
         }
     }
 }
