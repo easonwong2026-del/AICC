@@ -146,6 +146,17 @@ pub const METHODS: &[&str] = &[
     "workbuddy.client.status",
     "workbuddy.client.switch",
     "workbuddy.client.restore",
+    // ---- 夜间账号轮换（WB-ROTATE-1）----
+    //
+    // `status` / `dryRun` 只读；`save` / `setEnabled` 只写配置；
+    // `runNow` / `stop` / `restoreOrigin` 会关闭并重启客户端。
+    "workbuddy.rotation.status",
+    "workbuddy.rotation.save",
+    "workbuddy.rotation.setEnabled",
+    "workbuddy.rotation.dryRun",
+    "workbuddy.rotation.runNow",
+    "workbuddy.rotation.stop",
+    "workbuddy.rotation.restoreOrigin",
     // ---- 局域网 HTTPS 身份（PR-B）----
     "tls.identity",
     "tls.ensure",
@@ -1298,6 +1309,9 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                     .and_then(Value::as_bool)
                     .unwrap_or(true),
             };
+            // 手动切换与自动轮换共用同一把客户端锁：两边不能同时关客户端、
+            // 互相覆盖认证文件。拿不到就明确拒绝，不排队。
+            let _gate = workbuddy_switch::rotation::begin_manual_client_write(app, &env)?;
             workbuddy_switch::switch(app, &request, &control, &env).await
         }
 
@@ -1313,7 +1327,116 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                 .unwrap_or(false);
             let control = workbuddy_switch::SystemControl::for_variant(WbVariant::Cn);
             let env = workbuddy_switch::SwitchEnv::system(app);
+            let _gate = workbuddy_switch::rotation::begin_manual_client_write(app, &env)?;
             workbuddy_switch::restore(app, journal_id.as_deref(), force, &control, &env)
+        }
+
+        // ---- 夜间账号轮换（WB-ROTATE-1）----
+        "workbuddy.rotation.status" => {
+            let control = workbuddy_switch::SystemControl::for_variant(WbVariant::Cn);
+            let env = workbuddy_switch::SwitchEnv::system(app);
+            workbuddy_switch::rotation::status(
+                app,
+                &control,
+                &env,
+                &workbuddy_switch::rotation::SystemClock,
+            )
+        }
+
+        "workbuddy.rotation.dryRun" => {
+            let control = workbuddy_switch::SystemControl::for_variant(WbVariant::Cn);
+            let env = workbuddy_switch::SwitchEnv::system(app);
+            workbuddy_switch::rotation::dry_run(
+                app,
+                &control,
+                &env,
+                &workbuddy_switch::rotation::SystemClock,
+            )
+        }
+
+        "workbuddy.rotation.save" => {
+            let mut plan = app.with_db(|db| db.rotation_plan_or_default())?;
+            apply_rotation_params(&mut plan, params)?;
+            workbuddy_switch::rotation::validate_plan(&plan).map_err(RpcError::invalid_params)?;
+            app.with_db(|db| db.save_rotation_plan(&plan))?;
+            // 开关单独走一条：保存一次时间不该顺手把计划打开或关掉。
+            if let Some(enabled) = params.get("enabled").and_then(Value::as_bool) {
+                app.with_db(|db| db.set_rotation_enabled(enabled))?;
+            }
+            let control = workbuddy_switch::SystemControl::for_variant(WbVariant::Cn);
+            let env = workbuddy_switch::SwitchEnv::system(app);
+            workbuddy_switch::rotation::status(
+                app,
+                &control,
+                &env,
+                &workbuddy_switch::rotation::SystemClock,
+            )
+        }
+
+        "workbuddy.rotation.setEnabled" => {
+            let enabled = params
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| RpcError::invalid_params("缺少 enabled"))?;
+            if enabled {
+                // 一个连时区都不合法的计划不该被打开，更不能在半夜才开始报错。
+                let plan = app.with_db(|db| db.rotation_plan_or_default())?;
+                workbuddy_switch::rotation::validate_plan(&plan)
+                    .map_err(RpcError::invalid_params)?;
+                if plan.account_ids.is_empty() {
+                    return Err(RpcError::invalid_params(
+                        "先选择至少一个参与轮换的账号，再打开自动轮换",
+                    ));
+                }
+            }
+            app.with_db(|db| db.set_rotation_enabled(enabled))?;
+            let control = workbuddy_switch::SystemControl::for_variant(WbVariant::Cn);
+            let env = workbuddy_switch::SwitchEnv::system(app);
+            // 关掉开关不只是"别再开新轮次"：还在跑的那一轮必须立刻安全收尾，
+            // 否则客户端会停在一个轮换账号上过夜。这里同步执行一次 stop，
+            // 让界面能马上看到"已恢复原账号"，而不是等下一次心跳。
+            let stop_result = if enabled {
+                Value::Null
+            } else {
+                workbuddy_switch::rotation::stop(app, &control, &env)?
+            };
+            let mut payload = workbuddy_switch::rotation::status(
+                app,
+                &control,
+                &env,
+                &workbuddy_switch::rotation::SystemClock,
+            )?;
+            if !enabled {
+                payload["stopResult"] = stop_result;
+            }
+            Ok(payload)
+        }
+
+        "workbuddy.rotation.runNow" => {
+            // 会立刻关掉并重启客户端：必须显式确认，避免误点。
+            if params.get("confirm").and_then(Value::as_bool) != Some(true) {
+                return Err(RpcError::invalid_params(
+                    "立即执行会关闭并重启 WorkBuddy，需要 confirm=true",
+                ));
+            }
+            workbuddy_switch::rotation::run_tick(app, true).await
+        }
+
+        "workbuddy.rotation.stop" => {
+            let control = workbuddy_switch::SystemControl::for_variant(WbVariant::Cn);
+            let env = workbuddy_switch::SwitchEnv::system(app);
+            workbuddy_switch::rotation::stop(app, &control, &env)
+        }
+
+        "workbuddy.rotation.restoreOrigin" => {
+            let run_id = params.get("runId").and_then(Value::as_str);
+            let force = params
+                .get("force")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let control = workbuddy_switch::SystemControl::for_variant(WbVariant::Cn);
+            let env = workbuddy_switch::SwitchEnv::system(app);
+            workbuddy_switch::rotation::restore_now(app, &control, &env, run_id, force)
         }
 
         "auth.magpie.import" => {
@@ -2891,6 +3014,42 @@ fn require_setting_key(key: &str) -> RpcResult<()> {
     } else {
         Err(RpcError::invalid_params(format!("未知设置项：{key}")))
     }
+}
+
+/// 把 RPC 参数合并进现有计划。只覆盖出现的字段——界面改一个时间不该把
+/// 账号顺序、停留时长一起冲掉。
+fn apply_rotation_params(
+    plan: &mut crate::storage::rotation::RotationPlan,
+    params: &Value,
+) -> RpcResult<()> {
+    if let Some(timezone) = params.get("timezone").and_then(Value::as_str) {
+        plan.timezone = timezone.to_string();
+    }
+    if let Some(days) = params.get("weekdays").and_then(Value::as_array) {
+        plan.weekdays = days
+            .iter()
+            .filter_map(Value::as_u64)
+            .filter(|day| (1..=7).contains(day))
+            .map(|day| day as u8)
+            .collect();
+    }
+    if let Some(value) = params.get("startMinutes").and_then(Value::as_i64) {
+        plan.start_minutes = value;
+    }
+    if let Some(value) = params.get("endMinutes").and_then(Value::as_i64) {
+        plan.end_minutes = value;
+    }
+    if let Some(ids) = params.get("accountIds").and_then(Value::as_array) {
+        plan.account_ids = ids
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+    }
+    if let Some(value) = params.get("dwellSeconds").and_then(Value::as_i64) {
+        plan.dwell_seconds = value;
+    }
+    Ok(())
 }
 
 fn require_bool(params: &Value, key: &str) -> RpcResult<bool> {

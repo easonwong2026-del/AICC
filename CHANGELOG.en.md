@@ -4,6 +4,26 @@
 
 This file summarizes the current and recent public releases. The Chinese changelog contains the older detailed history.
 
+## Unreleased
+
+### WorkBuddy nightly account rotation (#113)
+
+- **Rotate several accounts on a schedule and return to the one you started with**:
+  A at 22:30 → B, C, D in turn → **A** at 07:00 (not C). The first session is
+  snapshotted separately, so restore never depends on "the previous stop".
+- **Off by default.** Window, weekdays, accounts and dwell time are configurable;
+  cross-midnight windows, one run per day, no catch-up after a missed start.
+- **Two credential modes**: long-lived own grant (probed read-only before each hop;
+  401 skips that account) and Magpie access-only (re-read every time, skipped when the
+  remaining lifetime cannot cover the dwell plus restore margin).
+- **Never overwrites you**: a manual switch during the night stops the plan; restore
+  refuses to touch a login the plan did not create.
+- **Evidence, not fabrication**: read-only activity checks before and after each hop,
+  reported separately from "switch succeeded" and "credential accepted".
+- The scheduler lives inside AICC's account worker: **it stops when AICC quits or the Mac
+  sleeps**, and the UI says so.
+- Database v27; 7 new RPCs plus a dry-run mode.
+
 ## 2.13.0 - 2026-11-18
 
 ### Growth center · rewards

@@ -86,7 +86,7 @@ impl LiveFile {
 }
 
 /// 客户端进程控制。生产实现见 [`SystemControl`]，测试用假实现。
-pub trait ClientControl {
+pub trait ClientControl: Send + Sync {
     fn variant(&self) -> WbVariant;
     fn app_path(&self) -> PathBuf;
     /// 客户端是否装在这台机器上（不可用时切换入口应当直接禁用）。

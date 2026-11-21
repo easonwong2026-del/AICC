@@ -207,6 +207,32 @@ fn serve() {
                         }
                     });
 
+                    // 夜间账号轮换也挂同一个心跳（60 秒一次）。
+                    //
+                    // 它自己判断"是不是在窗口内 / 今天跑过没有 / 有没有未完成的轮次"，
+                    // 关着的时候一个客户端动作都不做。**注意**：这个调度器活在
+                    // AICC.app 的子进程里，App 退出就停——界面文案必须这么说。
+                    let rotation_app = Arc::clone(&app);
+                    tokio::task::spawn(async move {
+                        match workbuddy_switch::rotation::run_tick(&rotation_app, false).await {
+                            Ok(report) => {
+                                let status = report
+                                    .get("status")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("?");
+                                // 关着/空闲/已跑过是每分钟都有的常态，不刷日志。
+                                if !matches!(
+                                    status,
+                                    "disabled" | "idle" | "already_ran" | "busy"
+                                        | "not_configured"
+                                ) {
+                                    log(&format!("夜间轮换：{status}"));
+                                }
+                            }
+                            Err(err) => log(&format!("夜间轮换检查失败：{}", err.message)),
+                        }
+                    });
+
                     // Qoder 每日 Credits 也挂同一个心跳。**没开开关就一个请求都不发**；
                     // 自己限速（20 分钟）+ 当天已领到就停手，所以不会把接口打成筛子。
                     let credits_app = Arc::clone(&app);

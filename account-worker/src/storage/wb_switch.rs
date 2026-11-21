@@ -22,6 +22,7 @@ use serde_json::Value;
 
 use crate::clock::now_rfc3339;
 use crate::rpc::{RpcError, RpcResult};
+use crate::storage::rotation::RotationSwitchLink;
 
 /// 快照已落盘、还没动客户端文件。
 pub const PHASE_PREPARED: &str = "prepared";
@@ -217,6 +218,99 @@ impl super::Db {
             .with_data(serde_json::json!({ "kind": "switch_busy" }))),
             Err(err) => Err(RpcError::storage(err)),
         }
+    }
+
+    /// 开一条切换记录，并在**同一个 SQLite 事务**里把它挂到夜间轮换上。
+    ///
+    /// 为什么必须同一个事务：轮次靠 `origin_*` 才能回到"这一轮最初那个账号"。
+    /// 如果 journal 插进去了、轮次没挂上就崩溃，恢复阶段会以为"这一轮没动过客户端"，
+    /// 于是 A→B 之后不回 A —— 这是最不能出的错。
+    pub fn begin_wb_switch_linked(
+        &mut self,
+        new: &NewSwitchJournal<'_>,
+        link: Option<&RotationSwitchLink<'_>>,
+    ) -> RpcResult<()> {
+        if link.is_none() {
+            return self.begin_wb_switch(new);
+        }
+        let link = link.expect("上面已经判过");
+        let now = now_rfc3339();
+        let tx = self.conn.transaction()?;
+        let inserted = tx.execute(
+            "INSERT INTO workbuddy_switch_journal (
+                 id, target_account_id, target_uid, previous_uid, previous_running,
+                 previous_marker, phase, open_slot, snapshot_path, snapshot_sha256,
+                 token_form, auth_source, temporary, access_expires_at,
+                 access_fingerprint, source_key, restore_state, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                       'pending', ?16, ?16)",
+            params![
+                new.id,
+                new.target_account_id,
+                new.target_uid,
+                new.previous_uid,
+                i64::from(new.previous_running),
+                i64::from(new.previous_marker),
+                PHASE_PREPARED,
+                new.snapshot_path,
+                new.snapshot_sha256,
+                new.token_form,
+                new.auth_source,
+                i64::from(new.temporary),
+                new.access_expires_at,
+                new.access_fingerprint,
+                new.source_key,
+                now,
+            ],
+        );
+        if let Err(err) = inserted {
+            return if is_unique_violation(&err) {
+                Err(RpcError::new(
+                    crate::rpc::E_SWITCH,
+                    "已有一条未完成的账号切换，先恢复或等它结束",
+                )
+                .with_data(serde_json::json!({ "kind": "switch_busy" })))
+            } else {
+                Err(RpcError::storage(err))
+            };
+        }
+
+        // 第一跳的快照就是"这一轮最初登录态"。只写一次，后续跳不得覆盖。
+        tx.execute(
+            "UPDATE workbuddy_rotation_run
+                SET current_journal_id = ?2,
+                    last_target_account_id = ?3,
+                    last_target_uid = ?4,
+                    origin_account_id = CASE
+                        WHEN origin_snapshot_sha256 IS NULL THEN ?3 ELSE origin_account_id END,
+                    origin_uid = CASE
+                        WHEN origin_snapshot_sha256 IS NULL THEN ?5 ELSE origin_uid END,
+                    origin_snapshot_path = CASE
+                        WHEN origin_snapshot_sha256 IS NULL THEN ?6 ELSE origin_snapshot_path END,
+                    origin_snapshot_sha256 = CASE
+                        WHEN origin_snapshot_sha256 IS NULL THEN ?7 ELSE origin_snapshot_sha256 END,
+                    origin_marker = CASE
+                        WHEN origin_snapshot_sha256 IS NULL THEN ?8 ELSE origin_marker END,
+                    origin_running = CASE
+                        WHEN origin_snapshot_sha256 IS NULL THEN ?9 ELSE origin_running END,
+                    updated_at = ?10
+              WHERE id = ?1",
+            params![
+                link.run_id,
+                new.id,
+                link.account_id,
+                link.uid,
+                new.previous_uid,
+                new.snapshot_path,
+                new.snapshot_sha256,
+                i64::from(new.previous_marker),
+                i64::from(new.previous_running),
+                now,
+            ],
+        )?;
+        let _ = link.is_first; // 是否第一跳由 `origin_snapshot_sha256 IS NULL` 决定
+        tx.commit()?;
+        Ok(())
     }
 
     /// 推进阶段。**不动 `open_slot`**：只有 `close_switch_journal` 才释放。

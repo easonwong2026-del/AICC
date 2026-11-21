@@ -13,7 +13,12 @@
 
 pub mod client;
 pub mod plan;
+pub mod rotation;
 pub mod service;
+
+#[cfg(test)]
+#[path = "rotation_tests.rs"]
+mod rotation_tests;
 
 pub use client::SystemControl;
 pub use service::{restore, status, switch, SwitchEnv, SwitchRequest};

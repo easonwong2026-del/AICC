@@ -768,6 +768,81 @@ final class AccountWorkerManager: ObservableObject {
         return WorkbuddyRestoreOutcome(json: result)
     }
 
+    // MARK: - 夜间账号轮换（WB-ROTATE-1）
+
+    /// 只读：计划、下一轮时间、当前这一轮、最近记录。
+    func workbuddyRotationStatus() async throws -> WorkbuddyRotationStatus {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        let result = try await client.call("workbuddy.rotation.status", timeout: 20)
+        return WorkbuddyRotationStatus(json: result)
+    }
+
+    /// 保存配置。`params` 只带要改的字段——后端会与现有配置合并。
+    func workbuddyRotationSave(params: [String: Any]) async throws -> WorkbuddyRotationStatus {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        let result = try await client.call("workbuddy.rotation.save", params: params, timeout: 20)
+        return WorkbuddyRotationStatus(json: result)
+    }
+
+    /// 开 / 关。打开时会先校验配置（缺账号会直接拒绝），不会悄悄打开一个跑不起来的计划。
+    ///
+    /// 关闭时会顺带**安全收尾**：还在跑的那一轮立刻恢复原账号。`stopResult`
+    /// 就是那次收尾的结论（`restored` = 是否真的回到原账号），不能吞掉——
+    /// 用户需要知道"关掉了"和"账号回来了"是两件事。
+    func workbuddyRotationSetEnabled(
+        _ enabled: Bool
+    ) async throws -> (status: WorkbuddyRotationStatus, stopResult: [String: Any]?) {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        let result = try await client.call(
+            "workbuddy.rotation.setEnabled",
+            params: ["enabled": enabled],
+            timeout: 180
+        )
+        let stopResult = result["stopResult"] as? [String: Any]
+        return (WorkbuddyRotationStatus(json: result), stopResult)
+    }
+
+    /// 预演：只演算会做什么、会跳过什么，不动客户端、不读令牌。
+    func workbuddyRotationDryRun() async throws -> WorkbuddyRotationDryRun {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        let result = try await client.call("workbuddy.rotation.dryRun", timeout: 30)
+        return WorkbuddyRotationDryRun(json: result)
+    }
+
+    /// 立即执行一轮（会关客户端，用于用户在场的短时验证）。占用当天名额。
+    func workbuddyRotationRunNow() async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call(
+            "workbuddy.rotation.runNow",
+            params: ["confirm": true],
+            timeout: 180
+        )
+    }
+
+    /// 暂停并恢复原账号。
+    func workbuddyRotationStop() async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        return try await client.call("workbuddy.rotation.stop", timeout: 180)
+    }
+
+    /// 手动恢复某一轮的最初账号。`force` 只用于用户明确确认"覆盖我现在的登录"。
+    func workbuddyRotationRestoreOrigin(
+        runId: String? = nil,
+        force: Bool = false
+    ) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let client, client.isRunning else { throw AccountWorkerFailure.notRunning }
+        var params: [String: Any] = ["force": force]
+        if let runId { params["runId"] = runId }
+        return try await client.call("workbuddy.rotation.restoreOrigin", params: params, timeout: 180)
+    }
+
     // MARK: - Buddy 旅行（PR1c）
 
     /// 本地快照，**不打接口**。界面轮询用这个，几秒一次也不会有网络开销。

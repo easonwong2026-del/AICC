@@ -1,0 +1,133 @@
+import XCTest
+@testable import AICCCore
+
+/// 夜间轮换模型的文案与边界。
+///
+/// 这些断言只盯"会不会说错话"——把"跳过"说成"完成"、把"未知"说成"未活跃"，
+/// 都是会让用户做出错误决定的错。
+final class WorkbuddyRotationModelsTests: XCTestCase {
+    func testPlanDescribesACrossMidnightWindowHonestly() {
+        let plan = WorkbuddyRotationPlan(json: [
+            "enabled": true,
+            "timezone": "Asia/Shanghai",
+            "weekdays": [1, 2, 3, 4, 5, 6, 7],
+            "startMinutes": 22 * 60 + 30,
+            "endMinutes": 7 * 60,
+            "accountIds": ["a", "b"],
+            "dwellSeconds": 3600,
+        ])
+        XCTAssertTrue(plan.crossesMidnight)
+        XCTAssertEqual(plan.windowText, "22:30 → 次日 07:00")
+        XCTAssertEqual(plan.weekdayText, "每天")
+        XCTAssertEqual(plan.dwellText, "1 小时")
+    }
+
+    func testWeekdayTextNamesTheCommonSets() {
+        func plan(_ days: [Int]) -> WorkbuddyRotationPlan {
+            WorkbuddyRotationPlan(json: ["weekdays": days, "startMinutes": 0, "endMinutes": 60])
+        }
+        XCTAssertEqual(plan([1, 2, 3, 4, 5]).weekdayText, "工作日")
+        XCTAssertEqual(plan([6, 7]).weekdayText, "周末")
+        XCTAssertEqual(plan([1, 3, 5]).weekdayText, "周一、周三、周五")
+    }
+
+    func testScheduleSaysSoWhenThereIsNoNextRun() {
+        let empty = WorkbuddyRotationSchedule(json: ["inWindow": false])
+        XCTAssertEqual(empty.nextRunText, "没有下一次")
+
+        let inside = WorkbuddyRotationSchedule(json: ["inWindow": true])
+        XCTAssertEqual(inside.nextRunText, "正在执行窗口内")
+    }
+
+    func testStepSeparatesSkippedFromDone() {
+        let skipped = WorkbuddyRotationStep(json: [
+            "status": "skipped",
+            "skipReason": "own_grant_rejected",
+        ])
+        XCTAssertEqual(skipped.statusText, "已跳过")
+        XCTAssertEqual(skipped.skipText, "自有授权被服务端拒绝，需要重新授权")
+
+        let done = WorkbuddyRotationStep(json: ["status": "done"])
+        XCTAssertEqual(done.statusText, "已切换")
+        XCTAssertNil(done.skipText)
+    }
+
+    func testMagpieShortWindowIsExplainedInTermsOfTheDwell() {
+        let step = WorkbuddyRotationStep(json: [
+            "status": "skipped",
+            "skipReason": "magpie_too_short_for_dwell",
+        ])
+        XCTAssertEqual(step.skipText, "Magpie 令牌剩余时间不够覆盖停留时长")
+    }
+
+    func testActivityUnknownStaysUnknown() {
+        let step = WorkbuddyRotationStep(json: ["status": "done"])
+        XCTAssertEqual(step.activityText, "活跃未查")
+
+        let failed = WorkbuddyRotationStep(json: [
+            "status": "done",
+            "activityAfter": ["state": "failed", "error": "timeout"],
+        ])
+        XCTAssertTrue(failed.activityText.contains("查不到"), failed.activityText)
+    }
+
+    func testRunExplainsTheRestoreOutcomeWithoutPretending() {
+        let restored = WorkbuddyRotationRun(json: [
+            "state": "completed",
+            "restoreResult": "restored",
+            "steps": [],
+        ])
+        XCTAssertEqual(restored.restoreText, "已恢复最初账号")
+        XCTAssertFalse(restored.needsAttention)
+
+        let corrupt = WorkbuddyRotationRun(json: [
+            "state": "recovery_required",
+            "restoreResult": "snapshot_corrupt",
+            "steps": [],
+        ])
+        XCTAssertEqual(corrupt.restoreText, "原账号快照已损坏，未覆盖")
+        XCTAssertTrue(corrupt.needsAttention)
+        XCTAssertEqual(corrupt.stateText, "需要你确认")
+    }
+
+    func testHeadlineCoversDisabledEmptyAndUnloggedCases() {
+        let disabled = WorkbuddyRotationStatus(json: [
+            "plan": ["enabled": false, "accountIds": ["a"]],
+            "client": ["installed": true],
+            "live": ["loggedIn": true],
+        ])
+        XCTAssertEqual(disabled.headline, "已关闭")
+
+        let empty = WorkbuddyRotationStatus(json: [
+            "plan": ["enabled": true, "accountIds": []],
+            "client": ["installed": true],
+            "live": ["loggedIn": true],
+        ])
+        XCTAssertEqual(empty.headline, "还没有选择参与轮换的账号")
+
+        let loggedOut = WorkbuddyRotationStatus(json: [
+            "plan": ["enabled": true, "accountIds": ["a"]],
+            "client": ["installed": true],
+            "live": ["loggedIn": false],
+            "schedule": ["inWindow": false],
+        ])
+        XCTAssertEqual(loggedOut.headline, "客户端当前没有登录，计划不会执行")
+    }
+
+    func testDryRunStepTellsSwitchFromSkip() {
+        let dry = WorkbuddyRotationDryRun(json: [
+            "steps": [
+                ["accountId": "a", "nickname": "甲", "outcome": "switch", "temporary": false],
+                ["accountId": "b", "nickname": "乙", "outcome": "skip", "detail": "剩余时间不够"],
+                ["accountId": "c", "nickname": "丙", "outcome": "already_live"],
+            ],
+            "warnings": ["每切一个账号都会关闭并重启 WorkBuddy"],
+            "originLoggedIn": true,
+        ])
+        XCTAssertEqual(dry.steps.count, 3)
+        XCTAssertTrue(dry.steps[0].summary.contains("甲"))
+        XCTAssertTrue(dry.steps[1].summary.contains("跳过"))
+        XCTAssertTrue(dry.steps[2].summary.contains("已经登录"))
+        XCTAssertEqual(dry.warnings.count, 1)
+    }
+}

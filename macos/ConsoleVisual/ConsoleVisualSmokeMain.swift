@@ -48,6 +48,8 @@ struct ConsoleVisualFixture {
     var wbClientStatus: WorkbuddyClientStatus?
     var wbSwitchNotice: String?
     var wbSwitchFailed = false
+    /// 夜间账号轮换（WB-ROTATE-1）：左栏的第二块卡片靠它渲染。
+    var wbRotationStatus: WorkbuddyRotationStatus?
 }
 
 extension ConsoleVisualFixture {
@@ -395,6 +397,74 @@ extension ConsoleVisualFixture {
             "已切换，客户端已接受这个登录（重启后仍然是它）；临时登录有效至 11-14 14:38"
             + "（剩余 40 分钟），到期前请点「恢复原账号」"
 
+        // WB-ROTATE-1：22:30 → 次日 07:00，两个账号，当前停在第二个。
+        fixture.wbRotationStatus = WorkbuddyRotationStatus(json: [
+            "plan": [
+                "enabled": true,
+                "timezone": "Asia/Shanghai",
+                "weekdays": [1, 2, 3, 4, 5, 6, 7],
+                "startMinutes": 22 * 60 + 30,
+                "endMinutes": 7 * 60,
+                "accountIds": ["acc-wb-1", "acc-mag-1"],
+                "dwellSeconds": 3600,
+                "startText": "22:30",
+                "endText": "07:00",
+            ],
+            "schedule": [
+                "inWindow": true,
+                "windowStart": ConsoleVisualFixture.iso(now, -1800),
+                "windowEnd": ConsoleVisualFixture.iso(now, 28800),
+            ],
+            "live": ["uid": "wb_1122334455667788", "loggedIn": true],
+            "client": ["installed": true, "running": true],
+            "current": [
+                "id": "run-demo",
+                "planDate": "2026-11-20",
+                "state": "dwelling",
+                "cursor": 1,
+                "originUid": "wb_9f3c1d7a4b2e5f6089abcdef12345678",
+                "originAccountId": "acc-wb-1",
+                "originSnapshotTracked": true,
+                "lastTargetUid": "wb_1122334455667788",
+                "lastTargetAccountId": "acc-wb-2",
+                "currentAccountId": "acc-mag-1",
+                "currentUid": "wb_mag_0001",
+                "steps": [
+                    ["id": "st-1", "seq": 0, "accountId": "acc-wb-2", "uid": "wb_1122334455667788",
+                     "mode": "own_refresh", "status": "done", "authPrecheck": "accepted",
+                     "activityBefore": ["state": "ok", "todayActive": false, "streakDays": 3],
+                     "activityAfter": ["state": "ok", "todayActive": true, "streakDays": 4]],
+                    ["id": "st-2", "seq": 1, "accountId": "acc-mag-1", "uid": "wb_mag_0001",
+                     "mode": "magpie_access_temporary", "status": "dwelling"],
+                ],
+                "createdAt": "2026-11-20T14:30:00Z",
+                "updatedAt": "2026-11-20T15:05:00Z",
+            ],
+            "lastRun": [
+                "id": "run-yesterday",
+                "planDate": "2026-11-19",
+                "state": "completed",
+                "cursor": 1,
+                "originUid": "wb_9f3c1d7a4b2e5f6089abcdef12345678",
+                "originSnapshotTracked": true,
+                "restoreResult": "restored",
+                "steps": [],
+            ],
+            "history": [
+                ["id": "run-yesterday", "planDate": "2026-11-19", "state": "completed",
+                 "cursor": 1, "originSnapshotTracked": true, "restoreResult": "restored",
+                 "steps": [
+                    ["id": "h-1", "seq": 0, "accountId": "acc-wb-2", "uid": "wb_1122334455667788",
+                     "status": "done", "mode": "own_refresh",
+                     "activityAfter": ["state": "ok", "todayActive": true, "streakDays": 4]],
+                    ["id": "h-2", "seq": 1, "accountId": "acc-mag-1", "uid": "wb_mag_0001",
+                     "status": "skipped", "skipReason": "magpie_too_short_for_dwell"],
+                 ]],
+            ],
+            "scheduler": ["owner": "AICC.app 的账号助手进程", "runsWhileAppClosed": false, "tickSeconds": 60],
+            "limits": ["supportedTimezones": ["Asia/Shanghai", "UTC"]],
+        ])
+
         fixture.tasksOverview = TasksOverview(json: [
             "today": "2026-11-14",
             "accounts": ["total": 23],
@@ -652,6 +722,12 @@ struct ConsoleVisualSmokeMain {
              { AnyView(Self.rewardsBlock()) }, CGSize(width: 760, height: 560), .light),            ("rewards-block-stale-760x560-light",
              { AnyView(Self.rewardsBlock(failure: "读取超时（60s）：account worker 未在时限内返回")) },
              CGSize(width: 760, height: 640), .light),
+            ("rotation-sheet-560x660-light",
+             { AnyView(ConsoleWorkbuddyRotationSheet(store: store)) },
+             CGSize(width: 560, height: 660), .light),
+            ("rotation-sheet-560x660-dark",
+             { AnyView(ConsoleWorkbuddyRotationSheet(store: store)) },
+             CGSize(width: 560, height: 660), .dark),
             ("activity-block-1000x420-light",
              { AnyView(Self.activityBlock()) }, CGSize(width: 1000, height: 420), .light),
             ("activity-block-1000x420-dark",

@@ -44,6 +44,7 @@ use crate::auth::probe::{self, Probe};
 use crate::auth::service as auth_service;
 use crate::providers::magpie;
 use crate::rpc::{RpcError, RpcResult};
+use crate::storage::rotation::RotationSwitchLink;
 use crate::storage::wb_switch::{
     NewSwitchJournal, SwitchJournal, PHASE_FAILED, PHASE_LAUNCHED, PHASE_RESTORED,
     PHASE_UNCONFIRMED, PHASE_VERIFIED, PHASE_WRITTEN, RESTORE_DONE,
@@ -208,6 +209,17 @@ pub async fn switch(
     control: &dyn ClientControl,
     env: &SwitchEnv,
 ) -> RpcResult<Value> {
+    switch_linked(app, request, control, env, None).await
+}
+
+/// 同 [`switch`]，但把这次切换挂到一轮夜间计划上（journal 与轮次同一事务）。
+pub async fn switch_linked(
+    app: &App,
+    request: &SwitchRequest,
+    control: &dyn ClientControl,
+    env: &SwitchEnv,
+    link: Option<&RotationSwitchLink<'_>>,
+) -> RpcResult<Value> {
     if !request.restart {
         return Err(RpcError::invalid_params(
             "账号切换必须重启 WorkBuddy：客户端运行时会用内存里的登录态覆盖认证文件",
@@ -268,7 +280,7 @@ pub async fn switch(
         None
     };
 
-    let applied = apply(app, &account, &plan, &target, control, env)?;
+    let applied = apply_inner(app, &account, &plan, &target, control, env, link)?;
 
     let auth_accepted = if request.verify_server {
         let outcome = probe_server(&account, target.credential.access(), &target.domain).await;
@@ -347,13 +359,14 @@ struct ApplyOutcome {
     snapshot_sha: String,
 }
 
-fn apply(
+fn apply_inner(
     app: &App,
     account: &AccountRecord,
     plan: &Plan,
     target: &TargetSession,
     control: &dyn ClientControl,
     env: &SwitchEnv,
+    link: Option<&RotationSwitchLink<'_>>,
 ) -> RpcResult<ApplyOutcome> {
     let running_before = control.is_running();
     if running_before {
@@ -416,26 +429,29 @@ fn apply(
     let access_fingerprint = crate::securestore::fingerprint(target.credential.access().as_bytes());
     let access_expires_at = plan.access_expires_at_ms.map(ms_to_rfc3339);
     let opened = app.with_db(|db| {
-        db.begin_wb_switch(&NewSwitchJournal {
-            id: &journal_id,
-            target_account_id: &account.id,
-            target_uid: &account.uid,
-            previous_uid: previous_uid.as_deref(),
-            previous_running: running_before,
-            previous_marker,
-            snapshot_path: &snapshot_path.to_string_lossy(),
-            snapshot_sha256: &snapshot_sha,
-            token_form: Some("plaintext"),
-            auth_source: if plan.mode == Mode::OwnRefresh {
-                "own"
-            } else {
-                "magpie"
+        db.begin_wb_switch_linked(
+            &NewSwitchJournal {
+                id: &journal_id,
+                target_account_id: &account.id,
+                target_uid: &account.uid,
+                previous_uid: previous_uid.as_deref(),
+                previous_running: running_before,
+                previous_marker,
+                snapshot_path: &snapshot_path.to_string_lossy(),
+                snapshot_sha256: &snapshot_sha,
+                token_form: Some("plaintext"),
+                auth_source: if plan.mode == Mode::OwnRefresh {
+                    "own"
+                } else {
+                    "magpie"
+                },
+                temporary: plan.temporary(),
+                access_expires_at: access_expires_at.as_deref(),
+                access_fingerprint: Some(&access_fingerprint),
+                source_key: plan.source_key.as_deref(),
             },
-            temporary: plan.temporary(),
-            access_expires_at: access_expires_at.as_deref(),
-            access_fingerprint: Some(&access_fingerprint),
-            source_key: plan.source_key.as_deref(),
-        })
+            link,
+        )
     });
     if let Err(err) = opened {
         let _ = std::fs::remove_file(&snapshot_path);
@@ -1077,6 +1093,34 @@ fn log_note(message: &str) {
     eprintln!("[aicc-account-worker] {}", crate::rpc::sanitize(message));
 }
 
+/// 自有授权的**只读**有效性预检。
+///
+/// 「库里有 `refresh_ref`」不等于「这份授权今天还能用」：客户端自己刷新时会轮换
+/// refresh token，AICC 手里那份可能已经作废。所以夜间自动切换前真的发一次只读
+/// 请求，而不是看数据库里有没有那一列。
+///
+/// 返回 `accepted` / `rejected` / `unknown`。读不到令牌直接 `Err`——
+/// 那说明这份授权在本地就已经不可用了，不需要再猜。
+pub async fn precheck_own(app: &App, account: &AccountRecord) -> RpcResult<String> {
+    let access = auth_service::read_access(app, account, "own")?
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| {
+            RpcError::new(crate::rpc::E_AUTH, "读取自有授权失败：没有访问令牌")
+                .with_data(json!({ "kind": plan::reason::NO_CREDENTIAL }))
+        })?;
+    let domain = account
+        .auth_domain
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            wb_switch_core::modules::variant::WbVariant::Cn
+                .codebuddy_domain()
+                .to_string()
+        });
+    let (state, _) = probe_server(account, &access, &domain).await;
+    Ok(state)
+}
+
 /// 一次只读探针：服务端到底认不认这份 access。
 ///
 /// 只回答"这份令牌能不能用"，**不写任何状态、不刷令牌、不改授权行**。
@@ -1134,15 +1178,6 @@ fn safe_restore_at(expires_at: Option<&str>) -> Option<String> {
 
 fn short_uid(uid: &str) -> String {
     uid.chars().take(8).collect()
-}
-
-/// `Display` 适配：错误文案里要一个短 UID，不想在 format! 里套函数。
-struct WorkbuddyUidLabel<'a>(&'a str);
-
-impl std::fmt::Display for WorkbuddyUidLabel<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", short_uid(self.0))
-    }
 }
 
 #[cfg(test)]
@@ -1216,7 +1251,6 @@ mod tests {
 
     use crate::paths::Paths;
     use crate::storage::AccountInput;
-    use std::cell::{Cell, RefCell};
 
     #[derive(Clone, PartialEq)]
     enum Launch {
@@ -1234,12 +1268,12 @@ mod tests {
         auth_path: PathBuf,
         app_path: PathBuf,
         installed: bool,
-        running: Cell<bool>,
+        running: std::sync::atomic::AtomicBool,
         /// 只在**第一次**启动时生效；回滚后的重启一律视为"正常启动"，
         /// 否则测试会分不清"客户端拒绝了"和"回滚把文件写坏了"。
-        mode: RefCell<Option<Launch>>,
-        launches: Cell<u32>,
-        closes: Cell<u32>,
+        mode: std::sync::Mutex<Option<Launch>>,
+        launches: std::sync::atomic::AtomicU32,
+        closes: std::sync::atomic::AtomicU32,
     }
 
     impl FakeControl {
@@ -1248,10 +1282,10 @@ mod tests {
                 auth_path: auth_path.to_path_buf(),
                 app_path: PathBuf::from("/Applications/WorkBuddy.app"),
                 installed: true,
-                running: Cell::new(running),
-                mode: RefCell::new(Some(mode)),
-                launches: Cell::new(0),
-                closes: Cell::new(0),
+                running: std::sync::atomic::AtomicBool::new(running),
+                mode: std::sync::Mutex::new(Some(mode)),
+                launches: std::sync::atomic::AtomicU32::new(0),
+                closes: std::sync::atomic::AtomicU32::new(0),
             }
         }
     }
@@ -1281,29 +1315,38 @@ mod tests {
             self.installed
         }
         fn is_running(&self) -> bool {
-            self.running.get()
+            self.running.load(std::sync::atomic::Ordering::SeqCst)
         }
         fn close(&self, _timeout_secs: i64) -> Result<(), String> {
-            self.closes.set(self.closes.get() + 1);
-            self.running.set(false);
+            self.closes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.running
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
         fn launch(&self) -> Result<(), String> {
-            self.launches.set(self.launches.get() + 1);
-            let mode = self.mode.borrow_mut().take();
+            self.launches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mode = self.mode.lock().map(|mut slot| slot.take()).unwrap_or(None);
             match mode {
                 Some(Launch::RewritesTo(uid)) => {
                     std::fs::write(&self.auth_path, auth_json(uid, "AT-OTHER")).unwrap();
-                    self.running.set(true);
+                    self.running
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
                 }
                 Some(Launch::LogsOut) => {
                     std::fs::write(client::logout_marker_path(&self.auth_path), "logged-out")
                         .unwrap();
-                    self.running.set(false);
+                    self.running
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
                 }
-                Some(Launch::NeverStarts) => self.running.set(false),
+                Some(Launch::NeverStarts) => self
+                    .running
+                    .store(false, std::sync::atomic::Ordering::SeqCst),
                 // `Works` 与"回滚后的重启"都走这里。
-                _ => self.running.set(true),
+                _ => self
+                    .running
+                    .store(true, std::sync::atomic::Ordering::SeqCst),
             }
             Ok(())
         }
@@ -1380,17 +1423,6 @@ mod tests {
         }
     }
 
-    fn magpie_plan() -> Plan {
-        Plan {
-            mode: Mode::MagpieTemporary,
-            source_key: Some("workbuddy".to_string()),
-            access_expires_at_ms: Some(1_800_000_000_000),
-            safe_restore_until_ms: Some(1_800_000_000_000),
-            remaining_secs: Some(3600),
-            degraded: None,
-        }
-    }
-
     fn target() -> TargetSession {
         TargetSession {
             uid: "uid-b".to_string(),
@@ -1408,13 +1440,29 @@ mod tests {
     #[test]
     fn apply_confirms_when_the_client_accepts_the_login() {
         let (h, control) = harness(true, Launch::Works);
-        let outcome = apply(&h.app, &h.account, &own_plan(), &target(), &control, &h.env).unwrap();
+        let outcome = apply_inner(
+            &h.app,
+            &h.account,
+            &own_plan(),
+            &target(),
+            &control,
+            &h.env,
+            None,
+        )
+        .unwrap();
 
         assert!(outcome.verified, "{:?}", outcome.verify_detail);
         assert_eq!(outcome.phase, PHASE_VERIFIED);
         assert_eq!(outcome.previous_uid.as_deref(), Some("uid-a"));
-        assert_eq!(control.closes.get(), 1, "切换前应当关一次客户端");
-        assert_eq!(control.launches.get(), 1);
+        assert_eq!(
+            control.closes.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "切换前应当关一次客户端"
+        );
+        assert_eq!(
+            control.launches.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
 
         let live = client::read_live(&h.env.auth_path);
         assert_eq!(live.uid.as_deref(), Some("uid-b"));
@@ -1433,7 +1481,16 @@ mod tests {
     #[test]
     fn a_rejecting_client_triggers_a_byte_exact_rollback() {
         let (h, control) = harness(true, Launch::RewritesTo("uid-a"));
-        let err = apply(&h.app, &h.account, &own_plan(), &target(), &control, &h.env).unwrap_err();
+        let err = apply_inner(
+            &h.app,
+            &h.account,
+            &own_plan(),
+            &target(),
+            &control,
+            &h.env,
+            None,
+        )
+        .unwrap_err();
 
         let data = err.data.clone().expect("失败必须带恢复结果");
         assert_eq!(data["kind"], "switch_failed");
@@ -1443,7 +1500,10 @@ mod tests {
             h.original,
             "回滚必须逐字节还原，不能重建"
         );
-        assert!(control.launches.get() >= 2, "回滚后要重新启动客户端");
+        assert!(
+            control.launches.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "回滚后要重新启动客户端"
+        );
         assert!(h.app.with_db(|db| db.open_wb_switch()).unwrap().is_none());
     }
 
@@ -1451,7 +1511,16 @@ mod tests {
     #[test]
     fn a_logout_marker_is_treated_as_rejection() {
         let (h, control) = harness(true, Launch::LogsOut);
-        let err = apply(&h.app, &h.account, &own_plan(), &target(), &control, &h.env).unwrap_err();
+        let err = apply_inner(
+            &h.app,
+            &h.account,
+            &own_plan(),
+            &target(),
+            &control,
+            &h.env,
+            None,
+        )
+        .unwrap_err();
         assert_eq!(err.data.unwrap()["restored"], true);
         assert!(
             !client::logout_marker_path(&h.env.auth_path).exists(),
@@ -1467,7 +1536,16 @@ mod tests {
     #[test]
     fn a_client_that_never_starts_is_unconfirmed_not_rolled_back() {
         let (h, control) = harness(true, Launch::NeverStarts);
-        let outcome = apply(&h.app, &h.account, &own_plan(), &target(), &control, &h.env).unwrap();
+        let outcome = apply_inner(
+            &h.app,
+            &h.account,
+            &own_plan(),
+            &target(),
+            &control,
+            &h.env,
+            None,
+        )
+        .unwrap();
 
         assert!(!outcome.verified);
         assert_eq!(outcome.phase, PHASE_UNCONFIRMED);
@@ -1489,7 +1567,16 @@ mod tests {
     #[test]
     fn restore_refuses_a_tampered_snapshot() {
         let (h, control) = harness(true, Launch::Works);
-        let outcome = apply(&h.app, &h.account, &own_plan(), &target(), &control, &h.env).unwrap();
+        let outcome = apply_inner(
+            &h.app,
+            &h.account,
+            &own_plan(),
+            &target(),
+            &control,
+            &h.env,
+            None,
+        )
+        .unwrap();
         let journal = h
             .app
             .with_db(|db| db.wb_switch_journal(&outcome.journal_id))
@@ -1510,7 +1597,16 @@ mod tests {
     #[test]
     fn restore_puts_the_previous_login_back() {
         let (h, control) = harness(true, Launch::Works);
-        let outcome = apply(&h.app, &h.account, &own_plan(), &target(), &control, &h.env).unwrap();
+        let outcome = apply_inner(
+            &h.app,
+            &h.account,
+            &own_plan(),
+            &target(),
+            &control,
+            &h.env,
+            None,
+        )
+        .unwrap();
         // 恢复时客户端应当按上一次记录的"原本在跑"重新启动。
         let value = restore(&h.app, Some(&outcome.journal_id), false, &control, &h.env).unwrap();
 
@@ -1557,7 +1653,16 @@ mod tests {
             })
             .unwrap();
 
-        let err = apply(&h.app, &h.account, &own_plan(), &target(), &control, &h.env).unwrap_err();
+        let err = apply_inner(
+            &h.app,
+            &h.account,
+            &own_plan(),
+            &target(),
+            &control,
+            &h.env,
+            None,
+        )
+        .unwrap_err();
         assert_eq!(err.data.unwrap()["kind"], "switch_busy");
         assert_eq!(
             std::fs::read_to_string(&h.env.auth_path).unwrap(),
@@ -1842,7 +1947,7 @@ mod tests {
             target.credential,
             TargetCredential::MagpieAccess { .. }
         ));
-        apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
+        apply_inner(&h.app, &h.account, &plan, &target, &control, &h.env, None).unwrap();
 
         let text = std::fs::read_to_string(&h.env.auth_path).unwrap();
         assert!(
@@ -1871,7 +1976,8 @@ mod tests {
         let plan = ready(&h);
         let before = client::read_live(&h.env.auth_path);
         let target = target_session(&h.app, &h.account, &plan, before.json.as_ref()).unwrap();
-        let outcome = apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
+        let outcome =
+            apply_inner(&h.app, &h.account, &plan, &target, &control, &h.env, None).unwrap();
 
         let journal = h
             .app
@@ -1911,7 +2017,8 @@ mod tests {
         let plan = ready(&h);
         let before = client::read_live(&h.env.auth_path);
         let target = target_session(&h.app, &h.account, &plan, before.json.as_ref()).unwrap();
-        let outcome = apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
+        let outcome =
+            apply_inner(&h.app, &h.account, &plan, &target, &control, &h.env, None).unwrap();
 
         // 模拟"客户端因 access 过期被登出"：文件没了。
         std::fs::remove_file(&h.env.auth_path).unwrap();
@@ -1950,7 +2057,8 @@ mod tests {
         let plan = ready(&h);
         let before = client::read_live(&h.env.auth_path);
         let target = target_session(&h.app, &h.account, &plan, before.json.as_ref()).unwrap();
-        let outcome = apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
+        let outcome =
+            apply_inner(&h.app, &h.account, &plan, &target, &control, &h.env, None).unwrap();
 
         // 用户自己在客户端里换成了 uid-c。
         std::fs::write(&h.env.auth_path, auth_json("uid-c", "AT-C")).unwrap();
@@ -1991,9 +2099,11 @@ mod tests {
         let before = client::read_live(&h.env.auth_path);
         let target = target_session(&h.app, &h.account, &plan, before.json.as_ref()).unwrap();
 
-        let first = apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
+        let first =
+            apply_inner(&h.app, &h.account, &plan, &target, &control, &h.env, None).unwrap();
         // 第二次切换（同一套夹具下等价于"又切了一次"）。
-        let second = apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
+        let second =
+            apply_inner(&h.app, &h.account, &plan, &target, &control, &h.env, None).unwrap();
         h.app
             .with_db(|db| db.settle_pending_temporary_except(&second.journal_id))
             .unwrap();
@@ -2034,7 +2144,7 @@ mod tests {
         let plan = ready(&h);
         let before = client::read_live(&h.env.auth_path);
         let target = target_session(&h.app, &h.account, &plan, before.json.as_ref()).unwrap();
-        apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
+        apply_inner(&h.app, &h.account, &plan, &target, &control, &h.env, None).unwrap();
         drop(control);
 
         // 另一个连接 = 进程重启后的视角。
@@ -2101,7 +2211,7 @@ mod tests {
         assert_eq!(target.credential.access(), "AT-MAG");
 
         // 走完整个写入也不该碰到那份坏引用。
-        apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
+        apply_inner(&h.app, &h.account, &plan, &target, &control, &h.env, None).unwrap();
         magpie::test_reset();
     }
 
@@ -2137,7 +2247,7 @@ mod tests {
         let plan = ready(&h);
         let live = client::read_live(&h.env.auth_path);
         let target = target_session(&h.app, &h.account, &plan, live.json.as_ref()).unwrap();
-        apply(&h.app, &h.account, &plan, &target, &control, &h.env).unwrap();
+        apply_inner(&h.app, &h.account, &plan, &target, &control, &h.env, None).unwrap();
 
         let after = status(&h.app, &control, &h.env).unwrap();
         assert_eq!(after["restoreAvailable"], true);

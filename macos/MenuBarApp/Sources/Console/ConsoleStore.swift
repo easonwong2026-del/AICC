@@ -118,6 +118,19 @@ final class ConsoleStore: ObservableObject {
     /// 恢复被"当前登录已变"挡住：非 nil 时界面弹确认，用户同意后走 force。
     @Published private(set) var wbRestoreNeedsConfirm: String?
 
+    // MARK: 夜间账号轮换（WB-ROTATE-1）
+
+    /// 计划 + 下一轮时间 + 当前这一轮 + 最近记录。`nil` = 还没查到。
+    @Published private(set) var wbRotationStatus: WorkbuddyRotationStatus?
+    @Published private(set) var wbRotationError: String?
+    /// 一次保存 / 执行 / 恢复的结论。
+    @Published private(set) var wbRotationNotice: String?
+    @Published private(set) var wbRotationFailed = false
+    /// 正在执行会动客户端的动作（保存配置不算）。
+    @Published private(set) var wbRotationBusy = false
+    /// 预演结果：只在用户点「预演」之后出现，不自动刷新。
+    @Published private(set) var wbRotationDryRun: WorkbuddyRotationDryRun?
+
     let worker: AccountWorkerManager
     private let settings: AppSettings
 
@@ -558,6 +571,149 @@ final class ConsoleStore: ObservableObject {
 
     func clearWorkbuddySwitchNotice() {
         wbSwitchNotice = nil
+    }
+
+    // MARK: - 夜间账号轮换（WB-ROTATE-1）
+
+    /// 只读刷新。轮换状态在计划执行期间会自己变（助手每分钟推进一次），
+    /// 所以界面每 30 秒静默刷一次就够。
+    func refreshWorkbuddyRotation(silent: Bool = false) async {
+        guard await ensureWorkerReady() else {
+            if !silent { wbRotationError = workerFailureText }
+            return
+        }
+        do {
+            wbRotationStatus = try await worker.workbuddyRotationStatus()
+            wbRotationError = nil
+        } catch {
+            // 老助手没有这条 RPC 时如实说，不把"不支持"显示成"计划不存在"。
+            wbRotationError = message(for: error)
+        }
+    }
+
+    /// 保存配置。只传变化过的字段，后端合并——改一个时间不该把账号顺序冲掉。
+    func saveWorkbuddyRotation(_ params: [String: Any], note: String? = nil) async {
+        wbRotationFailed = false
+        do {
+            wbRotationStatus = try await worker.workbuddyRotationSave(params: params)
+            wbRotationError = nil
+            wbRotationNotice = note
+        } catch {
+            wbRotationFailed = true
+            wbRotationNotice = message(for: error)
+        }
+    }
+
+    /// 打开 / 关闭。**打开前**后端会校验计划；缺账号会直接拒绝并说原因。
+    func setWorkbuddyRotationEnabled(_ enabled: Bool) async {
+        wbRotationFailed = false
+        wbRotationNotice = nil
+        do {
+            let result = try await worker.workbuddyRotationSetEnabled(enabled)
+            wbRotationStatus = result.status
+            wbRotationError = nil
+            if enabled {
+                wbRotationNotice = "已打开。计划只在 AICC 运行时执行；"
+                    + "开始前会先检查凭据，凭据不对就跳过那个账号。"
+                wbRotationFailed = false
+            } else {
+                // 关闭 = 停止后续计划 + 把账号恢复回来。两件事都要如实说。
+                let restored = result.stopResult?["restored"] as? Bool
+                switch restored {
+                case .some(true):
+                    wbRotationNotice = "已关闭，并把账号恢复到这一轮最初登录的那个。"
+                    wbRotationFailed = false
+                case .some(false):
+                    wbRotationNotice = "已关闭，但账号没能自动恢复；请点「恢复最初账号…」并确认。"
+                    wbRotationFailed = true
+                case .none:
+                    wbRotationNotice = "已关闭，不会再自动切换客户端。"
+                    wbRotationFailed = false
+                }
+            }
+        } catch {
+            wbRotationFailed = true
+            wbRotationNotice = message(for: error)
+            await refreshWorkbuddyRotation(silent: true)
+        }
+    }
+
+    /// 预演：只演算，不关客户端。
+    func previewWorkbuddyRotation() async {
+        wbRotationFailed = false
+        do {
+            wbRotationDryRun = try await worker.workbuddyRotationDryRun()
+            wbRotationNotice = "预演完成：没有改动任何登录态。"
+        } catch {
+            wbRotationFailed = true
+            wbRotationNotice = message(for: error)
+        }
+    }
+
+    /// 立即执行一轮。会关客户端，只给用户在场的短时验证用；占用当天名额。
+    func runWorkbuddyRotationNow() async {
+        guard !wbRotationBusy else { return }
+        wbRotationBusy = true
+        wbRotationFailed = false
+        defer { wbRotationBusy = false }
+        do {
+            let result = try await worker.workbuddyRotationRunNow()
+            let status = result["status"] as? String ?? "unknown"
+            wbRotationNotice = status == "busy"
+                ? "另一项轮换操作正在执行，请稍后再试。"
+                : "已开始这一轮（状态：\(status)）。计划结束时会恢复最初的账号。"
+            await refreshWorkbuddyRotation(silent: true)
+            await refreshWorkbuddyClient(silent: true)
+        } catch {
+            wbRotationFailed = true
+            wbRotationNotice = message(for: error)
+            await refreshWorkbuddyRotation(silent: true)
+        }
+    }
+
+    /// 暂停并恢复原账号。
+    func stopWorkbuddyRotation() async {
+        guard !wbRotationBusy else { return }
+        wbRotationBusy = true
+        wbRotationFailed = false
+        defer { wbRotationBusy = false }
+        do {
+            let result = try await worker.workbuddyRotationStop()
+            let restored = result["restored"] as? Bool ?? false
+            wbRotationFailed = !restored && (result["status"] as? String) == "recovery_required"
+            wbRotationNotice = result["detail"] as? String
+                ?? (restored ? "已暂停并恢复原账号。" : "已暂停。")
+            await refreshWorkbuddyRotation(silent: true)
+            await refreshWorkbuddyClient(silent: true)
+        } catch {
+            wbRotationFailed = true
+            wbRotationNotice = message(for: error)
+        }
+    }
+
+    /// 手动恢复最初账号。`force` 只在用户明确确认"覆盖我现在的登录"时用。
+    func restoreWorkbuddyRotationOrigin(force: Bool = false) async {
+        guard !wbRotationBusy else { return }
+        wbRotationBusy = true
+        wbRotationFailed = false
+        defer { wbRotationBusy = false }
+        do {
+            let result = try await worker.workbuddyRotationRestoreOrigin(force: force)
+            let restored = result["restored"] as? Bool ?? false
+            wbRotationFailed = !restored
+            wbRotationNotice = result["detail"] as? String
+                ?? (restored ? "已恢复最初账号。" : "恢复未完成。")
+            await refreshWorkbuddyRotation(silent: true)
+            await refreshWorkbuddyClient(silent: true)
+        } catch {
+            wbRotationFailed = true
+            wbRotationNotice = message(for: error)
+        }
+    }
+
+    func clearWorkbuddyRotationNotice() {
+        wbRotationNotice = nil
+        wbRotationDryRun = nil
     }
 
     private func message(for error: Error) -> String {
@@ -1241,6 +1397,8 @@ extension ConsoleStore {
         wbClientStatus = fixture.wbClientStatus
         wbSwitchNotice = fixture.wbSwitchNotice
         wbSwitchFailed = fixture.wbSwitchFailed
+
+        wbRotationStatus = fixture.wbRotationStatus
     }
 }
 #endif
