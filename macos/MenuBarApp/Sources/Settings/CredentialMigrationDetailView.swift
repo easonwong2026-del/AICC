@@ -79,7 +79,8 @@ struct CredentialMigrationDetailView: View {
                     }
                 }
                 .padding(.horizontal, ConsoleTheme.Sheet.padding)
-                .padding(.vertical, 10)
+                .padding(.top, 10)
+                .padding(.bottom, 14)
             }
         }
         .background(ConsoleTheme.canvas)

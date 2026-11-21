@@ -52,6 +52,21 @@ struct SettingsVisualSmokeMain {
         try renderDetail(state: withIssues, suffix: "issues", to: outputDir)
         count += 1
 
+        // 操作失败：结果条只留一句结论，完整原因在展开区。
+        var failed = SettingsVisualState.healthy
+        failed.migrationNotice = "迁移没有完成：读取钥匙串被拒绝（errSecAuthFailed）。原始条目仍在钥匙串，可以重试或核验当前状态。"
+        failed.migration = CredentialMigrationState(
+            summary: CredentialMigrationSummary(
+                migratable: 2, alreadyJSON: 3, magpie: 2, blocked: 1,
+                rollbackable: 0, total: 8, needsRelink: 0
+            ),
+            items: SettingsVisualState.migrationNeeded.items,
+            migratedRecords: 0,
+            keyMigration: .empty
+        )
+        try renderDetail(state: failed, suffix: "failed", to: outputDir)
+        count += 1
+
         // 展开态用高窗口，保证「迁移/回滚 + 盘点 + 逐条状态 + 最近结果」一次看全。
         try renderDetail(
             state: .healthy,
