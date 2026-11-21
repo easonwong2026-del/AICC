@@ -154,6 +154,8 @@ struct ConsoleCheckinSection: View {
             .labelsHidden()
             .frame(width: Column.auto, alignment: .leading)
             .disabled(!row.canToggleAuto)
+            // macOS 的 switch 在 disabled 时几乎不变色；显式降透明度，让「灰着但看起来能点」不再发生。
+            .opacity(row.canToggleAuto ? 1 : 0.45)
             .help(toggleHelp(row))
 
             actionCell(row)

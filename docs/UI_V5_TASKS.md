@@ -380,6 +380,8 @@ Qoder 每日 Credits：
 - 展示模型新增 `canEnableAuto` 与 `autoLockReason`；`canToggleAuto = autoLockReason == nil`。
 - 执行中（本行 running、别的账号在跑、批量签到中）一律不可切换，原因写进 help；
   Toggle 的禁用样式与 help 文案来自同一个 `autoLockReason`，不会出现「灰着但提示教人怎么开」。
+- macOS 的 `switch` 在 `.disabled(true)` 时几乎不变色（离屏放大 4 倍仍与可用状态同色），
+  因此三个自动开关（签到 / 旅行 / Credits）在禁用时统一降到 45% 透明度，静态截图也能看出不可点。
 - 服务端校验不变：`checkin.set_enabled` / `travel.set_enabled` 仍会自行校验，界面只是不再给无意义的入口。
 
 ### P2：去掉重复信息

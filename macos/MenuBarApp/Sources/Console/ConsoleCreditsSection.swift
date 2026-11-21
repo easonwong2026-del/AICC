@@ -142,6 +142,7 @@ struct ConsoleCreditsSection: View {
             .labelsHidden()
             .frame(width: Column.auto, alignment: .leading)
             .disabled(!row.supportsAuto || row.isBusy)
+            .opacity(row.supportsAuto && !row.isBusy ? 1 : 0.45)
             .help(row.supportsAuto
                   ? "每天按服务端活动窗口检查一次；不会增加额外领取"
                   : "该版本没有已证实的 Credits 接口")
