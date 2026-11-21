@@ -26,6 +26,11 @@ struct SettingsDialogsModifier: ViewModifier {
                     onCancel: {}
                 )
             }
+            .sheet(isPresented: $model.showBridgeSecurity) {
+                BridgeSecurityDetailView(model: model) {
+                    model.showBridgeSecurity = false
+                }
+            }
             .sheet(isPresented: $model.showCredentialDetail) {
                 CredentialMigrationDetailView(worker: model.worker) {
                     model.showCredentialDetail = false

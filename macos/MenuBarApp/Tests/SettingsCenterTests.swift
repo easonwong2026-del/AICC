@@ -27,7 +27,6 @@ final class SettingsCenterTests: XCTestCase {
         for category in SettingsCategory.allCases {
             XCTAssertFalse(category.items.isEmpty, "\(category.rawValue) 不能是空分类")
             XCTAssertFalse(category.title.isEmpty)
-            XCTAssertFalse(category.summary.isEmpty)
         }
     }
 
@@ -392,6 +391,19 @@ final class SettingsCenterTests: XCTestCase {
         XCTAssertEqual(running.detail, "v0.4.2 · 账号 9")
         XCTAssertEqual(running.tone, .neutral, "正常状态不额外着色")
         XCTAssertTrue(running.isRunning)
+    }
+
+    // MARK: - 文案预算
+
+    func testNoticeBriefDropsTrailingDetail() {
+        let full = "已迁移 1 条，失败 2 条（可重新核验）。备份：/Users/example/Library/Application Support/AICC-Dashboard/backups/2026-11-21T08-12-31"
+        let brief = SettingsNoticeText.brief(full)
+        XCTAssertTrue(brief.hasSuffix("（可重新核验）"), "摘要只保留第一句")
+        XCTAssertFalse(brief.contains("备份："), "备份路径属于展开详情")
+        XCTAssertLessThan(brief.count, 46)
+
+        let short = "没有需要迁移的凭据"
+        XCTAssertEqual(SettingsNoticeText.brief(short), short)
     }
 
     // MARK: - 窗口尺寸契约

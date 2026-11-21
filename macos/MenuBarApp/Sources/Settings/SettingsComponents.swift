@@ -6,24 +6,15 @@ import SwiftUI
 // 全部引用 ConsoleTheme / ConsoleType / ConsoleComponents。
 // 一套段标题 + 一个单层行容器，行内不再嵌套卡片。
 
-/// 设置页头：简短标题 + 一句辅助。不重复应用名。
+/// 设置页头：只有一行标题。页面用途由分类名已经说清，不再重复。
 struct SettingsPageHeader: View {
     let title: String
-    var subtitle: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title)
-                .font(ConsoleType.detailTitle)
-                .foregroundStyle(ConsoleTheme.text)
-            if let subtitle, !subtitle.isEmpty {
-                Text(subtitle)
-                    .font(ConsoleType.small)
-                    .foregroundStyle(ConsoleTheme.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        Text(title)
+            .font(ConsoleType.detailTitle)
+            .foregroundStyle(ConsoleTheme.text)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -250,26 +241,18 @@ struct SettingsCategoryNavigation: View {
                 Button {
                     selection = category
                 } label: {
-                    HStack(alignment: .center, spacing: 8) {
+                    HStack(spacing: 8) {
                         Image(systemName: category.symbol)
                             .font(.system(size: 12))
                             .frame(width: 16)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(category.title)
-                                .font(ConsoleType.rowTitle)
-                                .lineLimit(1)
-                            Text(category.summary)
-                                .font(ConsoleType.micro)
-                                .foregroundStyle(selection == category
-                                                 ? ConsoleTheme.secondaryText
-                                                 : ConsoleTheme.tertiaryText)
-                                .lineLimit(1)
-                        }
+                        Text(category.title)
+                            .font(ConsoleType.rowTitle)
+                            .lineLimit(1)
                         Spacer(minLength: 0)
                     }
                     .foregroundStyle(selection == category ? ConsoleTheme.text : ConsoleTheme.secondaryText)
                     .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
+                    .padding(.vertical, 7)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(
                         selection == category ? ConsoleTheme.selectionFill : Color.clear,

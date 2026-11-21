@@ -28,6 +28,7 @@ final class SettingsModel: ObservableObject {
     @Published var confirmDisableJSON = false
     @Published var confirmRevokeDevices = false
     @Published var showCredentialDetail = false
+    @Published var showBridgeSecurity = false
 
     @Published var rotationTimezone = ""
     @Published var rotationTimezones: [String] = []

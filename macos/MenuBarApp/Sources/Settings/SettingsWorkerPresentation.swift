@@ -13,7 +13,8 @@ extension SettingsWorkerPhase {
             return .starting
         case .running(let health):
             if health.isProtocolCompatible {
-                return .running(health.summary)
+                // 设置页只留"版本 + 账号数"；数据库/平台登录状态属于账号页与诊断日志。
+                return .running("v\(health.workerVersion) · \(health.accountCount) 个账号")
             }
             return .incompatible("助手协议 v\(health.protocolVersion)，App 支持 v\(AccountWorkerProtocol.version)。请更新 AICC 或重新安装完整安装包。")
         case .failed(let message):

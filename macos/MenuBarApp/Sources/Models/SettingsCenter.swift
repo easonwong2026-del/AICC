@@ -34,16 +34,6 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         }
     }
 
-    /// 分类下的一句话说明。只在宽窗口的导航里显示，窄窗口不占高度。
-    var summary: String {
-        switch self {
-        case .general: return "小组件与更新"
-        case .connection: return "Magpie 与墨水屏"
-        case .credentials: return "授权来源与凭据"
-        case .advanced: return "助手、轮换、日志"
-        }
-    }
-
     var items: [SettingsItemKey] {
         switch self {
         case .general:
@@ -316,20 +306,6 @@ struct SettingsCredentialView: Equatable {
             tone: policy.jsonEnabled ? .warning : .neutral,
             needsConsent: policy.consentRequired
         )
-    }
-
-    /// 主页那一行只写"新授权会怎样"，不写机制。
-    func promise(helperRunning: Bool) -> String {
-        switch mode {
-        case .keychain:
-            return "之后创建的授权默认写入钥匙串。"
-        case .localJSON:
-            return "之后创建的授权写入本机 JSON（明文）；已有授权不受影响。"
-        case .unknown:
-            return helperRunning
-                ? "这个版本的助手不支持切换存储方式。"
-                : "助手运行后才能读取或切换存储方式。"
-        }
     }
 }
 
@@ -655,9 +631,18 @@ enum SettingsWindowMetrics {
 
     /// 低于这个宽度就把左导航收成顶部选择器。
     static let compactBreakpoint: CGFloat = 700
-    static let navigationWidth: CGFloat = 176
+    static let navigationWidth: CGFloat = 152
     static let contentPadding: CGFloat = 24
     static let contentMaxWidth: CGFloat = 640
+}
+
+/// 操作结论的摘要。备份路径这类长内容进详情，首屏只留一句结论。
+enum SettingsNoticeText {
+    static func brief(_ text: String, limit: Int = 44) -> String {
+        let firstSentence = text.split(separator: "。", maxSplits: 1).first.map(String.init) ?? text
+        guard firstSentence.count > limit else { return firstSentence }
+        return String(firstSentence.prefix(limit)) + "…"
+    }
 }
 
 /// 一次性只读加载的闸门：分类切换不会让 `.task` 重跑。

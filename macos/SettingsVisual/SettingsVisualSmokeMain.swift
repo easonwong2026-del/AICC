@@ -35,6 +35,38 @@ struct SettingsVisualSmokeMain {
         try renderDetail(state: emptyState, suffix: "empty", to: outputDir)
         count += 1
 
+        var withIssues = SettingsVisualState.healthy
+        withIssues.migration = CredentialMigrationState(
+            summary: CredentialMigrationSummary(
+                migratable: 5, alreadyJSON: 1, magpie: 1, blocked: 2,
+                rollbackable: 0, total: 9, needsRelink: 2
+            ),
+            items: SettingsVisualState.migrationNeeded.items,
+            migratedRecords: 0,
+            keyMigration: CredentialKeyMigration(failed: 1, pending: 0)
+        )
+        withIssues.verifyReport = CredentialVerifyReport(
+            ok: 3, broken: 2, pendingKeychain: 5, orphanCount: 1,
+            brokenFiles: 0, pendingCleanup: 0, needsRelink: 2
+        )
+        try renderDetail(state: withIssues, suffix: "issues", to: outputDir)
+        count += 1
+
+        // 展开态用高窗口，保证「迁移/回滚 + 盘点 + 逐条状态 + 最近结果」一次看全。
+        try renderDetail(
+            state: .healthy,
+            suffix: "more",
+            showMore: true,
+            size: CGSize(width: 560, height: 980),
+            to: outputDir
+        )
+        count += 1
+
+        try renderSecurityDetail(dark: false, to: outputDir)
+        count += 1
+        try renderSecurityDetail(dark: true, to: outputDir)
+        count += 1
+
         try renderPlaintextSheet(failure: nil, scheme: .light, to: outputDir)
         count += 1
         try renderPlaintextSheet(failure: nil, scheme: .dark, to: outputDir)
@@ -126,15 +158,39 @@ struct SettingsVisualSmokeMain {
         state: SettingsVisualState,
         suffix: String,
         scheme: ColorScheme = .light,
+        showMore: Bool = false,
+        size: CGSize = CGSize(width: 560, height: 520),
         to outputDir: String
     ) throws {
         AccountWorkerManager.shared.applySettingsVisualState(state)
-        let view = CredentialMigrationDetailView(worker: .shared, onClose: {}, autoRefresh: false)
-            .environment(\.colorScheme, scheme)
-        let size = CGSize(width: 620, height: 620)
+        let view = CredentialMigrationDetailView(
+            worker: .shared,
+            onClose: {},
+            height: size.height,
+            autoRefresh: false,
+            initialShowMore: showMore
+        )
+        .environment(\.colorScheme, scheme)
         try render(view.frame(width: size.width, height: size.height),
                    size: size, scheme: scheme,
-                   to: "\(outputDir)/settings-credential-detail-620x620-\(suffix).png")
+                   to: "\(outputDir)/settings-credential-detail-\(Int(size.width))x\(Int(size.height))-\(suffix).png")
+    }
+
+    @MainActor
+    private static func renderSecurityDetail(dark: Bool, to outputDir: String) throws {
+        var state = SettingsVisualState.healthy
+        state.bridgeEnabled = true
+        state.bridgeLANEnabled = true
+        state.serverRunning = true
+        state.lanServing = true
+        let model = makeModel(state, category: .connection)
+        let scheme: ColorScheme = dark ? .dark : .light
+        let view = BridgeSecurityDetailView(model: model, onClose: {})
+            .environment(\.colorScheme, scheme)
+        let size = CGSize(width: 520, height: 520)
+        try render(view.frame(width: size.width, height: size.height),
+                   size: size, scheme: scheme,
+                   to: "\(outputDir)/settings-bridge-security-520x520-\(dark ? "dark" : "light").png")
     }
 
     // MARK: - 弹层
