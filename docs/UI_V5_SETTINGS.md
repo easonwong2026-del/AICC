@@ -130,8 +130,8 @@
 
 | 尺寸 | 行为 |
 |---|---|
-| 960×720（宽） | 左导航 176 固定 + 右侧内容最大宽度 640，增加留白 |
-| 760×620（默认） | 左导航 176 + 内容自适应 |
+| 960×720（宽） | 左导航 152 固定 + 右侧内容最大宽度 640，增加留白 |
+| 760×620（默认） | 左导航 152 + 内容自适应 |
 | 560×520（最小） | 左导航收起为顶部紧凑 Picker，内容单列；不允许隐藏任何设置入口 |
 
 - 内容区独立 `ScrollView`，导航不滚动；页面水平边距 24（比控制台 28 略紧，因窗口更窄）。
@@ -143,15 +143,15 @@
 ```
 SettingsRootView（既有，未改）
 └── SettingsView（改造为 shell）
-    ├── SettingsCategoryNavigation（宽窗左侧 / 窄窗顶部）
+    ├── SettingsCategoryNavigation（宽窗左侧：图标 + 名称，无副标题 / 窄窗顶部）
     └── SettingsDetailScrollView
         ├── GeneralSettingsSection
         ├── ConnectionSettingsSection
         ├── CredentialSettingsSection
         └── AdvancedSettingsSection
 独立详情：
-├── SettingsBridgeSecurityDetail（证书 + 撤销设备）
-├── SettingsCredentialDetail（迁移/核验/回滚/重新关联/逐条状态）
+├── BridgeSecurityDetailView（证书指纹 / 有效期 / 重置身份 / 撤销设备）
+├── CredentialMigrationDetailView（异常 → 检查 → 更多操作）
 ├── PlaintextCredentialSheet（既有，仅换 V5 样式）
 └── QuotaSelectionView（既有，仅换 V5 样式）
 ```
@@ -236,7 +236,8 @@ SettingsRootView（既有，未改）
 | `Settings/SettingsComponents.swift` | 新增 | `SettingsPageHeader` / `SettingsGroup` / `SettingsRow` / `SettingsValueRow` / `DangerRow` / 导航 |
 | `Settings/SettingsSections.swift` | 新增 | 四个分类的内容 |
 | `Settings/SettingsDialogs.swift` | 新增 | 三个 sheet + 三个确认框（集中核对文案） |
-| `Settings/CredentialMigrationDetailView.swift` | 新增（替换 `CredentialMigrationSection.swift`） | 凭据管理详情：盘点、操作、逐条状态 |
+| `Settings/CredentialMigrationDetailView.swift` | 新增（替换 `CredentialMigrationSection.swift`） | 凭据管理详情：摘要 → 异常 → 检查 → 更多操作 |
+| `Settings/BridgeSecurityDetailView.swift` | 新增 | 设备安全详情：指纹、有效期、重置身份、撤销设备 |
 | `Settings/SettingsWorkerPresentation.swift` | 新增 | `AccountWorkerManager.State` → 五种展示状态 |
 | `Settings/PlaintextCredentialSheet.swift` | 重写（仅样式） | 明文风险与显式同意（5 条说明一字未删） |
 | `Settings/QuotaSelectionView.swift` | 重写（仅样式） | 额度窗口选择（顺序、自动、失效项语义不变） |
@@ -268,7 +269,7 @@ SettingsRootView（既有，未改）
 ## 8. 视觉验收（真实 SwiftUI 离屏渲染）
 
 工具：`bash scripts/smoke-test-settings-visual.sh`
-输出：`/private/tmp/aicc-settings-qa`，51 张 PNG。
+输出：`/private/tmp/aicc-settings-qa`，55 张 PNG。
 样本：`macos/SettingsVisual/SettingsVisualState.swift`，固定且脱敏；不含真实令牌、指纹或账号。
 安全：双 flag 构建里 `SettingsModel.loadOnce()` 直接返回，视图不挂任何写操作；`tls.reset` / 撤销设备 / 迁移 / LAN 修改都不会被调用。
 
@@ -278,12 +279,12 @@ SettingsRootView（既有，未改）
 - 连接与设备：Magpie 连接失败、桥接仅本机、LAN 正常、LAN 未监听、运行时缺失、已生成配对码（含最小窗）、登录项失败、证书未准备、证书重置失败、证书已换未重启。
 - 授权与存储：本地 JSON、需要迁移（未核验）、首选授权保存失败（长错误）、助手未运行（禁用态）。
 - 高级与诊断：助手启动失败（深色）、协议不匹配、轮换读取失败。
-- 弹层：凭据管理（浅/深/空盘点）、明文风险（浅/深/失败）、额度选择错误态。
+- 弹层：凭据管理（浅/深/空/有异常/展开）、设备安全（浅/深）、明文风险（浅/深/失败）、额度选择错误态。
 
 ### 8.2 仓库内保存
 
 - `docs/console-v5/settings/before/`：3 张（旧页 580×560 浅/深 + 580×2200 全貌）。
-- `docs/console-v5/settings/after/`：27 张（核心页 × 浅深色、两套边界尺寸、关键状态与弹层）。
+- `docs/console-v5/settings/after/`：31 张（核心页 × 浅深色、两套边界尺寸、关键状态与弹层）。
 - 其余 24 张由 CI Artifact 承载，不进仓库。
 
 ### 8.3 逐轮人工检查与修复
@@ -340,6 +341,7 @@ SettingsRootView（既有，未改）
 | 12 Widget 变更后刷新 | `testWidgetChangeRepublishesAndReloadsTimelines` |
 | 13 加载/错误/未知 | `testLoadStateKeepsUnknownApartFromFailure` |
 | 14 禁用与重复点击 | `testBusyFlowBlocksRepeatedConfirmation` |
+| 文案预算 | `testNoticeBriefDropsTrailingDetail` |
 
 另外补了桥接状态派生（`testBridgePhaseOrdering`、`testBridgePhaseNeverCallsLoopbackNormalWhenLANIsSilentlyMissing`）、LAN 文案、助手状态、凭据摘要与窗口尺寸契约。
 
@@ -368,3 +370,94 @@ SettingsRootView（既有，未改）
 - 未在真实 Magpie 上做连接探测；连接成功/失败的文案由固定样本覆盖。
 - 深色 / 浅色是通过 `NSAppearance` + `preferredColorScheme` 渲染；系统"增强对比度""减少透明度"未单独验收。
 - 语言切换只验证了 `.id(SettingsPresentationIdentity)` 的重建路径；本轮新增文案全部为中文硬编码，与设置页原有做法一致（原有设置页也没有本地化字符串）。
+
+## 11. 第二轮收口：文案预算与减法清单
+
+第一轮建立了四分类结构，但默认页面仍然常驻大量说明。第二轮只做信息减法，不改业务逻辑、不改安全确认。
+
+### 11.1 默认页面的文案预算
+
+| 位置 | 允许 | 不允许 |
+|---|---|---|
+| 左侧导航 | 图标 + 一行分类名 | 副标题、摘要、计数 |
+| 页面 | 一行标题 | 解释页面用途的副标题 |
+| 分组 | 一个短标题 | 默认显示的脚注、机制说明 |
+| 普通设置行 | 名称 + 控件 / 当前值 | 介绍这段设置的段落 |
+| 异常 | 一句话原因 + 处理入口 | 与正常状态并列的长解释 |
+| 操作结果 | 一句摘要（≤44 字） | 常驻的完整日志与备份路径 |
+| 危险操作 | 确认弹窗内完整影响说明 | 默认页面上预演一遍 |
+
+### 11.2 删除（默认页面不再出现）
+
+| 位置 | 删掉的文案 |
+|---|---|
+| 导航 | 「小组件与更新 / Magpie 与墨水屏 / 授权来源与凭据 / 助手、轮换、日志」四行副标题 |
+| 全部页面 | 「桌面小组件与更新。」「Magpie、墨水屏桥接与证书。」「授权来源、凭据存放位置与旧凭据。」「账号助手、轮换时区、证书与日志。」四个 subtitle |
+| 常规 | 「小组件独立读取 Magpie，关闭 AICC 后仍可更新。」 |
+| 常规 | 「在 GitHub 上查看发布说明与安装包」 |
+| 连接与设备 | 「端口与 Magpie 设置里的一致；改动会重启桥接并刷新小组件数据源。」 |
+| 连接与设备 | 「仅使用小组件时无需桥接，关闭窗口即退出 AICC。」 |
+| 连接与设备 | 完整的「证书有效期 / 证书指纹 / 重置会换掉根证书…」常驻块（进详情） |
+| 连接与设备 | 「在墨水屏上输入，2 分钟内有效」改为只在有码时显示「2 分钟内有效」 |
+| 授权与存储 | 「保存位置：钥匙串 7 · Magpie 2」（属来源分布，已移入详情并改名「盘点」） |
+| 授权与存储 | 「之后创建的授权默认写入钥匙串。」「之后创建的授权写入本机 JSON（明文）…」 |
+| 授权与存储 | 「尚未确认明文存储的风险：在启用之前…」 |
+| 授权与存储 | 「查看逐条状态、迁移、核验与回滚」 |
+| 授权与存储 | 钥匙串自检的 `keychain，12 ms`（可用时只说「可用」） |
+| 管理凭据 | 副标题「旧钥匙串授权的盘点、迁移、核验与回滚」 |
+| 管理凭据 | 「这些操作会做什么」折叠说明块 |
+| 管理凭据 | 重复的分组标题「操作 / 盘点」与同义计数 |
+| 管理凭据 | 常驻的备份路径（改为展开区的「完整结果」） |
+| 管理凭据 | 页脚「不会显示任何令牌内容。」与底部第二个「完成」按钮 |
+| 高级与诊断 | 「助手是内嵌在 App 内的独立进程，只通过本机管道通信，不开放网络端口。」 |
+| 高级与诊断 | 完整的轮换规则段落（改为「账号轮换时区」的 help） |
+| 高级与诊断 | 整个「TLS 诊断」分组（证书信息只在设备安全详情里有一份） |
+| 高级与诊断 | 「重新检查助手进程与协议版本」「在 Finder 中打开 AICC 的日志目录」「关闭主控制台、设置窗口与账号助手」 |
+| 高级与诊断 | 助手状态里的 `数据库正常 · WorkBuddy 已登录 · Qoder 已安装`（只留版本与账号数） |
+
+### 11.3 隐藏（进 help / 详情 / 展开区）
+
+| 内容 | 去处 |
+|---|---|
+| 首选授权为什么不影响客户端登录、两种模式的取令牌方式 | 「首选授权」行的 help 图标 |
+| 小尺寸/中尺寸的卡片上限、勾选顺序 | 「显示数量」「显示额度」的 help |
+| LAN 默认只听回环、不打开就连不上 | 「局域网访问」的 help |
+| 轮换时区的固定偏移、不补跑、恢复余量 | 「账号轮换时区」的 help |
+| 证书指纹、有效期、复制、重置身份、撤销设备 | 设备安全详情（独立弹层，520×520） |
+| 迁移/回滚的完整规则、盘点明细、逐条状态、完整备份路径 | 管理凭据 → 更多操作 |
+| 明文存储的 5 条风险 | 点「启用本地 JSON…」时的风险弹层（一字未删） |
+
+### 11.4 保留（必须在默认页面可见）
+
+- 首选授权（Magpie 优先 / 自有优先）。
+- 当前凭据方式，以及「启用本地 JSON…」/「改回钥匙串…」。
+- 待处理数量与「管理凭据…」。
+- 桥接开关、运行状态、配对码、局域网访问、登录时启动、设备安全入口。
+- 一条异常一行：局域网已允许但 HTTPS 未起、运行时缺失、证书未生效、登录项失败、助手启动失败、轮换读取失败、凭据保存失败、首选授权保存失败。
+- 操作结果摘要（迁移/核验/复制指纹）。
+- 迁移/回滚/重新关联/重试四个入口（在「需要处理」与「更多操作」里）。
+- 全部确认弹窗：TLS 重置、撤销设备、启用 JSON、改回钥匙串、迁移、回滚、重新关联、重试旧键。
+
+### 11.5 结构变化
+
+- 设备安全从「常驻 5 行 + 2 个危险按钮」变成主页一行 `HTTPS 状态 + 详情…`；重置与撤销进入 520×520 详情。
+- 桥接关闭时设备安全行显示「已关闭」，入口仍可达，但不展开任何证书信息。
+- 管理凭据从「6 行盘点 + 5 个按钮 + 折叠」重排为：摘要 → 需要处理 → 检查 → 更多操作（迁移/回滚/盘点/逐条/完整结果）。
+- 管理凭据只有右上角一个「关闭」；底部改为结果条（无按钮）。
+- 检查行右侧常驻核验结论（`正常 5` / `异常 2`），失败仍标红。
+- 「诊断」组收纳日志与退出，避免再分出两个只有一行的分组。
+
+### 11.6 本轮截图
+
+- 改造前（第一轮成品）：`docs/console-v5/settings/before-simplify/`（连接、授权、管理凭据 3 张）。
+- 改造后：`docs/console-v5/settings/after/`（31 张，含 560/760/960 × 浅深色、异常态、设备安全详情、管理凭据四态）。
+- 完整 55 张由 CI Artifact `settings-ui-visuals` 承载。
+
+### 11.7 检查结论（560×520 / 760×620 / 960×720 × 浅色 / 深色）
+
+- 连接与设备（桥接关闭）：两行设置 + 设备安全入口，页面无一句解释文字；无裁切。
+- 连接与设备（桥接开启）：6 行，异常只出现一条橙色提示；指纹不再占用日常页面。
+- 授权与存储：三组五行以内；待处理与「管理凭据」同一行；钥匙串自检只说「可用」。
+- 管理凭据：打开即看到「N 项需处理」与三个异常入口；展开「更多操作」后自动滚到迁移/回滚；备份路径只在展开区。
+- 常规 / 高级与诊断：各 2 个与 3 个分组，无脚注。
+- 深色：所有正文与危险按钮对比度保持；弹层有 `ConsoleTheme.canvas` 背景，不再出现灰字压深底。
