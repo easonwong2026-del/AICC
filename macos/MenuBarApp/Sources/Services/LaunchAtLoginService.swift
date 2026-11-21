@@ -31,3 +31,13 @@ final class LaunchAtLoginService: ObservableObject {
         }
     }
 }
+
+#if AICC_VISUAL_TEST && AICC_SETTINGS_VISUAL
+extension LaunchAtLoginService {
+    /// 只给离屏渲染用：真实实现会去问 SMAppService。
+    func applySettingsVisualState(enabled: Bool, error: String?) {
+        isEnabled = enabled
+        errorMessage = error
+    }
+}
+#endif
