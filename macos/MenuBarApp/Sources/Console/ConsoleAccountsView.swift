@@ -18,6 +18,7 @@ struct ConsoleAccountsView: View {
     @State private var switchingTo: ConsoleAccount?
     @State private var restorePromptShown = false
     @State private var rotationSheetShown = false
+    @State private var rotationFocus: RotationManagerFocus = .plan
     /// QA 钩子：离屏渲染需要一张“奖励已展开”的真实详情图；生产环境永远默认收起。
     @State private var rewardsExpanded = UserDefaults.standard.bool(forKey: "AICCConsoleExpandRewards")
 
@@ -41,13 +42,18 @@ struct ConsoleAccountsView: View {
         .onChange(of: visibleEntries.map(\.selection)) { _, _ in reconcileSelection() }
         .onAppear {
             reconcileSelection()
-            // 首次挂载时请求可能已经是 true（总览切页后视图新建），必须同样消费。
-            if nav.consumeRotationSheetRequest() { rotationSheetShown = true }
+            // 首次挂载时请求可能已经存在（总览切页后视图新建），必须同样消费。
+            if let request = nav.consumeRotationManagerRequest() {
+                rotationFocus = request.focus
+                rotationSheetShown = true
+            }
         }
-        .onChange(of: nav.openRotationSheet) { _, requested in
-            // 总览待处理事项的一次性导航请求：打开既有轮换管理面板，不自动恢复。
-            guard requested else { return }
-            if nav.consumeRotationSheetRequest() { rotationSheetShown = true }
+        .onChange(of: nav.rotationRequest) { _, request in
+            // 总览待处理事项的一次性导航请求：打开管理界面，不自动恢复。
+            guard request != nil else { return }
+            guard let request = nav.consumeRotationManagerRequest() else { return }
+            rotationFocus = request.focus
+            rotationSheetShown = true
         }
     }
 
@@ -69,7 +75,7 @@ struct ConsoleAccountsView: View {
                 }
             }
             .sheet(isPresented: $rotationSheetShown) {
-                ConsoleWorkbuddyRotationSheet(store: store)
+                RotationManagerView(store: store, focus: rotationFocus)
             }
     }
 
@@ -177,7 +183,10 @@ struct ConsoleAccountsView: View {
             )
             Spacer(minLength: 4)
             Menu {
-                Button("WorkBuddy 登录与夜间轮换") { rotationSheetShown = true }
+                Button("WorkBuddy 登录与自动轮换") {
+                    rotationFocus = .plan
+                    rotationSheetShown = true
+                }
                 Button("管理本机 Qoder 配置") { activeSheet = .qoderProfiles(.cn) }
             } label: {
                 Image(systemName: "slider.horizontal.3")
@@ -379,10 +388,13 @@ struct ConsoleAccountsView: View {
         }
         let detail = attention?.restoreText
             ?? status?.restoreOffer?.temporaryNote
-            ?? (store.wbRotationStatus?.plan.enabled == true ? "夜间轮换已开启" : "登录与夜间轮换")
+            ?? (store.wbRotationStatus?.plan.enabled == true ? "自动轮换已开启" : "登录与自动轮换")
         let warning = attention != nil || status?.restoreOffer != nil
         return HStack(spacing: 10) {
-            Button { rotationSheetShown = true } label: {
+            Button {
+                rotationFocus = .plan
+                rotationSheetShown = true
+            } label: {
                 HStack(spacing: 10) {
                     Image(systemName: "desktopcomputer")
                         .font(ConsoleType.body)
@@ -409,10 +421,13 @@ struct ConsoleAccountsView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help(attention != nil ? "上一轮轮换没有完成恢复，需要人工确认" : "管理 WorkBuddy 登录与夜间轮换")
+            .help(attention != nil ? "上一轮轮换没有完成恢复，需要人工确认" : "管理 WorkBuddy 登录与自动轮换")
 
             if attention != nil {
-                Button("去处理") { rotationSheetShown = true }
+                Button("去处理") {
+                    rotationFocus = .recovery
+                    rotationSheetShown = true
+                }
                     .buttonStyle(ConsoleSecondaryButtonStyle())
                     .help("打开轮换管理面板，按原有确认流程恢复；不会自动覆盖当前登录")
             } else {

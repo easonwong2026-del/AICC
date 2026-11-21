@@ -266,7 +266,7 @@ struct ConsoleOverviewView: View {
     private func open(_ item: PendingItem) {
         if item.destination == .accounts {
             nav.openAccounts(filter: item.filter, selection: item.selection)
-            if item.opensRotationSheet { nav.requestRotationSheet() }
+            if item.opensRotationSheet { nav.requestRotationManager(.recovery) }
         } else {
             nav.openCheckin(platform: .workbuddy)
         }
