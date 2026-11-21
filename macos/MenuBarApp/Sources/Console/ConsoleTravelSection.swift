@@ -21,7 +21,7 @@ struct ConsoleTravelSection: View {
         VStack(alignment: .leading, spacing: ConsoleTheme.groupSpacing) {
             ConsoleSectionHeader(
                 title: "Buddy 旅行",
-                detail: rows.isEmpty ? nil : TaskCenterSummary.travel(rows)
+                detail: TaskCenterSummary.travel(rows)
             ) {
                 EmptyView()
             }
@@ -154,9 +154,7 @@ struct ConsoleTravelSection: View {
             .labelsHidden()
             .frame(width: Column.auto, alignment: .leading)
             .disabled(!row.canToggleAuto)
-            .help(row.autoEnabled
-                  ? "关闭后不再自动派出与领取"
-                  : "开启后由 AICC 常驻助手自动派出并领取，仅在 AICC 运行时生效")
+            .help(toggleHelp(row))
 
             actionCell(row)
                 .frame(width: Column.action, alignment: .leading)
@@ -164,6 +162,14 @@ struct ConsoleTravelSection: View {
         .padding(.horizontal, TaskCenterColumn.inset)
         .padding(.vertical, 8)
         .frame(minHeight: ConsoleTheme.rowHeight)
+    }
+
+    /// 开关的 help 必须与禁用状态说同一件事。
+    private func toggleHelp(_ row: TravelRowDisplay) -> String {
+        if let lock = row.autoLockReason { return lock }
+        return row.autoEnabled
+            ? "关闭后不再自动派出与领取"
+            : "开启后由 AICC 常驻助手自动派出并领取，仅在 AICC 运行时生效"
     }
 
     @ViewBuilder

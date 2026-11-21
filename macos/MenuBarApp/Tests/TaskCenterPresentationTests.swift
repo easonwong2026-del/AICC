@@ -129,6 +129,50 @@ final class TaskCenterPresentationTests: XCTestCase {
         XCTAssertTrue(CheckinRowDisplay(row: failed, acting: nil, batching: false).canRun)
     }
 
+    func testCheckinAutoToggleRespectsEligibility() {
+        // 不支持：不能开启，提示要说明原因。
+        let unsupported = CheckinAccountRow(
+            accountId: "a", nickname: "账号", enabled: false, state: .unsupported
+        )
+        let unsupportedRow = CheckinRowDisplay(row: unsupported, acting: nil, batching: false)
+        XCTAssertFalse(unsupportedRow.canEnableAuto)
+        XCTAssertFalse(unsupportedRow.canToggleAuto)
+        XCTAssertEqual(unsupportedRow.autoLockReason, "该平台不支持签到，无法开启自动签到")
+
+        // 授权失效但**此前已开启**：必须允许关闭，不能让人停不下来。
+        let expiredOn = CheckinAccountRow(
+            accountId: "b", nickname: "账号", enabled: true, state: .unauthorized
+        )
+        let on = CheckinRowDisplay(row: expiredOn, acting: nil, batching: false)
+        XCTAssertFalse(on.canEnableAuto)
+        XCTAssertTrue(on.canToggleAuto)
+        XCTAssertNil(on.autoLockReason)
+
+        // 授权失效且未开启：不能新开。
+        let expiredOff = CheckinAccountRow(
+            accountId: "c", nickname: "账号", enabled: false, state: .noCredential
+        )
+        let off = CheckinRowDisplay(row: expiredOff, acting: nil, batching: false)
+        XCTAssertFalse(off.canEnableAuto)
+        XCTAssertFalse(off.canToggleAuto)
+        XCTAssertEqual(off.autoLockReason, "授权失效：先重新登录，再开启自动签到")
+
+        // 其他失败（网络等）不阻止开启：状态未知不等于没资格。
+        let network = CheckinAccountRow(
+            accountId: "d", nickname: "账号", enabled: false, state: .failed, errorKind: "network"
+        )
+        XCTAssertTrue(CheckinRowDisplay(row: network, acting: nil, batching: false).canToggleAuto)
+
+        // 执行中禁止切换。
+        let normal = CheckinAccountRow(
+            accountId: "e", nickname: "账号", enabled: true, state: .claimed
+        )
+        let busy = CheckinRowDisplay(row: normal, acting: "e", batching: false)
+        XCTAssertFalse(busy.canToggleAuto)
+        XCTAssertEqual(busy.autoLockReason, "正在执行，结束后再切换")
+        XCTAssertFalse(CheckinRowDisplay(row: normal, acting: nil, batching: true).canToggleAuto)
+    }
+
     func testCheckinSummaryMatchesRows() {
         let rows = [
             CheckinRowDisplay(
@@ -148,7 +192,8 @@ final class TaskCenterPresentationTests: XCTestCase {
                 acting: nil, batching: false
             ),
         ]
-        XCTAssertEqual(TaskCenterSummary.checkin(rows), "2 / 4 已签到 · 1 个需处理 · 自动 2 个")
+        // 标题只补摘要里没有的自动状态，不再重复完成数/需处理数。
+        XCTAssertEqual(TaskCenterSummary.checkin(rows), "自动 2 个")
 
         let headline = TaskCenterHeadline.checkin(rows, loading: false)
         XCTAssertEqual(headline.done, "2")
@@ -167,7 +212,7 @@ final class TaskCenterPresentationTests: XCTestCase {
         let empty = TaskCenterHeadline.checkin([], loading: false)
         XCTAssertEqual(empty.done, "0")
         XCTAssertFalse(empty.hasProblems)
-        XCTAssertEqual(TaskCenterSummary.checkin([]), "0 / 0 已签到 · 自动未开启")
+        XCTAssertEqual(TaskCenterSummary.checkin([]), "自动未开启")
     }
 
     // MARK: - 成长中心
@@ -269,12 +314,12 @@ final class TaskCenterPresentationTests: XCTestCase {
 
     func testGrowthSummarySeparatesScannedAndUnscanned() {
         XCTAssertEqual(
-            TaskCenterSummary.growth([], claimable: 0, auto: GrowthAutoStatus(json: nil), scanned: false),
+            TaskCenterSummary.growth(auto: GrowthAutoStatus(json: nil), scanned: false),
             "尚未扫描"
         )
         XCTAssertEqual(
-            TaskCenterSummary.growth([], claimable: 0, auto: GrowthAutoStatus(json: nil), scanned: true),
-            "无待领奖 · 仅手动"
+            TaskCenterSummary.growth(auto: GrowthAutoStatus(json: nil), scanned: true),
+            "仅手动"
         )
     }
 
@@ -308,9 +353,10 @@ final class TaskCenterPresentationTests: XCTestCase {
 
         let headline = TaskCenterHeadline.growth(rows, claimed: 0, pending: 1, loading: false)
         XCTAssertEqual(headline.problems, "2")
+        // 分区标题不再重复异常数，只留自动状态。
         XCTAssertEqual(
-            TaskCenterSummary.growth(rows, claimable: 1, auto: GrowthAutoStatus(json: nil), scanned: true),
-            "1 项待领奖 · 1 个需登录 · 1 个任务异常 · 仅手动"
+            TaskCenterSummary.growth(auto: GrowthAutoStatus(json: nil), scanned: true),
+            "仅手动"
         )
     }
 
@@ -318,10 +364,18 @@ final class TaskCenterPresentationTests: XCTestCase {
         let off = GrowthAutoStatus(json: ["enabled": false])
         XCTAssertEqual(off.tickEmphasis, .secondary)
         XCTAssertEqual(off.modeLabel, "仅手动")
+        // 关闭时这一轮是只读的，按钮不能说成「检查」以外的写操作。
+        XCTAssertEqual(off.tickTitle, "只读检查")
+        XCTAssertTrue(off.tickHelp.contains("只读"))
+        XCTAssertFalse(off.tickHelp.contains("接单"))
 
         let on = GrowthAutoStatus(json: ["enabled": true, "intervalSeconds": 86_400])
         XCTAssertEqual(on.tickEmphasis, .primary)
         XCTAssertEqual(on.modeLabel, "自动管理")
+        // 开启时这一轮可能接单/领奖，按钮与 help 必须说出来。
+        XCTAssertEqual(on.tickTitle, "接单 / 领奖")
+        XCTAssertTrue(on.tickHelp.contains("接单"))
+        XCTAssertTrue(on.tickHelp.contains("领取"))
     }
 
     // MARK: - 旅行
@@ -377,6 +431,50 @@ final class TaskCenterPresentationTests: XCTestCase {
         XCTAssertFalse(row.canDepart)
         XCTAssertFalse(row.canClaim)
         XCTAssertTrue(row.statusText.contains("没有成长中心"))
+    }
+
+    func testTravelAutoToggleRespectsEligibility() throws {
+        // 该档位没有成长中心：不能开启。
+        let unsupported = try XCTUnwrap(TravelAccountRow(json: [
+            "accountId": "t1", "nickname": "账号", "travelEnabled": false,
+            "travel": ["label": "unsupported"],
+        ]))
+        let row = TravelRowDisplay(row: unsupported, acting: nil)
+        XCTAssertFalse(row.canEnableAuto)
+        XCTAssertFalse(row.canToggleAuto)
+        XCTAssertEqual(row.autoLockReason, "该档位没有成长中心，无法开启自动旅行")
+
+        // 已开启但后来变成不支持：必须允许关闭。
+        let unsupportedOn = try XCTUnwrap(TravelAccountRow(json: [
+            "accountId": "t2", "nickname": "账号", "travelEnabled": true,
+            "travel": ["label": "unsupported"],
+        ]))
+        XCTAssertTrue(TravelRowDisplay(row: unsupportedOn, acting: nil).canToggleAuto)
+
+        // 「无 Buddy」与「真正不支持」分开：还没生成 Buddy 不改变开启资格。
+        let noBuddy = try XCTUnwrap(TravelAccountRow(json: [
+            "accountId": "t3", "nickname": "账号", "travelEnabled": false,
+            "travel": ["label": "no_buddy"],
+        ]))
+        let noBuddyRow = TravelRowDisplay(row: noBuddy, acting: nil)
+        XCTAssertTrue(noBuddyRow.canEnableAuto)
+        XCTAssertTrue(noBuddyRow.canToggleAuto)
+
+        // 这次没查到（failed）也不改变资格，避免把临时错误当成永久不支持。
+        let failed = try XCTUnwrap(TravelAccountRow(json: [
+            "accountId": "t4", "nickname": "账号", "travelEnabled": false,
+            "travel": ["label": "failed", "lastError": "timeout"],
+        ]))
+        XCTAssertTrue(TravelRowDisplay(row: failed, acting: nil).canEnableAuto)
+
+        // 执行中禁止切换。
+        let normal = try XCTUnwrap(TravelAccountRow(json: [
+            "accountId": "t5", "nickname": "账号", "travelEnabled": true,
+            "travel": ["label": "arrived", "locationName": "杭州"],
+        ]))
+        let busy = TravelRowDisplay(row: normal, acting: "t5")
+        XCTAssertFalse(busy.canToggleAuto)
+        XCTAssertEqual(busy.autoLockReason, "正在执行，结束后再切换")
     }
 
     // MARK: - Qoder Credits
@@ -504,7 +602,7 @@ final class TaskCenterPresentationTests: XCTestCase {
             ),
             CreditsRowDisplay(item: global, report: nil, runs: [], busy: nil),
         ]
-        XCTAssertEqual(TaskCenterSummary.credits(rows), "1 个可领取 · 1 个不支持")
+        XCTAssertEqual(TaskCenterSummary.credits(rows), "2 个账号 · 1 个不支持")
     }
 
     // MARK: - 多账号与长名称

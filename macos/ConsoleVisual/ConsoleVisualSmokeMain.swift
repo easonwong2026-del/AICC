@@ -896,15 +896,17 @@ extension ConsoleVisualFixture {
         var fixture = sample
         fixture.checkin = CheckinFleetStatus(json: [
             "today": "2026-11-14",
-            "counts": ["accounts": 4, "checked": 0, "enabled": 1, "unchecked": 0, "credit": 0],
+            "counts": ["accounts": 4, "checked": 0, "enabled": 2, "unchecked": 0, "credit": 0],
             "accounts": [
                 ["accountId": "acc-wb-2", "nickname": "设计外包", "enabled": false,
                  "state": "failed", "errorKind": "unauthorized",
                  "errorDetail": "令牌已过期，需要重新登录"],
                 ["accountId": "acc-bulk-5", "nickname": "批量账号 5", "enabled": true,
                  "state": "unknown"],
-                ["accountId": "acc-bulk-6", "nickname": "批量账号 6", "enabled": false,
+                // 授权失效但**此前已开启**：开关必须仍然可以关闭。
+                ["accountId": "acc-bulk-6", "nickname": "批量账号 6", "enabled": true,
                  "state": "unauthorized"],
+                // 不支持：开关不得再被打开。
                 ["accountId": "acc-bulk-7", "nickname": "批量账号 7", "enabled": false,
                  "state": "unsupported"],
             ],

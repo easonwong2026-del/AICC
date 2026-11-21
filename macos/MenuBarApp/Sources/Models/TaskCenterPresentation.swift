@@ -213,6 +213,11 @@ struct CheckinRowDisplay: Identifiable, Equatable {
     let blockedReason: String?
     /// 单账号「立即签到」是否可点：本行没在跑、也没有别的账号在跑/批量在跑。
     let canRun: Bool
+    /// 这个账号是否有资格**开启**自动签到：不支持签到、授权失效、缺少凭据都不行。
+    /// 已经开启的账号不受这条限制 —— 必须允许用户把它关掉。
+    let canEnableAuto: Bool
+    /// 自动签到开关当前不可用的原因（直接进 help）；`nil` 表示可以切换。
+    let autoLockReason: String?
     let canToggleAuto: Bool
 
     var id: String { accountId }
@@ -246,7 +251,18 @@ struct CheckinRowDisplay: Identifiable, Equatable {
             }
         }
         canRun = !busy && acting == nil && !batching && isActionable
-        canToggleAuto = acting == nil && !batching
+        canEnableAuto = isActionable
+        // 已开启的账号永远允许关闭：异常账号不能被卡在「停不下来」的状态。
+        if busy || acting != nil || batching {
+            autoLockReason = "正在执行，结束后再切换"
+        } else if !row.enabled && !isActionable {
+            autoLockReason = row.state == .unsupported
+                ? "该平台不支持签到，无法开启自动签到"
+                : "授权失效：先重新登录，再开启自动签到"
+        } else {
+            autoLockReason = nil
+        }
+        canToggleAuto = autoLockReason == nil
     }
 
     static func rows(
@@ -464,6 +480,11 @@ struct TravelRowDisplay: Identifiable, Equatable {
     let canDepart: Bool
     let canClaim: Bool
     let isBusy: Bool
+    /// 这个账号是否有资格**开启**自动旅行。
+    /// 只有「该档位没有成长中心」算真正不支持；`no_buddy` 与查询失败都不改资格。
+    let canEnableAuto: Bool
+    /// 自动旅行开关当前不可用的原因（直接进 help）；`nil` 表示可以切换。
+    let autoLockReason: String?
     let canToggleAuto: Bool
 
     var id: String { accountId }
@@ -509,7 +530,17 @@ struct TravelRowDisplay: Identifiable, Equatable {
         isDispatchable = status?.canDepart == true
         canDepart = isDispatchable && !busy
         canClaim = isClaimable && !busy
-        canToggleAuto = !busy
+        // 只有 unsupported 是「这个账号/档位根本没有成长中心」；
+        // no_buddy（还没生成 Buddy）与 failed（这次没查到）都不阻止开启，避免误伤。
+        canEnableAuto = status?.stage != .unsupported
+        if busy {
+            autoLockReason = "正在执行，结束后再切换"
+        } else if !row.travelEnabled && !canEnableAuto {
+            autoLockReason = "该档位没有成长中心，无法开启自动旅行"
+        } else {
+            autoLockReason = nil
+        }
+        canToggleAuto = autoLockReason == nil
         help = TravelRowDisplay.helpText(status)
     }
 
@@ -672,44 +703,29 @@ struct GrowthProblemBreakdown: Equatable {
     }
 }
 
-enum TaskCenterSummary {    static func checkin(_ rows: [CheckinRowDisplay]) -> String {
-        let tally = TaskCenterTally(rows.map(\.status))
-        var parts = ["\(tally.done) / \(tally.rows) 已签到"]
-        if tally.problems > 0 { parts.append("\(tally.problems) 个需处理") }
+/// 分区标题的补充信息。
+///
+/// 只放页面摘要里**没有**的事实（自动状态、账号数、不支持数）：
+/// 完成/待处理/异常三个数字已经在摘要里，标题再写一遍就是同屏重复。
+enum TaskCenterSummary {
+    static func checkin(_ rows: [CheckinRowDisplay]) -> String {
         let auto = rows.filter(\.autoEnabled).count
-        parts.append(auto > 0 ? "自动 \(auto) 个" : "自动未开启")
-        return parts.joined(separator: " · ")
+        return auto > 0 ? "自动 \(auto) 个" : "自动未开启"
     }
 
-    static func growth(_ rows: [GrowthAccountDisplay], claimable: Int, auto: GrowthAutoStatus, scanned: Bool) -> String {
+    static func growth(auto: GrowthAutoStatus, scanned: Bool) -> String {
         guard scanned else { return "尚未扫描" }
-        let problems = GrowthProblemBreakdown(rows: rows)
-        var parts: [String] = []
-        parts.append(claimable > 0 ? "\(claimable) 项待领奖" : "无待领奖")
-        if problems.needsLogin > 0 { parts.append("\(problems.needsLogin) 个需登录") }
-        if problems.accounts > 0 { parts.append("\(problems.accounts) 个账号异常") }
-        if problems.tasks > 0 { parts.append("\(problems.tasks) 个任务异常") }
-        parts.append(auto.enabled ? "自动管理已开启" : "仅手动")
-        return parts.joined(separator: " · ")
+        return auto.enabled ? "自动管理已开启" : "仅手动"
     }
 
-    static func travel(_ rows: [TravelRowDisplay]) -> String {
-        let tally = TaskCenterTally(rows.map(\.status))
-        var parts: [String] = []
-        parts.append(tally.claimable > 0 ? "\(tally.claimable) 个待领取" : "无待领取")
-        if tally.done > 0 { parts.append("\(tally.done) 个已领取") }
-        if tally.problems > 0 { parts.append("\(tally.problems) 个异常") }
+    static func travel(_ rows: [TravelRowDisplay]) -> String? {
         let auto = rows.filter(\.autoEnabled).count
-        if auto > 0 { parts.append("自动 \(auto) 个") }
-        return parts.joined(separator: " · ")
+        return auto > 0 ? "自动 \(auto) 个" : nil
     }
 
-    static func credits(_ rows: [CreditsRowDisplay]) -> String {
-        let tally = TaskCenterTally(rows.map(\.status))
-        var parts: [String] = []
-        parts.append(tally.claimable > 0 ? "\(tally.claimable) 个可领取" : "无可领取")
-        if tally.done > 0 { parts.append("\(tally.done) 个已领取") }
-        if tally.problems > 0 { parts.append("\(tally.problems) 个异常") }
+    static func credits(_ rows: [CreditsRowDisplay]) -> String? {
+        guard !rows.isEmpty else { return nil }
+        var parts = ["\(rows.count) 个账号"]
         let unsupported = rows.filter { $0.status == .unsupported }.count
         if unsupported > 0 { parts.append("\(unsupported) 个不支持") }
         return parts.joined(separator: " · ")
@@ -728,10 +744,21 @@ extension GrowthAutoStatus {
     /// 自动管理关着时 tick 是只读检查，因此不能给主按钮。
     var tickEmphasis: TaskCenterEmphasis { enabled ? .primary : .secondary }
     var modeLabel: String { enabled ? "自动管理" : "仅手动" }
+
+    /// 按钮文案必须说出它**可能做什么**：
+    /// 自动管理开启时这一轮可能接单/领奖，不能叫「检查」。
+    var tickTitle: String { enabled ? "接单 / 领奖" : "只读检查" }
+
+    var tickHelp: String {
+        enabled
+            ? "执行一轮：可能按服务端下发的结果接单并领取奖励；不会补签、兑换或抽奖。"
+            : "只读检查：不会接受任务，也不会领取奖励。"
+    }
+
     var modeHelp: String {
         enabled
             ? "自动管理已开启：只接单与领奖，不代替你完成任何任务。"
-            : "当前仅手动：扫描与「立即检查」都只读，不会接受任务或领取奖励。"
+            : "当前仅手动：「只读检查」不会接受任务或领取奖励。"
     }
 }
 

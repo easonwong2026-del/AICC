@@ -204,7 +204,7 @@ Qoder 每日 Credits：
 ```
 签到任务
 ├─ 工具栏   [WorkBuddy CN | Qoder CN]  [每日签到 | 成长中心 | Buddy 旅行]   ?   检查状态/扫描/重读快照/刷新
-├─ 任务摘要  今日完成 3   待处理 2   执行异常 3                 当前任务：每日签到
+├─ 任务摘要  今日完成 3   待处理 2   执行异常 3
 └─ 当前任务（一次只渲染一个）
    ├─ 每日签到   账号 | 今日 | 奖励 | 最近执行 | 自动签到 | 操作   + 标题行「签到未完成账号（N）」
    ├─ 成长中心   账号 | 任务 | 最近执行 | 状态 | ⌄                 + 自动管理行（开关 + 立即检查）
@@ -254,7 +254,7 @@ Qoder 每日 Credits：
 | `Sources/Console/ConsoleStore.swift` | **只加视觉夹具字段**（`#if AICC_VISUAL_TEST && AICC_CONSOLE_VISUAL`）：acting/batching、growthAuto/runs/expanded、reports/runs、loading 标记、`visualFixtureLoaded` |
 | `Sources/Console/MainConsoleView.swift` | 只改 `.checkin` 分支的刷新范围（全部只读），未动其他页面分支 |
 | `ConsoleVisual/ConsoleVisualSmokeMain.swift` | 任务中心样本：8 个签到账号、3 个成长账号、4 个旅行账号、3 个 Credits 账号，以及 10 个状态变体；修正成长夹具字段名（`taskCode/acceptStatus` → `code/rawStatus/current/target/class`） |
-| `Tests/TaskCenterPresentationTests.swift`（新增） | 26 个纯展示用例 |
+| `Tests/TaskCenterPresentationTests.swift`（新增） | 28 个纯展示用例 |
 
 - 复用 `ConsoleTheme` / `ConsoleType` / `ConsoleListSurface` / `ConsoleEmptyState` / `ConsoleInlineNotice` /
   `ConsoleBadge` / 三种按钮样式；**没有新增配色、字号或第二套 Token**。
@@ -319,7 +319,7 @@ Qoder 每日 Credits：
 
 ## 8. 测试
 
-`Tests/TaskCenterPresentationTests.swift`（26 个用例）：
+`Tests/TaskCenterPresentationTests.swift`（28 个用例）：
 
 - 状态映射：签到 11 个状态、成长 7 个任务状态 + 3 个账号状态、旅行 8 个阶段、Credits 9 种报告态。
 - 成功 vs 待确认：`unknown → 待确认`，`claimed → 已完成`，`claimed(true) → 领取成功`。
@@ -357,3 +357,46 @@ Qoder 每日 Credits：
 - **长列表**：样本为 8 个签到账号、3 个成长账号（4 个任务）、4 个旅行账号、3 个 Credits 账号；
   22+ 账号与 19 任务 × N 的滚动仅做了逻辑检查，未做数百行压测。
 - **真实 worker 的极端字段**（超长错误、空昵称、未知状态串）未逐一构造；未知状态按「待查询/待确认」兜底。
+
+## 11. 复审收口（PR #117，P0 / P1 / P2）
+
+### P0：成长中心把「可能写」的按钮叫成「检查」
+
+- 旧文案 `立即检查` 在自动管理开启时会走 `growth.auto.tick(force: true)`，可能接单、领奖；
+  关闭时才是只读检查。同一个按钮两种性质，属于交互误导。
+- 现在按钮文案由 `GrowthAutoStatus.tickTitle` 决定：
+  - 自动管理开启 → **「接单 / 领奖」**（主按钮），help「执行一轮：可能按服务端下发的结果接单并领取奖励；不会补签、兑换或抽奖。」
+  - 自动管理关闭 → **「只读检查」**（次按钮），help「只读检查：不会接受任务，也不会领取奖励。」
+- RPC（`runGrowthTick(force: true)`）、执行条件、去重、每日上限、确认规则全部不变；只是命名与 help 如实。
+- 测试：`testGrowthTickIsPrimaryOnlyWhenAutoEnabled` 同时钉住文案、help 关键词与按钮权重。
+
+### P1：自动任务开关必须符合账号资格
+
+| 域 | 不能新开 | 仍可关闭 | 不阻止开启 |
+|---|---|---|---|
+| 签到 | `.unsupported`、`.unauthorized`、`.noCredential`、`failed + errorKind=unauthorized` | 已开启的上述账号 | 网络等其他失败、`unknown`、`waiting` |
+| 旅行 | 只有 `.unsupported`（该档位没有成长中心） | 已开启的 `.unsupported` | `.no_buddy`（Buddy 可能之后生成）、`.failed`（这次没查到）、`.unknown` |
+
+- 展示模型新增 `canEnableAuto` 与 `autoLockReason`；`canToggleAuto = autoLockReason == nil`。
+- 执行中（本行 running、别的账号在跑、批量签到中）一律不可切换，原因写进 help；
+  Toggle 的禁用样式与 help 文案来自同一个 `autoLockReason`，不会出现「灰着但提示教人怎么开」。
+- 服务端校验不变：`checkin.set_enabled` / `travel.set_enabled` 仍会自行校验，界面只是不再给无意义的入口。
+
+### P2：去掉重复信息
+
+- 删除页头「当前任务：每日签到」：它和工具栏选中项、分区标题说同一件事。
+- 分区标题只保留摘要里没有的事实，不再重复完成/待处理/异常：
+  - 签到：`自动 5 个` / `自动未开启`
+  - 成长：`自动管理已开启` / `仅手动`（未扫描时由空状态说明）
+  - 旅行：仅在有自动账号时显示 `自动 N 个`
+  - Credits：`3 个账号 · 1 个不支持`
+- 三个摘要数字（今日完成 / 待处理 / 执行异常）仍由同一批展示行派生，没有新增统计口径。
+
+### 重新渲染与测试
+
+- 重新渲染全部 25 张任务中心成品：摘要行不再有「当前任务」、分区标题不再重复计数、
+  成长按钮在自动开启时显示「接单 / 领奖」、关闭时显示「只读检查」、
+  异常样本中「授权失效但已开启」的开关保持可关闭、「不支持」的开关显示为禁用。
+- `TaskCenterPresentationTests` 28 个用例（新增 `testCheckinAutoToggleRespectsEligibility`、
+  `testTravelAutoToggleRespectsEligibility`，并补强 tick 文案断言）。
+- 后端 / RPC / SQLite / 调度 / 版本号零改动（`git diff --stat origin/main -- account-worker server.py collectors tests macos/Android macos/Widget VERSION` 为空）。

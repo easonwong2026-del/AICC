@@ -19,7 +19,7 @@ struct ConsoleGrowthSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: ConsoleTheme.groupSpacing) {
-            ConsoleSectionHeader(title: "成长任务", detail: summary) { EmptyView() }
+            ConsoleSectionHeader(title: "成长任务", detail: headerDetail) { EmptyView() }
             automationRow
             notices
             content
@@ -30,13 +30,10 @@ struct ConsoleGrowthSection: View {
         store.lastGrowthScan != nil || !store.growthResult.scans.isEmpty
     }
 
-    private var summary: String {
-        TaskCenterSummary.growth(
-            rows,
-            claimable: store.growthResult.overview.claimable,
-            auto: store.growthAuto,
-            scanned: scanned
-        )
+    /// 标题只补摘要里没有的信息（自动状态）；没有账号时不写 detail，交给空状态。
+    private var headerDetail: String? {
+        guard !rows.isEmpty else { return nil }
+        return TaskCenterSummary.growth(auto: store.growthAuto, scanned: scanned)
     }
 
     // MARK: - 自动管理
@@ -66,7 +63,7 @@ struct ConsoleGrowthSection: View {
 
             Spacer(minLength: 8)
 
-            Button("立即检查") {
+            Button(store.growthAuto.tickTitle) {
                 Task { await store.runGrowthTick(force: true) }
             }
             .buttonStyle(
@@ -75,9 +72,7 @@ struct ConsoleGrowthSection: View {
                     : AnyButtonStyle(ConsoleSecondaryButtonStyle())
             )
             .disabled(store.growthActing || store.growthAuto.running)
-            .help(store.growthAuto.enabled
-                  ? "跑一轮：接单 + 领奖；不会补签、兑换或抽奖"
-                  : "开关关着时只做只读检查，不会接受任务或领取奖励")
+            .help(store.growthAuto.tickHelp)
         }
     }
 

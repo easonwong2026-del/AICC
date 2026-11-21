@@ -154,9 +154,7 @@ struct ConsoleCheckinSection: View {
             .labelsHidden()
             .frame(width: Column.auto, alignment: .leading)
             .disabled(!row.canToggleAuto)
-            .help(row.autoEnabled
-                  ? "关闭后每天 09:00 的自动检查会跳过这个账号"
-                  : "开启后每天 09:00 自动检查一次；服务端已签到就跳过")
+            .help(toggleHelp(row))
 
             actionCell(row)
                 .frame(width: Column.action, alignment: .leading)
@@ -164,6 +162,14 @@ struct ConsoleCheckinSection: View {
         .padding(.horizontal, TaskCenterColumn.inset)
         .padding(.vertical, 8)
         .frame(minHeight: ConsoleTheme.rowHeight)
+    }
+
+    /// 开关的 help 必须与禁用状态说同一件事：不能按钮灰着、提示却在教人怎么开。
+    private func toggleHelp(_ row: CheckinRowDisplay) -> String {
+        if let lock = row.autoLockReason { return lock }
+        return row.autoEnabled
+            ? "关闭后每天 09:00 的自动检查会跳过这个账号"
+            : "开启后每天 09:00 自动检查一次；服务端已签到就跳过"
     }
 
     private func actionCell(_ row: CheckinRowDisplay) -> some View {

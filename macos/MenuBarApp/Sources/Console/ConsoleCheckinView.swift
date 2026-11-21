@@ -117,11 +117,6 @@ struct ConsoleCheckinView: View {
                 tone: headline.hasProblems ? ConsoleTheme.danger : ConsoleTheme.text
             )
             Spacer(minLength: 8)
-            Text("当前任务：\(currentTaskTitle)")
-                .font(ConsoleType.micro)
-                .foregroundStyle(ConsoleTheme.tertiaryText)
-                .lineLimit(1)
-                .padding(.top, 3)
         }
     }
 
@@ -138,13 +133,6 @@ struct ConsoleCheckinView: View {
                 .lineLimit(1)
         }
         .frame(width: 86, alignment: .leading)
-    }
-
-    private var currentTaskTitle: String {
-        switch nav.checkinPlatform {
-        case .workbuddy: return nav.workbuddyTask.title
-        case .qoder: return QoderTaskKind.credits.title
-        }
     }
 
     private var currentHeadline: TaskCenterHeadline {

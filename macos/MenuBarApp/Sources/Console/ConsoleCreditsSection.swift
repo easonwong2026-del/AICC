@@ -24,7 +24,7 @@ struct ConsoleCreditsSection: View {
         VStack(alignment: .leading, spacing: ConsoleTheme.groupSpacing) {
             ConsoleSectionHeader(
                 title: "每日 Credits",
-                detail: rows.isEmpty ? nil : TaskCenterSummary.credits(rows)
+                detail: TaskCenterSummary.credits(rows)
             ) {
                 EmptyView()
             }
