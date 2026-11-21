@@ -278,6 +278,42 @@ final class TaskCenterPresentationTests: XCTestCase {
         )
     }
 
+    func testGrowthProblemsAgreeBetweenHeadlineAndSectionDetail() throws {
+        let ok = try XCTUnwrap(GrowthAccountScan(json: [
+            "accountId": "acc-1", "nickname": "账号", "state": "ok",
+            "counts": ["claimable": 1],
+            "tasks": [[
+                "code": "Library_read", "title": "阅读资料库", "class": "automatic",
+                "rawStatus": "completed", "rewardCredit": 10,
+            ]],
+        ]))
+        let expired = try XCTUnwrap(GrowthAccountScan(json: [
+            "accountId": "acc-2", "nickname": "过期", "state": "unauthorized",
+        ]))
+        let failedRun = GrowthRuns(json: [
+            "latestByTask": [[
+                "taskCode": "Library_read", "action": "claim", "outcome": "failed",
+                "errorDetail": "任务已下架",
+            ]],
+        ])
+        let rows = [
+            GrowthAccountDisplay(scan: ok, runs: failedRun, expanded: false),
+            GrowthAccountDisplay(scan: expired, runs: nil, expanded: false),
+        ]
+        let breakdown = GrowthProblemBreakdown(rows: rows)
+        XCTAssertEqual(breakdown.needsLogin, 1)
+        XCTAssertEqual(breakdown.accounts, 0)
+        XCTAssertEqual(breakdown.tasks, 1)
+        XCTAssertEqual(breakdown.total, 2)
+
+        let headline = TaskCenterHeadline.growth(rows, claimed: 0, pending: 1, loading: false)
+        XCTAssertEqual(headline.problems, "2")
+        XCTAssertEqual(
+            TaskCenterSummary.growth(rows, claimable: 1, auto: GrowthAutoStatus(json: nil), scanned: true),
+            "1 项待领奖 · 1 个需登录 · 1 个任务异常 · 仅手动"
+        )
+    }
+
     func testGrowthTickIsPrimaryOnlyWhenAutoEnabled() {
         let off = GrowthAutoStatus(json: ["enabled": false])
         XCTAssertEqual(off.tickEmphasis, .secondary)

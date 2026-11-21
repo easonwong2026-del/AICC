@@ -654,6 +654,24 @@ struct CreditsRowDisplay: Identifiable, Equatable {
 
 // MARK: - 分区标题
 
+/// 成长域的异常拆分：账号级（授权/扫描）与任务级（执行记录）分开数，
+/// 但页面摘要与分区标题用的是同一个 `total`，两处不会打架。
+struct GrowthProblemBreakdown: Equatable {
+    let needsLogin: Int
+    let accounts: Int
+    let tasks: Int
+
+    var total: Int { needsLogin + accounts + tasks }
+
+    init(rows: [GrowthAccountDisplay]) {
+        needsLogin = rows.filter { $0.status == .needsLogin }.count
+        accounts = rows.filter { $0.status == .failed || $0.status == .partial }.count
+        tasks = rows.reduce(0) { total, row in
+            total + row.tasks.filter { $0.problemText != nil }.count
+        }
+    }
+}
+
 enum TaskCenterSummary {    static func checkin(_ rows: [CheckinRowDisplay]) -> String {
         let tally = TaskCenterTally(rows.map(\.status))
         var parts = ["\(tally.done) / \(tally.rows) 已签到"]
@@ -665,12 +683,12 @@ enum TaskCenterSummary {    static func checkin(_ rows: [CheckinRowDisplay]) -> 
 
     static func growth(_ rows: [GrowthAccountDisplay], claimable: Int, auto: GrowthAutoStatus, scanned: Bool) -> String {
         guard scanned else { return "尚未扫描" }
+        let problems = GrowthProblemBreakdown(rows: rows)
         var parts: [String] = []
         parts.append(claimable > 0 ? "\(claimable) 项待领奖" : "无待领奖")
-        let login = rows.filter { $0.status == .needsLogin }.count
-        if login > 0 { parts.append("\(login) 个需登录") }
-        let failed = rows.filter { $0.status == .failed || $0.status == .partial }.count
-        if failed > 0 { parts.append("\(failed) 个异常") }
+        if problems.needsLogin > 0 { parts.append("\(problems.needsLogin) 个需登录") }
+        if problems.accounts > 0 { parts.append("\(problems.accounts) 个账号异常") }
+        if problems.tasks > 0 { parts.append("\(problems.tasks) 个任务异常") }
         parts.append(auto.enabled ? "自动管理已开启" : "仅手动")
         return parts.joined(separator: " · ")
     }
@@ -755,15 +773,14 @@ struct TaskCenterHeadline: Equatable {
         pending: Int,
         loading: Bool
     ) -> TaskCenterHeadline {
-        let problems = rows.filter { $0.status.isProblem }.count
-        let taskProblems = rows.reduce(0) { $0 + $1.tasks.filter { $0.problemText != nil }.count }
+        let problems = GrowthProblemBreakdown(rows: rows).total
         return TaskCenterHeadline(
             doneLabel: "已领取",
             done: value(claimed, loading: loading),
             pendingLabel: "待处理",
             pending: value(pending, loading: loading),
             problemLabel: "执行异常",
-            problems: value(problems + taskProblems, loading: loading)
+            problems: value(problems, loading: loading)
         )
     }
 
