@@ -129,7 +129,17 @@ final class ConsoleStore: ObservableObject {
     // MARK: 夜间账号轮换（WB-ROTATE-1）
 
     /// 计划 + 下一轮时间 + 当前这一轮 + 最近记录。`nil` = 还没查到。
-    @Published private(set) var wbRotationStatus: WorkbuddyRotationStatus?
+    @Published private(set) var wbRotationStatus: WorkbuddyRotationStatus? {
+        didSet {
+            // 计划内容（不是开关）变了：旧预演结果立刻作废，代次 +1。
+            guard wbRotationStatus?.plan.planKey != oldValue?.plan.planKey else { return }
+            wbRotationPlanGeneration &+= 1
+            wbRotationDryRun = nil
+            wbRotationDryRunPlanKey = nil
+        }
+    }
+    /// 已保存计划内容变更的代次。预演用它判断请求往返期间计划有没有被改过。
+    @Published private(set) var wbRotationPlanGeneration = 0
     @Published private(set) var wbRotationError: String?
     /// 正在读取轮换状态。冷启动时总览据此显示"状态待确认"，而不是"一切正常"。
     @Published private(set) var wbRotationLoading = false
@@ -146,6 +156,8 @@ final class ConsoleStore: ObservableObject {
 
     let worker: AccountWorkerManager
     private let settings: AppSettings
+    /// 预演请求的序号：保证乱序返回时旧结果不能覆盖新结果。
+    private let rotationPreviewCoordinator = RotationPreviewCoordinator()
 
     #if AICC_VISUAL_TEST && AICC_CONSOLE_VISUAL
     /// 离屏渲染：样本已经灌好，页面不要再触发真实 RPC。
@@ -612,17 +624,16 @@ final class ConsoleStore: ObservableObject {
         guard !wbRotationLoading else { return }
         wbRotationLoading = true
         defer { wbRotationLoading = false }
-        guard await ensureWorkerReady() else {
-            if !silent { wbRotationError = workerFailureText }
-            return
-        }
-        do {
-            wbRotationStatus = try await worker.workbuddyRotationStatus()
-            wbRotationError = nil
-        } catch {
-            // 老助手没有这条 RPC 时如实说，不把"不支持"显示成"计划不存在"。
-            wbRotationError = message(for: error)
-        }
+        // `silent` 只影响调用方要不要弹提示；读取失败必须记录，否则界面会把
+        // 缓存继续当成当前确认的绿色状态。
+        let outcome = await RotationRefreshFlow.run(
+            cached: wbRotationStatus,
+            workerMessage: workerFailureText,
+            ensureWorker: { await self.ensureWorkerReady() },
+            fetch: { try await self.worker.workbuddyRotationStatus() }
+        )
+        if let status = outcome.status { wbRotationStatus = status }
+        wbRotationError = outcome.error
     }
 
     /// 保存配置。只传变化过的字段，后端合并——改一个时间不该把账号顺序冲掉。
@@ -674,16 +685,33 @@ final class ConsoleStore: ObservableObject {
     }
 
     /// 预演：只演算，不关客户端。
+    ///
+    /// 请求发起时就固定"这份结果属于哪份已保存计划"，返回时不再按当前计划
+    /// 重新贴标签；计划在往返期间变过就整份丢弃。
     func previewWorkbuddyRotation() async {
         wbRotationFailed = false
-        do {
-            wbRotationDryRun = try await worker.workbuddyRotationDryRun()
-            // 服务端读的是已保存计划：把它的摘要记下来，草稿再改就自动失效。
-            wbRotationDryRunPlanKey = wbRotationStatus?.plan.planKey
+        let result = await RotationPreviewFlow.run(
+            coordinator: rotationPreviewCoordinator,
+            planKey: wbRotationStatus?.plan.planKey,
+            generation: wbRotationPlanGeneration,
+            currentGeneration: { self.wbRotationPlanGeneration },
+            fetch: { try await self.worker.workbuddyRotationDryRun() }
+        )
+        switch result {
+        case .applied(let dryRun, let planKey):
+            wbRotationDryRun = dryRun
+            wbRotationDryRunPlanKey = planKey
             wbRotationNotice = "预演完成：没有改动任何登录态。"
-        } catch {
+        case .superseded:
+            // 已有更新的预演落地，旧结果直接丢。
+            break
+        case .planChanged:
+            wbRotationDryRun = nil
+            wbRotationDryRunPlanKey = nil
+            wbRotationNotice = "预演期间计划已经改变，这次结果已丢弃；请重新预演。"
+        case .failed(let message):
             wbRotationFailed = true
-            wbRotationNotice = message(for: error)
+            wbRotationNotice = message
         }
     }
 
@@ -872,16 +900,18 @@ final class ConsoleStore: ObservableObject {
         if qoderCreditsLoading { return }
         qoderCreditsLoading = true
         defer { qoderCreditsLoading = false }
-        do {
-            qoderCreditsAuto = try await worker.qoderCreditsAutoStatus()
-            qoderCreditsError = nil
-            qoderCreditsLoaded = true
-            if !silent {
-                qoderCreditsNotice = nil
-            }
-        } catch {
-            qoderCreditsAuto = []
-            qoderCreditsError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        // 读失败保留上次成功快照：清空数组会把"2 个账号已开启"变成
+        // "暂无支持账号"，等于编造历史。失败事实由 error 记录。
+        let outcome = await QoderCreditsRefreshFlow.run(
+            cached: qoderCreditsAuto,
+            loaded: qoderCreditsLoaded,
+            fetch: { try await self.worker.qoderCreditsAutoStatus() }
+        )
+        qoderCreditsAuto = outcome.items
+        qoderCreditsLoaded = outcome.loaded
+        qoderCreditsError = outcome.error
+        if outcome.error == nil, !silent {
+            qoderCreditsNotice = nil
         }
     }
 
@@ -1429,7 +1459,7 @@ extension ConsoleStore {
 
         checkin = fixture.checkin
         checkinAuto = fixture.checkinAuto
-        checkinAutoLoaded = true
+        checkinAutoLoaded = fixture.checkinAutoLoaded
         checkinAutoError = fixture.checkinAutoError
         checkinError = fixture.checkinError
         checkinLoading = fixture.isLoading
@@ -1440,7 +1470,7 @@ extension ConsoleStore {
         growthError = fixture.growthError
         lastGrowthScan = fixture.lastGrowthScan
         growthAuto = fixture.growthAuto
-        growthAutoLoaded = true
+        growthAutoLoaded = fixture.growthAutoLoaded
         growthAutoError = fixture.growthAutoError
         growthRuns = fixture.growthRuns
         growthLoading = fixture.isLoading
@@ -1459,7 +1489,7 @@ extension ConsoleStore {
         qoderError = fixture.qoderError
         qoderSyncedAt = fixture.lastAccountsRefresh
         qoderCreditsAuto = fixture.qoderCreditsAuto
-        qoderCreditsLoaded = true
+        qoderCreditsLoaded = fixture.qoderCreditsLoaded
         qoderCreditsError = fixture.qoderCreditsError
         qoderCreditsLoading = fixture.isLoading
         qoderCreditsReports = fixture.qoderCreditsReports

@@ -276,7 +276,11 @@ final class RotationManagerModel: ObservableObject {
         saving = false
         switch result {
         case .savedOnly:
-            localHint = "计划已保存（还没有开启）。预演现在针对的就是这份已保存计划。"
+            // 文案按服务端实际开关说：已开启的计划保存后配置立即生效。
+            let enabledAfterSave = store.wbRotationStatus?.plan.enabled ?? plan.enabled
+            localHint = enabledAfterSave
+                ? "计划已保存。新的配置已经生效。"
+                : "计划已保存（还没有开启）。预演现在针对的就是这份已保存计划。"
         case .enabled:
             resetEditing()
         case .saveFailed:

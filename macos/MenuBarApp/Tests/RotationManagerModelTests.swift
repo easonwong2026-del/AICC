@@ -164,6 +164,23 @@ final class RotationManagerModelTests: XCTestCase {
         XCTAssertEqual(store.calls, ["save", "enabled:true", "refresh:true"])
     }
 
+    /// P2：仅保存的提示按服务端实际开关说，已开启不能说"还没有开启"。
+    func testSaveOnlyCopyFollowsTheServerSwitch() async {
+        let onStore = FakeRotationStore(status: Self.status(enabled: true))
+        let onModel = RotationManagerModel(store: onStore)
+        onModel.beginEditing()
+        onModel.replaceDraft(RotationDraft(plan: Self.plan(enabled: true)).with { $0.startMinutes = 21 * 60 })
+        await onModel.performSave(enable: false)
+        XCTAssertEqual(onModel.localHint, "计划已保存。新的配置已经生效。")
+
+        let offStore = FakeRotationStore(status: Self.status(enabled: false))
+        let offModel = RotationManagerModel(store: offStore)
+        offModel.beginEditing()
+        offModel.replaceDraft(RotationDraft(plan: Self.plan(enabled: false)).with { $0.startMinutes = 21 * 60 })
+        await offModel.performSave(enable: false)
+        XCTAssertEqual(offModel.localHint, "计划已保存（还没有开启）。预演现在针对的就是这份已保存计划。")
+    }
+
     // MARK: - P1-3 未保存修改的离开
 
     func testCloseWithUnsavedChangesAsksThenReallyCloses() {

@@ -24,6 +24,8 @@ struct ConsoleVisualFixture {
     var tasksOverviewError: String?
     var checkin: CheckinFleetStatus = .empty
     var checkinAuto: CheckinAutoStatus = .unknown
+    /// `false` = 从未成功读取（用于渲染"读取失败"，而不是"上次状态"）。
+    var checkinAutoLoaded = true
     var checkinError: String?
     /// 视觉样本：某个账号正在签到 / 批量签到进行中。
     var checkinActing: String?
@@ -32,6 +34,7 @@ struct ConsoleVisualFixture {
     var growthError: String?
     var lastGrowthScan: Date?
     var growthAuto: GrowthAutoStatus = GrowthAutoStatus(json: nil)
+    var growthAutoLoaded = true
     var growthRuns: [String: GrowthRuns] = [:]
     var expandedGrowthAccount: String?
     var travelRows: [TravelAccountRow] = []
@@ -44,6 +47,7 @@ struct ConsoleVisualFixture {
     var qoderPendingSwitches: [QoderPendingSwitch] = []
     var qoderError: String?
     var qoderCreditsAuto: [QoderCreditsAutoItem] = []
+    var qoderCreditsLoaded = true
     var qoderCreditsError: String?
     var qoderCreditsReports: [String: QoderCreditsReport] = [:]
     var qoderCreditsRuns: [String: [QoderCreditRun]] = [:]
@@ -323,15 +327,22 @@ extension ConsoleVisualFixture {
         return fixture
     }
 
-    /// 自动状态读取失败：自动计划中心要区分"未知"与"关闭"。
+    /// 自动状态读取失败且没有任何缓存：五个计划都应是"读取失败"。
     static var rotationDegraded: ConsoleVisualFixture {
         var fixture = sample
         fixture.wbRotationStatus = nil
         fixture.wbRotationError = "助手未运行，无法读取轮换状态"
+        fixture.checkinAuto = .unknown
+        fixture.checkinAutoLoaded = false
         fixture.checkinAutoError = "助手未运行"
+        fixture.growthAuto = GrowthAutoStatus(json: nil)
+        fixture.growthAutoLoaded = false
         fixture.growthAutoError = "助手未运行"
         fixture.travelAuto = nil
+        fixture.travelError = "助手未运行"
         fixture.qoderCreditsAuto = []
+        fixture.qoderCreditsLoaded = false
+        fixture.qoderCreditsError = "助手未运行"
         return fixture
     }
 

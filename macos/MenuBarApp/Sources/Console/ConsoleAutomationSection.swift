@@ -71,17 +71,20 @@ struct ConsoleAutomationSection: View {
                         .lineLimit(1)
                     ConsoleStatusDot(color: toneColor(row.tone), text: row.statusText)
                 }
-                HStack(spacing: 6) {
-                    Text(row.summary)
-                        .lineLimit(1)
-                    if let next = row.nextRun {
-                        Text("·")
-                        Text("下次 \(next)")
-                            .monospacedDigit()
+                // 状态已经是"读取失败/读取中"时，摘要不再重复同一句话。
+                if showsSummary(row) {
+                    HStack(spacing: 6) {
+                        Text(row.summary)
+                            .lineLimit(1)
+                        if let next = row.nextRun {
+                            Text("·")
+                            Text("下次 \(next)")
+                                .monospacedDigit()
+                        }
                     }
+                    .font(ConsoleType.micro)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
                 }
-                .font(ConsoleType.micro)
-                .foregroundStyle(ConsoleTheme.tertiaryText)
             }
 
             Spacer(minLength: 8)
@@ -100,6 +103,10 @@ struct ConsoleAutomationSection: View {
                 .buttonStyle(ConsoleSecondaryButtonStyle())
         }
         .padding(.vertical, 9)
+    }
+
+    private func showsSummary(_ row: AutomationPlanRow) -> Bool {
+        !row.summary.isEmpty && row.summary != row.statusText
     }
 
     private func failureMessage(_ row: AutomationPlanRow) -> String? {
