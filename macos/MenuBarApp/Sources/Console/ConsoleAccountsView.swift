@@ -39,12 +39,15 @@ struct ConsoleAccountsView: View {
         }
         .task { await refreshWbClient() }
         .onChange(of: visibleEntries.map(\.selection)) { _, _ in reconcileSelection() }
-        .onAppear { reconcileSelection() }
+        .onAppear {
+            reconcileSelection()
+            // 首次挂载时请求可能已经是 true（总览切页后视图新建），必须同样消费。
+            if nav.consumeRotationSheetRequest() { rotationSheetShown = true }
+        }
         .onChange(of: nav.openRotationSheet) { _, requested in
             // 总览待处理事项的一次性导航请求：打开既有轮换管理面板，不自动恢复。
             guard requested else { return }
-            nav.openRotationSheet = false
-            rotationSheetShown = true
+            if nav.consumeRotationSheetRequest() { rotationSheetShown = true }
         }
     }
 

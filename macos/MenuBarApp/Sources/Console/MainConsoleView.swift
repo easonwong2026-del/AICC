@@ -1,42 +1,5 @@
 import SwiftUI
 
-enum ConsolePage: String, CaseIterable, Identifiable {
-    case overview
-    case accounts
-    case quota
-    case checkin
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .overview: return "总览"
-        case .accounts: return "AI 账号"
-        case .quota: return "额度看板"
-        case .checkin: return "签到任务"
-        }
-    }
-
-    /// 一句话说明这一页负责什么。只留一行，不写长段落（PRD §7.5）。
-    var subtitle: String {
-        switch self {
-        case .overview: return "账号、任务与异常"
-        case .accounts: return "账号列表、授权与详情"
-        case .quota: return "额度与用量"
-        case .checkin: return "每日签到与奖励"
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .overview: return "square.grid.2x2"
-        case .accounts: return "person.2"
-        case .quota: return "chart.bar.doc.horizontal"
-        case .checkin: return "calendar.badge.checkmark"
-        }
-    }
-}
-
 /// AICC 主控制台：左侧固定导航 + 右侧工作区（标题栏 + 页面工具栏 + 内容）。
 ///
 /// 布局约定（PRD §2.3）：
@@ -220,7 +183,8 @@ struct MainConsoleView: View {
             async let accounts: Void = store.refreshAccounts()
             async let qoder: Void = store.refreshQoder(silent: true)
             async let quota: Void = store.refreshQuota(force: false)
-            _ = await (overview, accounts, qoder, quota)
+            async let rotation: Void = store.refreshWorkbuddyRotation(silent: true)
+            _ = await (overview, accounts, qoder, quota, rotation)
         case .accounts:
             async let accounts: Void = store.refreshAccounts()
             async let qoder: Void = store.refreshQoder(silent: true)

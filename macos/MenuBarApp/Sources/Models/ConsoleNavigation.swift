@@ -1,10 +1,51 @@
 import Foundation
 import SwiftUI
 
+/// 主控制台的一级页面。属于导航状态，不依赖任何视图。
+enum ConsolePage: String, CaseIterable, Identifiable {
+    case overview
+    case accounts
+    case quota
+    case checkin
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .overview: return "总览"
+        case .accounts: return "AI 账号"
+        case .quota: return "额度看板"
+        case .checkin: return "签到任务"
+        }
+    }
+
+    /// 一句话说明这一页负责什么。只出现在 help 中，不占页头。
+    var subtitle: String {
+        switch self {
+        case .overview: return "账号、任务与异常"
+        case .accounts: return "账号列表、授权与详情"
+        case .quota: return "额度与用量"
+        case .checkin: return "每日签到与奖励"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .overview: return "square.grid.2x2"
+        case .accounts: return "person.2"
+        case .quota: return "chart.bar.doc.horizontal"
+        case .checkin: return "calendar.badge.checkmark"
+        }
+    }
+}
+
 /// 主控制台的**页面内导航上下文**（PRD §9.2）。
 ///
 /// 只放"界面看什么"，不放业务数据：账号、额度、任务的真实状态仍在 `ConsoleStore`。
 /// 放在这里的原因：切页不能丢筛选和选中项，总览点卡片要能带着平台跳过去。
+///
+/// 放在 Models 而不是 Console 目录：它不含任何 View，却承载跨页导航的状态机，
+/// 需要进 `swift test` 覆盖"一次性请求"的消费语义。
 @MainActor
 final class ConsoleNavigation: ObservableObject {
     @Published var page: ConsolePage
@@ -16,7 +57,7 @@ final class ConsoleNavigation: ObservableObject {
 
     /// 总览/账号页请求打开「WorkBuddy 登录与夜间轮换」管理面板的一次性信号。
     /// 只承载导航意图，不承载业务状态；账号页消费后立即复位。
-    @Published var openRotationSheet = false
+    @Published private(set) var openRotationSheet = false
 
     /// 额度页的来源：Magpie 额度 / 账号额度。
     @Published var quotaSource: ConsoleQuotaSource = .magpie
@@ -68,6 +109,23 @@ final class ConsoleNavigation: ObservableObject {
         workbuddyTask = workbuddy
         qoderTask = qoder
         page = .checkin
+    }
+
+    /// 请求打开轮换管理面板。只设置导航意图，不执行任何恢复。
+    func requestRotationSheet() {
+        openRotationSheet = true
+    }
+
+    /// 消费一次"打开轮换管理面板"的请求。
+    ///
+    /// 账号页在 `.onAppear` 与 `.onChange` 都调用它：
+    /// - 首次挂载时值已经是 true（总览切页后新建视图）也能消费；
+    /// - 无论从哪条路径进入，同一次请求只返回一次 true，面板不会重复弹。
+    @discardableResult
+    func consumeRotationSheetRequest() -> Bool {
+        guard openRotationSheet else { return false }
+        openRotationSheet = false
+        return true
     }
 }
 

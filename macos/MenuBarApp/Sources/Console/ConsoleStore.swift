@@ -123,6 +123,8 @@ final class ConsoleStore: ObservableObject {
     /// 计划 + 下一轮时间 + 当前这一轮 + 最近记录。`nil` = 还没查到。
     @Published private(set) var wbRotationStatus: WorkbuddyRotationStatus?
     @Published private(set) var wbRotationError: String?
+    /// 正在读取轮换状态。冷启动时总览据此显示"状态待确认"，而不是"一切正常"。
+    @Published private(set) var wbRotationLoading = false
     /// 一次保存 / 执行 / 恢复的结论。
     @Published private(set) var wbRotationNotice: String?
     @Published private(set) var wbRotationFailed = false
@@ -165,6 +167,10 @@ final class ConsoleStore: ObservableObject {
     /// 顺序很重要（PRD §11.4）：先把助手拉起来一次，再**并行**取四份数据。
     /// 早先串行时，Magpie 的 HTTP 超时会把账号列表一起拖到十几秒之后。
     func loadIfNeeded() async {
+        #if AICC_VISUAL_TEST && AICC_CONSOLE_VISUAL
+        // 离屏渲染只消费固定样本，绝不启动助手或发真实 RPC。
+        return
+        #else
         if case .running = worker.state {} else {
             await worker.refresh()
         }
@@ -179,13 +185,21 @@ final class ConsoleStore: ObservableObject {
         let needQoder = qoderEditions.isEmpty && !qoderLoading
         let needWorkerQuota = workerQuotaRows.isEmpty && !loadingWorkerQuota
         let needWbClient = wbClientStatus == nil
+        // 冷启动必须读一次轮换状态：总览的恢复异常与摘要计数依赖它。
+        // 只读 RPC，不会签发、切换或恢复任何登录态。
+        let needRotation = ConsoleColdStartLoadPolicy.needsRotation(
+            status: wbRotationStatus,
+            loading: wbRotationLoading
+        )
 
         async let quota: Void = needQuota ? refreshQuota(force: false) : ()
         async let accounts: Void = needAccounts ? refreshAccounts() : ()
         async let qoder: Void = needQoder ? refreshQoder(silent: true) : ()
         async let workerQuota: Void = needWorkerQuota ? refreshWorkerQuota(force: false) : ()
         async let wbClient: Void = needWbClient ? refreshWorkbuddyClient(silent: true) : ()
-        _ = await (quota, accounts, qoder, workerQuota, wbClient)
+        async let rotation: Void = needRotation ? refreshWorkbuddyRotation(silent: false) : ()
+        _ = await (quota, accounts, qoder, workerQuota, wbClient, rotation)
+        #endif
     }
 
     func refreshAll() async {
@@ -578,6 +592,9 @@ final class ConsoleStore: ObservableObject {
     /// 只读刷新。轮换状态在计划执行期间会自己变（助手每分钟推进一次），
     /// 所以界面每 30 秒静默刷一次就够。
     func refreshWorkbuddyRotation(silent: Bool = false) async {
+        guard !wbRotationLoading else { return }
+        wbRotationLoading = true
+        defer { wbRotationLoading = false }
         guard await ensureWorkerReady() else {
             if !silent { wbRotationError = workerFailureText }
             return

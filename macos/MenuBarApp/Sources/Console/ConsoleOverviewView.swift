@@ -42,12 +42,21 @@ struct ConsoleOverviewView: View {
 
     // MARK: - 状态摘要
 
-    private var attentionCount: Int {
-        store.fleet.issues + (store.tasksOverview?.failureCount ?? 0)
-            + (store.accountsError == nil ? 0 : 1)
-            + (store.qoderError == nil ? 0 : 1)
-            + (store.wbRotationStatus?.attentionRun == nil ? 0 : 1)
+    /// 首屏的“需要处理”汇总：轮换未知与恢复异常都不能被当成正常。
+    private var attention: ConsoleOverviewAttention {
+        ConsoleOverviewAttention(
+            fleetIssues: store.fleet.issues,
+            failureCount: store.tasksOverview?.failureCount ?? 0,
+            accountsError: store.accountsError != nil,
+            qoderError: store.qoderError != nil,
+            rotation: ConsoleRotationAttentionState(
+                status: store.wbRotationStatus,
+                error: store.wbRotationError
+            )
+        )
     }
+
+    private var attentionCount: Int { attention.count }
 
     private var summarySection: some View {
         ViewThatFits(in: .horizontal) {
@@ -83,7 +92,8 @@ struct ConsoleOverviewView: View {
     private var headline: String {
         if store.loadingAccounts && store.fleet.serviceAccounts == 0 { return "正在读取账号" }
         if store.fleet.serviceAccounts == 0 { return "从添加账号开始" }
-        return attentionCount > 0 ? "\(attentionCount) 项需要处理" : "一切正常"
+        // 只有轮换状态已确认无异常时才可能出现“一切正常”。
+        return attention.headline
     }
 
     private var summaryDetail: String {
@@ -140,18 +150,31 @@ struct ConsoleOverviewView: View {
 
     private var pendingItems: [PendingItem] {
         var items: [PendingItem] = []
-        // P0：轮换上一轮没有恢复成功时，必须出现在首屏待处理里。
+        // P0：轮换上一轮没有恢复成功、或状态读取失败时，必须出现在首屏待处理里。
         // 点击只带上下文进入账号页的轮换管理面板，恢复仍走原有确认流程。
-        if let attention = store.wbRotationStatus?.attentionRun {
+        switch attention.rotation {
+        case .needsAction(let run):
             items.append(PendingItem(
                 id: "wb-rotation-recovery",
-                title: "WorkBuddy 轮换未恢复",
-                detail: attention.restoreText,
+                title: attention.rotation.pendingTitle ?? "WorkBuddy 轮换未恢复",
+                detail: run.restoreText,
                 selection: nil,
                 filter: .workbuddy,
                 destination: .accounts,
                 opensRotationSheet: true
             ))
+        case .unavailable:
+            items.append(PendingItem(
+                id: "wb-rotation-unknown",
+                title: attention.rotation.pendingTitle ?? "轮换状态无法确认",
+                detail: attention.rotation.pendingDetail ?? "状态读取失败",
+                selection: nil,
+                filter: .workbuddy,
+                destination: .accounts,
+                opensRotationSheet: true
+            ))
+        case .loading, .clear:
+            break
         }
         for account in store.accounts where account.displayAuthTone == .error {
             items.append(PendingItem(
@@ -243,7 +266,7 @@ struct ConsoleOverviewView: View {
     private func open(_ item: PendingItem) {
         if item.destination == .accounts {
             nav.openAccounts(filter: item.filter, selection: item.selection)
-            if item.opensRotationSheet { nav.openRotationSheet = true }
+            if item.opensRotationSheet { nav.requestRotationSheet() }
         } else {
             nav.openCheckin(platform: .workbuddy)
         }

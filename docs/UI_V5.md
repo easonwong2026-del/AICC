@@ -219,6 +219,41 @@ AICC 的问题不是“卡片不够漂亮”，而是把数据库字段、机制
 - 状态未知、未登录、正常登录三种客户端状态不再混淆。
 - 全部写路径与危险确认未改动；Rust / SQLite / RPC 无变更（`git diff --stat origin/main -- account-worker server.py collectors tests` 为空）。
 
+## 8. 真实应用路径闭环（#115 复审第二轮）
+
+### P0：冷启动读取轮换状态
+
+- `ConsoleStore.loadIfNeeded()` 首次进入窗口时并行调用只读的 `refreshWorkbuddyRotation(silent: false)`；不签发、不切换、不恢复。
+- 新增 `wbRotationLoading`：加载中、读取失败、已确认无异常是三种状态。
+- 新增可测试状态机 `ConsoleRotationAttentionState` / `ConsoleOverviewAttention`：
+  - 只有已读到状态且 `attentionRun == nil` 才会出现“一切正常”；
+  - 加载中 → 首屏「状态待确认」；
+  - 读取失败（即使手里有旧状态）→ 不计为正常，待处理出现「轮换状态无法确认」，点击打开轮换面板；
+  - `attentionRun` 存在 → 计入摘要与待处理（「WorkBuddy 轮换未恢复」）。
+- 恢复成功后由 `restoreWorkbuddyRotationOrigin` 刷新轮换与客户端状态，警示自动消失。
+- 总览刷新按钮也会重读轮换状态。
+- 模型已移入 `Sources/Models/` 并加入 `AICCCore` 测试目标。
+
+### P1：首次挂载消费导航请求
+
+- `ConsoleNavigation` 增加 `requestRotationSheet()` 与一次性 `consumeRotationSheetRequest()`；
+- 账号页在 `.onAppear` 与 `.onChange` 都消费：请求先于视图创建（首次挂载值为 true）也能打开面板；
+- 消费后立即复位，同一次请求只弹一次；不执行自动恢复，不绕过确认；
+- `openRotationSheet` 改为 `private(set)`，只能通过请求/消费 API 操作。
+
+### 测试
+
+- `ConsoleOverviewAttentionTests`：冷启动仅 `lastRun=recovery_required` → 计数 +1 且标题不是“一切正常”；加载中/读取失败 → 未知、可行动；恢复后 → 计数 0 且“一切正常”。
+- `ConsoleNavigationTests`：总览路由（切页 + 请求）→ 首次消费成功、第二次为空操作；请求先于挂载 → `onAppear` 仍能消费；无请求时消费不产生副作用。
+
+### 验证截图（真实 SwiftUI 渲染）
+
+- `console-overview-recovery-1120x760-light.png`：总览首屏待处理第 1 行为「WorkBuddy 轮换未恢复」，摘要计数包含它。
+- `console-accounts-recovery-1120x760-light.png`：账号页「当前客户端」橙色警示 + 「去处理」。
+- `rotation-recovery-560x660-light.png`：点击后进入既有轮换面板，显示“需要你确认”，未自动恢复。
+- 普通总览（`console-overview-1120x760-light.png`）不出现该异常，计数保持 7。
+
+
 
 ### 复查结论（第三轮渲染后）
 
