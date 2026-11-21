@@ -60,15 +60,33 @@ final class WorkbuddyRotationModelsTests: XCTestCase {
         XCTAssertEqual(step.skipText, "Magpie 令牌剩余时间不够覆盖停留时长")
     }
 
-    func testActivityUnknownStaysUnknown() {
-        let step = WorkbuddyRotationStep(json: ["status": "done"])
-        XCTAssertEqual(step.activityText, "活跃未查")
+    func testActivityDistinguishesBeforeAfterAndUnknown() {
+        // 还没到停留结束：不能说"未活跃"，只能说还没查。
+        let pending = WorkbuddyRotationStep(json: [
+            "status": "done",
+            "activityBefore": ["state": "ok", "todayActive": false, "streakDays": 1],
+        ])
+        XCTAssertEqual(pending.activityPhase, .beforeSwitch)
+        XCTAssertTrue(pending.activityText.hasPrefix("切换前："), pending.activityText)
+
+        let nothing = WorkbuddyRotationStep(json: ["status": "planned"])
+        XCTAssertEqual(nothing.activityPhase, .pendingAfterDwell)
+        XCTAssertEqual(nothing.activityText, "停留后尚未查询")
+
+        let after = WorkbuddyRotationStep(json: [
+            "status": "done",
+            "activityBefore": ["state": "ok", "todayActive": false, "streakDays": 1],
+            "activityAfter": ["state": "ok", "todayActive": true, "streakDays": 2],
+        ])
+        XCTAssertEqual(after.activityPhase, .afterDwell)
+        XCTAssertFalse(after.activityText.hasPrefix("切换前"), after.activityText)
 
         let failed = WorkbuddyRotationStep(json: [
             "status": "done",
             "activityAfter": ["state": "failed", "error": "timeout"],
         ])
-        XCTAssertTrue(failed.activityText.contains("查不到"), failed.activityText)
+        XCTAssertEqual(failed.activityPhase, .failed)
+        XCTAssertEqual(failed.activityText, "查询失败／未知")
     }
 
     func testRunExplainsTheRestoreOutcomeWithoutPretending() {
@@ -129,5 +147,29 @@ final class WorkbuddyRotationModelsTests: XCTestCase {
         XCTAssertTrue(dry.steps[1].summary.contains("跳过"))
         XCTAssertTrue(dry.steps[2].summary.contains("已经登录"))
         XCTAssertEqual(dry.warnings.count, 1)
+    }
+
+    /// 恢复失败时后端把这一轮排除在 `current` 之外，只有 `lastRun` 停在待处理。
+    /// 界面必须靠 `attentionRun` 同时认这两个位置，否则警示区和入口会一起消失。
+    func testRecoveryInLastRunStillNeedsAttention() {
+        let status = WorkbuddyRotationStatus(json: [
+            "plan": ["enabled": true, "accountIds": ["a"]],
+            "lastRun": [
+                "id": "r1",
+                "state": "recovery_required",
+                "detail": "已写回快照，但客户端当前登录是别人",
+                "restoreResult": "restore_failed",
+            ],
+        ])
+
+        XCTAssertNil(status.current, "后端不把 recovery_required 算作活动轮次")
+        XCTAssertEqual(status.attentionRun?.id, "r1")
+        XCTAssertEqual(status.headline, "已写回快照，但客户端当前登录是别人")
+
+        let healthy = WorkbuddyRotationStatus(json: [
+            "plan": ["enabled": true, "accountIds": ["a"]],
+            "lastRun": ["id": "r2", "state": "completed", "restoreResult": "restored"],
+        ])
+        XCTAssertNil(healthy.attentionRun, "正常收尾不该报异常")
     }
 }

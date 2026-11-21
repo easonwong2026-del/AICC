@@ -60,6 +60,133 @@ extension ConsoleVisualFixture {
         return formatter.string(from: now.addingTimeInterval(seconds))
     }
 
+    /// 夜间轮换的一份样本。`state` 决定"正常 / 需要确认"，其余字段固定，
+    /// 这样正常态与恢复异常态用的是同一套结构，截图可比。
+    static func rotationStatusJSON(
+        now: Date,
+        state: String,
+        detail: String?,
+        restoreResult: String?
+    ) -> [String: Any] {
+        var current: [String: Any] = [
+            "id": "run-demo",
+            "planDate": "2026-11-20",
+            "trigger": "scheduled",
+            "state": state,
+            "cursor": 1,
+            "originUid": "wb_9f3c1d7a4b2e5f6089abcdef12345678",
+            "originAccountId": "acc-wb-1",
+            "originSnapshotTracked": true,
+            "lastTargetUid": "wb_1122334455667788",
+            "lastTargetAccountId": "acc-wb-2",
+            "currentAccountId": "acc-mag-1",
+            "currentUid": "wb_mag_0001",
+            "nextSwitchAt": ConsoleVisualFixture.iso(now, 2400),
+            "steps": [
+                ["id": "st-1", "seq": 0, "accountId": "acc-wb-2", "uid": "wb_1122334455667788",
+                 "mode": "own_refresh", "status": "done", "authPrecheck": "accepted",
+                 "activityBefore": ["state": "ok", "todayActive": false, "streakDays": 3],
+                 "activityAfter": ["state": "ok", "todayActive": true, "streakDays": 4]],
+                ["id": "st-2", "seq": 1, "accountId": "acc-mag-1", "uid": "wb_mag_0001",
+                 "mode": "magpie_access_temporary", "status": state == "recovery_required" ? "dwelling" : "dwelling"],
+            ],
+            "createdAt": "2026-11-20T14:30:00Z",
+            "updatedAt": "2026-11-20T15:05:00Z",
+        ]
+        if let detail { current["detail"] = detail }
+        if let restoreResult { current["restoreResult"] = restoreResult }
+
+        var history: [[String: Any]] = [
+            ["id": "run-yesterday", "planDate": "2026-11-19", "trigger": "scheduled",
+             "state": "completed", "cursor": 1, "originSnapshotTracked": true,
+             "restoreResult": "restored",
+             "steps": [
+                ["id": "h-1", "seq": 0, "accountId": "acc-wb-2", "uid": "wb_1122334455667788",
+                 "status": "done", "mode": "own_refresh",
+                 "activityBefore": ["state": "ok", "todayActive": false, "streakDays": 3],
+                 "activityAfter": ["state": "ok", "todayActive": true, "streakDays": 4]],
+                ["id": "h-2", "seq": 1, "accountId": "acc-mag-1", "uid": "wb_mag_0001",
+                 "status": "skipped", "skipReason": "magpie_too_short_for_dwell"],
+             ]],
+            ["id": "run-manual", "planDate": "2026-11-18", "trigger": "manual",
+             "state": "completed", "cursor": 0, "originSnapshotTracked": true,
+             "restoreResult": "restored",
+             "steps": [
+                ["id": "m-1", "seq": 0, "accountId": "acc-bulk-1", "uid": "wb_bulk_0001",
+                 "status": "done", "mode": "own_refresh",
+                 "activityBefore": ["state": "ok", "todayActive": false, "streakDays": 0],
+                 "activityAfter": ["state": "failed", "error": "超时"]],
+             ]],
+        ]
+        // 真实后端把"当前这一轮"也算在最近记录里，样本保持一致。
+        history.insert(
+            ["id": "run-demo", "planDate": "2026-11-20", "trigger": "scheduled",
+             "state": state, "cursor": 1, "originSnapshotTracked": true,
+             "restoreResult": restoreResult ?? (state == "dwelling" ? "等待恢复" : "restore_failed"),
+             "detail": detail ?? (state == "dwelling" ? "停留中，尚未到恢复时间" : ""),
+             "steps": current["steps"] as Any],
+            at: 0
+        )
+
+        var payload: [String: Any] = [
+            "plan": [
+                "enabled": true,
+                "timezone": "Asia/Shanghai",
+                "weekdays": [1, 2, 3, 4, 5, 6, 7],
+                "startMinutes": 22 * 60 + 30,
+                "endMinutes": 7 * 60,
+                "accountIds": ["acc-wb-1", "acc-mag-1"],
+                "dwellSeconds": 3600,
+                "startText": "22:30",
+                "endText": "07:00",
+            ],
+            "schedule": [
+                "inWindow": true,
+                "windowStart": ConsoleVisualFixture.iso(now, -1800),
+                "windowEnd": ConsoleVisualFixture.iso(now, 28800),
+            ],
+            "live": ["uid": "wb_1122334455667788", "loggedIn": true],
+            "client": ["installed": true, "running": true],
+            "current": current,
+            "lastRun": history.first ?? [:],
+            "history": history,
+            "scheduler": [
+                "owner": "AICC.app 的账号助手进程",
+                "runsWhileAppClosed": false,
+                "tickSeconds": 60,
+            ],
+            "limits": [
+                "lateStartToleranceSeconds": 600,
+                "restoreReserveSeconds": 300,
+                "userActiveIdleSeconds": 120,
+                "supportedTimezones": ["Asia/Shanghai", "UTC"],
+            ],
+        ]
+        // 真实后端把 `recovery_required` 排除在"活动轮次"之外：恢复失败后
+        // `current` 是 nil，只有 `lastRun` 停在待处理。样本必须一样，
+        // 否则截出来的界面比线上好看。
+        if state == "recovery_required" {
+            payload.removeValue(forKey: "current")
+            payload["lastRun"] = current
+        }
+        return payload
+    }
+
+    /// 恢复失败的样本：用来渲染"需要你确认"的界面。
+    static var rotationRecovery: ConsoleVisualFixture {
+        var fixture = sample
+        let now = Date()
+        fixture.wbRotationStatus = WorkbuddyRotationStatus(
+            json: rotationStatusJSON(
+                now: now,
+                state: "recovery_required",
+                detail: "已写回快照，但客户端当前登录是 wb_1122…；请手动确认",
+                restoreResult: "restore_failed"
+            )
+        )
+        return fixture
+    }
+
     /// 完整样本：4 个平台都有账号，含超长昵称、过期授权、失败任务。
     static var sample: ConsoleVisualFixture {
         var fixture = ConsoleVisualFixture()
@@ -398,73 +525,14 @@ extension ConsoleVisualFixture {
             + "（剩余 40 分钟），到期前请点「恢复原账号」"
 
         // WB-ROTATE-1：22:30 → 次日 07:00，两个账号，当前停在第二个。
-        fixture.wbRotationStatus = WorkbuddyRotationStatus(json: [
-            "plan": [
-                "enabled": true,
-                "timezone": "Asia/Shanghai",
-                "weekdays": [1, 2, 3, 4, 5, 6, 7],
-                "startMinutes": 22 * 60 + 30,
-                "endMinutes": 7 * 60,
-                "accountIds": ["acc-wb-1", "acc-mag-1"],
-                "dwellSeconds": 3600,
-                "startText": "22:30",
-                "endText": "07:00",
-            ],
-            "schedule": [
-                "inWindow": true,
-                "windowStart": ConsoleVisualFixture.iso(now, -1800),
-                "windowEnd": ConsoleVisualFixture.iso(now, 28800),
-            ],
-            "live": ["uid": "wb_1122334455667788", "loggedIn": true],
-            "client": ["installed": true, "running": true],
-            "current": [
-                "id": "run-demo",
-                "planDate": "2026-11-20",
-                "state": "dwelling",
-                "cursor": 1,
-                "originUid": "wb_9f3c1d7a4b2e5f6089abcdef12345678",
-                "originAccountId": "acc-wb-1",
-                "originSnapshotTracked": true,
-                "lastTargetUid": "wb_1122334455667788",
-                "lastTargetAccountId": "acc-wb-2",
-                "currentAccountId": "acc-mag-1",
-                "currentUid": "wb_mag_0001",
-                "steps": [
-                    ["id": "st-1", "seq": 0, "accountId": "acc-wb-2", "uid": "wb_1122334455667788",
-                     "mode": "own_refresh", "status": "done", "authPrecheck": "accepted",
-                     "activityBefore": ["state": "ok", "todayActive": false, "streakDays": 3],
-                     "activityAfter": ["state": "ok", "todayActive": true, "streakDays": 4]],
-                    ["id": "st-2", "seq": 1, "accountId": "acc-mag-1", "uid": "wb_mag_0001",
-                     "mode": "magpie_access_temporary", "status": "dwelling"],
-                ],
-                "createdAt": "2026-11-20T14:30:00Z",
-                "updatedAt": "2026-11-20T15:05:00Z",
-            ],
-            "lastRun": [
-                "id": "run-yesterday",
-                "planDate": "2026-11-19",
-                "state": "completed",
-                "cursor": 1,
-                "originUid": "wb_9f3c1d7a4b2e5f6089abcdef12345678",
-                "originSnapshotTracked": true,
-                "restoreResult": "restored",
-                "steps": [],
-            ],
-            "history": [
-                ["id": "run-yesterday", "planDate": "2026-11-19", "state": "completed",
-                 "cursor": 1, "originSnapshotTracked": true, "restoreResult": "restored",
-                 "steps": [
-                    ["id": "h-1", "seq": 0, "accountId": "acc-wb-2", "uid": "wb_1122334455667788",
-                     "status": "done", "mode": "own_refresh",
-                     "activityAfter": ["state": "ok", "todayActive": true, "streakDays": 4]],
-                    ["id": "h-2", "seq": 1, "accountId": "acc-mag-1", "uid": "wb_mag_0001",
-                     "status": "skipped", "skipReason": "magpie_too_short_for_dwell"],
-                 ]],
-            ],
-            "scheduler": ["owner": "AICC.app 的账号助手进程", "runsWhileAppClosed": false, "tickSeconds": 60],
-            "limits": ["supportedTimezones": ["Asia/Shanghai", "UTC"]],
-        ])
-
+        fixture.wbRotationStatus = WorkbuddyRotationStatus(
+            json: ConsoleVisualFixture.rotationStatusJSON(
+                now: now,
+                state: "dwelling",
+                detail: nil,
+                restoreResult: nil
+            )
+        )
         fixture.tasksOverview = TasksOverview(json: [
             "today": "2026-11-14",
             "accounts": ["total": 23],
@@ -688,6 +756,9 @@ struct ConsoleVisualSmokeMain {
         let settings = AppSettings.shared
         let store = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
         store.applyVisualFixture(.sample)
+        // 恢复失败是另一套状态：单独一个 store，避免把正常样本改脏。
+        let recoveryStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        recoveryStore.applyVisualFixture(.rotationRecovery)
         store.applyVisualFixture(.sample)  // 幂等：两次调用不应改变任何数据
 
         var count = 0
@@ -710,6 +781,11 @@ struct ConsoleVisualSmokeMain {
         // 关键状态与弹层
         // 用闭包延迟构造：视图必须在渲染前一刻创建，否则 QA 钩子读到的会是最后一组参数。
         let extras: [(String, () -> AnyView, CGSize, ColorScheme)] = [
+            // 恢复失败落在 lastRun（current 为 nil）时的账号页：警示区与「去处理」必须出现。
+            ("console-accounts-recovery-1120x760-light",
+             { AnyView(consoleView(store: recoveryStore, settings: settings, scheme: .light,
+                                   page: .accounts)) },
+             CGSize(width: 1120, height: 760), .light),
             ("accounts-qoder-detail-1120x760-light",
              { AnyView(consoleView(store: store, settings: settings, scheme: .light,
                                    page: .accounts, account: "qoderService:qsa-cn-1")) },
@@ -728,6 +804,14 @@ struct ConsoleVisualSmokeMain {
             ("rotation-sheet-560x660-dark",
              { AnyView(ConsoleWorkbuddyRotationSheet(store: store)) },
              CGSize(width: 560, height: 660), .dark),
+            ("rotation-history-560x760-light",
+             { AnyView(ConsoleWorkbuddyRotationSheet(
+                 store: store, expandedHistory: true, focus: .history
+             )) },
+             CGSize(width: 560, height: 760), .light),
+            ("rotation-recovery-560x660-light",
+             { AnyView(ConsoleWorkbuddyRotationSheet(store: recoveryStore, focus: .status)) },
+             CGSize(width: 560, height: 660), .light),
             ("activity-block-1000x420-light",
              { AnyView(Self.activityBlock()) }, CGSize(width: 1000, height: 420), .light),
             ("activity-block-1000x420-dark",

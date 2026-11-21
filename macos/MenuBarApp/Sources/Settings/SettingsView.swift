@@ -15,6 +15,11 @@ struct SettingsView: View {
     @State private var showSelection = false
     @State private var showCredentialRisk = false
     @State private var confirmDisableJSON = false
+    // 客户端轮换时区：存在助手的轮换计划里，这里只是读写入口。
+    @State private var rotationTimezone = "Asia/Shanghai"
+    @State private var rotationTimezones: [String] = ["Asia/Shanghai", "UTC"]
+    @State private var rotationRuleText = "错过开始时间 10 分钟以上不补跑；每次切换预留 5 分钟恢复余量。"
+    @State private var rotationSettingsError: String?
     // 与主控制台共用同一个助手实例，设置页不再单独起进程。
     @ObservedObject private var accountWorker = AccountWorkerManager.shared
 
@@ -23,7 +28,8 @@ struct SettingsView: View {
             Section {
                 Label("Magpie 显示伴侣", systemImage: "rectangle.on.rectangle")
                     .font(.title2.weight(.semibold))
-                Text("账号、模型和调用由 Magpie 管理。AICC 只提供桌面小组件与墨水屏显示。")
+                Text("账号、模型和调用由 Magpie 管理。AICC 在它之上管理账号与额度，"
+                    + "跑签到与成长任务，并把看板推到桌面小组件和墨水屏。")
                     .foregroundStyle(.secondary)
             }
             Section("Magpie 连接") {
@@ -104,7 +110,10 @@ struct SettingsView: View {
                     Text("自有优先").tag("own")
                 }
                 .pickerStyle(.segmented)
-                Text("Magpie 优先：直接使用 Magpie 已登录的令牌，AICC 不刷新它。自有优先：AICC 用自己的扫码授权，并用自己的刷新令牌续期。优先级不可用时自动兜底到另一份。")
+                Text("只作用于 AICC 后台请求（签到、额度、成长查询），**不决定 WorkBuddy 客户端登录哪个账号**。"
+                    + "客户端切换固定优先自有长期授权（带刷新令牌），没有时才借用 Magpie 的临时访问令牌。"
+                    + "Magpie 优先：直接用 Magpie 的令牌，AICC 不刷新它；自有优先：用自己的扫码授权并自行续期。"
+                    + "首选那份不可用时自动兜底到另一份。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if let error = accountWorker.authSettingsError {
@@ -114,6 +123,31 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Text("账号管理已移到主控制台（AI 账号 / 签到任务）。这里只保留助手与凭据的自检。")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("WorkBuddy 客户端") {
+                Picker("账号轮换时区", selection: Binding(
+                    get: { rotationTimezone },
+                    set: { value in
+                        rotationTimezone = value
+                        Task { await saveRotationTimezone(value) }
+                    }
+                )) {
+                    ForEach(rotationTimezones, id: \.self) { zone in
+                        Text(zone).tag(zone)
+                    }
+                }
+                Text("轮换的开始与结束时间按这个时区解释。只提供固定偏移、无夏令时的时区，避免半夜算错一小时。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(rotationRuleText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let rotationSettingsError {
+                    Text(rotationSettingsError).font(.caption).foregroundStyle(.red)
+                }
+                Text("客户端登录的切换与恢复在主控制台的「AI 账号」页操作。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Section("凭据存储") {
                 HStack {
@@ -233,6 +267,7 @@ struct SettingsView: View {
         .task { widgetProviders = WidgetStatusStore.load(port: settings.magpiePort)?.providers ?? [] }
         // 首选授权来源存在助手的 app_settings 里，进设置页时读一次真实值。
         .task { await accountWorker.loadAuthPreferences() }
+        .task { await loadRotationSettings() }
         .confirmationDialog("撤销设备后需要重新配对", isPresented: $showRevoke) {
             Button("撤销所有设备", role: .destructive) {
                 Task {
@@ -289,6 +324,34 @@ struct SettingsView: View {
     private var accountWorkerIsHealthy: Bool {
         if case .running(let health) = accountWorker.state { return health.isHealthy }
         return false
+    }
+
+    /// 读一次轮换计划，只为拿到时区与后端给的规则常量。
+    private func loadRotationSettings() async {
+        do {
+            let status = try await accountWorker.workbuddyRotationStatus()
+            rotationTimezone = status.plan.timezone
+            if !status.supportedTimezones.isEmpty {
+                rotationTimezones = status.supportedTimezones
+            }
+            let late = max(1, status.lateStartToleranceSeconds / 60)
+            let reserve = max(1, status.restoreReserveSeconds / 60)
+            rotationRuleText = "固定规则：错过开始时间 \(late) 分钟以上，本轮不补跑；"
+                + "每次切换前预留 \(reserve) 分钟恢复余量。"
+            rotationSettingsError = nil
+        } catch {
+            rotationSettingsError = "读不到轮换设置：\(error.localizedDescription)"
+        }
+    }
+
+    private func saveRotationTimezone(_ zone: String) async {
+        do {
+            _ = try await accountWorker.workbuddyRotationSave(params: ["timezone": zone])
+            rotationSettingsError = nil
+        } catch {
+            rotationSettingsError = "时区没保存成功：\(error.localizedDescription)"
+            await loadRotationSettings()
+        }
     }
 
     private func reloadWidgets() {

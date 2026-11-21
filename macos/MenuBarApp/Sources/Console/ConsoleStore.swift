@@ -592,15 +592,22 @@ final class ConsoleStore: ObservableObject {
     }
 
     /// 保存配置。只传变化过的字段，后端合并——改一个时间不该把账号顺序冲掉。
-    func saveWorkbuddyRotation(_ params: [String: Any], note: String? = nil) async {
+    ///
+    /// 返回 `false` 表示**没有保存成功**：调用方（例如"保存并打开"）必须停下，
+    /// 不能拿着旧配置继续往下走。
+    @discardableResult
+    func saveWorkbuddyRotation(_ params: [String: Any], note: String? = nil) async -> Bool {
         wbRotationFailed = false
         do {
             wbRotationStatus = try await worker.workbuddyRotationSave(params: params)
             wbRotationError = nil
-            wbRotationNotice = note
+            if let note { wbRotationNotice = note }
+            return true
         } catch {
             wbRotationFailed = true
-            wbRotationNotice = message(for: error)
+            wbRotationError = nil
+            wbRotationNotice = "保存失败：\(message(for: error))。设置没有改动。"
+            return false
         }
     }
 
@@ -612,25 +619,14 @@ final class ConsoleStore: ObservableObject {
             let result = try await worker.workbuddyRotationSetEnabled(enabled)
             wbRotationStatus = result.status
             wbRotationError = nil
-            if enabled {
-                wbRotationNotice = "已打开。计划只在 AICC 运行时执行；"
-                    + "开始前会先检查凭据，凭据不对就跳过那个账号。"
-                wbRotationFailed = false
-            } else {
-                // 关闭 = 停止后续计划 + 把账号恢复回来。两件事都要如实说。
-                let restored = result.stopResult?["restored"] as? Bool
-                switch restored {
-                case .some(true):
-                    wbRotationNotice = "已关闭，并把账号恢复到这一轮最初登录的那个。"
-                    wbRotationFailed = false
-                case .some(false):
-                    wbRotationNotice = "已关闭，但账号没能自动恢复；请点「恢复最初账号…」并确认。"
-                    wbRotationFailed = true
-                case .none:
-                    wbRotationNotice = "已关闭，不会再自动切换客户端。"
-                    wbRotationFailed = false
-                }
-            }
+            // 关闭 = 停止后续计划 + 把账号恢复回来。两件事分别说，不合并成一句。
+            let feedback = RotationFeedbackText.toggle(
+                enabled: enabled,
+                stopStatus: result.stopResult?["status"] as? String,
+                restored: result.stopResult?["restored"] as? Bool
+            )
+            wbRotationNotice = feedback.text
+            wbRotationFailed = feedback.isFailure
         } catch {
             wbRotationFailed = true
             wbRotationNotice = message(for: error)
@@ -658,10 +654,12 @@ final class ConsoleStore: ObservableObject {
         defer { wbRotationBusy = false }
         do {
             let result = try await worker.workbuddyRotationRunNow()
-            let status = result["status"] as? String ?? "unknown"
-            wbRotationNotice = status == "busy"
-                ? "另一项轮换操作正在执行，请稍后再试。"
-                : "已开始这一轮（状态：\(status)）。计划结束时会恢复最初的账号。"
+            let feedback = RotationFeedbackText.runNow(
+                status: result["status"] as? String ?? "unknown",
+                detail: result["detail"] as? String
+            )
+            wbRotationNotice = feedback.text
+            wbRotationFailed = feedback.isFailure
             await refreshWorkbuddyRotation(silent: true)
             await refreshWorkbuddyClient(silent: true)
         } catch {
@@ -679,10 +677,13 @@ final class ConsoleStore: ObservableObject {
         defer { wbRotationBusy = false }
         do {
             let result = try await worker.workbuddyRotationStop()
-            let restored = result["restored"] as? Bool ?? false
-            wbRotationFailed = !restored && (result["status"] as? String) == "recovery_required"
-            wbRotationNotice = result["detail"] as? String
-                ?? (restored ? "已暂停并恢复原账号。" : "已暂停。")
+            let feedback = RotationFeedbackText.stop(
+                status: result["status"] as? String ?? "unknown",
+                restored: result["restored"] as? Bool,
+                detail: result["detail"] as? String
+            )
+            wbRotationNotice = feedback.text
+            wbRotationFailed = feedback.isFailure
             await refreshWorkbuddyRotation(silent: true)
             await refreshWorkbuddyClient(silent: true)
         } catch {

@@ -18,9 +18,27 @@ struct ConsoleWorkbuddyRotationSheet: View {
     @State private var confirmRunNow = false
     @State private var confirmRestore = false
     @State private var showHistory = false
+    /// 执行记录的结果筛选：`all` / `done` / `skipped` / `failed`。
+    @State private var historyFilter = "all"
 
     private let dwellChoices = [300, 600, 900, 1800, 2700, 3600, 5400, 7200]
     private let weekdayNames = ["一", "二", "三", "四", "五", "六", "日"]
+
+    /// 离屏渲染时需要直接展开执行记录；正常打开保持收起。
+    /// 离屏渲染用：截图不能滚动，所以允许只画其中一段。
+    enum Focus { case all, history, status }
+
+    init(
+        store: ConsoleStore,
+        expandedHistory: Bool = false,
+        focus: Focus = .all
+    ) {
+        self.store = store
+        _showHistory = State(initialValue: expandedHistory)
+        self.focus = focus
+    }
+
+    private let focus: Focus
 
     private var status: WorkbuddyRotationStatus? { store.wbRotationStatus }
 
@@ -43,15 +61,26 @@ struct ConsoleWorkbuddyRotationSheet: View {
             header
             Divider().overlay(ConsoleTheme.border)
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    enableRow
-                    scheduleBlock
-                    accountBlock
-                    statusBlock
-                    actionBlock
-                    historyBlock
+                switch focus {
+                case .history:
+                    historyBlock.padding(20)
+                case .status:
+                    VStack(alignment: .leading, spacing: 18) {
+                        statusBlock
+                        actionBlock
+                    }
+                    .padding(20)
+                case .all:
+                    VStack(alignment: .leading, spacing: 18) {
+                        enableRow
+                        scheduleBlock
+                        accountBlock
+                        statusBlock
+                        actionBlock
+                        historyBlock
+                    }
+                    .padding(20)
                 }
-                .padding(20)
             }
         }
         .frame(width: 560, height: 660)
@@ -102,8 +131,14 @@ struct ConsoleWorkbuddyRotationSheet: View {
                 get: { status?.plan.enabled ?? false },
                 set: { enabled in
                     Task {
-                        if dirty { await save(notify: nil) }
-                        await store.setWorkbuddyRotationEnabled(enabled)
+                        // 开启才需要先把表单落盘（否则会用旧配置打开计划）；
+                        // 关闭是独立动作，不能被一个无效表单挡住。
+                        await RotationFeedbackText.applyToggle(
+                            enabled: enabled,
+                            dirty: dirty,
+                            save: { await save(notify: nil) },
+                            setEnabled: { await store.setWorkbuddyRotationEnabled($0) }
+                        )
                     }
                 }
             )) {
@@ -199,17 +234,20 @@ struct ConsoleWorkbuddyRotationSheet: View {
                 .labelsHidden()
                 .frame(width: 110)
 
-                Text("时区")
+                Text("时区 \(timezone)")
                     .font(ConsoleType.small)
-                    .foregroundStyle(ConsoleTheme.secondaryText)
-                Picker("", selection: $timezone) {
-                    ForEach(status?.supportedTimezones ?? ["Asia/Shanghai"], id: \.self) { zone in
-                        Text(zone).tag(zone)
-                    }
-                }
-                .labelsHidden()
-                .frame(width: 150)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                Text("（在「设置 → WorkBuddy 客户端」修改）")
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
                 Spacer(minLength: 0)
+            }
+            if let status {
+                Text("固定规则：错过开始时间 \(max(1, status.lateStartToleranceSeconds / 60)) 分钟以上不补跑；"
+                    + "每次切换前预留 \(max(1, status.restoreReserveSeconds / 60)) 分钟恢复余量。")
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -300,7 +338,7 @@ struct ConsoleWorkbuddyRotationSheet: View {
                         .foregroundStyle(ConsoleTheme.danger)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                if let run = status.current, run.needsAttention {
+                if status.attentionRun != nil {
                     Text("自动恢复没有完成。请先确认客户端现在登录的是谁，再决定是否点「恢复最初账号」。")
                         .font(ConsoleType.caption)
                         .foregroundStyle(ConsoleTheme.warning)
@@ -322,18 +360,23 @@ struct ConsoleWorkbuddyRotationSheet: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Button(dirty ? "保存计划" : "已保存") {
-                    Task { await save(notify: "计划已保存。") }
+                    Task { _ = await save(notify: "计划已保存。") }
                 }
                 .buttonStyle(ConsolePrimaryButtonStyle())
                 .disabled(!dirty)
 
                 Button("预演") { Task { await store.previewWorkbuddyRotation() } }
                     .buttonStyle(ConsoleSecondaryButtonStyle())
+                    .disabled(!RotationFeedbackText.canPreview(
+                        dirty: dirty, busy: store.wbRotationBusy
+                    ))
                     .help("只演算会切哪些账号、会跳过哪些，不修改任何登录态")
 
                 Button("立即执行一轮") { confirmRunNow = true }
                     .buttonStyle(ConsoleSecondaryButtonStyle())
-                    .disabled(store.wbRotationBusy)
+                    .disabled(!RotationFeedbackText.canRunNow(
+                        dirty: dirty, busy: store.wbRotationBusy
+                    ))
                     .help("会关闭并重启客户端；用于你在场时的短时验证")
 
                 Spacer(minLength: 0)
@@ -343,8 +386,10 @@ struct ConsoleWorkbuddyRotationSheet: View {
                     Task { await store.stopWorkbuddyRotation() }
                 }
                 .buttonStyle(ConsoleSecondaryButtonStyle())
-                .disabled(store.wbRotationBusy || status?.current == nil)
+                .disabled(store.wbRotationBusy || (status?.current?.isTerminal ?? true))
 
+                // 恢复失败时 `current` 是 nil（后端只把它留在 lastRun），
+                // 所以这里也要认 attentionRun，否则"去处理"进去后按钮是灰的。
                 Button("恢复最初账号…") { confirmRestore = true }
                     .buttonStyle(ConsoleSecondaryButtonStyle())
                     .disabled(store.wbRotationBusy)
@@ -354,6 +399,13 @@ struct ConsoleWorkbuddyRotationSheet: View {
                     ProgressView().controlSize(.mini)
                 }
                 Spacer(minLength: 0)
+            }
+
+            if dirty {
+                Text("有未保存的修改：先保存，预演和立即执行才会按新计划演算。")
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.warning)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if let dry = store.wbRotationDryRun {
@@ -386,33 +438,24 @@ struct ConsoleWorkbuddyRotationSheet: View {
         VStack(alignment: .leading, spacing: 8) {
             DisclosureGroup(isExpanded: $showHistory) {
                 VStack(alignment: .leading, spacing: 10) {
-                    let runs = status?.history ?? []
-                    if runs.isEmpty {
-                        Text("还没有执行记录。")
+                    Picker("", selection: $historyFilter) {
+                        Text("全部").tag("all")
+                        Text("成功").tag("done")
+                        Text("跳过").tag("skipped")
+                        Text("失败").tag("failed")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 260)
+
+                    if filteredRuns.isEmpty {
+                        Text(status?.history.isEmpty == true ? "还没有执行记录。" : "没有符合条件的记录。")
                             .font(ConsoleType.caption)
                             .foregroundStyle(ConsoleTheme.secondaryText)
                     } else {
-                        ForEach(runs) { run in
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("\(run.planDate) · \(run.stateText) · \(run.restoreText)")
-                                    .font(ConsoleType.small)
-                                    .foregroundStyle(ConsoleTheme.text)
-                                ForEach(run.steps) { step in
-                                    Text("· \(nickname(step.accountId)) — \(step.statusText)"
-                                        + (step.skipText.map { "（\($0)）" } ?? "")
-                                        + " · \(step.activityText)")
-                                        .font(ConsoleType.caption)
-                                        .foregroundStyle(ConsoleTheme.tertiaryText)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                                if let detail = run.detail, !detail.isEmpty {
-                                    Text(detail)
-                                        .font(ConsoleType.caption)
-                                        .foregroundStyle(ConsoleTheme.tertiaryText)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                            }
-                            .padding(.vertical, 4)
+                        historyHeader
+                        ForEach(filteredRuns) { run in
+                            historyRun(run)
                         }
                     }
                 }
@@ -422,6 +465,93 @@ struct ConsoleWorkbuddyRotationSheet: View {
                     .font(ConsoleType.small)
                     .foregroundStyle(ConsoleTheme.secondaryText)
             }
+        }
+    }
+
+    /// 四列：日期 / 账号 / 切换结果 / 活跃。切换成功与活跃确认分开显示。
+    private var historyHeader: some View {
+        HStack(spacing: 8) {
+            Text("日期")
+                .frame(width: 74, alignment: .leading)
+            Text("账号")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("切换")
+                .frame(width: 68, alignment: .leading)
+            Text("活跃")
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .font(ConsoleType.caption)
+        .foregroundStyle(ConsoleTheme.tertiaryText)
+    }
+
+    @ViewBuilder
+    private func historyRun(_ run: WorkbuddyRotationRun) -> some View {
+        let steps = run.steps.filter { matchesFilter($0) }
+        VStack(alignment: .leading, spacing: 3) {
+            // 轮次头放在步骤**上面**：恢复摘要属于这一轮，不该漂到下一轮的行里。
+            HStack(spacing: 6) {
+                Text("本轮恢复：\(run.restoreText)")
+                Text(run.triggerText)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                Spacer(minLength: 0)
+                Text(run.stateText)
+                    .foregroundStyle(run.needsAttention ? ConsoleTheme.warning : ConsoleTheme.tertiaryText)
+            }
+            .font(ConsoleType.caption)
+            .foregroundStyle(ConsoleTheme.secondaryText)
+            .padding(.bottom, 1)
+
+            ForEach(steps) { step in
+                HStack(spacing: 8) {
+                    Text(run.planDate)
+                        .frame(width: 74, alignment: .leading)
+                    Text(nickname(step.accountId))
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(step.statusText)
+                        .foregroundStyle(step.status == "failed" ? ConsoleTheme.danger : ConsoleTheme.secondaryText)
+                        .frame(width: 68, alignment: .leading)
+                    Text(step.activityText)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .font(ConsoleType.caption)
+                .foregroundStyle(ConsoleTheme.secondaryText)
+                .help(step.skipText ?? step.detail ?? "")
+            }
+            if let detail = run.detail, !detail.isEmpty {
+                Text(detail)
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.vertical, 4)
+        Divider().overlay(ConsoleTheme.border)
+    }
+
+    private var filteredRuns: [WorkbuddyRotationRun] {
+        (status?.history ?? []).filter { run in
+            run.steps.isEmpty ? matchesFilter(run) : run.steps.contains(where: matchesFilter)
+        }
+    }
+
+    private func matchesFilter(_ step: WorkbuddyRotationStep) -> Bool {
+        switch historyFilter {
+        case "done": return step.status == "done" || step.status == "dwelling"
+        case "skipped": return step.status == "skipped" || step.status == "already_live"
+        case "failed": return step.status == "failed"
+        default: return true
+        }
+    }
+
+    private func matchesFilter(_ run: WorkbuddyRotationRun) -> Bool {
+        switch historyFilter {
+        case "done": return run.state == "completed"
+        case "skipped": return run.state == "skipped"
+        case "failed": return run.state == "failed" || run.state == "recovery_required"
+        default: return true
         }
     }
 
@@ -489,7 +619,8 @@ struct ConsoleWorkbuddyRotationSheet: View {
         loaded = true
     }
 
-    private func save(notify: String?) async {
+    /// 保存表单。返回 `false` = 没保存成功（调用方必须停下）。
+    private func save(notify: String?) async -> Bool {
         await store.saveWorkbuddyRotation([
             "weekdays": weekdays.sorted(),
             "startMinutes": startMinutes,

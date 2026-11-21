@@ -342,12 +342,9 @@ struct ConsoleAccountsView: View {
     private var listColumn: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 2, pinnedViews: []) {
-                workbuddyClientBanner
+                workbuddyClientSection
                     .padding(.horizontal, 8)
                     .padding(.top, 8)
-                workbuddyRotationBanner
-                    .padding(.horizontal, 8)
-                    .padding(.top, 6)
                 if !store.qoderPendingSwitches.isEmpty {
                     pendingSwitchNotice
                         .padding(.horizontal, 8)
@@ -440,138 +437,164 @@ struct ConsoleAccountsView: View {
     ///
     /// 这行字只能来自客户端自己的认证文件（`live.uid`）。AICC 列表里"选中了谁"
     /// 不是登录状态，混用会让人以为已经切过去了。
+    /// 左栏顶部：一个「客户端」区。
+    ///
+    /// 合并了原本分散在两块卡片里的三件事：客户端**现在**登录的是谁、
+    /// 夜间轮换开没开、上一次切换是否还需要收尾。
+    /// 正常状态只显示状态；需要处理时才出现一句原因 + 一个动作。
     @ViewBuilder
-    private var workbuddyClientBanner: some View {
-        if let status = store.wbClientStatus {
-            VStack(alignment: .leading, spacing: 5) {
-                // 左栏很窄：标签单独一行，账号名独占一行（最多两行）。
-                // 挤成一句会把最关键的"是哪个账号"截掉。
-                HStack(spacing: 5) {
-                    Image(systemName: "desktopcomputer")
-                        .font(.system(size: 10))
-                        .foregroundStyle(ConsoleTheme.secondaryText)
-                    Text("WorkBuddy 当前登录")
-                        .font(ConsoleType.caption)
-                        .foregroundStyle(ConsoleTheme.secondaryText)
-                    Spacer(minLength: 0)
+    private var workbuddyClientSection: some View {
+        let client = store.wbClientStatus
+        let rotation = store.wbRotationStatus
+
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
+                Image(systemName: "desktopcomputer")
+                    .font(.system(size: 10))
+                    .foregroundStyle(ConsoleTheme.secondaryText)
+                Text("WorkBuddy 客户端")
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.secondaryText)
+                Spacer(minLength: 0)
+                Button(rotation == nil ? "轮换设置" : (rotation?.plan.enabled == true ? "轮换·开" : "轮换·关")) {
+                    rotationSheetShown = true
                 }
-                Text(liveTitle(status))
+                .buttonStyle(.plain)
+                .font(ConsoleType.caption)
+                .foregroundStyle(
+                    rotation?.plan.enabled == true ? ConsoleTheme.success : ConsoleTheme.accent
+                )
+                .help("设置夜间账号轮换")
+            }
+
+            if let client {
+                Text(liveTitle(client))
                     .font(ConsoleType.rowTitle)
                     .foregroundStyle(ConsoleTheme.text)
                     .lineLimit(2)
                     .truncationMode(.middle)
                     .fixedSize(horizontal: false, vertical: true)
-                Text(bannerDetail(status))
+                Text(clientDetail(client))
                     .font(ConsoleType.caption)
                     .foregroundStyle(ConsoleTheme.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
-                // 临时登录：到期时间必须在左栏一直看得见，不能只留在详情里。
-                if let temporary = status.live.temporarySummary {
-                    Text(temporary)
-                        .font(ConsoleType.caption)
-                        .foregroundStyle(ConsoleTheme.warning)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let offer = status.restoreOffer {
-                    HStack(spacing: 8) {
-                        Text(restoreOfferLabel(offer))
-                            .font(ConsoleType.caption)
-                            .foregroundStyle(offer.isPending ? ConsoleTheme.warning : ConsoleTheme.tertiaryText)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: 0)
-                        Button(offer.temporary ? "恢复原账号…" : "恢复…") {
-                            restorePromptShown = true
-                        }
-                        .buttonStyle(ConsoleSecondaryButtonStyle())
-                        .disabled(store.wbSwitching != nil)
-                    }
-                }
+            } else if let error = store.wbClientError {
+                Text("读不到客户端登录态")
+                    .font(ConsoleType.rowTitle)
+                    .foregroundStyle(ConsoleTheme.text)
+                Text(error)
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .lineLimit(2)
+            } else {
+                Text("读取中")
+                    .font(ConsoleType.rowTitle)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
             }
-            .padding(8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(ConsoleTheme.card, in: RoundedRectangle(cornerRadius: 8))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .strokeBorder(ConsoleTheme.border, lineWidth: 1)
-            )
-        } else if let error = store.wbClientError {
-            ConsoleInlineNotice(
-                kind: .warning,
-                message: "读不到客户端登录态：\(error)",
-                actionTitle: "重试"
-            ) {
-                Task { await store.refreshWorkbuddyClient() }
-            }
-        }
-    }
 
-    /// 左栏第二块：**夜间轮换**。
-    ///
-    /// 只放日常要看的三件事：开没开、什么时候跑、现在跑到哪。设置与执行记录
-    /// 都在面板里——状态机、锁、快照这些词不该出现在主界面。
-    @ViewBuilder
-    private var workbuddyRotationBanner: some View {
-        Button {
-            rotationSheetShown = true
-        } label: {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 5) {
-                    Image(systemName: "moon.stars")
-                        .font(.system(size: 10))
-                        .foregroundStyle(ConsoleTheme.secondaryText)
-                    Text("夜间轮换")
-                        .font(ConsoleType.caption)
-                        .foregroundStyle(ConsoleTheme.secondaryText)
+            if let rotation, !rotation.plan.accountIds.isEmpty {
+                Text(rotationPlanLine(rotation))
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(rotationNextLine(rotation))
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(rotation.attentionRun != nil
+                        ? ConsoleTheme.warning
+                        : ConsoleTheme.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // 临时登录的到期信息必须一直可见，不能只留在详情里。
+            if let temporary = client?.live.temporarySummary {
+                Text(temporary)
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let offer = client?.restoreOffer {
+                Divider().overlay(ConsoleTheme.border)
+                Text(restoreOfferLabel(offer))
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(offer.isPending ? ConsoleTheme.warning : ConsoleTheme.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
                     Spacer(minLength: 0)
-                    if let status = store.wbRotationStatus {
-                        Text(status.plan.enabled ? "已开启" : "已关闭")
-                            .font(ConsoleType.caption)
-                            .foregroundStyle(status.plan.enabled ? ConsoleTheme.success : ConsoleTheme.tertiaryText)
-                    } else {
-                        Text("设置")
-                            .font(ConsoleType.caption)
-                            .foregroundStyle(ConsoleTheme.tertiaryText)
+                    Button(offer.temporary ? "恢复原账号…" : "恢复…") {
+                        restorePromptShown = true
                     }
+                    .buttonStyle(ConsoleSecondaryButtonStyle())
+                    .disabled(store.wbSwitching != nil)
                 }
+            }
 
-                if let status = store.wbRotationStatus {
-                    Text(status.plan.accountIds.isEmpty
-                        ? "还没有选择账号"
-                        : "\(status.plan.windowText) · \(status.plan.accountIds.count) 个账号")
-                        .font(ConsoleType.small)
-                        .foregroundStyle(ConsoleTheme.text)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(status.headline)
-                        .font(ConsoleType.caption)
-                        .foregroundStyle(status.current?.needsAttention == true
-                            ? ConsoleTheme.warning
-                            : ConsoleTheme.tertiaryText)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    Text("设置夜间自动切换账号，并在结束时恢复原账号")
+            if let attention = rotation?.attentionRun {
+                Divider().overlay(ConsoleTheme.border)
+                Text("上一轮没能自动恢复原账号")
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let detail = attention.detail, !detail.isEmpty {
+                    Text(detail)
                         .font(ConsoleType.caption)
                         .foregroundStyle(ConsoleTheme.tertiaryText)
+                        .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                HStack(spacing: 8) {
+                    Spacer(minLength: 0)
+                    Button("去处理…") { rotationSheetShown = true }
+                        .buttonStyle(ConsoleSecondaryButtonStyle())
+                }
             }
-            .padding(8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(ConsoleTheme.card, in: RoundedRectangle(cornerRadius: 8))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .strokeBorder(ConsoleTheme.border, lineWidth: 1)
-            )
         }
-        .buttonStyle(.plain)
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(ConsoleTheme.card, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(ConsoleTheme.border, lineWidth: 1)
+        )
     }
 
+    /// 「运行中 · 短 UID」这类事实，不重复"当前登录"四个字。
+    private func clientDetail(_ status: WorkbuddyClientStatus) -> String {
+        var parts: [String] = []
+        if !status.client.installed {
+            parts.append("未安装客户端")
+        } else if status.client.running == true {
+            parts.append("客户端运行中")
+        } else {
+            parts.append("客户端未运行")
+        }
+        if let uid = status.live.uid, status.live.loggedIn {
+            parts.append(WorkbuddyLiveLogin.shortUID(uid))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func rotationPlanLine(_ status: WorkbuddyRotationStatus) -> String {
+        let plan = status.plan
+        return "\(plan.enabled ? "自动" : "自动（已关闭）") \(plan.windowText) · \(plan.accountIds.count) 个账号"
+    }
+
+    private func rotationNextLine(_ status: WorkbuddyRotationStatus) -> String {
+        if let current = status.current, !current.isTerminal {
+            return current.summary
+        }
+        if !status.plan.enabled { return "下次不会自动执行" }
+        return status.schedule.nextRunText
+    }
+
+    /// 左栏只放"是哪个账号"。UID 在下一行，标题里再挤一遍会先把昵称截断。
     private func liveTitle(_ status: WorkbuddyClientStatus) -> String {
         guard status.live.loggedIn, let uid = status.live.uid else { return "未登录" }
         if let id = status.liveAccountID,
            let account = store.accounts.first(where: { $0.id == id }) {
-            return "\(account.nickname)（\(WorkbuddyLiveLogin.shortUID(uid))）"
+            return account.nickname
         }
-        return "\(WorkbuddyLiveLogin.shortUID(uid))（不在 AICC 账号列表里）"
+        return "\(WorkbuddyLiveLogin.shortUID(uid))（不在账号列表）"
     }
 
     private func bannerDetail(_ status: WorkbuddyClientStatus) -> String {
@@ -765,7 +788,6 @@ struct ConsoleAccountsView: View {
                     ConsoleInfoRow(label: "平台", value: account.platformName)
                     ConsoleInfoRow(label: "账号昵称", value: account.nickname)
                     ConsoleInfoRow(label: "UID", value: ConsoleFormat.maskedUID(account.uid), mono: true)
-                    ConsoleInfoRow(label: "邮箱", value: "未提供（该平台接口不返回邮箱）")
                     ConsoleInfoRow(
                         label: "最近更新",
                         value: ConsoleFormat.shortTimestamp(account.updatedAt)
@@ -819,14 +841,15 @@ struct ConsoleAccountsView: View {
                             .foregroundStyle(ConsoleTheme.secondaryText)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    Text("当前使用：\(account.activeSourceLabel)"
-                        + (account.tokenExpiresAt.map { " · 到期 \(ConsoleFormat.shortTimestamp($0))" } ?? ""))
+                    Text("AICC 后台请求用：\(account.activeSourceLabel)"
+                        + (account.tokenExpiresAt.map { " · 到期 \(ConsoleFormat.shortTimestamp($0))" } ?? "")
+                        + "（只影响签到、额度、成长查询，不影响客户端登录）")
                         .font(ConsoleType.caption)
                         .foregroundStyle(ConsoleTheme.tertiaryText)
                 }
             }
 
-            ConsoleDetailGroup(title: "可用能力", detail: "只显示真实接入的能力") {
+            ConsoleDetailGroup(title: "可用能力") {
                 VStack(alignment: .leading, spacing: 8) {
                     capabilityRow("每日签到", enabled: account.supportsCNTasks,
                                   note: account.supportsCNTasks ? "已接入" : "国际版没有该接口")
@@ -843,7 +866,7 @@ struct ConsoleAccountsView: View {
             if account.supportsCNTasks {
                 ConsoleDetailGroup(
                     title: "奖励",
-                    detail: "写操作需二次确认 · 每次只发一次请求"
+                    detail: "确认后执行 · 结果可回查"
                 ) {
                     ConsoleRewardsBlock(
                         state: store.rewardStates[account.id],
@@ -1027,10 +1050,9 @@ struct ConsoleAccountsView: View {
                     ConsoleInfoRow(label: "平台", value: account.editionName)
                     ConsoleInfoRow(label: "账号昵称", value: account.displayName)
                     ConsoleInfoRow(label: "UID", value: ConsoleFormat.maskedUID(account.uid), mono: true)
-                    ConsoleInfoRow(
-                        label: "邮箱",
-                        value: account.email.map(ConsoleFormat.maskedEmail) ?? "未提供"
-                    )
+                    if let email = account.email, !email.isEmpty {
+                        ConsoleInfoRow(label: "邮箱", value: ConsoleFormat.maskedEmail(email))
+                    }
                     ConsoleInfoRow(label: "最近更新", value: lastQoderSyncText)
                 }
             }
