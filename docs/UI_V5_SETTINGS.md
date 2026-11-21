@@ -269,7 +269,7 @@ SettingsRootView（既有，未改）
 ## 8. 视觉验收（真实 SwiftUI 离屏渲染）
 
 工具：`bash scripts/smoke-test-settings-visual.sh`
-输出：`/private/tmp/aicc-settings-qa`，55 张 PNG。
+输出：`/private/tmp/aicc-settings-qa`，56 张 PNG。
 样本：`macos/SettingsVisual/SettingsVisualState.swift`，固定且脱敏；不含真实令牌、指纹或账号。
 安全：双 flag 构建里 `SettingsModel.loadOnce()` 直接返回，视图不挂任何写操作；`tls.reset` / 撤销设备 / 迁移 / LAN 修改都不会被调用。
 
@@ -284,7 +284,7 @@ SettingsRootView（既有，未改）
 ### 8.2 仓库内保存
 
 - `docs/console-v5/settings/before/`：3 张（旧页 580×560 浅/深 + 580×2200 全貌）。
-- `docs/console-v5/settings/after/`：31 张（核心页 × 浅深色、两套边界尺寸、关键状态与弹层）。
+- `docs/console-v5/settings/after/`：32 张（核心页 × 浅深色、两套边界尺寸、关键状态与弹层）。
 - 其余 24 张由 CI Artifact 承载，不进仓库。
 
 ### 8.3 逐轮人工检查与修复
@@ -450,8 +450,8 @@ SettingsRootView（既有，未改）
 ### 11.6 本轮截图
 
 - 改造前（第一轮成品）：`docs/console-v5/settings/before-simplify/`（连接、授权、管理凭据 3 张）。
-- 改造后：`docs/console-v5/settings/after/`（31 张，含 560/760/960 × 浅深色、异常态、设备安全详情、管理凭据四态）。
-- 完整 55 张由 CI Artifact `settings-ui-visuals` 承载。
+- 改造后：`docs/console-v5/settings/after/`（32 张，含 560/760/960 × 浅深色、异常态、设备安全详情、管理凭据五态）。
+- 完整 56 张由 CI Artifact `settings-ui-visuals` 承载。
 
 ### 11.7 检查结论（560×520 / 760×620 / 960×720 × 浅色 / 深色）
 
@@ -461,3 +461,19 @@ SettingsRootView（既有，未改）
 - 管理凭据：打开即看到「N 项需处理」与三个异常入口；展开「更多操作」后自动滚到迁移/回滚；备份路径只在展开区。
 - 常规 / 高级与诊断：各 2 个与 3 个分组，无脚注。
 - 深色：所有正文与危险按钮对比度保持；弹层有 `ConsoleTheme.canvas` 背景，不再出现灰字压深底。
+
+### 11.8 危险确认文案（系统 `confirmationDialog` 无法离屏渲染，逐条列出以便核对）
+
+| 操作 | 确认标题 | 正文（完整保留） |
+|---|---|---|
+| 启用本地 JSON | 启用本地 JSON 存储（风险弹层） | 5 条：明文保存 / 建议 FileVault / 之后新建授权默认写 JSON / 随时可改回 / 钥匙串仍会用到 |
+| 改回钥匙串 | 之后新建的授权会重新使用钥匙串 | 已经写成 JSON 的授权不受影响，继续可用；不会自动迁移回钥匙串。 |
+| 撤销设备 | 撤销设备后需要重新配对 | 所有已配对的墨水屏与 Android 设备会立即失去访问权限，需要重新生成配对码。 |
+| 重置证书身份 | 重置证书身份？ | 会换掉根证书：所有已配对设备都必须重新确认新指纹，当前的配对码立即失效。执行期间请勿关闭 AICC。 |
+| 迁移全部 | 迁移后新写入的令牌会落成本机 JSON 文件（明文） | 会先备份数据库与清单（不含令牌）。原始钥匙串条目不会删除，可以随时回滚。 |
+| 回滚 | 把引用改回钥匙串？ | 只回滚本次迁移产生、之后没有被重新授权的副本。副本删除前会核对引用；凭据重新从钥匙串读取（可能触发系统授权框）。 |
+| 重新关联 | 把借用授权的引用改成 Magpie 文件？ | 只改引用，不读取、不复制、不删除任何令牌；旧钥匙串条目原样保留。需要 Magpie 已登录且该账号能唯一匹配。 |
+| 重试旧键搬运 | 重试会读一次旧钥匙串条目 | 系统可能弹出授权框。若之前点过「不允许」，请这次选择允许；仍然失败就保持原样，不影响已有授权。 |
+
+自动化覆盖：`testTLSResetCannotRunWithoutConfirmation`、`testTLSResetConfirmationStartsExactlyOneRun`、
+`testFailedCredentialSwitchNeverReportsSuccess`、`testPreferredAuthRollsBackWhenSaveFails`。
