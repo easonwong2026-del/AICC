@@ -53,7 +53,8 @@ enum AutomationPlanKind: String, CaseIterable, Identifiable {
 /// 一个自动计划的展示状态。
 ///
 /// `unknown` / `loading` / `failed` 与 `off` 必须分开：读不到状态时显示
-/// "未开启"会让用户以为计划被关掉了。
+/// "未开启"会让用户以为计划被关掉了。`stale` 处理另一种情况：
+/// 以前读到过，但**最新一次读取失败** —— 旧值可以留着，但不能冒充当前状态。
 enum AutomationState: Equatable {
     case unknown
     case loading
@@ -63,6 +64,8 @@ enum AutomationState: Equatable {
     /// 需要人处理，附带一句原因（例如"需要恢复"）。
     case attention(String)
     case failed(String)
+    /// 有缓存但最新读取失败：保留上次的值，并明确它已经不是最新确认。
+    case stale(previous: String, reason: String)
 
     var statusText: String {
         switch self {
@@ -73,6 +76,7 @@ enum AutomationState: Equatable {
         case .running: return "正在执行"
         case .attention(let text): return text
         case .failed: return "读取失败"
+        case .stale(let previous, _): return "上次：\(previous)"
         }
     }
 
@@ -81,8 +85,21 @@ enum AutomationState: Equatable {
         case .unknown, .loading, .off: return .neutral
         case .on: return .ok
         case .running: return .accent
-        case .attention: return .warning
+        case .attention, .stale: return .warning
         case .failed: return .error
+        }
+    }
+
+    /// 不是最新的确认结果（失败或过期）。
+    var isStale: Bool {
+        if case .stale = self { return true }
+        return false
+    }
+
+    var failureReason: String? {
+        switch self {
+        case .failed(let message), .stale(_, let message): return message
+        default: return nil
         }
     }
 
@@ -104,6 +121,17 @@ struct AutomationPlanRow: Identifiable, Equatable {
     var title: String { kind.title }
     var statusText: String { state.statusText }
     var tone: SettingsTone { state.tone }
+
+    /// 最新一次读取失败时，保留上次的值但降级为"上次状态"。
+    /// 「下次执行时间」属于当前状态，不能被当成最新的：直接丢掉。
+    func markingStale(_ reason: String) -> AutomationPlanRow {
+        AutomationPlanRow(
+            kind: kind,
+            state: .stale(previous: state.statusText, reason: reason),
+            summary: summary + " · 当前无法确认",
+            nextRun: nil
+        )
+    }
 }
 
 struct AutomationInputs {
@@ -173,7 +201,12 @@ enum AutomationPlanBuilder {
             summary = "未知"
         }
 
-        return AutomationPlanRow(kind: .checkin, state: state, summary: summary, nextRun: nextRun)
+        let row = AutomationPlanRow(kind: .checkin, state: state, summary: summary, nextRun: nextRun)
+        // 有缓存但这次没读到：留着上次的值，但不能再叫"已开启"。
+        if let error = inputs.checkinError, inputs.checkinAuto != nil {
+            return row.markingStale(error)
+        }
+        return row
     }
 
     // MARK: 成长
@@ -207,7 +240,11 @@ enum AutomationPlanBuilder {
             summary = "未知"
         }
 
-        return AutomationPlanRow(kind: .growth, state: state, summary: summary, nextRun: nextRun)
+        let row = AutomationPlanRow(kind: .growth, state: state, summary: summary, nextRun: nextRun)
+        if let error = inputs.growthError, inputs.growthAuto != nil {
+            return row.markingStale(error)
+        }
+        return row
     }
 
     // MARK: 旅行
@@ -234,7 +271,11 @@ enum AutomationPlanBuilder {
             summary = "未知"
         }
 
-        return AutomationPlanRow(kind: .travel, state: state, summary: summary)
+        let row = AutomationPlanRow(kind: .travel, state: state, summary: summary)
+        if let error = inputs.travelError, inputs.travelAuto != nil {
+            return row.markingStale(error)
+        }
+        return row
     }
 
     // MARK: Credits
@@ -267,7 +308,12 @@ enum AutomationPlanBuilder {
             }
         }
 
-        return AutomationPlanRow(kind: .credits, state: state, summary: summary)
+        let row = AutomationPlanRow(kind: .credits, state: state, summary: summary)
+        let hasCreditsCache = inputs.creditsLoaded || !inputs.creditsAuto.isEmpty
+        if let error = inputs.creditsError, hasCreditsCache {
+            return row.markingStale(error)
+        }
+        return row
     }
 
     // MARK: 轮换
@@ -284,10 +330,15 @@ enum AutomationPlanBuilder {
             state = .failed(error)
             summary = "读取失败"
         } else if let status = inputs.rotation {
-            let overview = RotationOverview.make(status: status, now: now)
+            let overview = RotationOverview.make(
+                status: status,
+                error: inputs.rotationError,
+                now: now
+            )
             state = overview.state
             summary = overview.compactSummary
-            nextRun = overview.nextRunText
+            // 过期状态下不展示"下次运行"：那是上次读到的排期。
+            nextRun = overview.staleReason == nil ? overview.nextRunText : nil
         } else {
             state = .unknown
             summary = "未知"
@@ -301,7 +352,14 @@ enum AutomationPlanBuilder {
 
 /// 自动轮换的日常视图：打开就回答"开没开、跑几个账号、什么时候跑、上次怎样、有没有要处理"。
 struct RotationOverview: Equatable {
+    /// 展示用状态。最新读取失败时会是 `.stale`，而不是继续绿色"已开启"。
     let state: AutomationState
+    /// 包装成 `.stale` 之前的状态。摘要必须按它来写，否则会退化成"未开启"。
+    let underlyingState: AutomationState
+    /// 计划开关本身（`plan.enabled`）。恢复异常不能反推它还在运行。
+    let planEnabled: Bool
+    /// 有缓存但最新一次读取失败的原因。
+    let staleReason: String?
     let accountCount: Int
     let scheduleText: String
     let nextRunText: String?
@@ -318,12 +376,21 @@ struct RotationOverview: Equatable {
 
     /// 自动计划中心那一行用的短摘要。
     var compactSummary: String {
+        staleReason == nil ? baseSummary : baseSummary + " · 当前无法确认"
+    }
+
+    private var baseSummary: String {
         if !configured { return "未配置" }
-        switch state {
+        // 恢复异常只说明上一轮没收好，不能反推计划仍在运行。
+        if needsRecovery {
+            return planEnabled ? "已开启 · 需要恢复" : "已关闭 · 需要恢复"
+        }
+        if !planEnabled, case .attention = underlyingState {
+            return "已关闭 · 正在停止"
+        }
+        switch underlyingState {
         case .on, .running:
             return "已开启 · \(accountCount) 个账号"
-        case .attention:
-            return "已开启 · 需要恢复"
         default:
             return "未开启 · \(accountCount) 个账号"
         }
@@ -342,6 +409,9 @@ struct RotationOverview: Equatable {
             else { state = .unknown }
             return RotationOverview(
                 state: state,
+                underlyingState: state,
+                planEnabled: false,
+                staleReason: nil,
                 accountCount: 0,
                 scheduleText: "—",
                 nextRunText: nil,
@@ -362,20 +432,26 @@ struct RotationOverview: Equatable {
             ? "自动恢复没有完成，需要人工确认。"
             : nil)
 
-        let state: AutomationState
+        let baseState: AutomationState
         if recoveryText != nil {
-            state = .attention("需要恢复")
+            baseState = .attention("需要恢复")
+        } else if !plan.enabled, let current = status.current, !current.isTerminal {
+            // 开关已经关了，但这一轮还在安全收尾：既不是"已开启"，也不是"空闲"。
+            baseState = .attention("正在停止")
         } else if let current = status.current, !current.isTerminal {
-            state = .running
+            baseState = .running
         } else if plan.enabled {
-            state = .on
+            baseState = .on
         } else {
-            state = .off
+            baseState = .off
         }
+        let staleReason = error
+        let displayState = error.map { AutomationState.stale(previous: baseState.statusText, reason: $0) }
+            ?? baseState
 
-        // 只在有具体时间时给"下次"：窗口内已经在跑，状态行已经说过了。
+        // 只在"会执行"时给下一次：关闭的计划没有下一次，窗口内已经在跑也说过了。
         let next: String?
-        if !status.schedule.inWindow, let date = status.schedule.nextRunAt, configured {
+        if plan.enabled, !status.schedule.inWindow, let date = status.schedule.nextRunAt, configured {
             next = AutomationTime.short(date)
         } else {
             next = nil
@@ -390,7 +466,10 @@ struct RotationOverview: Equatable {
         }
 
         return RotationOverview(
-            state: state,
+            state: displayState,
+            underlyingState: baseState,
+            planEnabled: plan.enabled,
+            staleReason: staleReason,
             accountCount: plan.accountIds.count,
             scheduleText: configured
                 ? "\(AutomationScheduleText.weekdays(plan.weekdays)) \(plan.windowText) · 每账号 \(plan.dwellText)"
@@ -454,6 +533,18 @@ struct RotationDraft: Equatable {
             || plan.timezone != timezone
     }
 
+    /// 与 `WorkbuddyRotationPlan.planKey` 同一套字段，用来判断草稿是否已保存。
+    var planKey: String {
+        RotationPlanKey.make(
+            weekdays: Array(weekdays),
+            startMinutes: startMinutes,
+            endMinutes: endMinutes,
+            accountIds: accountIds,
+            dwellSeconds: dwellSeconds,
+            timezone: timezone
+        )
+    }
+
     /// 交给 `saveWorkbuddyRotation` 的字段。键名必须与既有 RPC 一致。
     var params: [String: Any] {
         [
@@ -482,6 +573,27 @@ struct RotationDraft: Equatable {
     }
 }
 
+/// 计划内容的稳定摘要。键顺序固定，账号顺序参与计算（顺序就是切换顺序）。
+enum RotationPlanKey {
+    static func make(
+        weekdays: [Int],
+        startMinutes: Int,
+        endMinutes: Int,
+        accountIds: [String],
+        dwellSeconds: Int,
+        timezone: String
+    ) -> String {
+        [
+            weekdays.sorted().map(String.init).joined(separator: ","),
+            String(startMinutes),
+            String(endMinutes),
+            accountIds.joined(separator: ","),
+            String(dwellSeconds),
+            timezone,
+        ].joined(separator: "|")
+    }
+}
+
 // MARK: - 配置步骤
 
 enum RotationSetupStep: Int, CaseIterable, Identifiable {
@@ -505,6 +617,146 @@ enum RotationSetupStep: Int, CaseIterable, Identifiable {
 
     var previous: RotationSetupStep? {
         RotationSetupStep(rawValue: rawValue - 1)
+    }
+}
+
+// MARK: - 预演与草稿的一致性
+
+/// 第三步该说什么。
+///
+/// 服务端 `dry_run` 读的是**已保存**计划，不接受草稿。所以：
+/// - 草稿有改动时，按钮禁用，只展示本地摘要，绝不把旧计划的预演当成新配置的验证；
+/// - 只有"已保存计划的摘要"与"预演时的计划摘要"一致，结果才算数。
+struct RotationPreviewState: Equatable {
+    let dirty: Bool
+    /// 计划当前是否开启。开启时保存会立刻改变正在生效的配置。
+    let planEnabled: Bool
+    let savedPlanKey: String?
+    let dryRunPlanKey: String?
+    let hasDryRun: Bool
+
+    var hasSavedPlan: Bool { savedPlanKey != nil }
+
+    /// 预演按钮可用条件：没有未保存修改、有计划、没有结果或结果对应这份计划。
+    var canPreview: Bool { hasSavedPlan && !dirty }
+
+    /// 结果是否对应当前已保存计划。
+    var showsDryRun: Bool {
+        guard hasDryRun, !dirty else { return false }
+        return dryRunPlanKey != nil && dryRunPlanKey == savedPlanKey
+    }
+
+    /// 有结果但已经不是这份计划的：明确说过期，不展示细节。
+    var showsStaleResult: Bool {
+        hasDryRun && !showsDryRun
+    }
+
+    var summaryTitle: String {
+        dirty ? "未保存的配置（本地摘要）" : "已保存的配置"
+    }
+
+    /// 面板上那句限制说明。只有这里能解释"为什么不能预演"。
+    var caveat: String? {
+        if dirty {
+            var text = "改动还没有保存。服务端预演只读已保存的计划，所以现在不能拿它验证这份配置；"
+                + "先「仅保存」，再预演。"
+            if planEnabled {
+                text += "注意：计划当前是开启的，保存会立即改变正在生效的配置。"
+            }
+            return text
+        }
+        guard hasSavedPlan else { return "还没有可预演的计划。" }
+        if showsStaleResult { return "上一次预演对应的是旧计划，已经过期；请重新预演。" }
+        if !hasDryRun { return "还没有预演。预演只读，不会切换账号。" }
+        return "这份结果来自服务端对已保存计划的演算，不代表真实切换一定成功。"
+    }
+}
+
+// MARK: - 离开编辑
+
+enum RotationManagerTab: String, CaseIterable, Identifiable {
+    case plan
+    case history
+
+    var id: String { rawValue }
+    var title: String { self == .plan ? "计划" : "执行记录" }
+}
+
+/// 编辑中可能触发的三种离开。关闭窗口与切标签用的是同一套判定。
+enum RotationLeaveIntent: Equatable {
+    case close
+    case tab(RotationManagerTab)
+    case cancelEditing
+}
+
+enum RotationLeaveDecision: Equatable {
+    case proceed
+    case confirm
+    /// 保存执行中：不接受任何会丢状态的导航。
+    case ignore
+}
+
+enum RotationLeavePolicy {
+    static func decide(intent: RotationLeaveIntent, dirty: Bool, saving: Bool) -> RotationLeaveDecision {
+        if saving { return .ignore }
+        if !dirty { return .proceed }
+        return .confirm
+    }
+}
+
+// MARK: - 开关（生产路径）
+
+enum RotationToggleOutcome: Equatable {
+    case applied(enabled: Bool)
+    /// 保存失败：没有再发开关请求。
+    case saveFailed
+    /// 开关请求失败（含 Worker 不可用）。调用方必须回读真实状态。
+    case applyFailed
+
+    var isFailure: Bool {
+        if case .applied = self { return false }
+        return true
+    }
+    var enabled: Bool? {
+        if case .applied(let value) = self { return value }
+        return nil
+    }
+}
+
+/// 自动轮换开关的执行顺序。视图与模型都走这里，测试也走这里。
+enum RotationPlanControl {
+    enum Step: Equatable {
+        case save
+        case apply
+    }
+
+    /// **关闭永远不先保存表单**：用户可能在编辑一个无效计划，
+    /// 关闭是想让它停下来，不能被"保存失败"挡住。
+    static func steps(enabled: Bool, dirty: Bool) -> [Step] {
+        guard enabled else { return [.apply] }
+        return dirty ? [.save, .apply] : [.apply]
+    }
+
+    static func setPlanEnabled(
+        _ enabled: Bool,
+        dirty: Bool,
+        save: () async -> Bool,
+        apply: (Bool) async -> Bool,
+        reload: () async -> Void
+    ) async -> RotationToggleOutcome {
+        for step in steps(enabled: enabled, dirty: dirty) {
+            switch step {
+            case .save:
+                guard await save() else { return .saveFailed }
+            case .apply:
+                guard await apply(enabled) else {
+                    // Worker 不可用时不能假装改成功：回读服务端真实状态。
+                    await reload()
+                    return .applyFailed
+                }
+            }
+        }
+        return .applied(enabled: enabled)
     }
 }
 

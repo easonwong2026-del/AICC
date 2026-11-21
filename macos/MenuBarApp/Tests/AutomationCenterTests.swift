@@ -137,6 +137,7 @@ final class AutomationCenterTests: XCTestCase {
         XCTAssertEqual(off.state, .off)
         XCTAssertTrue(off.scheduleText.contains("周一至周五"))
         XCTAssertEqual(off.compactSummary, "未开启 · 2 个账号")
+        XCTAssertNil(off.nextRunText, "关闭的计划没有下一次执行")
 
         let on = RotationOverview.make(status: rotationStatus(enabled: true, accountIds: ["a", "b"]))
         XCTAssertEqual(on.state, .on)
@@ -144,12 +145,31 @@ final class AutomationCenterTests: XCTestCase {
     }
 
     func testRotationOverviewNeverMasksRecovery() {
-        let recovery = RotationOverview.make(status: rotationRecoveryStatus())
+        let recovery = RotationOverview.make(status: rotationRecoveryStatus(enabled: true))
         XCTAssertTrue(recovery.needsRecovery)
+        XCTAssertTrue(recovery.planEnabled)
         XCTAssertEqual(recovery.state, .attention("需要恢复"))
         XCTAssertEqual(recovery.state.tone, .warning)
         XCTAssertNotNil(recovery.recoveryText)
         XCTAssertEqual(recovery.compactSummary, "已开启 · 需要恢复")
+
+        // 计划已关闭但上一轮恢复失败：仍然要警告，但不能说计划还在运行。
+        let closed = RotationOverview.make(status: rotationRecoveryStatus(enabled: false))
+        XCTAssertTrue(closed.needsRecovery)
+        XCTAssertFalse(closed.planEnabled)
+        XCTAssertEqual(closed.state, .attention("需要恢复"))
+        XCTAssertEqual(closed.compactSummary, "已关闭 · 需要恢复")
+    }
+
+    func testRotationOverviewSeparatesStoppingFromRunning() {
+        // 开关已关、这一轮还在安全收尾：既不是"已开启"，也不是"空闲"。
+        let stopping = RotationOverview.make(status: rotationDwellingStatus(enabled: false))
+        XCTAssertEqual(stopping.state, .attention("正在停止"))
+        XCTAssertEqual(stopping.compactSummary, "已关闭 · 正在停止")
+
+        let running = RotationOverview.make(status: rotationDwellingStatus(enabled: true))
+        XCTAssertEqual(running.state, .running)
+        XCTAssertEqual(running.compactSummary, "已开启 · 1 个账号")
     }
 
     func testRotationOverviewKeepsUnknownApartFromOff() {
@@ -317,9 +337,10 @@ final class AutomationCenterTests: XCTestCase {
 
     func testDisablingNeverRequiresSavingAnInvalidForm() {
         // 关闭是独立动作：表单再怎么无效，也必须能停下来。
-        XCTAssertEqual(RotationFeedbackText.toggleSteps(enabled: false, dirty: true), [.disable])
-        XCTAssertEqual(RotationFeedbackText.toggleSteps(enabled: false, dirty: false), [.disable])
-        XCTAssertEqual(RotationFeedbackText.toggleSteps(enabled: true, dirty: true), [.save, .enable])
+        XCTAssertEqual(RotationPlanControl.steps(enabled: false, dirty: true), [.apply])
+        XCTAssertEqual(RotationPlanControl.steps(enabled: false, dirty: false), [.apply])
+        XCTAssertEqual(RotationPlanControl.steps(enabled: true, dirty: true), [.save, .apply])
+        XCTAssertEqual(RotationPlanControl.steps(enabled: true, dirty: false), [.apply])
     }
 
     func testStopRequestKeepsItsAsynchronousMeaning() {
@@ -332,6 +353,186 @@ final class AutomationCenterTests: XCTestCase {
 
         let notRestored = RotationFeedbackText.stop(status: "stopped", restored: false, detail: nil)
         XCTAssertTrue(notRestored.isFailure, "恢复失败必须算失败")
+    }
+
+    // MARK: - 缓存 + 最新读取失败
+
+    func testEveryPlanKeepsTheCachedValueButMarksItAsStale() {
+        var inputs = AutomationInputs()
+        inputs.checkinAuto = enabledCheckinAuto()
+        inputs.checkinError = "助手超时"
+        inputs.growthAuto = GrowthAutoStatus(json: ["enabled": true, "intervalSeconds": 86_400])
+        inputs.growthError = "助手超时"
+        inputs.travelAuto = TravelAutoStatus(json: [
+            "enabledAccounts": 2, "busy": false,
+            "departIntervalSecs": 1800, "claimIntervalSecs": 600,
+            "owner": "AICC.app", "runsOnlyWhileAppRunning": true,
+        ])
+        inputs.travelError = "助手超时"
+        inputs.creditsLoaded = true
+        inputs.creditsAuto = [
+            QoderCreditsAutoItem(json: ["accountId": "a", "autoEnabled": true, "supported": true])!,
+        ]
+        inputs.creditsError = "助手超时"
+        inputs.rotation = rotationStatus(enabled: true, accountIds: ["a"])
+        inputs.rotationError = "助手超时"
+
+        for row in AutomationPlanBuilder.rows(inputs) {
+            XCTAssertTrue(row.state.isStale, "\(row.kind.rawValue) 有缓存但读取失败必须是过期状态")
+            XCTAssertTrue(row.statusText.hasPrefix("上次："), row.statusText)
+            XCTAssertTrue(row.summary.contains("当前无法确认"), row.summary)
+            XCTAssertEqual(row.tone, .warning)
+            XCTAssertNil(row.nextRun, "过期的下次执行时间不能当成当前排期")
+        }
+    }
+
+    func testNoCacheAndFailureIsAFailureNotStale() {
+        var inputs = AutomationInputs()
+        inputs.checkinError = "助手未运行"
+        inputs.growthError = "助手未运行"
+        inputs.travelError = "助手未运行"
+        inputs.creditsError = "助手未运行"
+        inputs.rotationError = "助手未运行"
+
+        for row in AutomationPlanBuilder.rows(inputs) {
+            guard case .failed = row.state else {
+                return XCTFail("\(row.kind.rawValue) 没有缓存时必须是 failed")
+            }
+            XCTAssertEqual(row.tone, .error)
+            XCTAssertFalse(row.statusText.hasPrefix("上次："))
+        }
+    }
+
+    func testLoadingWithACacheDoesNotLookLikeOff() {
+        var inputs = AutomationInputs()
+        inputs.checkinAuto = enabledCheckinAuto()
+        inputs.checkinLoading = true
+        inputs.growthAuto = GrowthAutoStatus(json: ["enabled": true])
+        inputs.growthLoading = true
+        inputs.travelAuto = TravelAutoStatus(json: [
+            "enabledAccounts": 1, "busy": false,
+            "departIntervalSecs": 1800, "claimIntervalSecs": 600,
+            "owner": "AICC.app", "runsOnlyWhileAppRunning": true,
+        ])
+        inputs.travelLoading = true
+        inputs.creditsLoaded = true
+        inputs.creditsAuto = [
+            QoderCreditsAutoItem(json: ["accountId": "a", "autoEnabled": true, "supported": true])!,
+        ]
+        inputs.creditsLoading = true
+        inputs.rotation = rotationStatus(enabled: true, accountIds: ["a"])
+        inputs.rotationLoading = true
+
+        for row in AutomationPlanBuilder.rows(inputs) {
+            XCTAssertNotEqual(row.state, .off, "\(row.kind.rawValue) 读取中不能显示成未开启")
+            XCTAssertNotEqual(row.state, .loading, "\(row.kind.rawValue) 有缓存时不该丢掉已知状态")
+        }
+    }
+
+    func testRotationStaleKeepsTheLastKnownPlanButDropsNextRun() {
+        var inputs = AutomationInputs()
+        inputs.rotation = rotationStatus(enabled: true, accountIds: ["a"])
+        inputs.rotationError = "助手超时"
+
+        let row = AutomationPlanBuilder.rotation(inputs, now: Date())
+        XCTAssertTrue(row.state.isStale)
+        XCTAssertEqual(row.statusText, "上次：已开启")
+        XCTAssertTrue(row.summary.contains("已开启 · 1 个账号"))
+        XCTAssertTrue(row.summary.contains("当前无法确认"))
+        XCTAssertNil(row.nextRun)
+    }
+
+    // MARK: - 预演只对已保存计划
+
+    func testDirtyDraftCannotClaimAServerPreview() {
+        let state = RotationPreviewState(
+            dirty: true,
+            planEnabled: true,
+            savedPlanKey: "saved",
+            dryRunPlanKey: "saved",
+            hasDryRun: true
+        )
+        XCTAssertFalse(state.canPreview, "草稿没保存时不能预演")
+        XCTAssertFalse(state.showsDryRun, "旧计划的预演不能冒充新草稿的验证结果")
+        XCTAssertEqual(state.summaryTitle, "未保存的配置（本地摘要）")
+        XCTAssertTrue(state.caveat?.contains("仅保存") == true)
+        XCTAssertTrue(state.caveat?.contains("计划当前是开启的") == true,
+                      "开启中的计划保存会立刻生效，必须说明")
+    }
+
+    func testPreviewOnlyCountsWhenItMatchesTheSavedPlan() {
+        let matching = RotationPreviewState(
+            dirty: false,
+            planEnabled: false,
+            savedPlanKey: "a|b",
+            dryRunPlanKey: "a|b",
+            hasDryRun: true
+        )
+        XCTAssertTrue(matching.canPreview)
+        XCTAssertTrue(matching.showsDryRun)
+        XCTAssertFalse(matching.showsStaleResult)
+        XCTAssertTrue(matching.caveat?.contains("不代表真实切换一定成功") == true)
+
+        let stale = RotationPreviewState(
+            dirty: false,
+            planEnabled: false,
+            savedPlanKey: "new",
+            dryRunPlanKey: "old",
+            hasDryRun: true
+        )
+        XCTAssertTrue(stale.showsStaleResult)
+        XCTAssertFalse(stale.showsDryRun)
+        XCTAssertTrue(stale.caveat?.contains("过期") == true)
+
+        let none = RotationPreviewState(
+            dirty: false,
+            planEnabled: false,
+            savedPlanKey: "new",
+            dryRunPlanKey: nil,
+            hasDryRun: false
+        )
+        XCTAssertTrue(none.canPreview)
+        XCTAssertFalse(none.showsDryRun)
+        XCTAssertTrue(none.caveat?.contains("还没有预演") == true)
+    }
+
+    func testPlanKeyCoversEveryPreviewFieldAndIgnoresEnabled() {
+        let plan = rotationPlan(enabled: false)
+        var draft = RotationDraft(plan: plan)
+        XCTAssertEqual(draft.planKey, plan.planKey)
+        XCTAssertEqual(RotationDraft(plan: rotationPlan(enabled: true)).planKey, draft.planKey,
+                       "开关不影响 dry-run 内容")
+
+        draft.accountIds = ["b", "a"]
+        XCTAssertNotEqual(draft.planKey, plan.planKey, "顺序变了就是另一份计划")
+
+        draft = RotationDraft(plan: plan)
+        draft.startMinutes += 1
+        XCTAssertNotEqual(draft.planKey, plan.planKey)
+
+        draft = RotationDraft(plan: plan)
+        draft.dwellSeconds = 600
+        XCTAssertNotEqual(draft.planKey, plan.planKey)
+
+        draft = RotationDraft(plan: plan)
+        draft.weekdays = [6]
+        XCTAssertNotEqual(draft.planKey, plan.planKey)
+
+        draft = RotationDraft(plan: plan)
+        draft.timezone = "UTC"
+        XCTAssertNotEqual(draft.planKey, plan.planKey)
+    }
+
+    // MARK: - 离开编辑
+
+    func testLeavePolicyNeverLosesEditsAndNeverFightsASave() {
+        XCTAssertEqual(RotationLeavePolicy.decide(intent: .close, dirty: false, saving: false), .proceed)
+        XCTAssertEqual(RotationLeavePolicy.decide(intent: .close, dirty: true, saving: false), .confirm)
+        XCTAssertEqual(RotationLeavePolicy.decide(intent: .tab(.history), dirty: true, saving: false), .confirm)
+        XCTAssertEqual(RotationLeavePolicy.decide(intent: .cancelEditing, dirty: true, saving: false), .confirm)
+        XCTAssertEqual(RotationLeavePolicy.decide(intent: .close, dirty: true, saving: true), .ignore,
+                       "保存执行中不接受会丢状态的导航")
+        XCTAssertEqual(RotationLeavePolicy.decide(intent: .tab(.history), dirty: false, saving: true), .ignore)
     }
 
     // MARK: - 文案
@@ -384,10 +585,42 @@ final class AutomationCenterTests: XCTestCase {
         ])
     }
 
-    private func rotationRecoveryStatus() -> WorkbuddyRotationStatus {
+    private func enabledCheckinAuto() -> CheckinAutoStatus {
+        var auto = CheckinAutoStatus()
+        auto.enabled = true
+        auto.enabledAccounts = 2
+        auto.totalAccounts = 3
+        return auto
+    }
+
+    private func rotationDwellingStatus(enabled: Bool) -> WorkbuddyRotationStatus {
         WorkbuddyRotationStatus(json: [
             "plan": [
-                "enabled": true,
+                "enabled": enabled,
+                "timezone": "Asia/Shanghai",
+                "weekdays": [1, 2],
+                "startMinutes": 22 * 60 + 30,
+                "endMinutes": 7 * 60,
+                "accountIds": ["a"],
+                "dwellSeconds": 3600,
+            ],
+            "schedule": ["inWindow": true],
+            "live": ["uid": "wb_1", "loggedIn": true],
+            "current": [
+                "id": "r0",
+                "planDate": "2026-11-21",
+                "state": "dwelling",
+                "restoreResult": "等待恢复",
+                "steps": [],
+            ],
+            "history": [],
+        ])
+    }
+
+    private func rotationRecoveryStatus(enabled: Bool = true) -> WorkbuddyRotationStatus {
+        WorkbuddyRotationStatus(json: [
+            "plan": [
+                "enabled": enabled,
                 "timezone": "Asia/Shanghai",
                 "weekdays": [1, 2, 3],
                 "startMinutes": 22 * 60 + 30,

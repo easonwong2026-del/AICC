@@ -4,35 +4,22 @@ import SwiftUI
 ///
 /// 与旧弹层的区别不是尺寸，而是**职责**：
 /// - 打开默认是概览（开没开、几个账号、什么时候跑、上次怎样、要不要处理）；
+/// - 概览里直接有开启/关闭；关闭不要求先保存表单；
 /// - 配置走三步（账号 → 时间 → 预演/保存），一次设置好；
 /// - 执行操作（立即执行 / 停止 / 恢复）单独收在「执行」区，不和保存并排。
+///
+/// 所有"该不该问、能不能发"的判断在 `RotationManagerModel`，视图只画。
 struct RotationManagerView: View {
     @ObservedObject var store: ConsoleStore
+    @StateObject private var model: RotationManagerModel
     let focus: RotationManagerFocus
 
     @Environment(\.dismiss) private var dismiss
 
-    enum Tab: String, CaseIterable, Identifiable {
-        case plan
-        case history
-
-        var id: String { rawValue }
-        var title: String { self == .plan ? "计划" : "执行记录" }
-    }
-
-    @State private var tab: Tab
-    @State private var editing = false
-    @State private var step: RotationSetupStep = .accounts
-    @State private var draft: RotationDraft?
     @State private var showExecution = false
     @State private var confirmRunNow = false
     @State private var confirmRestore = false
-    @State private var confirmDiscard = false
-    @State private var saving = false
-    @State private var saveFailure: String?
-    @State private var localHint: String?
-    /// 打开编辑时落在哪一步。生产固定第一步；离屏渲染可以直接看第 2、3 步。
-    private let initialStep: RotationSetupStep
+
     /// 离屏渲染：直接呈现保存/启用失败。生产构建里没有这个参数。
     #if AICC_VISUAL_TEST && AICC_CONSOLE_VISUAL
     var visualSaveFailure: String?
@@ -41,29 +28,21 @@ struct RotationManagerView: View {
     init(
         store: ConsoleStore,
         focus: RotationManagerFocus = .plan,
-        initialStep: RotationSetupStep = .accounts
+        initialStep: RotationSetupStep = .accounts,
+        seedDraft: RotationDraft? = nil
     ) {
         self.store = store
         self.focus = focus
-        self.initialStep = initialStep
-        _tab = State(initialValue: focus == .history ? .history : .plan)
+        _model = StateObject(wrappedValue: RotationManagerModel(
+            store: store,
+            focus: focus,
+            initialStep: initialStep,
+            seedDraft: seedDraft
+        ))
         _showExecution = State(initialValue: focus == .recovery)
-        _editing = State(initialValue: focus == .setup)
     }
 
-    private var status: WorkbuddyRotationStatus? { store.wbRotationStatus }
-    private var overview: RotationOverview {
-        RotationOverview.make(
-            status: status,
-            loading: store.wbRotationLoading,
-            error: store.wbRotationError
-        )
-    }
-
-    private var dirty: Bool {
-        guard let draft, let plan = status?.plan else { return false }
-        return draft.isDirty(against: plan)
-    }
+    private var overview: RotationOverview { model.overview }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -74,8 +53,8 @@ struct RotationManagerView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: ConsoleTheme.sectionSpacing) {
-                    if tab == .plan {
-                        if editing {
+                    if model.tab == .plan {
+                        if model.editing {
                             setupContent
                         } else {
                             overviewContent
@@ -92,7 +71,7 @@ struct RotationManagerView: View {
             }
             .frame(maxHeight: .infinity)
 
-            if editing && tab == .plan {
+            if model.editing && model.tab == .plan {
                 Divider().overlay(ConsoleTheme.border)
                 setupFooter
             }
@@ -100,14 +79,14 @@ struct RotationManagerView: View {
         .frame(width: 760, height: 620)
         .background(ConsoleTheme.canvas)
         .onAppear {
-            handleFocus()
+            model.handleFocus()
+            if focus == .recovery { showExecution = true }
             #if AICC_VISUAL_TEST && AICC_CONSOLE_VISUAL
-            if let visualSaveFailure, editing { saveFailure = visualSaveFailure }
+            if let visualSaveFailure, model.editing { model.applyVisualFailure(visualSaveFailure) }
             #endif
         }
-        .onChange(of: store.wbRotationStatus) { _, _ in
-            // 服务端刷新绝不覆盖正在编辑的表单。
-            if !editing { draft = nil }
+        .onChange(of: model.closeRequested) { _, requested in
+            if requested { dismiss() }
         }
         .alert("立即执行一轮？", isPresented: $confirmRunNow) {
             Button("取消", role: .cancel) {}
@@ -122,12 +101,34 @@ struct RotationManagerView: View {
         } message: {
             Text("会用这一轮开始时保存的认证文件覆盖客户端当前登录态。如果你刚刚手动换过账号，请不要继续。")
         }
-        .confirmationDialog("放弃未保存的修改？", isPresented: $confirmDiscard) {
-            Button("放弃修改", role: .destructive) { leaveEditing() }
-            Button("继续编辑", role: .cancel) {}
+        .alert("开启自动轮换？", isPresented: firstEnableBinding) {
+            Button("取消", role: .cancel) { model.cancelFirstEnable() }
+            Button("开启") { Task { await model.confirmFirstEnable() } }
+        } message: {
+            Text("开启后，计划会在窗口内关闭并重启 WorkBuddy 来切换账号，可能影响你正在使用的工作。\n"
+                + "AICC 没有运行、或 Mac 处于休眠时，不能保证计划执行。\n"
+                + "每轮结束会按既有规则尝试恢复最初登录的账号；恢复失败时需要你手动处理。")
+        }
+        .confirmationDialog("放弃未保存的修改？", isPresented: discardBinding) {
+            Button("放弃修改", role: .destructive) { model.confirmLeave() }
+            Button("继续编辑", role: .cancel) { model.cancelLeave() }
         } message: {
             Text("账号顺序与时间还没有保存，离开后这些修改会丢失。")
         }
+    }
+
+    // MARK: - 弹层绑定
+
+    /// 只读绑定：关闭由按钮动作负责。
+    ///
+    /// 如果在这里的 `set(false)` 里取消，SwiftUI 会在调用按钮动作**之前**
+    /// 先把待办清掉，"放弃修改/开启"就会变成空操作。
+    private var discardBinding: Binding<Bool> {
+        Binding(get: { model.pendingLeave != nil }, set: { _ in })
+    }
+
+    private var firstEnableBinding: Binding<Bool> {
+        Binding(get: { model.pendingEnable != nil }, set: { _ in })
     }
 
     // MARK: - 头部与标签
@@ -138,9 +139,10 @@ struct RotationManagerView: View {
                 .font(ConsoleType.detailTitle)
                 .foregroundStyle(ConsoleTheme.text)
             Spacer(minLength: 0)
-            Button("关闭") { requestClose() }
+            Button("关闭") { model.requestClose() }
                 .buttonStyle(ConsoleSecondaryButtonStyle())
                 .keyboardShortcut(.cancelAction)
+                .disabled(model.saving)
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 14)
@@ -148,20 +150,23 @@ struct RotationManagerView: View {
 
     private var tabBar: some View {
         HStack(spacing: 8) {
-            Picker("", selection: $tab) {
-                ForEach(Tab.allCases) { item in
+            Picker("", selection: Binding(
+                get: { model.tab },
+                set: { model.requestTab($0) }
+            )) {
+                ForEach(RotationManagerTab.allCases) { item in
                     Text(item.title).tag(item)
                 }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .frame(width: 200)
-            .onChange(of: tab) { _, newValue in
-                if newValue == .history { requestLeaveEditing() }
-            }
+            .disabled(model.saving)
+
             Spacer(minLength: 0)
-            if editing {
-                Text("第 \(step.rawValue + 1)/3 步 · \(step.title)")
+
+            if model.editing {
+                Text("第 \(model.step.rawValue + 1)/3 步 · \(model.step.title)")
                     .font(ConsoleType.small)
                     .foregroundStyle(ConsoleTheme.secondaryText)
             }
@@ -178,7 +183,18 @@ struct RotationManagerView: View {
                 recoveryBanner(recovery)
             }
 
-            if let error = store.wbRotationError, status == nil {
+            if let reason = overview.staleReason {
+                // 有缓存但这次没读到：旧值可以看，但不能当成当前状态。
+                ConsoleInlineNotice(
+                    kind: .warning,
+                    message: "最新一次读取失败：\(reason)。下面显示的是上次读到的状态。",
+                    actionTitle: "重试"
+                ) {
+                    Task { await store.refreshWorkbuddyRotation() }
+                }
+            }
+
+            if let error = store.wbRotationError, model.status == nil {
                 ConsoleInlineNotice(kind: .error, message: "读不到轮换状态：\(error)", actionTitle: "重试") {
                     Task { await store.refreshWorkbuddyRotation() }
                 }
@@ -202,13 +218,19 @@ struct RotationManagerView: View {
     private var overviewGroup: some View {
         ConsoleListSurface {
             VStack(spacing: 0) {
-                overviewRow("状态", value: overview.state.statusText, tone: overview.state.tone)
+                // 正常开/关由"自动执行"一行说清；只有执行中、待处理、
+                // 读取失败这些额外事实才值得再占一行。
+                if showsStateRow {
+                    overviewRow("状态", value: overview.state.statusText, tone: overview.state.tone)
+                    rowDivider
+                }
+                autoRunRow
                 rowDivider
                 if overview.configured {
                     overviewRow("参与账号", value: "\(overview.accountCount) 个")
                     rowDivider
                     overviewRow("计划时间", value: overview.scheduleText)
-                    if let next = overview.nextRunText {
+                    if let next = overview.nextRunText, overview.staleReason == nil {
                         rowDivider
                         overviewRow("下次运行", value: next)
                     }
@@ -228,6 +250,64 @@ struct RotationManagerView: View {
                 overviewRow("客户端登录", value: overview.liveText)
             }
         }
+    }
+
+    private var showsStateRow: Bool {
+        if overview.staleReason != nil { return true }
+        switch overview.state {
+        case .on, .off: return false
+        default: return true
+        }
+    }
+
+    /// 概览里的开/关。关闭是安全方向，不需要确认，也不先保存表单。
+    private var autoRunRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text("自动执行")
+                .font(ConsoleType.small)
+                .foregroundStyle(ConsoleTheme.secondaryText)
+                .frame(width: 76, alignment: .leading)
+
+            if model.status == nil || overview.staleReason != nil {
+                // 读不到或只有缓存：不给开关，也不假装"未配置"。
+                Text("无法确认")
+                    .font(ConsoleType.body)
+                    .foregroundStyle(ConsoleTheme.secondaryText)
+                Spacer(minLength: 0)
+            } else if !overview.configured {
+                // 确实还没配置过：这里不摆一个永远点不动的开关。
+                Text("未配置")
+                    .font(ConsoleType.body)
+                    .foregroundStyle(ConsoleTheme.secondaryText)
+                Spacer(minLength: 0)
+            } else if let enabled = model.planEnabled {
+                Text(enabled ? "已开启" : "未开启")
+                    .font(ConsoleType.body)
+                    .foregroundStyle(enabled ? ConsoleTheme.success : ConsoleTheme.secondaryText)
+                Spacer(minLength: 8)
+                if model.togglingPlan {
+                    ProgressView().controlSize(.small)
+                }
+                Button(enabled ? "关闭" : "开启…") {
+                    model.requestPlanEnabled(!enabled)
+                }
+                .buttonStyle(ConsoleSecondaryButtonStyle())
+                .disabled(model.togglingPlan
+                          || (!enabled && !overview.configured)
+                          || (!enabled && model.status?.current?.isTerminal == false))
+                .help(enabled
+                      ? "停止后续计划；正在执行的一轮会安全收尾并恢复原账号。"
+                      : (model.status?.current?.isTerminal == false
+                         ? "这一轮还在收尾，结束后再开启。"
+                         : "先确认风险再开启。"))
+            } else {
+                Text("无法确认")
+                    .font(ConsoleType.body)
+                    .foregroundStyle(ConsoleTheme.secondaryText)
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.vertical, 9)
     }
 
     private var rowDivider: some View {
@@ -251,9 +331,9 @@ struct RotationManagerView: View {
 
     private var actionRow: some View {
         HStack(spacing: 8) {
-            Button(overview.configured ? "设置计划…" : "设置轮换计划…") { beginEditing() }
-                .buttonStyle(ConsolePrimaryButtonStyle(enabled: status != nil))
-                .disabled(status == nil)
+            Button(overview.configured ? "设置计划…" : "设置轮换计划…") { model.beginEditing() }
+                .buttonStyle(ConsolePrimaryButtonStyle(enabled: model.status != nil))
+                .disabled(model.status == nil)
             Spacer(minLength: 0)
         }
     }
@@ -289,7 +369,7 @@ struct RotationManagerView: View {
                             title: "暂停并恢复原账号",
                             detail: "请求可能先落库，等当前切换安全收尾后再恢复。",
                             action: "暂停",
-                            disabled: store.wbRotationBusy || status?.current?.isTerminal != false
+                            disabled: store.wbRotationBusy || model.status?.current?.isTerminal != false
                         ) {
                             Task { await store.stopWorkbuddyRotation() }
                         }
@@ -339,7 +419,7 @@ struct RotationManagerView: View {
             HStack(spacing: 6) {
                 Image(systemName: "exclamationmark.triangle")
                     .font(ConsoleType.caption)
-                Text("上一轮没有完成恢复")
+                Text(overview.planEnabled ? "上一轮没有完成恢复" : "上一轮没有完成恢复（计划已关闭）")
                     .font(ConsoleType.rowTitle)
                 Spacer(minLength: 0)
             }
@@ -365,17 +445,18 @@ struct RotationManagerView: View {
     // MARK: - 编辑内容
 
     @ViewBuilder private var setupContent: some View {
-        if let draft, let plan = status?.plan {
+        if let draft = model.draft, let plan = model.plan {
             RotationSetupView(
                 store: store,
                 draft: Binding(
-                    get: { self.draft ?? RotationDraft(plan: plan) },
-                    set: { self.draft = $0 }
+                    get: { model.draft ?? draft },
+                    set: { model.replaceDraft($0) }
                 ),
-                step: step,
-                plan: plan
+                step: model.step,
+                preview: model.preview,
+                onPreview: { Task { await model.previewSavedPlan() } }
             )
-        } else if let error = store.wbRotationError, status == nil {
+        } else if let error = store.wbRotationError, model.status == nil {
             ConsoleInlineNotice(kind: .error, message: "读不到轮换计划：\(error)", actionTitle: "重试") {
                 Task { await store.refreshWorkbuddyRotation() }
             }
@@ -386,43 +467,51 @@ struct RotationManagerView: View {
 
     private var setupFooter: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let saveFailure {
+            if let saveFailure = model.saveFailure {
                 ConsoleInlineNotice(kind: .error, message: saveFailure)
-            } else if let localHint {
+            } else if let localHint = model.localHint {
                 ConsoleInlineNotice(kind: .info, message: localHint)
-            } else if dirty {
+            } else if model.dirty {
                 Text("有未保存的修改")
                     .font(ConsoleType.micro)
                     .foregroundStyle(ConsoleTheme.warning)
             }
 
             HStack(spacing: 8) {
-                Button("取消") { requestLeaveEditing() }
+                Button("取消") { model.requestLeave(.cancelEditing) }
                     .buttonStyle(ConsoleSecondaryButtonStyle())
-                    .disabled(saving)
+                    .disabled(model.saving)
+
+                if model.planEnabled == true {
+                    // 关闭不受表单状态影响：这里不保存、不校验草稿。
+                    Button("关闭自动轮换") { model.requestPlanEnabled(false) }
+                        .buttonStyle(ConsoleSecondaryButtonStyle())
+                        .disabled(model.saving || model.togglingPlan)
+                        .help("停止后续计划。不会保存当前表单，也不会校验它。")
+                }
 
                 Spacer(minLength: 8)
 
-                if step.previous != nil {
-                    Button("上一步") { step = step.previous ?? .accounts }
+                if model.step.previous != nil {
+                    Button("上一步") { model.step = model.step.previous ?? .accounts }
                         .buttonStyle(ConsoleSecondaryButtonStyle())
-                        .disabled(saving)
+                        .disabled(model.saving)
                 }
 
-                if let next = step.next {
-                    Button("下一步") { step = next }
+                if let next = model.step.next {
+                    Button("下一步") { model.step = next }
                         .buttonStyle(ConsolePrimaryButtonStyle(enabled: canAdvance))
-                        .disabled(!canAdvance || saving)
+                        .disabled(!canAdvance || model.saving)
                 } else {
-                    Button("仅保存") { Task { await performSave(enable: false) } }
+                    Button("仅保存") { model.requestSaveOnly() }
                         .buttonStyle(ConsoleSecondaryButtonStyle())
-                        .disabled(saving || !canSave)
-                    Button("保存并开启") { Task { await performSave(enable: true) } }
+                        .disabled(model.saving || !canSave)
+                    Button("保存并开启") { model.requestSaveAndEnable() }
                         .buttonStyle(ConsolePrimaryButtonStyle(enabled: canSave))
-                        .disabled(saving || !canSave)
+                        .disabled(model.saving || !canSave)
                 }
 
-                if saving {
+                if model.saving {
                     ProgressView().controlSize(.small)
                 }
             }
@@ -432,88 +521,15 @@ struct RotationManagerView: View {
     }
 
     private var canAdvance: Bool {
-        switch step {
-        case .accounts: return !(draft?.accountIds.isEmpty ?? true)
-        case .schedule: return !(draft?.weekdays.isEmpty ?? true)
+        switch model.step {
+        case .accounts: return !(model.draft?.accountIds.isEmpty ?? true)
+        case .schedule: return !(model.draft?.weekdays.isEmpty ?? true)
         case .preview: return true
         }
     }
 
     private var canSave: Bool {
-        guard let draft else { return false }
-        return draft.isValid
-    }
-
-    // MARK: - 动作
-
-    @MainActor
-    private func performSave(enable: Bool) async {
-        guard let draft, let plan = status?.plan else { return }
-        saving = true
-        saveFailure = nil
-        localHint = nil
-        let isDirty = draft.isDirty(against: plan)
-
-        let result = await RotationSaveFlow.run(
-            dirty: isDirty,
-            enable: enable,
-            save: { await store.saveWorkbuddyRotation(draft.params, note: nil) },
-            setEnabled: { await store.setWorkbuddyRotationEnabled($0) },
-            reload: { await store.refreshWorkbuddyRotation(silent: true) }
-        )
-
-        saving = false
-        switch result {
-        case .savedOnly:
-            localHint = "计划已保存。要生效还需要打开自动轮换。"
-        case .enabled:
-            leaveEditing()
-        case .saveFailed:
-            // 保存失败：保留表单内容，绝不用旧计划去开启。
-            saveFailure = store.wbRotationNotice ?? "计划没有保存成功。"
-        case .enableFailed:
-            // 已经回读过服务端状态；这里只说明没有开启成功。
-            saveFailure = store.wbRotationNotice.map { "开启失败：\($0)" } ?? "开启失败，计划仍是原来的状态。"
-        }
-    }
-
-    private func handleFocus() {
-        if focus == .recovery { showExecution = true }
-        if focus == .setup, status != nil { beginEditing() }
-    }
-
-    private func beginEditing() {
-        guard let plan = status?.plan else { return }
-        draft = RotationDraft(plan: plan)
-        step = initialStep
-        saveFailure = nil
-        localHint = nil
-        editing = true
-        tab = .plan
-    }
-
-    private func leaveEditing() {
-        editing = false
-        draft = nil
-        step = .accounts
-        saveFailure = nil
-        localHint = nil
-    }
-
-    private func requestLeaveEditing() {
-        guard editing, dirty else {
-            leaveEditing()
-            return
-        }
-        confirmDiscard = true
-    }
-
-    private func requestClose() {
-        if editing, dirty {
-            confirmDiscard = true
-        } else {
-            dismiss()
-        }
+        model.draft?.isValid ?? false
     }
 
     private func toneColor(_ tone: SettingsTone) -> Color {

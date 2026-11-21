@@ -140,6 +140,9 @@ final class ConsoleStore: ObservableObject {
     @Published private(set) var wbRotationBusy = false
     /// 预演结果：只在用户点「预演」之后出现，不自动刷新。
     @Published private(set) var wbRotationDryRun: WorkbuddyRotationDryRun?
+    /// 这份预演对应的**已保存计划**摘要。服务端 dry-run 只读已保存计划，
+    /// 界面据此判断结果是否还能代表当前草稿对应的计划。
+    @Published private(set) var wbRotationDryRunPlanKey: String?
 
     let worker: AccountWorkerManager
     private let settings: AppSettings
@@ -675,6 +678,8 @@ final class ConsoleStore: ObservableObject {
         wbRotationFailed = false
         do {
             wbRotationDryRun = try await worker.workbuddyRotationDryRun()
+            // 服务端读的是已保存计划：把它的摘要记下来，草稿再改就自动失效。
+            wbRotationDryRunPlanKey = wbRotationStatus?.plan.planKey
             wbRotationNotice = "预演完成：没有改动任何登录态。"
         } catch {
             wbRotationFailed = true
@@ -751,6 +756,7 @@ final class ConsoleStore: ObservableObject {
     func clearWorkbuddyRotationNotice() {
         wbRotationNotice = nil
         wbRotationDryRun = nil
+        wbRotationDryRunPlanKey = nil
     }
 
     private func message(for error: Error) -> String {
@@ -1476,6 +1482,13 @@ extension ConsoleStore {
         wbRotationNotice = fixture.wbRotationNotice
         wbRotationFailed = fixture.wbRotationFailed
         wbRotationDryRun = fixture.wbRotationDryRun
+        wbRotationDryRunPlanKey = fixture.wbRotationDryRunPlanKey
     }
 }
 #endif
+
+// MARK: - 轮换管理界面的动作入口
+
+/// 视图只通过 `RotationControlling` 操作轮换，测试用同一套接口的替身。
+/// 这里不做任何额外逻辑：全部转发到上面的既有方法。
+extension ConsoleStore: RotationControlling {}

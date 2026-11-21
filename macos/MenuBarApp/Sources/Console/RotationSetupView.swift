@@ -6,7 +6,9 @@ struct RotationSetupView: View {
     @ObservedObject var store: ConsoleStore
     @Binding var draft: RotationDraft
     let step: RotationSetupStep
-    let plan: WorkbuddyRotationPlan
+    /// 第三步的诚实边界：服务端预演只读已保存计划。
+    let preview: RotationPreviewState
+    let onPreview: () -> Void
 
     private var cnAccounts: [ConsoleAccount] {
         store.accounts.filter { $0.isWorkbuddy(international: false) }
@@ -272,6 +274,18 @@ struct RotationSetupView: View {
 
     private var previewStep: some View {
         VStack(alignment: .leading, spacing: ConsoleTheme.sectionSpacing) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(preview.summaryTitle)
+                    .font(ConsoleType.rowTitle)
+                    .foregroundStyle(ConsoleTheme.text)
+                if let caveat = preview.caveat {
+                    Text(caveat)
+                        .font(ConsoleType.micro)
+                        .foregroundStyle(preview.dirty ? ConsoleTheme.warning : ConsoleTheme.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             ConsoleListSurface {
                 VStack(spacing: 0) {
                     summaryRow("参与账号", value: accountOrderText)
@@ -287,16 +301,21 @@ struct RotationSetupView: View {
             }
 
             HStack(spacing: 8) {
-                Button("预演") { Task { await store.previewWorkbuddyRotation() } }
+                Button("预演已保存计划", action: onPreview)
                     .buttonStyle(ConsoleSecondaryButtonStyle())
-                    .disabled(store.wbRotationBusy)
-                Text("只演算，不切换账号。")
-                    .font(ConsoleType.micro)
-                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .disabled(!preview.canPreview || store.wbRotationBusy)
+                    .help(preview.dirty
+                          ? "先「仅保存」，预演才能读到这份配置。"
+                          : "服务端只读演算已保存的计划，不会切换账号。")
+                if preview.dirty {
+                    Text("改动未保存，预演不可用")
+                        .font(ConsoleType.micro)
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                }
                 Spacer(minLength: 0)
             }
 
-            if let dry = store.wbRotationDryRun {
+            if preview.showsDryRun, let dry = store.wbRotationDryRun {
                 ConsoleListSurface {
                     VStack(alignment: .leading, spacing: 4) {
                         ForEach(dry.steps) { step in
@@ -317,6 +336,7 @@ struct RotationSetupView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
+            // 结果过期/未预演已经在标题下的说明里写清楚了，这里不再重复一遍。
         }
     }
 

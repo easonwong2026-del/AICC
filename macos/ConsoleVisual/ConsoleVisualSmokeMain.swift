@@ -66,6 +66,7 @@ struct ConsoleVisualFixture {
     var wbRotationNotice: String?
     var wbRotationFailed = false
     var wbRotationDryRun: WorkbuddyRotationDryRun?
+    var wbRotationDryRunPlanKey: String?
     /// 自动计划中心：读不到自动状态时不能显示"未开启"。
     var checkinAutoError: String?
     var growthAutoError: String?
@@ -246,6 +247,71 @@ extension ConsoleVisualFixture {
             "endAt": iso(Date(), 8 * 3600),
             "originLoggedIn": true,
         ])
+        // 服务端预演只读已保存计划：样本必须带上它对应的计划摘要。
+        fixture.wbRotationDryRunPlanKey = fixture.wbRotationStatus?.plan.planKey
+        return fixture
+    }
+
+    /// 已关闭但这一轮还在安全收尾：状态不能写"已开启"。
+    static var rotationStopWaiting: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.wbRotationStatus = WorkbuddyRotationStatus(
+            json: rotationStatusJSON(
+                now: Date(), state: "dwelling", detail: nil, restoreResult: nil,
+                enabled: false, inWindow: true
+            )
+        )
+        fixture.wbRotationNotice = RotationFeedbackText.toggle(
+            enabled: false,
+            stopStatus: "stop_requested",
+            restored: nil
+        ).text
+        return fixture
+    }
+
+    /// 计划已关闭，但上一轮恢复失败：仍然要警告，不能说计划还在运行。
+    static var rotationRecoveryClosed: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.wbRotationStatus = WorkbuddyRotationStatus(
+            json: rotationStatusJSON(
+                now: Date(), state: "recovery_required",
+                detail: "已写回快照，但客户端当前登录不是原账号；请手动确认",
+                restoreResult: "restore_failed", enabled: false
+            )
+        )
+        fixture.wbRotationFailed = true
+        fixture.wbRotationNotice = RotationFeedbackText.disableFeedback(.restoreFailed).text
+        return fixture
+    }
+
+    /// 有缓存但最新读取失败：显示"上次状态"，不能继续绿色"已开启"。
+    static var rotationStale: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.wbRotationStatus = WorkbuddyRotationStatus(
+            json: rotationStatusJSON(
+                now: Date(), state: "scheduled", detail: nil, restoreResult: nil
+            )
+        )
+        fixture.wbRotationError = "助手 20 秒内没有返回最新状态"
+        return fixture
+    }
+
+    /// 五类自动计划都有缓存，但最新一次读取全部失败。
+    static var automationStale: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.checkinError = nil
+        fixture.checkinAutoError = "助手 20 秒内没有返回"
+        fixture.growthAutoError = "助手 20 秒内没有返回"
+        fixture.travelError = "助手 20 秒内没有返回"
+        fixture.qoderCreditsError = "助手 20 秒内没有返回"
+        fixture.wbRotationError = "助手 20 秒内没有返回"
+        if fixture.wbRotationStatus == nil {
+            fixture.wbRotationStatus = WorkbuddyRotationStatus(
+                json: rotationStatusJSON(
+                    now: Date(), state: "scheduled", detail: nil, restoreResult: nil
+                )
+            )
+        }
         return fixture
     }
 
@@ -1274,6 +1340,14 @@ struct ConsoleVisualSmokeMain {
         previewStore.applyVisualFixture(.rotationPreview)
         let noAccountStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
         noAccountStore.applyVisualFixture(.rotationNoAccount)
+        let stopWaitingStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        stopWaitingStore.applyVisualFixture(.rotationStopWaiting)
+        let recoveryClosedStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        recoveryClosedStore.applyVisualFixture(.rotationRecoveryClosed)
+        let staleRotationStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        staleRotationStore.applyVisualFixture(.rotationStale)
+        let staleAutomationStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        staleAutomationStore.applyVisualFixture(.automationStale)
         store.applyVisualFixture(.sample)  // 幂等：两次调用不应改变任何数据
 
         var count = 0
@@ -1462,6 +1536,27 @@ struct ConsoleVisualSmokeMain {
             ("rotation-off-760x620-light",
              { AnyView(RotationManagerView(store: offStore)) },
              CGSize(width: 760, height: 620), .light),
+            ("rotation-off-760x620-dark",
+             { AnyView(RotationManagerView(store: offStore)) },
+             CGSize(width: 760, height: 620), .dark),
+            ("rotation-disable-waiting-760x620-light",
+             { AnyView(RotationManagerView(store: stopWaitingStore)) },
+             CGSize(width: 760, height: 620), .light),
+            ("rotation-disable-waiting-760x620-dark",
+             { AnyView(RotationManagerView(store: stopWaitingStore)) },
+             CGSize(width: 760, height: 620), .dark),
+            ("rotation-recovery-closed-760x620-light",
+             { AnyView(RotationManagerView(store: recoveryClosedStore)) },
+             CGSize(width: 760, height: 620), .light),
+            ("rotation-recovery-closed-760x620-dark",
+             { AnyView(RotationManagerView(store: recoveryClosedStore)) },
+             CGSize(width: 760, height: 620), .dark),
+            ("rotation-stale-760x620-light",
+             { AnyView(RotationManagerView(store: staleRotationStore)) },
+             CGSize(width: 760, height: 620), .light),
+            ("rotation-stale-760x620-dark",
+             { AnyView(RotationManagerView(store: staleRotationStore)) },
+             CGSize(width: 760, height: 620), .dark),
             ("rotation-empty-760x620-light",
              { AnyView(RotationManagerView(store: emptyStore)) },
              CGSize(width: 760, height: 620), .light),
@@ -1471,12 +1566,22 @@ struct ConsoleVisualSmokeMain {
             ("rotation-setup-760x620-light",
              { AnyView(RotationManagerView(store: offStore, focus: .setup)) },
              CGSize(width: 760, height: 620), .light),
+            // 已开启 + 未保存修改：底部仍然必须能直接关闭计划。
+            ("rotation-setup-enabled-dirty-760x620-light",
+             { AnyView(Self.enabledDirtyScene(store: store)) },
+             CGSize(width: 760, height: 620), .light),
             ("rotation-setup-schedule-760x620-light",
              { AnyView(RotationManagerView(store: offStore, focus: .setup, initialStep: .schedule)) },
              CGSize(width: 760, height: 620), .light),
             ("rotation-setup-preview-760x620-light",
              { AnyView(RotationManagerView(store: previewStore, focus: .setup, initialStep: .preview)) },
              CGSize(width: 760, height: 620), .light),
+            ("rotation-preview-dirty-760x620-light",
+             { AnyView(Self.dirtyPreviewScene(store: previewStore)) },
+             CGSize(width: 760, height: 620), .light),
+            ("rotation-preview-dirty-760x620-dark",
+             { AnyView(Self.dirtyPreviewScene(store: previewStore)) },
+             CGSize(width: 760, height: 620), .dark),
             ("rotation-save-failed-760x620-light",
              { AnyView({
                  var view = RotationManagerView(store: offStore, focus: .setup, initialStep: .preview)
@@ -1520,6 +1625,10 @@ struct ConsoleVisualSmokeMain {
              CGSize(width: 1440, height: 900), .dark),
             ("automation-degraded-1120x760-light",
              { AnyView(consoleView(store: degradedStore, settings: settings, scheme: .light,
+                                   page: .checkin, taskCenterMode: "automation")) },
+             CGSize(width: 1120, height: 760), .light),
+            ("automation-stale-1120x760-light",
+             { AnyView(consoleView(store: staleAutomationStore, settings: settings, scheme: .light,
                                    page: .checkin, taskCenterMode: "automation")) },
              CGSize(width: 1120, height: 760), .light),
             ("activity-block-1000x420-light",
@@ -1672,6 +1781,24 @@ struct ConsoleVisualSmokeMain {
         }
 
         print("console visual QA: \(count) images -> \(outputDir)")
+    }
+
+    /// 已开启 + 未保存修改：验证"关闭自动轮换"不被表单挡住。
+    @MainActor
+    private static func enabledDirtyScene(store: ConsoleStore) -> some View {
+        let plan = store.wbRotationStatus?.plan ?? WorkbuddyRotationPlan(json: [:])
+        var seed = RotationDraft(plan: plan)
+        seed.startMinutes = 21 * 60
+        return RotationManagerView(store: store, focus: .setup, initialStep: .schedule, seedDraft: seed)
+    }
+
+    /// 第三步的"未保存"状态：草稿与已保存计划不同，预演必须禁用。
+    @MainActor
+    private static func dirtyPreviewScene(store: ConsoleStore) -> some View {
+        let plan = store.wbRotationStatus?.plan ?? WorkbuddyRotationPlan(json: [:])
+        var seed = RotationDraft(plan: plan)
+        seed.startMinutes = 21 * 60
+        return RotationManagerView(store: store, focus: .setup, initialStep: .preview, seedDraft: seed)
     }
 
     private static func schemeName(_ scheme: ColorScheme) -> String {
