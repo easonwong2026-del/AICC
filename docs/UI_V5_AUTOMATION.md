@@ -221,12 +221,13 @@
 | 文件 | 用例 | 覆盖 |
 |---|---:|---|
 | `AutomationCenterTests` | 33 | 五类状态派生（未知/读取中/失败/关闭/开启/执行中/**缓存+失败**）、Credits 只计支持账号、轮换概览（未配置/关闭/开启/恢复异常/正在停止/未知）、恢复异常按 `plan.enabled` 区分、`planKey` 覆盖全部预演字段、预演态四条分支、草稿脏判定与排序稳定、`params` 键与顺序、保存并开启四条分支、关闭不需要保存、离开策略（关闭/切 tab/取消编辑 × 脏/保存中）、星期与时间文案 |
-| `RotationManagerModelTests` | 21 | **生产控制路径**：关闭不保存无效表单、执行中仍可关闭、关闭失败回读、开启先保存再启用、保存失败不启用、Worker 不可用不伪装成功、首次开启确认（取消零请求/确认后才执行/已开启不再问）、放弃修改后真正关闭、取消关闭保留内容、切 tab 先确认且取消回原页、无修改直接离开、保存中拒绝导航、预演与草稿一致性、焦点落点 |
+| `RotationManagerModelTests` | 22 | **生产控制路径**：关闭不保存无效表单、执行中仍可关闭、关闭失败回读、开启先保存再启用、保存失败不启用、Worker 不可用不伪装成功、首次开启确认（取消零请求/确认后才执行/已开启不再问）、放弃修改后真正关闭、取消关闭保留内容、切 tab 先确认且取消回原页、无修改直接离开、保存中拒绝导航、预演与草稿一致性、焦点落点 |
+| `AutomationAsyncFlowTests` | 11 | **异步结果一致性**：预演发起时绑定计划、请求期间计划变化丢弃、乱序返回不覆盖新结果、无计划不发请求；Worker 不可用有/无缓存、恢复清除 stale；Credits 失败保留上次快照、从未成功读取为失败、上次无支持账号仍算历史、恢复清除 stale |
 | `WorkbuddyRotationFeedbackTests` | 8 | 执行/停止文案语义；关闭计划后「另一操作占锁 / 停止请求 / 已恢复 / 恢复失败 / 无事可停」分别反馈；`stop_requested` 不得出现「已恢复」 |
 | `ConsoleNavigationTests` | 7 | 三个入口共用一次性请求、token 每次变化、任务中心模式切换不产生请求、自动计划的管理路由 |
 
 本机没有 XCTest，使用一份 XCTest 替身编译并**真跑**了本次受影响的三套测试：
-`AutomationCenterTests` + `RotationManagerModelTests` + `WorkbuddyRotationFeedbackTests` 共 62 个用例（334 断言），
+`AutomationCenterTests` + `RotationManagerModelTests` + `WorkbuddyRotationFeedbackTests` + `AutomationAsyncFlowTests` 共 74 个用例（375 断言），
 以及 `SettingsCenterTests` + `ConsoleNavigationTests` 共 41 个用例（216 断言），全部 0 失败。
 最终以 CI `swift-test` 为准。
 
@@ -237,8 +238,8 @@
 | 概览「关闭」/「开启…」 | `RotationManagerView.autoRunRow` → `RotationManagerModel.requestPlanEnabled` → `setPlanEnabled` → `RotationPlanControl.setPlanEnabled` → `ConsoleStore.setWorkbuddyRotationEnabled` |
 | 编辑底部「关闭自动轮换」 | 同上，`dirty` 为 true 时仍只走 `[.apply]` |
 | 「保存并开启」（首次） | `requestSaveAndEnable` → `pendingEnable = .saveAndEnable` → alert → `confirmFirstEnable()` → `performSave(enable: true)` |
-| 「仅保存」 | `requestSaveOnly` → `performSave(enable: false)` → `RotationSaveFlow.steps == [.save]` |
-| 第三步「预演已保存计划」 | `onPreview` → `previewSavedPlan`（`preview.canPreview` 为 false 时不发 RPC）→ `ConsoleStore.previewWorkbuddyRotation` → 记录 `wbRotationDryRunPlanKey` |
+| 「仅保存」 | `requestSaveOnly` → `performSave(enable: false)` → `RotationSaveFlow.steps == [.save]`；提示按服务端 `plan.enabled` 说 |
+| 第三步「预演已保存计划」 | `onPreview` → `previewSavedPlan`（`preview.canPreview` 为 false 时不发 RPC）→ `ConsoleStore.previewWorkbuddyRotation` → `RotationPreviewFlow`（发起时固定 planKey + 代次）|
 | 关闭窗口 / 切 tab | `requestClose` / `requestTab` → `RotationLeavePolicy.decide` → `pendingLeave` → `confirmLeave` / `cancelLeave` |
 | 概览开关失败 | `RotationPlanControl` 返回 `.applyFailed` → 已 `reload` → `ConsoleStore` 的 notice 显示真实原因 |
 
@@ -246,7 +247,7 @@
 
 ### 10.3 CI
 
-- HEAD `0ca1d0d`，run `44912283147` **completed success**：
+- HEAD `0ca1d0d`，run `44912283147` **completed success**（数据一致性轮之前）：
   `changes` / `swift-test` / `macos-build` 全部 success；
   `rust` / `android` / `test` / `lint` / `android-visual` 按路径过滤 skipped；`macos-dmg` 在 PR 上按设计跳过。
 - `swift-test` 内：`swift test` 通过，控制台 137 张与设置 59 张离屏渲染并上传 artifact（`console-ui-visuals` / `settings-ui-visuals`）。
@@ -333,3 +334,48 @@
 
 设置 → 高级与诊断 → 账号轮换时区改为只读：显示服务端值 + 「在任务中心 → 自动计划 → 客户端轮换里修改」。
 删除 `SettingsModel.saveRotationTimezone`，确保没有第二个写入口。后端存储与计算未改。
+
+## 13. 数据一致性收口
+
+本轮不动 UI 结构，只修异步结果与历史状态。
+
+### 13.1 P0 预演结果绑定发起时的计划
+
+`ConsoleStore.previewWorkbuddyRotation` 不再在返回后读 `planKey`：
+
+- `RotationPreviewFlow` 在**请求开始前**捕获 `planKey` 与 `wbRotationPlanGeneration`；
+- 返回后先检查序号：只有最新一次预演可以落库，乱序返回的旧结果标记 `superseded`；
+- 再检查代次：请求期间计划内容变过（含 A→B→A）→ `planChanged`，结果丢弃并提示重新预演；
+- 计划内容变化时 `wbRotationStatus.didSet` 会清空旧 dry-run 并递增代次；
+- 预演从不保存草稿。
+
+### 13.2 P1 静默刷新也记录失败
+
+`refreshWorkbuddyRotation` 改走 `RotationRefreshFlow`：
+
+- `ensureWorkerReady()` 失败 → **总是**写入 `wbRotationError`，保留最后成功快照；
+- `silent` 只影响是否打扰用户，不再决定是否记录事实；
+- 有缓存 → `stale`（上次：… + 当前无法确认）；无缓存 → `failed`；下次成功 → error 清空，恢复正常。
+
+### 13.3 P1 Credits 保留真实历史
+
+`refreshQoderCredits` 改走 `QoderCreditsRefreshFlow`：
+
+- 失败时不再清空 `qoderCreditsAuto`，保留上次成功快照；
+- 从未成功读取 → `loaded == false` + 空数组 → 「读取失败」；
+- 上次成功但确实没有支持账号 → `loaded == true` + 空数组 → 「上次：未开启 · 暂无支持账号 · 当前无法确认」；
+- 读取恢复 → error 清空，过期标记消失；
+- 领取行为、逐账号动作未改。
+
+### 13.4 P2 仅保存文案
+
+`performSave(enable:false)` 按服务端 `plan.enabled` 输出：
+
+- 已开启：「计划已保存。新的配置已经生效。」
+- 未开启：「计划已保存（还没有开启）。预演现在针对的就是这份已保存计划。」
+
+### 13.5 测试与截图
+
+- 新增 `AutomationAsyncFlowTests`（11 个）：用 continuation 制造乱序返回，覆盖 A 预演未回 → B 落地 → A 返回。
+- `RotationManagerModelTests` 增加仅保存文案用例（22 个）。
+- 截图仍为 137 张；`automation-degraded` 现在严格渲染「无缓存 + 读取失败」，`automation-stale` 渲染「上次状态 + 当前无法确认」。
