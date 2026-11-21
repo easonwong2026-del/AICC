@@ -169,3 +169,22 @@ struct CredentialVerifyReport: Equatable {
         )
     }
 }
+
+/// CRED-5：批量重新关联的失败原因聚合。
+///
+/// 放在纯模型里而不是 `AccountWorkerManager` 上：Manager 依赖 SwiftUI，
+/// 不能进 AICCCore 测试目标；这段逻辑只处理字典，属于可测的展示规则。
+enum CredentialRelinkSummary {
+    /// 把 `items[]` 里 `ok == false` 的原因聚合成一句，按出现次数排序。
+    static func reasonSummary(_ items: [[String: Any]]) -> String {
+        var counts: [String: Int] = [:]
+        for item in items where item["ok"] as? Bool == false {
+            let reason = item["reason"] as? String ?? "unknown"
+            counts[reason, default: 0] += 1
+        }
+        return counts
+            .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
+            .map { "\($0.key) ×\($0.value)" }
+            .joined(separator: "、")
+    }
+}

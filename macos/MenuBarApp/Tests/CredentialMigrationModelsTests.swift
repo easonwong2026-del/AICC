@@ -244,9 +244,9 @@ final class CredentialMigrationModelsTests: XCTestCase {
             ["accountId": "c", "ok": false, "reason": "write_failed"],
             ["accountId": "d", "ok": false, "reason": "source_missing"],
         ]
-        let text = AccountWorkerManager.reasonSummary(items)
+        let text = CredentialRelinkSummary.reasonSummary(items)
         XCTAssertTrue(text.contains("source_missing ×2"), text)
         XCTAssertTrue(text.contains("write_failed ×1"), text)
-        XCTAssertTrue(AccountWorkerManager.reasonSummary([]).isEmpty, "全成功时不显示原因")
+        XCTAssertTrue(CredentialRelinkSummary.reasonSummary([]).isEmpty, "全成功时不显示原因")
     }
 }

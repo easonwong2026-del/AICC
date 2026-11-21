@@ -91,6 +91,7 @@ jobs:
               - 'scripts/smoke-test-widget-bundle.sh'
               - 'scripts/smoke-test-board-visual.sh'
               - 'scripts/smoke-test-console-visual.sh'
+              - 'scripts/smoke-test-settings-visual.sh'
               - 'scripts/smoke-test-dashboard-visual.sh'
               - 'scripts/smoke-test-display-snapshot.sh'
               - 'scripts/build-widget-preview.sh'
@@ -299,11 +300,20 @@ jobs:
       - name: Render the console UI (4 pages x 3 sizes x light/dark)
         run: bash scripts/smoke-test-console-visual.sh
 
+      - name: Render the settings centre (4 categories x 3 sizes x light/dark)
+        run: bash scripts/smoke-test-settings-visual.sh
+
       - name: Upload console acceptance images
         uses: actions/upload-artifact@v4
         with:
           name: console-ui-visuals
           path: /private/tmp/aicc-console-qa/*.png
+
+      - name: Upload settings acceptance images
+        uses: actions/upload-artifact@v4
+        with:
+          name: settings-ui-visuals
+          path: /private/tmp/aicc-settings-qa/*.png
 
       - name: Upload dashboard acceptance images
         uses: actions/upload-artifact@v4

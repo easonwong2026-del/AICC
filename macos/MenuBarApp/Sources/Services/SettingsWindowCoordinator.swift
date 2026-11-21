@@ -6,9 +6,23 @@ struct SettingsRootView: View {
     @ObservedObject var settings: AppSettings
     let server: ServerManager
     let loginAtLaunch: LaunchAtLoginService
+    @StateObject private var model: SettingsModel
+
+    init(settings: AppSettings, server: ServerManager, loginAtLaunch: LaunchAtLoginService) {
+        self.settings = settings
+        self.server = server
+        self.loginAtLaunch = loginAtLaunch
+        // 主控制台与设置共用同一个账号助手实例，避免一个 App 起两个 worker。
+        _model = StateObject(wrappedValue: SettingsModel(
+            settings: settings,
+            server: server,
+            loginAtLaunch: loginAtLaunch,
+            worker: .shared
+        ))
+    }
 
     var body: some View {
-        SettingsView()
+        SettingsView(model: model)
             .environmentObject(settings)
             .environmentObject(server)
             .environmentObject(loginAtLaunch)
@@ -92,8 +106,14 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
         let settingsWindow = NSWindow(contentViewController: hostingController)
         settingsWindow.identifier = NSUserInterfaceItemIdentifier("com.aieink.dashboard.settings")
         settingsWindow.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        settingsWindow.setContentSize(NSSize(width: 580, height: 560))
-        settingsWindow.minSize = NSSize(width: 560, height: 520)
+        settingsWindow.setContentSize(NSSize(
+            width: SettingsWindowMetrics.defaultWidth,
+            height: SettingsWindowMetrics.defaultHeight
+        ))
+        settingsWindow.minSize = NSSize(
+            width: SettingsWindowMetrics.minWidth,
+            height: SettingsWindowMetrics.minHeight
+        )
         settingsWindow.isReleasedWhenClosed = false
         settingsWindow.animationBehavior = .none
         settingsWindow.delegate = self

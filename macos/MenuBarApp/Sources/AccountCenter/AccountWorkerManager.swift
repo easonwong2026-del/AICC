@@ -206,12 +206,16 @@ final class AccountWorkerManager: ObservableObject {
     }
 
     /// 写首选来源。助手侧会校验取值，非法值返回 `invalid_params`。
+    ///
+    /// 先乐观改 UI，再发请求；**任何失败都要把 UI 恢复到服务端的旧值**，
+    /// 否则界面会长期显示一个助手并不认可的来源（旧实现在"助手未运行"
+    /// 分支直接 return，正好漏掉了这一步）。
     func setPreferredAuthSource(_ value: String) async {
         guard value == "magpie" || value == "own" else { return }
         let previous = preferredAuthSource
         preferredAuthSource = value
         guard let client, client.isRunning else {
-            authSettingsError = "助手未运行，设置没有保存"
+            applyPreferredAuthOutcome(.rolledBack(previous, error: "助手未运行，设置没有保存"))
             return
         }
         do {
@@ -225,9 +229,14 @@ final class AccountWorkerManager: ObservableObject {
             )
             authSettingsError = nil
         } catch {
-            preferredAuthSource = previous
-            authSettingsError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            let detail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            applyPreferredAuthOutcome(.rolledBack(previous, error: detail))
         }
+    }
+
+    private func applyPreferredAuthOutcome(_ outcome: SettingsPreferredAuthOutcome) {
+        preferredAuthSource = outcome.value
+        authSettingsError = outcome.error
     }
 
     // MARK: - 明文 JSON 的告知与开关（CRED-3-UI）
@@ -387,16 +396,9 @@ final class AccountWorkerManager: ObservableObject {
     }
 
     /// 把 `items[]` 里 `ok == false` 的原因聚合成一句，按出现次数排序。
+    /// 规则本身在 `CredentialRelinkSummary`（纯模型，可在 AICCCore 里测试）。
     nonisolated static func reasonSummary(_ items: [[String: Any]]) -> String {
-        var counts: [String: Int] = [:]
-        for item in items where item["ok"] as? Bool == false {
-            let reason = item["reason"] as? String ?? "unknown"
-            counts[reason, default: 0] += 1
-        }
-        return counts
-            .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
-            .map { "\($0.key) ×\($0.value)" }
-            .joined(separator: "、")
+        CredentialRelinkSummary.reasonSummary(items)
     }
 
     /// 旧键搬运（G4）的显式重试。**只有**这里会让 `failed` 重新进自动流程。
@@ -1319,3 +1321,27 @@ final class AccountWorkerManager: ObservableObject {
         }
     }
 }
+
+#if AICC_VISUAL_TEST && AICC_SETTINGS_VISUAL
+// MARK: - 设置页离屏渲染
+//
+// 只在 `scripts/smoke-test-settings-visual.sh` 的双 flag 构建里存在。
+// 生产构建里没有这段，也没有 `SettingsVisualState`。
+
+extension AccountWorkerManager {
+    /// 灌入只读样本。**不**启动进程、**不**发任何 RPC。
+    func applySettingsVisualState(_ sample: SettingsVisualState) {
+        state = sample.workerState
+        preferredAuthSource = sample.preferredAuthSource
+        authSettingsError = sample.authSettingsError
+        credentialStorage = sample.credentialStorage
+        secureStoreSummary = sample.secureStoreSummary
+        credentialMigration = sample.migration
+        credentialMigrationNotice = sample.migrationNotice
+        credentialVerifyReport = sample.verifyReport
+        credentialMigrationBusy = sample.migrationBusy
+        bridgeTls = sample.bridgeTls
+        bridgeTlsError = sample.bridgeTlsError
+    }
+}
+#endif

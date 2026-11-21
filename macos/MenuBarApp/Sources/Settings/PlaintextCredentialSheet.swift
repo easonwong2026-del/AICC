@@ -4,6 +4,8 @@ import SwiftUI
 ///
 /// 只在用户**主动**点「启用本地 JSON」时出现。点「仍使用钥匙串」什么都不写 ——
 /// 助手的默认行为本来就是钥匙串，所以拒绝是零成本的。
+///
+/// 文案与语义沿用 CRED-3/4 的交付，只换成 UI V5 的排版与配色。
 struct PlaintextCredentialSheet: View {
     /// 助手给出的风险说明（`health.credentials.risk`）。为空时用本地文案兜底。
     let risk: String
@@ -15,25 +17,21 @@ struct PlaintextCredentialSheet: View {
     @State private var busy = false
     @State private var failure: String?
 
+    /// 离屏渲染：直接呈现"保存失败"的样子。生产构建里没有这个参数。
+    #if AICC_VISUAL_TEST && AICC_SETTINGS_VISUAL
+    var visualFailure: String?
+    #endif
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline) {
-                Label("启用本地 JSON 存储", systemImage: "lock.open.display")
-                    .font(.headline)
-                Spacer()
-                Button("关闭") {
-                    onCancel()
-                    dismiss()
-                }
-                .keyboardShortcut(.cancelAction)
-            }
-            .padding(.horizontal, 20)
-            .padding(.top, 18)
+            header
+            Divider()
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    // 不用 `**加粗**`：这里渲染出来是字面量，`Text` 只在部分上下文里解析 markdown。
-                    Text("AICC 可以把之后新建的 WorkBuddy 与 Qoder 自有授权（设备授权、PAT）保存为本机 JSON 文件，不再写入 macOS 钥匙串。这样后台任务不会因为 App 重新构建、签名变化而反复弹出授权框。")
+                    Text("之后新建的 WorkBuddy 与 Qoder 自有授权（设备授权、PAT）会保存为本机 JSON 文件，不再写入钥匙串。这样后台任务不会因为 App 重新签名而反复弹出授权框。")
+                        .font(ConsoleType.body)
+                        .foregroundStyle(ConsoleTheme.text)
                         .fixedSize(horizontal: false, vertical: true)
 
                     point(
@@ -41,7 +39,8 @@ struct PlaintextCredentialSheet: View {
                         title: "凭据是明文保存的",
                         detail: risk.isEmpty
                             ? "凭据目录是 0700、文件是 0600，但这只能挡住同机的其他用户，挡不住同一个 macOS 用户下运行的其他程序。"
-                            : risk
+                            : risk,
+                        tone: .warning
                     )
                     point(
                         icon: "externaldrive.badge.exclamationmark",
@@ -51,43 +50,48 @@ struct PlaintextCredentialSheet: View {
                     point(
                         icon: "clock.arrow.circlepath",
                         title: "之后新建的授权默认写 JSON",
-                        detail: "打开之后，新的 WorkBuddy / Qoder 自有授权直接落成本机文件，也允许把旧账号从钥匙串迁过来（在「设置 → 旧凭据迁移」里显式操作）。两件事共用这一个开关，不另设第二个。"
+                        detail: "新的自有授权直接落成本机文件，也允许把旧账号迁过来（在「设置 → 授权与存储 → 管理凭据」里显式操作）。两件事共用这一个开关。"
                     )
                     point(
                         icon: "arrow.uturn.backward",
                         title: "随时可以改回去",
-                        detail: "在「设置 → 凭据存储」里关闭后，之后新建的授权重新使用钥匙串；已经写成 JSON 的授权不会因此失效，仍可在「旧凭据迁移」里回滚。"
+                        detail: "在「设置 → 授权与存储」里关闭后，之后新建的授权重新使用钥匙串；已经写成 JSON 的授权不会因此失效，仍可在「管理凭据」里回滚。"
                     )
                     point(
                         icon: "key",
                         title: "钥匙串仍会用到",
-                        detail: "Qoder 客户端自身的登录凭据、以及你主动导入时读取的第三方钥匙串条目不受这个开关影响；再打开这个开关之前保存的 AICC 授权也仍在钥匙串里。"
+                        detail: "Qoder 客户端自身的登录凭据、导入时读取的第三方条目不受影响；开关打开之前保存的 AICC 授权也仍在钥匙串里。"
                     )
 
-                    if let failure {
-                        Text(failure)
-                            .font(.callout)
-                            .foregroundStyle(.red)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
                 }
-                .padding(.horizontal, 20)
-                .padding(.top, 14)
-                .padding(.bottom, 16)
+                .padding(.horizontal, ConsoleTheme.Sheet.padding)
+                .padding(.top, 16)
+                .padding(.bottom, 18)
             }
+            .frame(maxHeight: .infinity)
 
             Divider()
 
-            HStack {
+            if let failure {
+                ConsoleInlineNotice(kind: .error, message: failure)
+                    .padding(.horizontal, ConsoleTheme.Sheet.padding)
+                    .padding(.top, 12)
+            }
+
+            HStack(spacing: 8) {
                 Button("仍使用钥匙串") {
                     onCancel()
                     dismiss()
                 }
+                .buttonStyle(ConsoleSecondaryButtonStyle())
                 .disabled(busy)
+
                 Spacer()
+
                 if busy {
                     ProgressView().controlSize(.small)
                 }
+
                 Button("我已了解，启用") {
                     Task {
                         busy = true
@@ -99,27 +103,74 @@ struct PlaintextCredentialSheet: View {
                         }
                     }
                 }
+                .buttonStyle(ConsolePrimaryButtonStyle())
                 .keyboardShortcut(.defaultAction)
                 .disabled(busy)
             }
-            .padding(.horizontal, 20)
+            .padding(.horizontal, ConsoleTheme.Sheet.padding)
             .padding(.vertical, 14)
         }
-        .frame(width: 560, height: 520)
+        .background(ConsoleTheme.canvas)
+        .frame(width: ConsoleTheme.Sheet.mediumWidth, height: 560)
+        #if AICC_VISUAL_TEST && AICC_SETTINGS_VISUAL
+        .onAppear {
+            if let visualFailure, failure == nil { failure = visualFailure }
+        }
+        #endif
     }
 
-    private func point(icon: String, title: String, detail: String) -> some View {
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("启用本地 JSON 存储")
+                    .font(ConsoleType.detailTitle)
+                    .foregroundStyle(ConsoleTheme.text)
+                Text("明文保存，只有你能决定是否开启")
+                    .font(ConsoleType.small)
+                    .foregroundStyle(ConsoleTheme.secondaryText)
+            }
+            Spacer()
+            Button("关闭") {
+                onCancel()
+                dismiss()
+            }
+            .buttonStyle(ConsoleSecondaryButtonStyle())
+            .keyboardShortcut(.cancelAction)
+        }
+        .padding(.horizontal, ConsoleTheme.Sheet.padding)
+        .padding(.vertical, 14)
+    }
+
+    private func point(
+        icon: String,
+        title: String,
+        detail: String,
+        tone: SettingsTone = .neutral
+    ) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: icon)
-                .foregroundStyle(.secondary)
+                .font(.system(size: 12))
+                .foregroundStyle(iconColor(tone))
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.callout.weight(.semibold))
+                Text(title)
+                    .font(ConsoleType.rowTitle)
+                    .foregroundStyle(ConsoleTheme.text)
                 Text(detail)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                    .font(ConsoleType.small)
+                    .foregroundStyle(ConsoleTheme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    private func iconColor(_ tone: SettingsTone) -> Color {
+        switch tone {
+        case .warning: return ConsoleTheme.warning
+        case .error: return ConsoleTheme.danger
+        case .ok: return ConsoleTheme.success
+        case .accent: return ConsoleTheme.accent
+        case .neutral: return ConsoleTheme.secondaryText
         }
     }
 }
