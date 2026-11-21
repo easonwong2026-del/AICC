@@ -48,11 +48,39 @@ final class QuotaPresentationTests: XCTestCase {
 
     // MARK: 账号额度
 
-    func testUnknownRemainingIsNotZero() {
+    func testUnknownRemainingIsNotZeroAndNotLive() {
         let display = AccountQuotaDisplay(row: workerRow())
         XCTAssertEqual(display.remainingValue, "未知")
         XCTAssertNil(display.unit)
-        XCTAssertEqual(display.state, .live)
+        // 接口 ok 但没拿到数值：不能用绿色点暗示已确认。
+        XCTAssertEqual(display.state, .unknown)
+        XCTAssertEqual(display.state.label, "未取得额度")
+        XCTAssertEqual(display.state.tone, .neutral)
+        XCTAssertFalse(display.remainingValue.contains("0"))
+    }
+
+    /// 接口成功与数值取得是两件事：有值才是 live，真实的 0 也是值。
+    func testValuePresenceDecidesLive() {
+        let zero = AccountQuotaDisplay(row: workerRow(["remaining": 0, "unit": "credits"]))
+        XCTAssertEqual(zero.remainingValue, "0")
+        XCTAssertEqual(zero.state, .live)
+        XCTAssertNil(zero.state.label)
+
+        let missing = AccountQuotaDisplay(row: workerRow(["unit": "credits"]))
+        XCTAssertEqual(missing.state, .unknown)
+        XCTAssertNotEqual(missing.state, .live)
+        XCTAssertNil(missing.unit)
+    }
+
+    /// 已有状态优先级不变：旧快照 / 缓存仍然优先于「未取得额度」。
+    func testStaleAndCachedKeepPrecedenceWithoutValue() {
+        let stale = AccountQuotaDisplay(row: workerRow(["stale": true, "cached": true]))
+        XCTAssertEqual(stale.state, .stale)
+        XCTAssertEqual(stale.state.label, "旧快照")
+
+        let cached = AccountQuotaDisplay(row: workerRow(["cached": true]))
+        XCTAssertEqual(cached.state, .cached)
+        XCTAssertEqual(cached.state.label, "缓存")
     }
 
     func testUnverifiedIsNotFailureAndShowsNoNumber() {
@@ -105,6 +133,8 @@ final class QuotaPresentationTests: XCTestCase {
         ]))
         XCTAssertEqual(display.remainingValue, "未知")
         XCTAssertFalse(display.remainingValue.contains("100"))
+        // 每日奖励存在不代表余额已取得：状态仍是中性的「未取得额度」。
+        XCTAssertEqual(display.state, .unknown)
         XCTAssertEqual(display.creditsBadge, "每日奖励 · 可领 100 Credits")
         XCTAssertTrue(display.creditsHelp?.contains("不是余额") == true)
         XCTAssertTrue(display.creditsHelp?.contains("活动窗口截止") == true)
@@ -186,6 +216,15 @@ final class QuotaPresentationTests: XCTestCase {
             MagpieQuotaDisplayRow.rows(for: fromStaleSnapshot, snapshotStale: true).first?.state,
             .stale
         )
+    }
+
+    func testMagpieEmptyCardWithoutValueIsNeutral() throws {
+        // 没有窗口、没有余额，也没失败：同样是「未取得额度」，不能用绿点。
+        let rows = MagpieQuotaDisplayRow.rows(for: try card(), snapshotStale: false)
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].remaining, "—")
+        XCTAssertEqual(rows[0].state, .unknown)
+        XCTAssertEqual(rows[0].state.tone, .neutral)
     }
 
     func testMultipleWindowsProduceOneRowEach() throws {

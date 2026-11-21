@@ -9,7 +9,10 @@ enum QuotaStateTone: Equatable {
 }
 
 enum QuotaDisplayState: Equatable {
+    /// 接口读取成功，且已经拿到可用的额度数值。只有这一种状态配绿色点。
     case live
+    /// 接口读取成功，但没有返回额度数值。它不等于失败，也不等于 0。
+    case unknown
     case cached
     case stale
     case failed
@@ -21,6 +24,7 @@ enum QuotaDisplayState: Equatable {
     var label: String? {
         switch self {
         case .live: return nil
+        case .unknown: return "未取得额度"
         case .cached: return "缓存"
         case .stale: return "旧快照"
         case .failed: return "读取失败"
@@ -33,6 +37,7 @@ enum QuotaDisplayState: Equatable {
     var tone: QuotaStateTone {
         switch self {
         case .live: return .normal
+        case .unknown: return .neutral
         case .cached, .stale: return .warning
         case .failed, .unauthorized: return .danger
         case .deferred, .unverified: return .neutral
@@ -42,6 +47,7 @@ enum QuotaDisplayState: Equatable {
     var help: String? {
         switch self {
         case .live: return "实时数据"
+        case .unknown: return "接口读取成功，但本次没有返回可用的额度数值"
         case .cached: return "显示上一次读取的缓存"
         case .stale: return "本次没有取到新数据，显示旧快照"
         case .failed: return "这次读取失败，没有把未知显示成 0"
@@ -56,6 +62,8 @@ enum QuotaDisplayState: Equatable {
         case "ok":
             if row.stale { return .stale }
             if row.cached { return .cached }
+            // 接口成功 ≠ 数值已取得：没有 remaining 就不能标成已确认。
+            if row.remaining == nil { return .unknown }
             return .live
         case "stale": return .stale
         case "unverified": return .unverified
@@ -68,6 +76,8 @@ enum QuotaDisplayState: Equatable {
         if card.failed { return .failed }
         if card.deferred { return .deferred }
         if card.stale || snapshotStale { return .stale }
+        // 空卡（没有窗口也没有余额）同样是「没拿到数值」，不能用绿点。
+        if !card.hasQuota { return .unknown }
         return .live
     }
 }
