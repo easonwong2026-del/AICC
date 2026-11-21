@@ -41,6 +41,21 @@ struct WorkbuddyRotationPlan: Equatable {
         String(format: "%02d:%02d", minutes / 60, minutes % 60)
     }
 
+    /// 影响服务端 dry-run 结果的字段摘要。
+    ///
+    /// `dry_run` 只读**已保存**的计划，所以界面必须能判断"当前看到的预演
+    /// 是不是这份计划算出来的"。`enabled` 不参与：开关不改变演算内容。
+    var planKey: String {
+        RotationPlanKey.make(
+            weekdays: weekdays,
+            startMinutes: startMinutes,
+            endMinutes: endMinutes,
+            accountIds: accountIds,
+            dwellSeconds: dwellSeconds,
+            timezone: timezone
+        )
+    }
+
     /// 跨午夜的计划要在界面上说清楚，否则 22:30 → 07:00 看起来像负时间。
     var crossesMidnight: Bool { endMinutes <= startMinutes }
 

@@ -15,7 +15,7 @@ enum ConsolePage: String, CaseIterable, Identifiable {
         case .overview: return "总览"
         case .accounts: return "AI 账号"
         case .quota: return "额度看板"
-        case .checkin: return "签到任务"
+        case .checkin: return "任务中心"
         }
     }
 
@@ -25,7 +25,7 @@ enum ConsolePage: String, CaseIterable, Identifiable {
         case .overview: return "账号、任务与异常"
         case .accounts: return "账号列表、授权与详情"
         case .quota: return "额度与用量"
-        case .checkin: return "每日签到与奖励"
+        case .checkin: return "今日任务与自动计划"
         }
     }
 
@@ -55,14 +55,17 @@ final class ConsoleNavigation: ObservableObject {
     /// 账号页当前选中的账号。切页后保留，异步刷新不会覆盖用户的选择。
     @Published var accountSelection: ConsoleAccountSelection?
 
-    /// 总览/账号页请求打开「WorkBuddy 登录与夜间轮换」管理面板的一次性信号。
-    /// 只承载导航意图，不承载业务状态；账号页消费后立即复位。
-    @Published private(set) var openRotationSheet = false
+    /// 请求打开「自动轮换」管理界面的一次性信号。
+    /// 只承载导航意图，不承载业务状态；消费后立即复位。
+    @Published private(set) var rotationRequest: RotationManagerRequest?
 
     /// 额度页的来源：Magpie 额度 / 账号额度。
     @Published var quotaSource: ConsoleQuotaSource = .magpie
     /// 额度页的服务商筛选（Magpie 来源用）。
     @Published var quotaProvider: String = ""
+
+    /// 任务中心：今日任务 / 自动计划。
+    @Published var taskCenterMode: TaskCenterMode = .today
 
     /// 签到任务页：先选平台，再选任务类型。
     @Published var checkinPlatform: ConsoleTaskPlatform = .workbuddy
@@ -85,6 +88,10 @@ final class ConsoleNavigation: ObservableObject {
         if let raw = defaults.string(forKey: "AICCConsoleQuotaProvider"), !raw.isEmpty {
             quotaProvider = raw
         }
+        if let raw = defaults.string(forKey: "AICCConsoleTaskCenterMode"),
+           let mode = TaskCenterMode(rawValue: raw) {
+            taskCenterMode = mode
+        }
         if let raw = defaults.string(forKey: "AICCConsoleCheckinPlatform"),
            let platform = ConsoleTaskPlatform(rawValue: raw) {
             checkinPlatform = platform
@@ -106,30 +113,56 @@ final class ConsoleNavigation: ObservableObject {
         page = .accounts
     }
 
-    /// 从额度页跳去签到任务页的某个任务，不做任何写操作。
-    func openCheckin(platform: ConsoleTaskPlatform, workbuddy: WorkbuddyTaskKind = .checkin, qoder: QoderTaskKind = .credits) {
+    /// 从额度页跳去任务中心的某个任务，不做任何写操作。
+    func openCheckin(
+        platform: ConsoleTaskPlatform,
+        workbuddy: WorkbuddyTaskKind = .checkin,
+        qoder: QoderTaskKind = .credits,
+        mode: TaskCenterMode = .today
+    ) {
         checkinPlatform = platform
         workbuddyTask = workbuddy
         qoderTask = qoder
+        taskCenterMode = mode
         page = .checkin
     }
 
-    /// 请求打开轮换管理面板。只设置导航意图，不执行任何恢复。
-    func requestRotationSheet() {
-        openRotationSheet = true
+    /// 请求打开自动轮换管理界面。只设置导航意图，不执行任何恢复。
+    func requestRotationManager(_ focus: RotationManagerFocus = .plan) {
+        rotationRequest = RotationManagerRequest(focus: focus, token: UUID())
     }
 
-    /// 消费一次"打开轮换管理面板"的请求。
+    /// 消费一次"打开轮换管理"的请求。
     ///
-    /// 账号页在 `.onAppear` 与 `.onChange` 都调用它：
-    /// - 首次挂载时值已经是 true（总览切页后新建视图）也能消费；
-    /// - 无论从哪条路径进入，同一次请求只返回一次 true，面板不会重复弹。
+    /// 两个入口（总览、账号页、任务中心）都走这一条：
+    /// - 首次挂载时请求已经存在也能消费；
+    /// - 同一次请求只返回一次，不会重复弹窗。
     @discardableResult
-    func consumeRotationSheetRequest() -> Bool {
-        guard openRotationSheet else { return false }
-        openRotationSheet = false
-        return true
+    func consumeRotationManagerRequest() -> RotationManagerRequest? {
+        guard let request = rotationRequest else { return nil }
+        rotationRequest = nil
+        return request
     }
+}
+
+/// 打开自动轮换管理界面时希望落在哪一段。
+enum RotationManagerFocus: String, Equatable {
+    /// 计划总览。
+    case plan
+    /// 执行记录。
+    case history
+    /// 恢复异常：打开后先看到「需要恢复」与处理入口。
+    case recovery
+    /// 直接进入设置流程。
+    case setup
+}
+
+/// 一次性导航请求。`token` 让同一次请求可以被视图的 `onChange` 稳定识别。
+struct RotationManagerRequest: Equatable, Identifiable {
+    let focus: RotationManagerFocus
+    let token: UUID
+
+    var id: UUID { token }
 }
 
 /// 额度页的来源。两个数据链路的量纲不同，不合并、不相加。

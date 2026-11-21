@@ -388,11 +388,16 @@ struct AdvancedSettingsSection: View {
         }
     }
 
+    /// 轮换时区只读：唯一可编辑入口是「任务中心 → 自动计划 → WorkBuddy 客户端轮换」。
+    /// 两处都能改同一份计划会让人以为存了两套配置；这里只显示服务端当前值。
     private var rotationGroup: some View {
         SettingsGroup(title: "WorkBuddy 轮换") {
             SettingsRow(
                 title: "账号轮换时区",
-                help: "轮换的开始与结束时间按这个时区解释；只提供固定偏移、无夏令时的时区。错过开始时间过久不补跑，每次切换前预留恢复余量。"
+                detail: model.rotationLoaded && model.rotationError == nil
+                    ? "在「任务中心 → 自动计划 → 客户端轮换」里修改。"
+                    : nil,
+                help: "时区跟随自动轮换计划，与任务中心里的计划是同一份数据；这里只显示，不能编辑。"
             ) {
                 if !model.rotationLoaded {
                     HStack(spacing: 6) {
@@ -406,17 +411,10 @@ struct AdvancedSettingsSection: View {
                         .font(ConsoleType.small)
                         .foregroundStyle(ConsoleTheme.tertiaryText)
                 } else {
-                    Picker("账号轮换时区", selection: Binding(
-                        get: { model.rotationTimezone },
-                        set: { zone in Task { await model.saveRotationTimezone(zone) } }
-                    )) {
-                        ForEach(model.rotationTimezones, id: \.self) { zone in
-                            Text(zone).tag(zone)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .fixedSize()
+                    Text(model.rotationTimezone)
+                        .font(ConsoleType.small)
+                        .foregroundStyle(ConsoleTheme.secondaryText)
+                        .textSelection(.enabled)
                 }
             }
 

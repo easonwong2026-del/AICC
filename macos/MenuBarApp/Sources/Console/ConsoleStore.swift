@@ -47,6 +47,11 @@ final class ConsoleStore: ObservableObject {
 
     /// 自动管理（PR #68）。开关默认关闭，状态从 worker 读。
     @Published private(set) var growthAuto: GrowthAutoStatus = GrowthAutoStatus(json: nil)
+    /// 自动管理状态读取失败。仅用于区分"未知"与"已关闭"，不影响原有流程。
+    @Published private(set) var growthAutoError: String?
+    /// 是否真的读到过自动管理状态。`GrowthAutoStatus(json: nil)` 默认是"关闭"，
+    /// 不加这个标记会把"还没读"显示成"未开启"。
+    @Published private(set) var growthAutoLoaded = false
     @Published private(set) var growthRuns: [String: GrowthRuns] = [:]
     @Published private(set) var growthActing = false
     /// 最近一次手动检查 / 开关动作的一句话结果。
@@ -71,6 +76,9 @@ final class ConsoleStore: ObservableObject {
     /// 每日签到（PR #69）。首屏先用本地缓存出图，联网查询由用户点按钮触发。
     @Published private(set) var checkin: CheckinFleetStatus = .empty
     @Published private(set) var checkinAuto: CheckinAutoStatus = .unknown
+    /// 自动签到状态读取失败。仅用于区分"未知"与"已关闭"。
+    @Published private(set) var checkinAutoError: String?
+    @Published private(set) var checkinAutoLoaded = false
     @Published private(set) var checkinError: String?
     @Published private(set) var checkinLoading = false
     /// 正在执行动作的账号，用来禁用该行按钮。
@@ -132,6 +140,9 @@ final class ConsoleStore: ObservableObject {
     @Published private(set) var wbRotationBusy = false
     /// 预演结果：只在用户点「预演」之后出现，不自动刷新。
     @Published private(set) var wbRotationDryRun: WorkbuddyRotationDryRun?
+    /// 这份预演对应的**已保存计划**摘要。服务端 dry-run 只读已保存计划，
+    /// 界面据此判断结果是否还能代表当前草稿对应的计划。
+    @Published private(set) var wbRotationDryRunPlanKey: String?
 
     let worker: AccountWorkerManager
     private let settings: AppSettings
@@ -635,7 +646,10 @@ final class ConsoleStore: ObservableObject {
     }
 
     /// 打开 / 关闭。**打开前**后端会校验计划；缺账号会直接拒绝并说原因。
-    func setWorkbuddyRotationEnabled(_ enabled: Bool) async {
+    ///
+    /// 返回是否成功：`保存并开启` 必须据此决定能不能显示"已开启"。
+    @discardableResult
+    func setWorkbuddyRotationEnabled(_ enabled: Bool) async -> Bool {
         wbRotationFailed = false
         wbRotationNotice = nil
         do {
@@ -650,10 +664,12 @@ final class ConsoleStore: ObservableObject {
             )
             wbRotationNotice = feedback.text
             wbRotationFailed = feedback.isFailure
+            return true
         } catch {
             wbRotationFailed = true
             wbRotationNotice = message(for: error)
             await refreshWorkbuddyRotation(silent: true)
+            return false
         }
     }
 
@@ -662,6 +678,8 @@ final class ConsoleStore: ObservableObject {
         wbRotationFailed = false
         do {
             wbRotationDryRun = try await worker.workbuddyRotationDryRun()
+            // 服务端读的是已保存计划：把它的摘要记下来，草稿再改就自动失效。
+            wbRotationDryRunPlanKey = wbRotationStatus?.plan.planKey
             wbRotationNotice = "预演完成：没有改动任何登录态。"
         } catch {
             wbRotationFailed = true
@@ -738,6 +756,7 @@ final class ConsoleStore: ObservableObject {
     func clearWorkbuddyRotationNotice() {
         wbRotationNotice = nil
         wbRotationDryRun = nil
+        wbRotationDryRunPlanKey = nil
     }
 
     private func message(for error: Error) -> String {
@@ -835,6 +854,8 @@ final class ConsoleStore: ObservableObject {
 
     /// 自动领取总览。每个账号独立开关，默认关闭。
     @Published private(set) var qoderCreditsAuto: [QoderCreditsAutoItem] = []
+    /// 是否读到过自动领取状态。空数组既可能是"没有账号"，也可能是"还没读"。
+    @Published private(set) var qoderCreditsLoaded = false
     @Published private(set) var qoderCreditsError: String?
     @Published private(set) var qoderCreditsLoading = false
     /// 正在执行动作的账号 id（查询 / 领取 / 切换开关），用来禁用该行按钮。
@@ -854,6 +875,7 @@ final class ConsoleStore: ObservableObject {
         do {
             qoderCreditsAuto = try await worker.qoderCreditsAutoStatus()
             qoderCreditsError = nil
+            qoderCreditsLoaded = true
             if !silent {
                 qoderCreditsNotice = nil
             }
@@ -1033,8 +1055,12 @@ final class ConsoleStore: ObservableObject {
     func loadGrowthAuto() async {
         do {
             growthAuto = GrowthAutoStatus(json: try await worker.growthAutoStatus())
+            growthAutoError = nil
+            growthAutoLoaded = true
         } catch {
             // 读不到就保持原样：这是次要信息，不该把整页打成错误态。
+            // 但自动计划中心要能区分"未知"与"已关闭"。
+            growthAutoError = message(for: error)
         }
     }
 
@@ -1271,8 +1297,12 @@ final class ConsoleStore: ObservableObject {
     func loadCheckinAuto() async {
         do {
             checkinAuto = CheckinAutoStatus(json: try await worker.checkinAutoStatus())
+            checkinAutoError = nil
+            checkinAutoLoaded = true
         } catch {
-            // 次要信息，读不到就保持原样，不把整页打成错误态。
+            // 次要信息，读不到就保持原样，不把整页打成错误态；
+            // 但要记下原因，自动计划中心不能把"读不到"显示成"未开启"。
+            checkinAutoError = message(for: error)
         }
     }
 
@@ -1399,6 +1429,8 @@ extension ConsoleStore {
 
         checkin = fixture.checkin
         checkinAuto = fixture.checkinAuto
+        checkinAutoLoaded = true
+        checkinAutoError = fixture.checkinAutoError
         checkinError = fixture.checkinError
         checkinLoading = fixture.isLoading
         checkinActing = fixture.checkinActing
@@ -1408,6 +1440,8 @@ extension ConsoleStore {
         growthError = fixture.growthError
         lastGrowthScan = fixture.lastGrowthScan
         growthAuto = fixture.growthAuto
+        growthAutoLoaded = true
+        growthAutoError = fixture.growthAutoError
         growthRuns = fixture.growthRuns
         growthLoading = fixture.isLoading
         expandedGrowthAccount = fixture.expandedGrowthAccount
@@ -1425,6 +1459,7 @@ extension ConsoleStore {
         qoderError = fixture.qoderError
         qoderSyncedAt = fixture.lastAccountsRefresh
         qoderCreditsAuto = fixture.qoderCreditsAuto
+        qoderCreditsLoaded = true
         qoderCreditsError = fixture.qoderCreditsError
         qoderCreditsLoading = fixture.isLoading
         qoderCreditsReports = fixture.qoderCreditsReports
@@ -1443,6 +1478,17 @@ extension ConsoleStore {
         wbSwitchFailed = fixture.wbSwitchFailed
 
         wbRotationStatus = fixture.wbRotationStatus
+        wbRotationError = fixture.wbRotationError
+        wbRotationNotice = fixture.wbRotationNotice
+        wbRotationFailed = fixture.wbRotationFailed
+        wbRotationDryRun = fixture.wbRotationDryRun
+        wbRotationDryRunPlanKey = fixture.wbRotationDryRunPlanKey
     }
 }
 #endif
+
+// MARK: - 轮换管理界面的动作入口
+
+/// 视图只通过 `RotationControlling` 操作轮换，测试用同一套接口的替身。
+/// 这里不做任何额外逻辑：全部转发到上面的既有方法。
+extension ConsoleStore: RotationControlling {}

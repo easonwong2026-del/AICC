@@ -334,19 +334,6 @@ final class SettingsModel: ObservableObject {
         }
     }
 
-    func saveRotationTimezone(_ zone: String) async {
-        let previous = rotationTimezone
-        rotationTimezone = zone
-        do {
-            _ = try await worker.workbuddyRotationSave(params: ["timezone": zone])
-            rotationError = nil
-        } catch {
-            rotationError = "时区没保存成功：\(Self.describe(error))"
-            rotationTimezone = previous
-            await loadRotationSettings()
-        }
-    }
-
     static func describe(_ error: Error) -> String {
         (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
