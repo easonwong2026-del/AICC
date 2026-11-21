@@ -396,16 +396,9 @@ final class AccountWorkerManager: ObservableObject {
     }
 
     /// 把 `items[]` 里 `ok == false` 的原因聚合成一句，按出现次数排序。
+    /// 规则本身在 `CredentialRelinkSummary`（纯模型，可在 AICCCore 里测试）。
     nonisolated static func reasonSummary(_ items: [[String: Any]]) -> String {
-        var counts: [String: Int] = [:]
-        for item in items where item["ok"] as? Bool == false {
-            let reason = item["reason"] as? String ?? "unknown"
-            counts[reason, default: 0] += 1
-        }
-        return counts
-            .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
-            .map { "\($0.key) ×\($0.value)" }
-            .joined(separator: "、")
+        CredentialRelinkSummary.reasonSummary(items)
     }
 
     /// 旧键搬运（G4）的显式重试。**只有**这里会让 `failed` 重新进自动流程。
