@@ -205,7 +205,21 @@
 
 ## 10. 测试与 CI
 
-（待 CI 完成后补齐）
+### 10.1 新增测试
+
+| 文件 | 用例 | 覆盖 |
+|---|---:|---|
+| `AutomationCenterTests` | 24 | 五类状态派生（未知/读取中/失败/关闭/开启/执行中）、Credits 只计支持账号、轮换概览（未配置/关闭/开启/恢复异常/未知）、草稿脏判定与排序稳定、`params` 键与顺序、保存并开启四条分支、关闭不需要保存、停止的异步语义、星期与时间文案 |
+| `ConsoleNavigationTests` | 7（原 4） | 三个入口共用一次性请求、token 每次变化、任务中心模式切换不产生请求、自动计划的管理路由 |
+
+本机没有 XCTest，使用一份 XCTest 替身编译并**真跑**了两套模型测试：`AutomationCenterTests` 24 个（117 断言）与 `SettingsCenterTests` 31 个（183 断言），0 失败；最终以 CI `swift-test` 为准。
+
+### 10.2 CI
+
+- 分支 HEAD `1f6cdb8`，run `44905511384`：`changes` / `swift-test` / `macos-build` 全部 **success**；
+  其余 job 因路径过滤为 skipped（`rust` / `android` / `test` / `lint` 本轮未改动对应文件），`macos-dmg` 在 PR 上按设计跳过。
+- `swift-test` 内：`swift test` 通过（含本 PR 新增的 31 个用例），控制台离屏渲染 126 张并上传 artifact `console-ui-visuals`。
+- 基线：#118 合并后 main CI `44902417879` 9 个 job 全部 success（含 macos-dmg）。
 
 ## 11. 尚未验证的真实客户端场景
 
