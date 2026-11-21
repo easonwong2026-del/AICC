@@ -60,7 +60,9 @@ struct TestIdle(AtomicI64);
 
 impl IdleProbe for TestIdle {
     fn idle_secs(&self) -> Option<i64> {
-        Some(self.0.load(Ordering::SeqCst))
+        let secs = self.0.load(Ordering::SeqCst);
+        // -1 = 读不到（ioreg 失败 / 平台不支持），生产代码走的是同一个分支。
+        (secs >= 0).then_some(secs)
     }
 }
 
@@ -136,7 +138,21 @@ impl ClientControl for TestControl {
     }
 }
 
-struct TestPrecheck(Mutex<Result<String, String>>);
+struct TestPrecheck {
+    result: Mutex<Result<String, String>>,
+    /// 预检"耗时"期间发生的事：返回前执行一次，然后清空。
+    /// 用来模拟"用户在等网络的时候按了暂停"。
+    on_call: Mutex<Option<Box<dyn Fn() + Send>>>,
+}
+
+impl TestPrecheck {
+    fn new() -> Self {
+        Self {
+            result: Mutex::new(Ok("accepted".to_string())),
+            on_call: Mutex::new(None),
+        }
+    }
+}
 
 impl OwnPrecheck for TestPrecheck {
     fn check<'a>(
@@ -144,9 +160,17 @@ impl OwnPrecheck for TestPrecheck {
         _app: &'a App,
         _account: &'a AccountRecord,
     ) -> BoxFut<'a, RpcResult<String>> {
+        if let Some(hook) = self
+            .on_call
+            .lock()
+            .map(|mut slot| slot.take())
+            .unwrap_or(None)
+        {
+            hook();
+        }
         Box::pin(async move {
             match self
-                .0
+                .result
                 .lock()
                 .map(|slot| slot.clone())
                 .unwrap_or_else(|_| Err("锁中毒".to_string()))
@@ -222,6 +246,7 @@ fn beijing(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
 struct Harness {
     _dir: tempfile::TempDir,
     app: App,
+    db_path: std::path::PathBuf,
     env: SwitchEnv,
     control: TestControl,
     clock: Arc<TestClock>,
@@ -267,13 +292,14 @@ impl Harness {
             },
             control: TestControl::new(auth_path),
             idle: TestIdle(AtomicI64::new(3600)),
-            precheck: TestPrecheck(Mutex::new(Ok("accepted".to_string()))),
+            precheck: TestPrecheck::new(),
             activity: TestActivity::new(clock.clone()),
             clock,
             a,
             b,
             c,
             app,
+            db_path: data.join("accounts.sqlite"),
             _dir: dir,
         }
     }
@@ -515,7 +541,7 @@ fn a_second_tick_in_the_same_night_does_not_start_another_run() {
 fn a_rejected_own_grant_is_skipped_and_the_client_is_restored() {
     let h = Harness::new();
     h.plan(&[&h.b], 300);
-    *h.precheck.0.lock().unwrap() = Ok("rejected".to_string());
+    *h.precheck.result.lock().unwrap() = Ok("rejected".to_string());
 
     let report = h.tick(false);
     assert!(
@@ -534,7 +560,7 @@ fn a_rejected_own_grant_is_skipped_and_the_client_is_restored() {
 fn an_unreadable_own_grant_is_skipped_too() {
     let h = Harness::new();
     h.plan(&[&h.b], 300);
-    *h.precheck.0.lock().unwrap() = Err("读取自有授权失败".to_string());
+    *h.precheck.result.lock().unwrap() = Err("读取自有授权失败".to_string());
 
     let report = h.tick(false);
     assert!(
@@ -1231,5 +1257,134 @@ fn a_slow_probe_cannot_switch_into_a_closed_window() {
     assert_eq!(
         last.skip_reason.as_deref(),
         Some("window_elapsed_during_wait")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 第五轮：客户端写互斥 / 空闲未知 / 停止竞态
+// ---------------------------------------------------------------------------
+
+/// 读不到空闲状态（ioreg 失败）时不能当成"用户不在用"。
+///
+/// 证明不了就没资格关客户端：这一轮停在预检、`close()` 一次都不该发生。
+#[test]
+fn an_unknown_idle_state_never_starts_a_switch() {
+    let h = Harness::new();
+    h.plan(&[&h.b], 300);
+    h.idle.0.store(-1, Ordering::SeqCst); // 读不到
+
+    let report = h.tick(false);
+    assert_eq!(report["status"], STATE_PRECHECKING, "{report}");
+    assert_eq!(h.control.closes(), 0, "不知道用户是否在用，就不能关客户端");
+    assert_eq!(h.live_uid().as_deref(), Some("uid-a"));
+    assert_eq!(h.run().state, STATE_PRECHECKING);
+
+    // 能读到且确实空闲之后，正常开始。
+    h.idle.0.store(3600, Ordering::SeqCst);
+    assert_eq!(h.tick(false)["status"], STATE_DWELLING);
+    assert_eq!(h.live_uid().as_deref(), Some("uid-b"));
+}
+
+/// 预检（一次真实网络探针）期间用户按了暂停：落库的意图必须在关客户端之前生效。
+#[test]
+fn a_stop_requested_during_the_precheck_prevents_the_next_hop() {
+    let h = Harness::new();
+    h.plan(&[&h.b, &h.c], 300);
+    h.tick(false); // A → B
+    assert_eq!(h.live_uid().as_deref(), Some("uid-b"));
+
+    // B 的停留结束，准备切 C。预检"耗时"期间写入停止请求。
+    h.clock.advance_secs(300);
+    let db_path = h.db_path.clone();
+    *h.precheck.on_call.lock().unwrap() = Some(Box::new(move || {
+        let db = crate::storage::Db::open(&db_path).expect("打开同库");
+        let run = db.active_rotation_run().unwrap().expect("有活动轮次");
+        db.request_rotation_stop(&run.id).unwrap();
+    }));
+
+    let closes_before = h.control.closes();
+    let report = h.tick(false);
+    assert_eq!(report["status"], STATE_COMPLETED, "{report}");
+    assert_eq!(
+        h.live_uid().as_deref(),
+        Some("uid-a"),
+        "必须回原账号，不能切 C"
+    );
+    assert_eq!(
+        h.control.closes(),
+        closes_before + 1,
+        "只应关一次客户端（恢复），不该多一次切换"
+    );
+
+    let run = h.run();
+    let steps = h.app.with_db(|db| db.rotation_steps(&run.id)).unwrap();
+    let third = steps.iter().find(|step| step.uid == "uid-c").unwrap();
+    assert_eq!(third.status, "skipped", "{steps:?}");
+    assert_eq!(third.skip_reason.as_deref(), Some("stop_requested"));
+}
+
+/// 轮换正在跑（锁被占）时，手动切换必须**明确拒绝**，不能挤进去一起关客户端。
+#[test]
+fn a_manual_write_is_refused_while_the_rotation_holds_the_client() {
+    let h = Harness::new();
+    h.plan(&[&h.b], 300);
+
+    std::fs::create_dir_all(&h.env.snapshot_dir).unwrap();
+    let lock_path = h.env.snapshot_dir.join("rotation.lock");
+    let holder = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap();
+    holder.try_lock().expect("测试里独占这把锁");
+
+    let refused = rotation::begin_manual_client_write(&h.app, &h.env);
+    let err = refused.err().expect("必须拒绝，而不是排队或硬切");
+    assert_eq!(
+        err.data.as_ref().and_then(|d| d["kind"].as_str()),
+        Some("switch_busy")
+    );
+    assert!(
+        err.message.contains("正在切换账号"),
+        "错误要说人话：{}",
+        err.message
+    );
+
+    drop(holder);
+    assert!(
+        rotation::begin_manual_client_write(&h.app, &h.env).is_ok(),
+        "锁空出来之后应当放行"
+    );
+}
+
+/// 手动切换拿到独占权后，正在跑的这一轮立即停止，且之后不会把账号切回去。
+#[test]
+fn a_manual_write_stops_the_run_without_switching_back() {
+    let h = Harness::new();
+    h.plan(&[&h.b, &h.c], 300);
+    h.tick(false); // A → B，停留中
+    assert_eq!(h.live_uid().as_deref(), Some("uid-b"));
+
+    let gate = rotation::begin_manual_client_write(&h.app, &h.env).expect("应当放行");
+    let run = h.run();
+    assert_eq!(run.state, STATE_COMPLETED, "这一轮必须就地收尾");
+    assert!(
+        run.detail.as_deref().unwrap_or_default().contains("手动"),
+        "{:?}",
+        run.detail
+    );
+
+    // 用户此刻切到 D（手动切换 RPC 做的事），随后心跳不能把它覆盖掉。
+    std::fs::write(&h.env.auth_path, auth_json("uid-d", "AT-D")).unwrap();
+    h.clock.advance_secs(600);
+    drop(gate);
+    let report = h.tick(false);
+    assert_eq!(report["status"], "already_ran", "{report}");
+    assert_eq!(
+        h.live_uid().as_deref(),
+        Some("uid-d"),
+        "不能覆盖用户选的账号"
     );
 }

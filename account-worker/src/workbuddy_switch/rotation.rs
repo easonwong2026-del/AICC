@@ -233,23 +233,55 @@ impl RotationLock {
 }
 
 /// 一次操作客户端所需的全部独占权：进程内 + 跨进程。
-struct RotationGate {
+///
+/// **手动切换 / 恢复与夜间轮换共用这一把**。只护轮换是不够的：用户点
+/// 「切换到此账号」时，两边会各关一次客户端、互相覆盖同一个认证文件。
+pub struct ClientGate {
     _local: BusyGuard,
     _cross_process: RotationLock,
 }
 
-fn acquire_gate(deps: &RotationDeps<'_>) -> RpcResult<Option<RotationGate>> {
+/// 拿客户端独占权。拿不到返回 `None`（另一个动作正在跑），不排队、不阻塞。
+pub fn acquire_client_gate(env: &SwitchEnv) -> RpcResult<Option<ClientGate>> {
     let Some(local) = BusyGuard::acquire() else {
         return Ok(None);
     };
-    let path = deps.env.snapshot_dir.join("rotation.lock");
+    let path = env.snapshot_dir.join("rotation.lock");
     let Some(cross_process) = RotationLock::acquire(&path)? else {
         return Ok(None);
     };
-    Ok(Some(RotationGate {
+    Ok(Some(ClientGate {
         _local: local,
         _cross_process: cross_process,
     }))
+}
+
+fn acquire_gate(deps: &RotationDeps<'_>) -> RpcResult<Option<ClientGate>> {
+    acquire_client_gate(deps.env)
+}
+
+/// 手动切换 / 恢复的准入：要么拿到独占权，要么明确拒绝。
+///
+/// 拿到之后立刻把正在跑的这一轮**收尾**（不是 `restoring`）：用户刚选的账号
+/// 才是他要的，任何自动恢复都不该盖过去。此刻没有 tick 在跑，标记是安全的。
+pub fn begin_manual_client_write(app: &App, env: &SwitchEnv) -> RpcResult<ClientGate> {
+    let Some(gate) = acquire_client_gate(env)? else {
+        return Err(RpcError::new(
+            crate::rpc::E_SWITCH,
+            "AICC 正在切换账号（自动轮换或另一个窗口），请稍后再试",
+        )
+        .with_data(json!({ "kind": "switch_busy" })));
+    };
+    if let Some(run) = app.with_db(|db| db.active_rotation_run())? {
+        app.with_db(|db| {
+            db.set_rotation_state(
+                &run.id,
+                STATE_COMPLETED,
+                Some("你在轮换期间手动换号了，本轮已停止，不会覆盖你选的账号"),
+            )
+        })?;
+    }
+    Ok(gate)
 }
 
 pub struct RotationDeps<'a> {
@@ -826,22 +858,27 @@ async fn precheck(
     }
 
     // 用户在键盘前：不关客户端。还等得起就等下一跳，等不起就明确跳过。
-    if let Some(idle) = deps.idle.idle_secs() {
-        if idle < USER_ACTIVE_IDLE_SECS {
-            let can_wait = now + need_ms + reserve_ms < window_end - reserve_ms;
-            if can_wait {
-                return Ok(Precheck::Wait {
-                    detail: format!(
-                        "检测到正在使用（空闲 {idle} 秒），等用户离开后再开始；现在没有关闭客户端"
-                    ),
-                });
-            }
-            return Ok(Precheck::Stop {
-                state: STATE_SKIPPED,
-                detail: "用户正在使用，且窗口剩余时间不足以再等一轮，本轮跳过（没有改动客户端）"
-                    .to_string(),
+    //
+    // `None` = 读不到空闲状态（ioreg 失败 / 平台不支持）。**证明不了用户不在用，
+    // 就按"在用"处理**：宁可整轮跳过，也不要在别人写文档时把客户端关掉。
+    let idle = deps.idle.idle_secs();
+    if idle.map_or(true, |secs| secs < USER_ACTIVE_IDLE_SECS) {
+        let can_wait = now + need_ms + reserve_ms < window_end - reserve_ms;
+        if can_wait {
+            return Ok(Precheck::Wait {
+                detail: format!(
+                    "{}，等用户离开后再开始；现在没有关闭客户端",
+                    idle_reason(idle)
+                ),
             });
         }
+        return Ok(Precheck::Stop {
+            state: STATE_SKIPPED,
+            detail: format!(
+                "{}，且窗口剩余时间不足以再等一轮，本轮跳过（没有改动客户端）",
+                idle_reason(idle)
+            ),
+        });
     }
 
     // 到这里才需要"最初登录态"：它要关一次客户端，不能白关。
@@ -1001,6 +1038,14 @@ enum StepGate {
     Halt { detail: String },
 }
 
+/// 空闲状态的说明。`None` 不是"空闲 0 秒"，是"不知道"。
+fn idle_reason(idle: Option<i64>) -> String {
+    match idle {
+        Some(secs) => format!("检测到正在使用（空闲 {secs} 秒）"),
+        None => "读不到系统空闲状态，无法确认你不在使用客户端".to_string(),
+    }
+}
+
 /// 这一步处理完了：把 cursor 推到下一个，没有下一个就进入恢复。
 ///
 /// **所有"跳过/失败"路径都必须经过它**，否则 tick 会一直停在同一个账号上
@@ -1071,13 +1116,12 @@ async fn switch_current(
         });
     }
 
-    // 用户正在用：推迟，不突然关客户端。
-    if let Some(idle) = deps.idle.idle_secs() {
-        if idle < USER_ACTIVE_IDLE_SECS {
-            return Ok(StepGate::Wait {
-                detail: format!("检测到正在使用（空闲 {} 秒），这一跳推迟", idle),
-            });
-        }
+    // 用户正在用（或读不到空闲状态）：推迟，不突然关客户端。
+    let idle = deps.idle.idle_secs();
+    if idle.map_or(true, |secs| secs < USER_ACTIVE_IDLE_SECS) {
+        return Ok(StepGate::Wait {
+            detail: format!("{}，这一跳推迟", idle_reason(idle)),
+        });
     }
 
     let Some(account) = app.with_db(|db| db.get_account(&step.account_id))? else {
@@ -1171,6 +1215,26 @@ async fn switch_current(
     }
 
     let activity_before = deps.activity.snapshot(app, &account.id).await;
+
+    // 预检是网络等待。期间用户可能已经按了暂停：意图已落库，就别再开这一跳。
+    let stopped = app
+        .with_db(|db| db.rotation_run(&run.id))?
+        .map(|latest| latest.stop_requested)
+        .unwrap_or(false);
+    if stopped {
+        app.with_db(|db| {
+            db.finish_rotation_step(
+                &step.id,
+                STEP_SKIPPED,
+                Some("已请求停止，这一跳没有执行"),
+                Some("stop_requested"),
+                Some(&ms_to_rfc3339(deps.clock.now_ms())),
+            )
+        })?;
+        return Ok(StepGate::Restore {
+            detail: "收到停止请求，不再开始新的切换，直接恢复原账号".to_string(),
+        });
+    }
 
     // 预检和活跃查询都可能等网络（或让 Mac 在等待中睡过去）。等完之后 `now`
     // 已经不是入口那个值了，所以真正动客户端之前用**当下**时间再确认一次窗口。

@@ -124,6 +124,10 @@ restoring ──► completed / recovery_required / failed
 所以每次准备开始新的一跳，都用当前时间重新算一次"现在 + 停留 + 恢复余量"；
 不够就恢复本轮最初账号，不切入一个已经结束的窗口。
 
+**预检之后、关客户端之前重新读一次 `stop_requested`**：预检是网络等待，用户完全可能
+在这几秒里按了暂停。意图已经落库，就不能再开这一跳 —— 这一步记成
+`skipped / stop_requested` 并进入恢复。
+
 **同一次 tick 内也要复核**：入口的 `now` 在预检（一次真实 HTTP 探针）和活跃查询
 之后已经过时。所以真正动客户端之前再读一次 `deps.clock.now_ms()`，超窗就把这一步
 记成 `skipped / window_elapsed_during_wait` 并进入恢复 —— 而不是拿着入口的时间戳
@@ -206,6 +210,7 @@ restoring ──► completed / recovery_required / failed
 | 场景 | 行为 |
 | --- | --- |
 | 用户在键盘前（HID 空闲 < 2 分钟） | **拍快照之前**就推迟（这一轮停在 `prechecking`）；等不起就整轮跳过，客户端一次都不关 |
+| **读不到空闲状态**（`ioreg` 失败） | 按"可能在用"处理：同样推迟 / 跳过。**证明不了没在用，就没有资格关客户端** |
 | 推迟之后用户离开 | 下一次 tick 正常开始，不需要用户操作 |
 | 已在停留中、用户回来了 | 停留照旧；到点该切下一个时若仍在用，就推迟那一跳（不关客户端） |
 | 用户中途手动换了账号 | **立即停止**整轮，且**不覆盖**他的选择（`completed` + 说明） |
@@ -247,6 +252,18 @@ restoring ──► completed / recovery_required / failed
 
 `flock` 而不是锁文件里的 pid：进程崩溃时内核自动释放，不需要"清理陈旧锁"，
 也不会因为 pid 复用判错。锁文件残留无害。
+
+**这把锁不只护轮换**：手动 `workbuddy.client.switch` / `workbuddy.client.restore` 走
+`begin_manual_client_write()`，与轮换共用同一个 `rotation.lock`：
+
+| 情况 | 行为 |
+| --- | --- |
+| 轮换正在跑（锁被占） | 手动切换 / 恢复**明确拒绝**（`switch_busy`），不排队、不硬切 |
+| 手动操作先拿到锁 | 正在跑的那一轮立刻 `completed`（"你在轮换期间手动换号了，本轮已停止，不会覆盖你选的账号"），随后手动操作正常执行 |
+| 轮换内部的切换 | 直接调 `service::switch_linked`，不重复抢锁 → 不会自己把自己锁死 |
+
+标记成 `completed` 而不是 `restoring`：用户刚选的账号才是他要的，任何自动恢复都不该盖过去。
+（锁在手动操作结束后才释放，所以不存在"刚标记完又被 tick 推进"的窗口。）
 
 真实并发测试：`two_concurrent_ticks_switch_only_once` 用两个线程共享同一份数据目录
 （线程局部的 `BusyGuard` 互不可见），断言只有一个 tick 真正执行、只切一次、只产生一条 `done`。
@@ -390,6 +407,10 @@ Fake Clock + Fake Client + 注入式预检与活跃取证，**不联网、不碰
 | `two_concurrent_ticks_switch_only_once` | **两个线程**同时 tick，只执行一次 |
 | `a_stop_request_survives_a_busy_lock` | 锁被占时按暂停：请求落库，锁放开后只收尾不切下一个 |
 | `a_slow_probe_cannot_switch_into_a_closed_window` | 活跃查询"耗时" 9 小时：复核用当下时间，不切 C |
+| `an_unknown_idle_state_never_starts_a_switch` | 读不到空闲状态 → 停在预检、`close()` 0 次 |
+| `a_stop_requested_during_the_precheck_prevents_the_next_hop` | 预检期间写 `stop_requested` → 不切 C，只恢复 A |
+| `a_manual_write_is_refused_while_the_rotation_holds_the_client` | 轮换占着锁 → 手动写操作返回 `switch_busy` |
+| `a_manual_write_stops_the_run_without_switching_back` | 手动切换拿到锁 → 当轮就地收尾，心跳返回 `already_ran`，不覆盖新账号 |
 | `a_manual_run_keeps_going_after_the_plan_is_switched_off` | 关闭自动计划后，手动一轮仍走完 B→C→A |
 | `the_window_is_rechecked_after_waiting_for_the_user` | 等待用户后已超窗 → 不切 C，直接恢复 A |
 | `a_successful_manual_restore_reopens_a_recovery_required_run` | 人工恢复成功 → `recovery_required` 收口为 `completed` |

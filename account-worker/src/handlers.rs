@@ -1309,6 +1309,9 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                     .and_then(Value::as_bool)
                     .unwrap_or(true),
             };
+            // 手动切换与自动轮换共用同一把客户端锁：两边不能同时关客户端、
+            // 互相覆盖认证文件。拿不到就明确拒绝，不排队。
+            let _gate = workbuddy_switch::rotation::begin_manual_client_write(app, &env)?;
             workbuddy_switch::switch(app, &request, &control, &env).await
         }
 
@@ -1324,6 +1327,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
                 .unwrap_or(false);
             let control = workbuddy_switch::SystemControl::for_variant(WbVariant::Cn);
             let env = workbuddy_switch::SwitchEnv::system(app);
+            let _gate = workbuddy_switch::rotation::begin_manual_client_write(app, &env)?;
             workbuddy_switch::restore(app, journal_id.as_deref(), force, &control, &env)
         }
 
