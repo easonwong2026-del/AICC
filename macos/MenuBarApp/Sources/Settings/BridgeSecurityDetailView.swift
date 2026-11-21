@@ -11,6 +11,7 @@ struct BridgeSecurityDetailView: View {
     @Environment(\.dismiss) private var dismiss
 
     private var tls: BridgeTlsStatus? { model.worker.bridgeTls }
+    private var certificateStatus: SettingsCertificateStatus? { model.tlsPhase.certificateStatus }
     private var lanServing: Bool { model.server.lanServing }
     private var lanEnabled: Bool { model.settings.bridgeLANEnabled }
 
@@ -50,7 +51,11 @@ struct BridgeSecurityDetailView: View {
 
     private var certificateGroup: some View {
         SettingsGroup(title: "证书") {
-            SettingsValueRow(title: "HTTPS 服务", value: httpsText, tone: httpsTone)
+            SettingsValueRow(
+                title: "HTTPS 服务",
+                value: certificateStatus?.value ?? httpsText,
+                tone: certificateStatus?.tone ?? httpsTone
+            )
             SettingsRowDivider()
 
             if let tls {
@@ -73,9 +78,16 @@ struct BridgeSecurityDetailView: View {
                         .foregroundStyle(ConsoleTheme.secondaryText)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text("墨水屏上显示的指纹必须与这段完全一致。")
-                        .font(ConsoleType.micro)
-                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                    if let stale = certificateStatus?.fingerprintNotServing {
+                        Text(stale)
+                            .font(ConsoleType.micro)
+                            .foregroundStyle(ConsoleTheme.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text("墨水屏上显示的指纹必须与这段完全一致。")
+                            .font(ConsoleType.micro)
+                            .foregroundStyle(ConsoleTheme.tertiaryText)
+                    }
                 }
                 .padding(.vertical, 8)
             } else {
@@ -84,6 +96,15 @@ struct BridgeSecurityDetailView: View {
                     value: "未准备",
                     detail: lanEnabled ? "桥接启动时会自动准备。" : nil
                 )
+            }
+
+            // 身份没换成功：服务状态仍是真实的，错误单独说清楚。
+            if let notice = model.tlsPhase.notice, certificateStatus == nil {
+                SettingsInlineNotice(
+                    kind: notice.tone == .error ? .error : .warning,
+                    message: notice.text
+                )
+                .padding(.bottom, 8)
             }
 
             if let error = model.worker.bridgeTlsError {

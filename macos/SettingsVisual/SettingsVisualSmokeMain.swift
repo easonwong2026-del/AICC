@@ -77,9 +77,26 @@ struct SettingsVisualSmokeMain {
         )
         count += 1
 
-        try renderSecurityDetail(dark: false, to: outputDir)
+        try renderSecurityDetail(state: .bridgeServing, suffix: "light", scheme: .light, to: outputDir)
         count += 1
-        try renderSecurityDetail(dark: true, to: outputDir)
+        try renderSecurityDetail(state: .bridgeServing, suffix: "dark", scheme: .dark, to: outputDir)
+        count += 1
+
+        // 证书已换、服务没重启：详情不能显示绿色，指纹要注明尚未生效。
+        var restartFailed = SettingsVisualState.bridgeServing
+        restartFailed.tlsReset = .replacedButRestartFailed
+        try renderSecurityDetail(state: restartFailed, suffix: "restart-failed-light",
+                                 scheme: .light, to: outputDir)
+        count += 1
+        try renderSecurityDetail(state: restartFailed, suffix: "restart-failed-dark",
+                                 scheme: .dark, to: outputDir)
+        count += 1
+
+        // 身份没换成功：服务状态保持真实，错误单独显示。
+        var resetFailed = SettingsVisualState.bridgeServing
+        resetFailed.tlsReset = .failed("tls.reset 超时：助手 30 秒内没有返回")
+        try renderSecurityDetail(state: resetFailed, suffix: "reset-failed-light",
+                                 scheme: .light, to: outputDir)
         count += 1
 
         try renderPlaintextSheet(failure: nil, scheme: .light, to: outputDir)
@@ -192,20 +209,19 @@ struct SettingsVisualSmokeMain {
     }
 
     @MainActor
-    private static func renderSecurityDetail(dark: Bool, to outputDir: String) throws {
-        var state = SettingsVisualState.healthy
-        state.bridgeEnabled = true
-        state.bridgeLANEnabled = true
-        state.serverRunning = true
-        state.lanServing = true
+    private static func renderSecurityDetail(
+        state: SettingsVisualState,
+        suffix: String,
+        scheme: ColorScheme,
+        to outputDir: String
+    ) throws {
         let model = makeModel(state, category: .connection)
-        let scheme: ColorScheme = dark ? .dark : .light
         let view = BridgeSecurityDetailView(model: model, onClose: {})
             .environment(\.colorScheme, scheme)
         let size = CGSize(width: 520, height: 520)
         try render(view.frame(width: size.width, height: size.height),
                    size: size, scheme: scheme,
-                   to: "\(outputDir)/settings-bridge-security-520x520-\(dark ? "dark" : "light").png")
+                   to: "\(outputDir)/settings-bridge-security-520x520-\(suffix).png")
     }
 
     // MARK: - 弹层

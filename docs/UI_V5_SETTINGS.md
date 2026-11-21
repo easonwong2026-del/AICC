@@ -269,7 +269,7 @@ SettingsRootView（既有，未改）
 ## 8. 视觉验收（真实 SwiftUI 离屏渲染）
 
 工具：`bash scripts/smoke-test-settings-visual.sh`
-输出：`/private/tmp/aicc-settings-qa`，56 张 PNG。
+输出：`/private/tmp/aicc-settings-qa`，59 张 PNG。
 样本：`macos/SettingsVisual/SettingsVisualState.swift`，固定且脱敏；不含真实令牌、指纹或账号。
 安全：双 flag 构建里 `SettingsModel.loadOnce()` 直接返回，视图不挂任何写操作；`tls.reset` / 撤销设备 / 迁移 / LAN 修改都不会被调用。
 
@@ -279,12 +279,12 @@ SettingsRootView（既有，未改）
 - 连接与设备：Magpie 连接失败、桥接仅本机、LAN 正常、LAN 未监听、运行时缺失、已生成配对码（含最小窗）、登录项失败、证书未准备、证书重置失败、证书已换未重启。
 - 授权与存储：本地 JSON、需要迁移（未核验）、首选授权保存失败（长错误）、助手未运行（禁用态）。
 - 高级与诊断：助手启动失败（深色）、协议不匹配、轮换读取失败。
-- 弹层：凭据管理（浅/深/空/有异常/展开）、设备安全（浅/深）、明文风险（浅/深/失败）、额度选择错误态。
+- 弹层：凭据管理（浅/深/空/有异常/失败/展开）、设备安全（正常浅深 / 证书已换未重启浅深 / 身份替换失败）、明文风险（浅/深/失败）、额度选择错误态。
 
 ### 8.2 仓库内保存
 
 - `docs/console-v5/settings/before/`：3 张（旧页 580×560 浅/深 + 580×2200 全貌）。
-- `docs/console-v5/settings/after/`：32 张（核心页 × 浅深色、两套边界尺寸、关键状态与弹层）。
+- `docs/console-v5/settings/after/`：35 张（核心页 × 浅深色、两套边界尺寸、关键状态与弹层）。
 - 其余 24 张由 CI Artifact 承载，不进仓库。
 
 ### 8.3 逐轮人工检查与修复
@@ -342,6 +342,7 @@ SettingsRootView（既有，未改）
 | 13 加载/错误/未知 | `testLoadStateKeepsUnknownApartFromFailure` |
 | 14 禁用与重复点击 | `testBusyFlowBlocksRepeatedConfirmation` |
 | 文案预算 | `testNoticeBriefDropsTrailingDetail` |
+| 证书状态（主页与详情一致） | `testCertificateStatusOverridesOnlyWhenTheRunningServiceIsStale`、`testCertificateStatusStaysQuietWhenTheServiceStateIsTruthful`、`testCertificateStatusReturnsToNormalAfterASuccessfulRestart` |
 
 另外补了桥接状态派生（`testBridgePhaseOrdering`、`testBridgePhaseNeverCallsLoopbackNormalWhenLANIsSilentlyMissing`）、LAN 文案、助手状态、凭据摘要与窗口尺寸契约。
 
@@ -450,8 +451,8 @@ SettingsRootView（既有，未改）
 ### 11.6 本轮截图
 
 - 改造前（第一轮成品）：`docs/console-v5/settings/before-simplify/`（连接、授权、管理凭据 3 张）。
-- 改造后：`docs/console-v5/settings/after/`（32 张，含 560/760/960 × 浅深色、异常态、设备安全详情、管理凭据五态）。
-- 完整 56 张由 CI Artifact `settings-ui-visuals` 承载。
+- 改造后：`docs/console-v5/settings/after/`（35 张，含 560/760/960 × 浅深色、异常态、设备安全详情三态、管理凭据五态）。
+- 完整 59 张由 CI Artifact `settings-ui-visuals` 承载。
 
 ### 11.7 检查结论（560×520 / 760×620 / 960×720 × 浅色 / 深色）
 
@@ -461,6 +462,7 @@ SettingsRootView（既有，未改）
 - 管理凭据：打开即看到「N 项需处理」与三个异常入口；展开「更多操作」后自动滚到迁移/回滚；备份路径只在展开区。
 - 常规 / 高级与诊断：各 2 个与 3 个分组，无脚注。
 - 深色：所有正文与危险按钮对比度保持；弹层有 `ConsoleTheme.canvas` 背景，不再出现灰字压深底。
+- 设备安全详情：证书已换但服务未重启时，「HTTPS 服务」显示「运行中 · 证书未生效」并用警告色，指纹下方注明「这段指纹属于新证书，端口上仍在用旧证书」；身份替换失败时服务状态保持真实，错误单独一条红色提示。两条规则与主页共用 `SettingsTLSResetFlow.certificateStatus`。
 
 ### 11.8 危险确认文案（系统 `confirmationDialog` 无法离屏渲染，逐条列出以便核对）
 

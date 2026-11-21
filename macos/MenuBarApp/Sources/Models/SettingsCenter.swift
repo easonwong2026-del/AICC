@@ -524,6 +524,19 @@ enum SettingsTLSResetFlow: Equatable {
         }
     }
 
+    /// 证书已换、但运行中的服务还在用旧证书时，页面必须改口。
+    ///
+    /// 只有这一种情况会覆盖"HTTPS 服务"的值：`.failed` 表示身份没换成功，
+    /// 服务状态本身是真实的，错误交给 `notice` 显示，不能篡改服务状态。
+    var certificateStatus: SettingsCertificateStatus? {
+        guard self == .replacedButRestartFailed else { return nil }
+        return SettingsCertificateStatus(
+            value: "运行中 · 证书未生效",
+            tone: .warning,
+            fingerprintNotServing: "这段指纹属于新证书，端口上仍在用旧证书；重启 AICC 后才会生效。"
+        )
+    }
+
     var notice: (text: String, tone: SettingsTone)? {
         switch self {
         case .idle, .confirming, .running:
@@ -534,6 +547,13 @@ enum SettingsTLSResetFlow: Equatable {
             return ("证书身份已替换，但桥接没有重启成功：端口上仍是旧证书，请手动重启 AICC。", .warning)
         }
     }
+}
+
+/// 证书在页面上的呈现。`fingerprintNotServing` 非空时，指纹属于尚未生效的新证书。
+struct SettingsCertificateStatus: Equatable {
+    var value: String
+    var tone: SettingsTone
+    var fingerprintNotServing: String?
 }
 
 /// 凭据存储开关的结果。

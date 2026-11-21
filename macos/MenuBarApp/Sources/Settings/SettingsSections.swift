@@ -205,16 +205,13 @@ struct ConnectionSettingsSection: View {
     }
 
     /// 证书已换但端口没重启时，运行状态不能还是绿色"一切正常"。
+    /// 规则在 `SettingsTLSResetFlow.certificateStatus`，与设备安全详情共用一份。
     private var statusText: String {
-        if model.tlsPhase == .replacedButRestartFailed, phase == .loopbackOnly || phase == .lanServing {
-            return "运行中 · 证书未生效"
-        }
-        return phase.statusText
+        model.tlsPhase.certificateStatus?.value ?? phase.statusText
     }
 
     private var statusTone: SettingsTone {
-        if model.tlsPhase == .replacedButRestartFailed { return .warning }
-        return phase.tone
+        model.tlsPhase.certificateStatus?.tone ?? phase.tone
     }
 
     private var httpsText: String {

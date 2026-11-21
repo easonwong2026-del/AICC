@@ -209,6 +209,33 @@ final class SettingsCenterTests: XCTestCase {
         XCTAssertNil(allGood.notice)
     }
 
+    /// 详情与主页共用这一条规则：证书换了、服务没重启时不能显示绿色"运行中"。
+    func testCertificateStatusOverridesOnlyWhenTheRunningServiceIsStale() {
+        let stale = SettingsTLSResetFlow.replacedButRestartFailed.certificateStatus
+        XCTAssertNotNil(stale)
+        XCTAssertEqual(stale?.value, "运行中 · 证书未生效")
+        XCTAssertEqual(stale?.tone, .warning)
+        XCTAssertNotEqual(stale?.tone, .ok, "不能用正常状态暗示新证书已生效")
+        XCTAssertTrue(stale?.fingerprintNotServing?.contains("旧证书") == true)
+        XCTAssertTrue(stale?.fingerprintNotServing?.contains("重启") == true)
+    }
+
+    func testCertificateStatusStaysQuietWhenTheServiceStateIsTruthful() {
+        // 身份没换成功：服务状态本身没变，错误交给 notice，不能篡改服务状态。
+        XCTAssertNil(SettingsTLSResetFlow.failed("tls.reset 超时").certificateStatus)
+        XCTAssertNil(SettingsTLSResetFlow.idle.certificateStatus)
+        XCTAssertNil(SettingsTLSResetFlow.confirming.certificateStatus)
+        XCTAssertNil(SettingsTLSResetFlow.running.certificateStatus)
+    }
+
+    func testCertificateStatusReturnsToNormalAfterASuccessfulRestart() {
+        var flow = SettingsTLSResetFlow.running
+        flow.finish(identityReplaced: true, restartSucceeded: true, error: nil)
+        XCTAssertEqual(flow, .idle)
+        XCTAssertNil(flow.certificateStatus, "重启成功后必须回到正常的 HTTPS 状态")
+        XCTAssertNil(flow.notice)
+    }
+
     // MARK: - 8. 凭据 JSON 风险确认
 
     func testCredentialViewKeepsConsentRequirementVisible() {

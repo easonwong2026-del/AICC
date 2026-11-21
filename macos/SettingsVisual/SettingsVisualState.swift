@@ -76,6 +76,16 @@ extension SettingsVisualState {
         ])!
     }
 
+    /// 桥接开启、局域网 HTTPS 正在服务（设备安全详情的正常样本）。
+    static var bridgeServing: SettingsVisualState {
+        var state = healthy
+        state.bridgeEnabled = true
+        state.bridgeLANEnabled = true
+        state.serverRunning = true
+        state.lanServing = true
+        return state
+    }
+
     /// 正常：助手在跑、Magpie 已连接、钥匙串存储。
     static var healthy: SettingsVisualState {
         var state = SettingsVisualState()
