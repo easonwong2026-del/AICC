@@ -246,7 +246,11 @@
 
 ### 10.3 CI
 
-（以本轮最终 run 为准，提交后补。）
+- HEAD `0ca1d0d`，run `44912283147` **completed success**：
+  `changes` / `swift-test` / `macos-build` 全部 success；
+  `rust` / `android` / `test` / `lint` / `android-visual` 按路径过滤 skipped；`macos-dmg` 在 PR 上按设计跳过。
+- `swift-test` 内：`swift test` 通过，控制台 137 张与设置 59 张离屏渲染并上传 artifact（`console-ui-visuals` / `settings-ui-visuals`）。
+- 基线：上一轮 `7d02a95` 的 run `44907673299` 也是 success。
 
 ## 11. 尚未验证的真实客户端场景
 
