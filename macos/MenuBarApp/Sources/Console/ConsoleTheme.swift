@@ -1,62 +1,63 @@
 import AppKit
 import SwiftUI
 
-/// 主控制台的**唯一**视觉令牌来源（PRD §8）。
-///
-/// 规则：
-/// - 尺寸只在这里定义，页面里不再写魔法数字；
-/// - 颜色全部走 `NSColor` 动态 provider，切外观不需要重建视图树；
-/// - 颜色只用来表达状态，不做装饰性大色块。
+/// AICC 主控制台唯一视觉 Token 来源。
+/// 页面只引用语义，不直接选择字号、色号或临时尺寸。
 enum ConsoleTheme {
-    // MARK: 尺寸
+    // MARK: 窗口与布局
 
-    static let sidebarWidth: CGFloat = 202
+    static let sidebarWidth: CGFloat = 208
     static let windowSize = NSSize(width: 1120, height: 760)
     static let minWindowSize = NSSize(width: 960, height: 640)
+    static let pagePadding: CGFloat = 28
+    static let pageTopPadding: CGFloat = 24
+    static let pageBottomPadding: CGFloat = 28
+    static let headerHeight: CGFloat = 72
+    static let sectionSpacing: CGFloat = 24
+    static let groupSpacing: CGFloat = 12
+    static let rowHeight: CGFloat = 44
+    static let accountRowHeight: CGFloat = 52
+    static let accountListWidth: CGFloat = 276
+    static let detailLabelWidth: CGFloat = 92
 
-    /// 页面左右边距（PRD 20–24）。
-    static let pagePadding: CGFloat = 20
-    /// 标题栏高度：保证标题、主操作、齿轮在最小窗口下也完整可见。
-    static let headerHeight: CGFloat = 58
-    /// 卡片与区块。
+    // MARK: 容器与控件
+
     static let cardRadius: CGFloat = 12
-    static let cardPadding: CGFloat = 14
-    static let cardSpacing: CGFloat = 12
-    /// 区块之间的间距（12–16）。
-    static let sectionSpacing: CGFloat = 16
-    /// 控件统一高度（30–32）。
-    static let controlHeight: CGFloat = 28
-    /// 列表行高度。
-    static let rowHeight: CGFloat = 34
-    /// 账号页左栏宽度（PRD 230–250）。
-    static let accountListWidth: CGFloat = 244
+    static let controlRadius: CGFloat = 8
+    static let cardPadding: CGFloat = 16
+    static let cardSpacing: CGFloat = 16
+    static let controlHeight: CGFloat = 30
 
-    // MARK: 颜色
+    enum Sheet {
+        static let smallWidth: CGFloat = 440
+        static let mediumWidth: CGFloat = 560
+        static let padding: CGFloat = 24
+    }
 
-    static let canvas = adaptive(light: 0xF5F6F7, dark: 0x17191C)
-    static let sidebar = adaptive(light: 0xEDEFF2, dark: 0x1D2024)
-    static let card = adaptive(light: 0xFFFFFF, dark: 0x23262A)
-    static let cardSubtle = adaptive(light: 0xF7F8F9, dark: 0x1F2226)
-    static let border = adaptive(light: 0xE6E9EC, dark: 0x34383D)
-    static let borderStrong = adaptive(light: 0xD8DDE2, dark: 0x3E444A)
-    static let text = adaptive(light: 0x20252B, dark: 0xECEEF1)
-    static let secondaryText = adaptive(light: 0x7B8490, dark: 0x98A1AD)
-    static let tertiaryText = adaptive(light: 0x9AA3AE, dark: 0x7C848E)
-    static let accent = adaptive(light: 0x328F80, dark: 0x45B3A0)
-    static let accentSoft = adaptive(light: 0xE7F2F0, dark: 0x20332F)
-    static let success = adaptive(light: 0x3F9E6A, dark: 0x5CC08A)
-    static let warning = adaptive(light: 0xC98430, dark: 0xE0A458)
-    static let danger = adaptive(light: 0xC0504D, dark: 0xE0746E)
-    static let selectionFill = adaptive(light: 0xDCE5E3, dark: 0x2A3634)
+    // MARK: 中性色
 
-    /// 半透明状态底：用于徽章与内联提示，避免整块上色。
-    static let successSoft = adaptive(light: 0xEAF5EE, dark: 0x1E2E26)
-    static let warningSoft = adaptive(light: 0xFBF3E6, dark: 0x2E2719)
-    static let dangerSoft = adaptive(light: 0xFBECEB, dark: 0x2E1F1F)
+    static let canvas = adaptive(light: 0xF6F6F7, dark: 0x1B1B1D)
+    static let sidebar = adaptive(light: 0xEEEEEF, dark: 0x232325)
+    static let card = adaptive(light: 0xFFFFFF, dark: 0x262628)
+    static let cardSubtle = adaptive(light: 0xF0F0F2, dark: 0x2C2C2E)
+    static let border = adaptive(light: 0xE1E1E4, dark: 0x3A3A3C)
+    static let borderStrong = adaptive(light: 0xD2D2D6, dark: 0x48484A)
+    static let text = adaptive(light: 0x1D1D1F, dark: 0xF5F5F7)
+    static let secondaryText = adaptive(light: 0x606068, dark: 0xA1A1A6)
+    static let tertiaryText = adaptive(light: 0x85858B, dark: 0x7C7C80)
 
-    // MARK: 语义
+    // MARK: 语义色
 
-    /// 语义色：页面里只描述"什么状态"，不直接挑色号。
+    static let accent = adaptive(light: 0x007AFF, dark: 0x0A84FF)
+    static let accentSoft = adaptive(light: 0xE8F1FD, dark: 0x17324D)
+    static let success = adaptive(light: 0x248A3D, dark: 0x30D158)
+    static let warning = adaptive(light: 0xC93400, dark: 0xFF9F0A)
+    static let danger = adaptive(light: 0xD70015, dark: 0xFF453A)
+    static let selectionFill = adaptive(light: 0xDDE9F8, dark: 0x303D4D)
+    static let successSoft = adaptive(light: 0xEAF5ED, dark: 0x203529)
+    static let warningSoft = adaptive(light: 0xFFF1E8, dark: 0x392A20)
+    static let dangerSoft = adaptive(light: 0xFDEBEC, dark: 0x3B2426)
+
     enum Tone {
         case accent
         case ok
@@ -85,14 +86,8 @@ enum ConsoleTheme {
         }
     }
 
-    /// 状态点的颜色。
     static func tone(_ tone: ConsoleAccount.AuthTone) -> Color {
-        switch tone {
-        case .ok: return success
-        case .warning: return warning
-        case .error: return danger
-        case .neutral: return tertiaryText
-        }
+        color(consoleTone(tone))
     }
 
     static func consoleTone(_ tone: ConsoleAccount.AuthTone) -> Tone {
@@ -112,27 +107,26 @@ enum ConsoleTheme {
     }
 }
 
-/// 字号与字重（PRD §8：标题 18–20、分组 13–14、正文 12–13、辅助 11–12）。
-///
-/// 全部集中在这里，禁止在页面里临时写 `size: 9`：10pt 以下的字在最小窗口下读不清。
+/// 系统字体层级。除特殊图标外，页面不得再创建临时字号。
 enum ConsoleType {
-    static let pageTitle = Font.system(size: 19, weight: .semibold)
-    static let pageSubtitle = Font.system(size: 11)
-    static let sectionTitle = Font.system(size: 13, weight: .semibold)
-    static let sectionDetail = Font.system(size: 11)
-    static let rowTitle = Font.system(size: 12, weight: .medium)
-    static let body = Font.system(size: 12)
-    static let small = Font.system(size: 11)
-    static let caption = Font.system(size: 11)
+    static let pageTitle = Font.system(size: 24, weight: .semibold)
+    static let pageSubtitle = Font.system(size: 12)
+    static let hero = Font.system(size: 28, weight: .semibold)
+    static let detailTitle = Font.system(size: 20, weight: .semibold)
+    static let sectionTitle = Font.system(size: 15, weight: .semibold)
+    static let sectionDetail = Font.system(size: 12)
+    static let rowTitle = Font.system(size: 13, weight: .medium)
+    static let body = Font.system(size: 13)
+    static let small = Font.system(size: 12)
+    static let caption = Font.system(size: 12)
     static let micro = Font.system(size: 11)
-    static let metric = Font.system(size: 22, weight: .semibold)
-    static let metricSmall = Font.system(size: 16, weight: .semibold)
-    static let mono = Font.system(size: 11, design: .monospaced)
-    static let monoSmall = Font.system(size: 10, design: .monospaced)
+    static let metric = Font.system(size: 30, weight: .semibold)
+    static let metricSmall = Font.system(size: 20, weight: .semibold)
+    static let mono = Font.system(size: 12, design: .monospaced)
+    static let monoSmall = Font.system(size: 11, design: .monospaced)
 }
 
 extension NSColor {
-    /// 0xRRGGBB → NSColor（sRGB）。
     convenience init(rgbHex: UInt32) {
         let red = CGFloat((rgbHex >> 16) & 0xFF) / 255
         let green = CGFloat((rgbHex >> 8) & 0xFF) / 255

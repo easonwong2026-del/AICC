@@ -16,8 +16,55 @@ struct ConsoleCard<Content: View>: View {
             .background(ConsoleTheme.card, in: RoundedRectangle(cornerRadius: ConsoleTheme.cardRadius))
             .overlay(
                 RoundedRectangle(cornerRadius: ConsoleTheme.cardRadius)
-                    .strokeBorder(ConsoleTheme.border, lineWidth: 1)
+                    .strokeBorder(ConsoleTheme.border, lineWidth: 0.5)
             )
+    }
+}
+
+/// 一组相关列表行共用一个容器；行内不再嵌套卡片。
+struct ConsoleListSurface<Content: View>: View {
+    var horizontalPadding: CGFloat = ConsoleTheme.cardPadding
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        content
+            .padding(.horizontal, horizontalPadding)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(ConsoleTheme.card, in: RoundedRectangle(cornerRadius: ConsoleTheme.cardRadius))
+            .overlay(
+                RoundedRectangle(cornerRadius: ConsoleTheme.cardRadius)
+                    .strokeBorder(ConsoleTheme.border, lineWidth: 0.5)
+            )
+    }
+}
+
+/// 不带底色的关键数字，用于页面摘要与账号详情。
+struct ConsoleSummaryMetric: View {
+    let label: String
+    let value: String
+    var detail: String?
+    var tone: Color = ConsoleTheme.text
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label)
+                .font(ConsoleType.small)
+                .foregroundStyle(ConsoleTheme.secondaryText)
+            Text(value)
+                .font(ConsoleType.metricSmall)
+                .monospacedDigit()
+                .foregroundStyle(tone)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+            if let detail {
+                Text(detail)
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -216,18 +263,16 @@ struct ConsoleInlineNotice: View {
 
 // MARK: - 详情分组
 
-/// 账号详情的 A/B/C/D 区块：标题 + 卡片内容，间距统一。
+/// 平面详情分组：以标题和留白建立层级，不为每组再画一张卡片。
 struct ConsoleDetailGroup<Content: View>: View {
     let title: String
     var detail: String?
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: ConsoleTheme.groupSpacing) {
             ConsoleSectionHeader(title: title, detail: detail) { EmptyView() }
-            ConsoleCard(padding: 12) {
-                content
-            }
+            content
         }
     }
 }
@@ -244,7 +289,7 @@ struct ConsoleInfoRow: View {
             Text(label)
                 .font(ConsoleType.small)
                 .foregroundStyle(ConsoleTheme.secondaryText)
-                .frame(width: 78, alignment: .leading)
+                .frame(width: ConsoleTheme.detailLabelWidth, alignment: .leading)
             Text(value)
                 .font(mono ? ConsoleType.mono : ConsoleType.body)
                 .foregroundStyle(valueTint)
@@ -286,10 +331,7 @@ struct ConsoleSearchField: View {
         }
         .padding(.horizontal, 8)
         .frame(height: ConsoleTheme.controlHeight)
-        .background(ConsoleTheme.card, in: RoundedRectangle(cornerRadius: 7))
-        .overlay(
-            RoundedRectangle(cornerRadius: 7).strokeBorder(ConsoleTheme.border, lineWidth: 1)
-        )
+        .background(ConsoleTheme.cardSubtle, in: RoundedRectangle(cornerRadius: ConsoleTheme.controlRadius))
     }
 }
 
@@ -326,9 +368,9 @@ struct ConsoleFilterMenu<Option: Identifiable & Equatable>: View {
             .foregroundStyle(ConsoleTheme.text)
             .padding(.horizontal, 9)
             .frame(height: ConsoleTheme.controlHeight)
-            .background(ConsoleTheme.card, in: RoundedRectangle(cornerRadius: 7))
+            .background(ConsoleTheme.card, in: RoundedRectangle(cornerRadius: ConsoleTheme.controlRadius))
             .overlay(
-                RoundedRectangle(cornerRadius: 7).strokeBorder(ConsoleTheme.border, lineWidth: 1)
+                RoundedRectangle(cornerRadius: ConsoleTheme.controlRadius).strokeBorder(ConsoleTheme.border, lineWidth: 0.5)
             )
         }
         .menuStyle(.borderlessButton)
@@ -385,7 +427,7 @@ struct ConsolePrimaryButtonStyle: ButtonStyle {
                     active
                         ? ConsoleTheme.accent.opacity(configuration.isPressed ? 0.82 : 1)
                         : ConsoleTheme.cardSubtle,
-                    in: RoundedRectangle(cornerRadius: 7)
+                    in: RoundedRectangle(cornerRadius: ConsoleTheme.controlRadius)
                 )
         }
     }
@@ -409,10 +451,10 @@ struct ConsoleSecondaryButtonStyle: ButtonStyle {
                 .frame(height: ConsoleTheme.controlHeight)
                 .background(
                     (configuration.isPressed && isEnabled) ? ConsoleTheme.cardSubtle : ConsoleTheme.card,
-                    in: RoundedRectangle(cornerRadius: 7)
+                    in: RoundedRectangle(cornerRadius: ConsoleTheme.controlRadius)
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 7).strokeBorder(ConsoleTheme.border, lineWidth: 1)
+                    RoundedRectangle(cornerRadius: ConsoleTheme.controlRadius).strokeBorder(ConsoleTheme.border, lineWidth: 0.5)
                 )
                 .opacity(isEnabled ? 1 : 0.65)
         }
@@ -427,12 +469,10 @@ struct ConsoleIconButtonStyle: ButtonStyle {
             .foregroundStyle(ConsoleTheme.secondaryText)
             .frame(width: size + 4, height: size)
             .background(
-                configuration.isPressed ? ConsoleTheme.cardSubtle : ConsoleTheme.card,
-                in: RoundedRectangle(cornerRadius: 7)
+                configuration.isPressed ? ConsoleTheme.cardSubtle : Color.clear,
+                in: RoundedRectangle(cornerRadius: ConsoleTheme.controlRadius)
             )
-            .overlay(
-                RoundedRectangle(cornerRadius: 7).strokeBorder(ConsoleTheme.border, lineWidth: 1)
-            )
+            .contentShape(RoundedRectangle(cornerRadius: ConsoleTheme.controlRadius))
     }
 }
 

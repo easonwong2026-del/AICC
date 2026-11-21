@@ -1,369 +1,182 @@
 import SwiftUI
 
-/// 总览页（PRD §3）。
-///
-/// 回答四个问题就够：有几个服务账号、授权是否正常、今天完成了多少、有没有要手动处理的。
-/// 这里**不**放登录表单、完整额度列表或全部账号——那些属于各自的页面。
+/// 总览只回答：整体是否正常、今天是否完成、现在要处理什么。
+/// 详细额度、任务日志和授权机制分别留在对应页面。
 struct ConsoleOverviewView: View {
     @ObservedObject var store: ConsoleStore
     @EnvironmentObject private var nav: ConsoleNavigation
 
     var body: some View {
-        // 总览没有"必须的主操作"（PRD §7.1）：刷新走标题栏那颗全局按钮。
-        ConsolePageScaffold {
-            HStack(spacing: 8) {
-                Text(syncSummary)
-                    .font(ConsoleType.small)
-                    .foregroundStyle(ConsoleTheme.secondaryText)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-            }
-        } content: {
+        ScrollView {
             VStack(alignment: .leading, spacing: ConsoleTheme.sectionSpacing) {
-                statSection
-                activitySection
-                platformSection
-                HStack(alignment: .top, spacing: ConsoleTheme.cardSpacing) {
-                    recentSection
-                    pendingSection.frame(width: 286)
+                summarySection
+                errorSection
+                attentionSection
+                todaySection
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: ConsoleTheme.sectionSpacing) {
+                        platformSection
+                        activitySection.frame(width: 300)
+                    }
+                    VStack(alignment: .leading, spacing: ConsoleTheme.sectionSpacing) {
+                        platformSection
+                        activitySection
+                    }
                 }
+                recentSection
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, ConsoleTheme.pagePadding)
+            .padding(.top, ConsoleTheme.pageTopPadding)
+            .padding(.bottom, ConsoleTheme.pageBottomPadding)
         }
         .task {
-            // 其余几块只读本地记录，不联网；唯一联网的是下面的成长活跃（只读 GET）。
-            if store.tasksOverview == nil {
-                await store.refreshTasksOverview()
-            }
-            // 签到 / 旅行的"最近记录"来自本地库，读一次才不是空的（不发网络请求）。
-            if store.checkin.rows.isEmpty {
-                await store.loadCheckin(cached: true)
-            }
-            if store.travelRows.isEmpty {
-                await store.loadTravel()
-            }
-            // 成长活跃：每次启动只自动读一次。这一块的存在意义就是"打开就能看一眼"，
-            // 让用户先点一下再看反而违背目的；读到的结果留在 store 里，之后靠「刷新」。
+            if store.tasksOverview == nil { await store.refreshTasksOverview() }
+            if store.checkin.rows.isEmpty { await store.loadCheckin(cached: true) }
+            if store.travelRows.isEmpty { await store.loadTravel() }
             if store.lastActivityRefresh == nil && store.activityError == nil && !store.activityLoading {
                 await store.loadActivity()
             }
         }
     }
 
-    private var syncSummary: String {
-        var parts: [String] = []
-        if let at = store.lastAccountsRefresh {
-            parts.append("账号 \(ConsoleFormat.shortDateTime(at))")
-        }
-        if let at = store.qoderSyncedAt {
-            parts.append("Qoder \(ConsoleFormat.shortDateTime(at))")
-        }
-        if let at = store.tasksOverview?.today {
-            parts.append("统计日 \(at)")
-        }
-        return parts.isEmpty ? "尚未同步" : parts.joined(separator: " · ")
+    // MARK: - 状态摘要
+
+    /// 首屏的“需要处理”汇总：轮换未知与恢复异常都不能被当成正常。
+    private var attention: ConsoleOverviewAttention {
+        ConsoleOverviewAttention(
+            fleetIssues: store.fleet.issues,
+            failureCount: store.tasksOverview?.failureCount ?? 0,
+            accountsError: store.accountsError != nil,
+            qoderError: store.qoderError != nil,
+            rotation: ConsoleRotationAttentionState(
+                status: store.wbRotationStatus,
+                error: store.wbRotationError
+            )
+        )
     }
 
-    // MARK: 第一层：状态摘要
+    private var attentionCount: Int { attention.count }
 
-    private var statSection: some View {
+    private var summarySection: some View {
         ViewThatFits(in: .horizontal) {
-            HStack(spacing: ConsoleTheme.cardSpacing) {
-                statTiles.frame(minWidth: 186)
+            HStack(alignment: .center, spacing: 24) {
+                summaryHeadline
+                Spacer(minLength: 16)
+                summaryMetrics.frame(width: 310)
             }
-            LazyVGrid(
-                columns: [GridItem(.flexible(), spacing: ConsoleTheme.cardSpacing),
-                          GridItem(.flexible(), spacing: ConsoleTheme.cardSpacing)],
-                spacing: ConsoleTheme.cardSpacing
-            ) {
-                statTiles
+            VStack(alignment: .leading, spacing: 20) {
+                summaryHeadline
+                summaryMetrics
             }
+        }
+        .padding(.bottom, 4)
+    }
+
+    private var summaryHeadline: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(headline)
+                .font(ConsoleType.hero)
+                .foregroundStyle(ConsoleTheme.text)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(summaryDetail)
+                .font(ConsoleType.body)
+                .foregroundStyle(ConsoleTheme.secondaryText)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(minWidth: 260, alignment: .leading)
+    }
+
+    private var headline: String {
+        if store.loadingAccounts && store.fleet.serviceAccounts == 0 { return "正在读取账号" }
+        if store.fleet.serviceAccounts == 0 { return "从添加账号开始" }
+        // 只有轮换状态已确认无异常时才可能出现“一切正常”。
+        return attention.headline
+    }
+
+    private var summaryDetail: String {
+        let healthy = store.fleet.healthy
+        let total = store.fleet.serviceAccounts
+        let accounts = total == 0 ? "添加账号后即可管理授权与任务" : "\(total) 个账号，\(healthy) 个授权正常"
+        guard let overview = store.tasksOverview else { return accounts }
+        return "\(accounts) · 今日完成 \(overview.doneToday) 项"
+    }
+
+    private var summaryMetrics: some View {
+        HStack(alignment: .top, spacing: 16) {
+            ConsoleSummaryMetric(
+                label: "账号",
+                value: "\(store.fleet.serviceAccounts)",
+                detail: store.fleet.localProfiles > 0 ? "本机配置 \(store.fleet.localProfiles)" : nil
+            )
+            ConsoleSummaryMetric(
+                label: "今日完成",
+                value: store.tasksOverview.map { "\($0.doneToday)" } ?? "—",
+                detail: store.tasksOverview.map { "待完成 \($0.pendingToday)" } ?? "尚未读取"
+            )
+            ConsoleSummaryMetric(
+                label: "需要处理",
+                value: "\(attentionCount)",
+                detail: attentionCount > 0 ? "查看下方事项" : "无需操作",
+                tone: attentionCount > 0 ? ConsoleTheme.warning : ConsoleTheme.text
+            )
         }
     }
 
     @ViewBuilder
-    private var statTiles: some View {
-        let fleet = store.fleet
-        let overview = store.tasksOverview
-
-        ConsoleStatTile(
-            caption: "服务账号",
-            value: "\(fleet.serviceAccounts)",
-            hint: "WorkBuddy \(fleet.cards[0].accounts + fleet.cards[1].accounts) · Qoder \(fleet.cards[2].accounts + fleet.cards[3].accounts)"
-        )
-        ConsoleStatTile(
-            caption: "授权正常",
-            value: "\(fleet.healthy)",
-            hint: fleet.issues > 0 ? "\(fleet.issues) 个需要处理" : "没有异常授权",
-            tone: fleet.issues > 0 ? ConsoleTheme.warning : ConsoleTheme.text
-        )
-        ConsoleStatTile(
-            caption: "今日完成",
-            value: overview.map { "\($0.doneToday)" } ?? "—",
-            hint: overview.map { "待完成 \($0.pendingToday)" } ?? "读取本地记录中",
-            emphasized: overview != nil
-        )
-        // 口径必须与左边那张卡一致：授权异常来自账号本身，失败任务来自本地记录，
-        // 两者不重叠，可以相加（needsReauth 就是账号级异常，不重复计）。
-        ConsoleStatTile(
-            caption: "需要处理",
-            value: overview.map { "\(fleet.issues + $0.failureCount)" } ?? "\(fleet.issues)",
-            hint: "授权 \(fleet.issues) · 失败任务 \(overview?.failureCount ?? 0)",
-            tone: fleet.issues > 0 || (overview?.failureCount ?? 0) > 0
-                ? ConsoleTheme.danger : ConsoleTheme.text,
-            emphasized: true
-        )
-    }
-
-    // MARK: 第二层：成长活跃（PR #103）
-
-    /// 四个账号今天亮了没有。自动读一次，之后由用户点「刷新」触发。
-    /// 每账号 2 个成长 GET；本地没有成功签到记录时再加 1 次只读语义 POST。
-    private var activitySection: some View {
-        ConsoleActivityBlock(
-            fleet: store.activity,
-            loading: store.activityLoading,
-            failure: store.activityError,
-            lastRefresh: store.lastActivityRefresh,
-            onRefresh: { Task { await store.loadActivity() } }
-        )
-    }
-
-    // MARK: 第三层：服务平台
-
-    private var platformSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ConsoleSectionHeader(
-                title: "服务平台",
-                detail: store.fleet.localProfiles > 0
-                    ? "另有 \(store.fleet.localProfiles) 个本机 Qoder 配置，不计入服务账号"
-                    : nil
-            ) { EmptyView() }
-
-            LazyVGrid(
-                columns: [GridItem(.flexible(), spacing: ConsoleTheme.cardSpacing),
-                          GridItem(.flexible(), spacing: ConsoleTheme.cardSpacing)],
-                spacing: ConsoleTheme.cardSpacing
-            ) {
-                ForEach(store.fleet.cards) { card in
-                    platformCard(card)
-                }
-            }
+    private var errorSection: some View {
+        if store.loadingAccounts && store.accounts.isEmpty {
+            ConsoleLoadingRow(text: "正在读取账号状态")
+        }
+        if let error = store.tasksOverviewError {
+            ConsoleInlineNotice(kind: .warning, message: "今日任务暂时无法读取：\(error)")
         }
     }
 
-    private func platformCard(_ card: ConsolePlatformCard) -> some View {
-        Button {
-            nav.openAccounts(filter: card.kind.filter)
-        } label: {
-            ConsoleCard(padding: 12) {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        Image(systemName: card.kind.symbol)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(ConsoleTheme.accent)
-                            .frame(width: 24, height: 24)
-                            .background(ConsoleTheme.accentSoft, in: RoundedRectangle(cornerRadius: 7))
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(card.kind.title)
-                                .font(ConsoleType.rowTitle)
-                                .foregroundStyle(ConsoleTheme.text)
-                                .lineLimit(1)
-                            Text(card.kind.subtitle)
-                                .font(ConsoleType.caption)
-                                .foregroundStyle(ConsoleTheme.tertiaryText)
-                                .lineLimit(1)
-                        }
-                        Spacer(minLength: 4)
-                        Text("\(card.accounts)")
-                            .font(ConsoleType.metricSmall)
-                            .monospacedDigit()
-                            .foregroundStyle(ConsoleTheme.text)
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(ConsoleTheme.tertiaryText)
-                    }
-
-                    HStack(spacing: 10) {
-                        ConsoleStatusDot(color: ConsoleTheme.success, text: "正常 \(card.healthy)")
-                        if card.issues > 0 {
-                            ConsoleStatusDot(color: ConsoleTheme.warning, text: "异常 \(card.issues)")
-                        } else if card.accounts == 0 {
-                            ConsoleStatusDot(color: ConsoleTheme.tertiaryText, text: "未添加账号")
-                        } else {
-                            ConsoleStatusDot(color: ConsoleTheme.tertiaryText, text: "无异常")
-                        }
-                        Spacer(minLength: 0)
-                    }
-
-                    Text(lastSyncText(for: card.kind))
-                        .font(ConsoleType.caption)
-                        .foregroundStyle(ConsoleTheme.tertiaryText)
-                        .lineLimit(1)
-                }
-            }
-        }
-        .buttonStyle(.plain)
-        .help("在 AI 账号页筛选 \(card.kind.title)")
-    }
-
-    /// 最近同步状态：只写真实拿到的时间，没同步过就直说。
-    private func lastSyncText(for kind: ConsolePlatformKind) -> String {
-        switch kind {
-        case .workbuddyCN, .workbuddyAI:
-            if let at = store.lastAccountsRefresh {
-                return "最近同步 \(ConsoleFormat.shortDateTime(at))"
-            }
-            if let error = store.accountsError { return error }
-            return "尚未同步"
-        case .qoderCN, .qoderGlobal:
-            if let at = store.qoderSyncedAt {
-                return "最近同步 \(ConsoleFormat.shortDateTime(at))"
-            }
-            if let error = store.qoderError { return error }
-            return "尚未同步"
-        }
-    }
-
-    // MARK: 第三层：最近记录
-
-    private struct RecentRecord: Identifiable {
-        let id: String
-        let title: String
-        let detail: String
-        let at: Date?
-        let tone: ConsoleTheme.Tone
-        let symbol: String
-    }
-
-    private var recentRecords: [RecentRecord] {
-        var items: [RecentRecord] = []
-
-        for row in store.checkin.rows where row.state.isChecked || row.state.isProblem {
-            let credits = row.credits.map { " +\($0)" } ?? ""
-            items.append(RecentRecord(
-                id: "checkin-\(row.accountId)",
-                title: "签到 · \(row.nickname)",
-                detail: row.state.isProblem
-                    ? (row.errorDetail ?? row.state.title)
-                    : "\(row.state.title)\(credits)",
-                at: row.checkedAt,
-                tone: row.state.isProblem ? .warning : .ok,
-                symbol: "calendar.badge.checkmark"
-            ))
-        }
-
-        for row in store.travelRows {
-            guard let status = row.status, status.claimed || status.stage == .failed else { continue }
-            items.append(RecentRecord(
-                id: "travel-\(row.accountId)",
-                title: "Buddy 旅行 · \(row.nickname)",
-                detail: status.claimed
-                    ? "已领取\(status.rewardCredits.map { " +\($0)" } ?? "")"
-                    : (status.lastError ?? "执行失败"),
-                at: ConsoleFormat.parse(status.claimedAt) ?? ConsoleFormat.parse(status.lastCheckedAt),
-                tone: status.claimed ? .ok : .warning,
-                symbol: "airplane"
-            ))
-        }
-
-        for item in store.qoderCreditsAuto {
-            guard let run = item.lastRun else { continue }
-            items.append(RecentRecord(
-                id: "credits-\(item.accountId)",
-                title: "Qoder Credits · \(item.displayName)",
-                detail: run.outcomeLabel + (run.credits.map { " +\($0)" } ?? ""),
-                at: ConsoleFormat.parse(run.executedAt),
-                tone: run.isSuccess ? .ok : .warning,
-                symbol: "circle.dotted.circle"
-            ))
-        }
-
-        if let at = store.lastGrowthScan, !store.growthResult.scans.isEmpty {
-            let pending = store.growthResult.scans.reduce(0) { $0 + $1.pendingCount }
-            items.append(RecentRecord(
-                id: "growth-scan",
-                title: "成长中心扫描",
-                detail: "\(store.growthResult.scans.count) 个账号 · 待办 \(pending)",
-                at: at,
-                tone: .ok,
-                symbol: "sparkles"
-            ))
-        }
-
-        return items
-            .sorted { ($0.at ?? .distantPast) > ($1.at ?? .distantPast) }
-            .prefix(6)
-            .map { $0 }
-    }
-
-    private var recentSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ConsoleSectionHeader(title: "最近操作", detail: nil) { EmptyView() }
-            ConsoleCard(padding: 0) {
-                let records = recentRecords
-                if records.isEmpty {
-                    ConsoleEmptyState(
-                        symbol: "clock",
-                        title: "暂无操作",
-                        message: "签到、成长或旅行执行过一次后，这里会显示最近结果。"
-                    )
-                } else {
-                    VStack(spacing: 0) {
-                        ForEach(Array(records.enumerated()), id: \.element.id) { index, record in
-                            recordRow(record)
-                            if index < records.count - 1 {
-                                Divider().overlay(ConsoleTheme.border).padding(.leading, 38)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func recordRow(_ record: RecentRecord) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: record.symbol)
-                .font(.system(size: 11))
-                .foregroundStyle(ConsoleTheme.color(record.tone))
-                .frame(width: 18)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(record.title)
-                    .font(ConsoleType.rowTitle)
-                    .foregroundStyle(ConsoleTheme.text)
-                    .lineLimit(1)
-                Text(record.detail)
-                    .font(ConsoleType.caption)
-                    .foregroundStyle(ConsoleTheme.secondaryText)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 6)
-            Text(record.at.map(ConsoleFormat.shortDateTime) ?? "时间未知")
-                .font(ConsoleType.caption)
-                .foregroundStyle(ConsoleTheme.tertiaryText)
-                .monospacedDigit()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-    }
-
-    // MARK: 待处理事项
+    // MARK: - 待处理
 
     private struct PendingItem: Identifiable {
         let id: String
         let title: String
         let detail: String
         let selection: ConsoleAccountSelection?
-        /// 跳转时要应用到的平台筛选：否则账号会被当前筛选挡住。
         let filter: ConsolePlatformFilter
         let destination: ConsolePage
+        /// 点开后是否直接打开 WorkBuddy 登录与夜间轮换管理面板（只导航，不执行任何恢复）。
+        var opensRotationSheet = false
     }
 
     private var pendingItems: [PendingItem] {
         var items: [PendingItem] = []
-
-        for account in store.accounts where ["expired", "invalid", "denied"].contains(account.authStatus) {
+        // P0：轮换上一轮没有恢复成功、或状态读取失败时，必须出现在首屏待处理里。
+        // 点击只带上下文进入账号页的轮换管理面板，恢复仍走原有确认流程。
+        switch attention.rotation {
+        case .needsAction(let run):
+            items.append(PendingItem(
+                id: "wb-rotation-recovery",
+                title: attention.rotation.pendingTitle ?? "WorkBuddy 轮换未恢复",
+                detail: run.restoreText,
+                selection: nil,
+                filter: .workbuddy,
+                destination: .accounts,
+                opensRotationSheet: true
+            ))
+        case .unavailable:
+            items.append(PendingItem(
+                id: "wb-rotation-unknown",
+                title: attention.rotation.pendingTitle ?? "轮换状态无法确认",
+                detail: attention.rotation.pendingDetail ?? "状态读取失败",
+                selection: nil,
+                filter: .workbuddy,
+                destination: .accounts,
+                opensRotationSheet: true
+            ))
+        case .loading, .clear:
+            break
+        }
+        for account in store.accounts where account.displayAuthTone == .error {
             items.append(PendingItem(
                 id: "wb-\(account.id)",
                 title: account.nickname,
@@ -373,7 +186,6 @@ struct ConsoleOverviewView: View {
                 destination: .accounts
             ))
         }
-
         for account in store.qoderServiceAccounts where account.usableSources.isEmpty {
             items.append(PendingItem(
                 id: "qoder-\(account.id)",
@@ -384,70 +196,44 @@ struct ConsoleOverviewView: View {
                 destination: .accounts
             ))
         }
-
-        if let overview = store.tasksOverview {
-            for failure in overview.recentFailures.prefix(3) {
-                items.append(PendingItem(
-                    id: "fail-\(failure.id)",
-                    title: failure.displayName,
-                    detail: "\(failure.taskLabel) · \(failure.detail ?? failure.status)",
-                    selection: nil,
-                    filter: .all,
-                    destination: .checkin
-                ))
-            }
-        }
-
-        if let error = store.accountsError {
+        for failure in store.tasksOverview?.recentFailures ?? [] {
             items.append(PendingItem(
-                id: "accounts-error",
-                title: "账号读取失败",
-                detail: error,
+                id: "failure-\(failure.id)",
+                title: failure.displayName,
+                detail: "\(failure.taskLabel) · \(failure.detail ?? failure.status)",
                 selection: nil,
                 filter: .all,
-                destination: .accounts
+                destination: .checkin
             ))
+        }
+        if let error = store.accountsError {
+            items.append(PendingItem(id: "accounts-error", title: "账号更新失败", detail: error, selection: nil, filter: .all, destination: .accounts))
         }
         if let error = store.qoderError {
-            items.append(PendingItem(
-                id: "qoder-error",
-                title: "Qoder 读取失败",
-                detail: error,
-                selection: nil,
-                filter: .all,
-                destination: .accounts
-            ))
+            items.append(PendingItem(id: "qoder-error", title: "Qoder 更新失败", detail: error, selection: nil, filter: .all, destination: .accounts))
         }
-
-        return Array(items.prefix(5))
+        return items
     }
 
-    private var pendingSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ConsoleSectionHeader(title: "待处理", detail: nil) { EmptyView() }
-            ConsoleCard(padding: 0) {
-                let items = pendingItems
-                if items.isEmpty {
-                    ConsoleEmptyState(
-                        symbol: "checkmark.circle",
-                        title: "没有需要处理的事项",
-                        message: "授权失效、任务失败会出现在这里。"
-                    )
-                } else {
+    private var attentionSection: some View {
+        VStack(alignment: .leading, spacing: ConsoleTheme.groupSpacing) {
+            ConsoleSectionHeader(title: "需要处理", detail: pendingItems.isEmpty ? nil : "\(pendingItems.count) 项") {
+                EmptyView()
+            }
+            if pendingItems.isEmpty {
+                Label("没有需要处理的事项", systemImage: "checkmark.circle")
+                    .font(ConsoleType.body)
+                    .foregroundStyle(ConsoleTheme.secondaryText)
+                    .padding(.vertical, 4)
+            } else {
+                ConsoleListSurface {
                     VStack(spacing: 0) {
-                        ForEach(items) { item in
-                            Button {
-                                if item.destination == .accounts {
-                                    nav.openAccounts(filter: item.filter, selection: item.selection)
-                                } else {
-                                    nav.openCheckin(platform: .workbuddy)
-                                }
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Circle()
-                                        .fill(ConsoleTheme.warning)
-                                        .frame(width: 6, height: 6)
-                                    VStack(alignment: .leading, spacing: 1) {
+                        ForEach(Array(pendingItems.prefix(4).enumerated()), id: \.element.id) { index, item in
+                            Button { open(item) } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: "exclamationmark.circle.fill")
+                                        .foregroundStyle(ConsoleTheme.warning)
+                                    VStack(alignment: .leading, spacing: 2) {
                                         Text(item.title)
                                             .font(ConsoleType.rowTitle)
                                             .foregroundStyle(ConsoleTheme.text)
@@ -457,16 +243,305 @@ struct ConsoleOverviewView: View {
                                             .foregroundStyle(ConsoleTheme.secondaryText)
                                             .lineLimit(2)
                                     }
-                                    Spacer(minLength: 4)
+                                    Spacer(minLength: 8)
                                     Image(systemName: "chevron.right")
-                                        .font(.system(size: 9, weight: .semibold))
+                                        .font(ConsoleType.caption)
                                         .foregroundStyle(ConsoleTheme.tertiaryText)
                                 }
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
+                                .frame(minHeight: ConsoleTheme.rowHeight)
+                                .padding(.vertical, 6)
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+                            if index < min(4, pendingItems.count) - 1 {
+                                Divider().overlay(ConsoleTheme.border)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func open(_ item: PendingItem) {
+        if item.destination == .accounts {
+            nav.openAccounts(filter: item.filter, selection: item.selection)
+            if item.opensRotationSheet { nav.requestRotationSheet() }
+        } else {
+            nav.openCheckin(platform: .workbuddy)
+        }
+    }
+
+    // MARK: - 今日任务
+
+    private struct TaskSummary: Identifiable {
+        let id: String
+        let title: String
+        let value: String
+        let detail: String
+        let tone: Color?
+        let platform: ConsoleTaskPlatform
+        let workbuddy: WorkbuddyTaskKind
+    }
+
+    private var taskSummaries: [TaskSummary] {
+        guard let overview = store.tasksOverview else { return [] }
+        return [
+            TaskSummary(
+                id: "checkin", title: "每日签到", value: "\(overview.checkinDone) 完成",
+                detail: overview.checkinFailed > 0 ? "\(overview.checkinFailed) 失败" : "待完成 \(overview.checkinPending)",
+                tone: overview.checkinFailed > 0 ? ConsoleTheme.danger : nil,
+                platform: .workbuddy, workbuddy: .checkin
+            ),
+            TaskSummary(
+                id: "growth", title: "成长任务", value: "\(overview.growthRuns) 次执行",
+                detail: overview.growthFailed > 0 ? "\(overview.growthFailed) 失败" : "自动开启 \(overview.autoEnabled)",
+                tone: overview.growthFailed > 0 ? ConsoleTheme.danger : nil,
+                platform: .workbuddy, workbuddy: .growth
+            ),
+            TaskSummary(
+                id: "travel", title: "Buddy 旅行", value: "\(overview.travelClaimed) 已领取",
+                detail: "待领取 \(overview.travelPending)", tone: nil,
+                platform: .workbuddy, workbuddy: .travel
+            ),
+            TaskSummary(
+                id: "credits", title: "每日 Credits", value: "\(overview.qoderClaimed) 已领取",
+                detail: overview.qoderFailed > 0 ? "\(overview.qoderFailed) 失败" : (overview.qoderClaimable.map { "可领取 \($0)" } ?? "尚未查询"),
+                tone: overview.qoderFailed > 0 ? ConsoleTheme.danger : nil,
+                platform: .qoder, workbuddy: .checkin
+            ),
+        ]
+    }
+
+    private var todaySection: some View {
+        VStack(alignment: .leading, spacing: ConsoleTheme.groupSpacing) {
+            ConsoleSectionHeader(title: "今日任务", detail: nil) {
+                Button("查看全部") { nav.openCheckin(platform: .workbuddy) }
+                    .buttonStyle(.borderless)
+                    .font(ConsoleType.small)
+            }
+            if store.tasksOverviewLoading && store.tasksOverview == nil {
+                ConsoleLoadingRow(text: "正在读取今日任务")
+            } else if taskSummaries.isEmpty {
+                Text("还没有今日任务记录")
+                    .font(ConsoleType.body)
+                    .foregroundStyle(ConsoleTheme.secondaryText)
+            } else {
+                ConsoleListSurface {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 0) {
+                            ForEach(Array(taskSummaries.enumerated()), id: \.element.id) { index, task in
+                                taskCell(task)
+                                if index < taskSummaries.count - 1 {
+                                    Divider().overlay(ConsoleTheme.border).frame(height: 54)
+                                }
+                            }
+                        }
+                        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 18) {
+                            ForEach(taskSummaries) { task in taskCell(task) }
+                        }
+                        .padding(.vertical, 8)
+                    }
+                }
+            }
+        }
+    }
+
+    private func taskCell(_ task: TaskSummary) -> some View {
+        Button {
+            nav.openCheckin(platform: task.platform, workbuddy: task.workbuddy)
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(task.title)
+                    .font(ConsoleType.small)
+                    .foregroundStyle(ConsoleTheme.secondaryText)
+                Text(task.value)
+                    .font(ConsoleType.rowTitle)
+                    .foregroundStyle(ConsoleTheme.text)
+                    .lineLimit(1)
+                Text(task.detail)
+                    .font(ConsoleType.caption)
+                    .foregroundStyle(task.tone ?? ConsoleTheme.tertiaryText)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
+            .padding(.horizontal, 12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - 平台与活跃
+
+    private var platformSection: some View {
+        VStack(alignment: .leading, spacing: ConsoleTheme.groupSpacing) {
+            ConsoleSectionHeader(title: "账号分布", detail: nil) { EmptyView() }
+            ConsoleListSurface {
+                VStack(spacing: 0) {
+                    ForEach(Array(store.fleet.cards.enumerated()), id: \.element.id) { index, card in
+                        Button { nav.openAccounts(filter: card.kind.filter) } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: card.kind.symbol)
+                                    .font(ConsoleType.body)
+                                    .foregroundStyle(ConsoleTheme.secondaryText)
+                                    .frame(width: 20)
+                                Text(card.kind.title)
+                                    .font(ConsoleType.rowTitle)
+                                    .foregroundStyle(ConsoleTheme.text)
+                                    .lineLimit(1)
+                                Spacer(minLength: 8)
+                                Text("\(card.accounts)")
+                                    .font(ConsoleType.body)
+                                    .monospacedDigit()
+                                    .foregroundStyle(ConsoleTheme.text)
+                                if card.issues > 0 {
+                                    ConsoleBadge(text: "\(card.issues) 异常", tint: ConsoleTheme.warning)
+                                }
+                                Image(systemName: "chevron.right")
+                                    .font(ConsoleType.caption)
+                                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                            }
+                            .frame(minHeight: ConsoleTheme.rowHeight)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        if index < store.fleet.cards.count - 1 { Divider().overlay(ConsoleTheme.border) }
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var activitySection: some View {
+        VStack(alignment: .leading, spacing: ConsoleTheme.groupSpacing) {
+            ConsoleSectionHeader(title: "成长活跃", detail: nil) {
+                Button {
+                    Task { await store.loadActivity() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .disabled(store.activityLoading)
+                .help("重新查询今日活跃，不执行任务")
+            }
+            if store.activityLoading && store.activity.accounts.isEmpty {
+                ConsoleLoadingRow(text: "正在查询")
+            } else if store.activity.accounts.isEmpty {
+                Text("尚未查询今日活跃")
+                    .font(ConsoleType.body)
+                    .foregroundStyle(ConsoleTheme.secondaryText)
+            } else {
+                let active = store.activity.accounts.filter { $0.todayActive == true }.count
+                HStack(spacing: 20) {
+                    ConsoleSummaryMetric(label: "今日活跃", value: "\(active)/\(store.activity.accounts.count)")
+                    ConsoleSummaryMetric(
+                        label: "需要行动",
+                        value: "\(store.activity.needsAction.count)",
+                        tone: store.activity.needsAction.isEmpty ? ConsoleTheme.text : ConsoleTheme.warning
+                    )
+                }
+                if let failure = store.activityError {
+                    Text(failure)
+                        .font(ConsoleType.caption)
+                        .foregroundStyle(ConsoleTheme.warning)
+                        .lineLimit(2)
+                }
+                ForEach(store.activity.needsAction.prefix(2)) { account in
+                    HStack(spacing: 8) {
+                        Text(account.nickname)
+                            .font(ConsoleType.small)
+                            .foregroundStyle(ConsoleTheme.text)
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                        Text(account.diagnosis.shortLabel)
+                            .font(ConsoleType.caption)
+                            .foregroundStyle(ConsoleTheme.warning)
+                            .lineLimit(1)
+                    }
+                    .help(account.diagnosis.action)
+                }
+                if store.activity.needsAction.contains(where: { $0.diagnosis.needsClient }) {
+                    Button("打开 WorkBuddy") { WorkBuddyClient.open() }
+                        .buttonStyle(ConsoleSecondaryButtonStyle())
+                        .disabled(!WorkBuddyClient.isInstalled)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: - 最近活动
+
+    private struct RecentRecord: Identifiable {
+        let id: String
+        let title: String
+        let detail: String
+        let at: Date?
+        let tone: ConsoleTheme.Tone
+    }
+
+    private var recentRecords: [RecentRecord] {
+        var items: [RecentRecord] = []
+        for row in store.checkin.rows where row.state.isChecked || row.state.isProblem {
+            items.append(RecentRecord(
+                id: "checkin-\(row.accountId)", title: "签到 · \(row.nickname)",
+                detail: row.state.isProblem ? (row.errorDetail ?? row.state.title) : row.state.title,
+                at: row.checkedAt, tone: row.state.isProblem ? .warning : .neutral
+            ))
+        }
+        for row in store.travelRows {
+            guard let status = row.status, status.claimed || status.stage == .failed else { continue }
+            items.append(RecentRecord(
+                id: "travel-\(row.accountId)", title: "旅行 · \(row.nickname)",
+                detail: status.claimed ? "已领取\(status.rewardCredits.map { " +\($0)" } ?? "")" : (status.lastError ?? "执行失败"),
+                at: ConsoleFormat.parse(status.claimedAt) ?? ConsoleFormat.parse(status.lastCheckedAt),
+                tone: status.claimed ? .neutral : .warning
+            ))
+        }
+        for item in store.qoderCreditsAuto {
+            guard let run = item.lastRun else { continue }
+            items.append(RecentRecord(
+                id: "credits-\(item.accountId)", title: "Credits · \(item.displayName)",
+                detail: run.outcomeLabel + (run.credits.map { " +\($0)" } ?? ""),
+                at: ConsoleFormat.parse(run.executedAt), tone: run.isSuccess ? .neutral : .warning
+            ))
+        }
+        return items.sorted { ($0.at ?? .distantPast) > ($1.at ?? .distantPast) }.prefix(5).map { $0 }
+    }
+
+    private var recentSection: some View {
+        VStack(alignment: .leading, spacing: ConsoleTheme.groupSpacing) {
+            ConsoleSectionHeader(title: "最近活动", detail: nil) { EmptyView() }
+            if recentRecords.isEmpty {
+                Text("完成一次任务后，结果会显示在这里")
+                    .font(ConsoleType.body)
+                    .foregroundStyle(ConsoleTheme.secondaryText)
+            } else {
+                ConsoleListSurface {
+                    VStack(spacing: 0) {
+                        ForEach(Array(recentRecords.enumerated()), id: \.element.id) { index, record in
+                            HStack(spacing: 12) {
+                                Circle()
+                                    .fill(ConsoleTheme.color(record.tone))
+                                    .frame(width: 6, height: 6)
+                                Text(record.title)
+                                    .font(ConsoleType.rowTitle)
+                                    .foregroundStyle(ConsoleTheme.text)
+                                    .lineLimit(1)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                Text(record.detail)
+                                    .font(ConsoleType.caption)
+                                    .foregroundStyle(ConsoleTheme.secondaryText)
+                                    .lineLimit(1)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                Text(record.at.map(ConsoleFormat.shortDateTime) ?? "时间未知")
+                                    .font(ConsoleType.caption)
+                                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                                    .monospacedDigit()
+                            }
+                            .frame(minHeight: ConsoleTheme.rowHeight)
+                            if index < recentRecords.count - 1 { Divider().overlay(ConsoleTheme.border) }
                         }
                     }
                 }
@@ -476,7 +551,6 @@ struct ConsoleOverviewView: View {
 }
 
 extension ConsoleFormat {
-    /// RFC3339 → Date。解析不了返回 nil，不猜时间。
     static func parse(_ value: String?) -> Date? {
         guard let value, !value.isEmpty else { return nil }
         let parser = ISO8601DateFormatter()

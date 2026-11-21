@@ -1,42 +1,5 @@
 import SwiftUI
 
-enum ConsolePage: String, CaseIterable, Identifiable {
-    case overview
-    case accounts
-    case quota
-    case checkin
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .overview: return "总览"
-        case .accounts: return "AI 账号"
-        case .quota: return "额度看板"
-        case .checkin: return "签到任务"
-        }
-    }
-
-    /// 一句话说明这一页负责什么。只留一行，不写长段落（PRD §7.5）。
-    var subtitle: String {
-        switch self {
-        case .overview: return "账号、任务与异常"
-        case .accounts: return "账号列表、授权与详情"
-        case .quota: return "额度与用量"
-        case .checkin: return "每日签到与奖励"
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .overview: return "square.grid.2x2"
-        case .accounts: return "person.2"
-        case .quota: return "chart.bar.doc.horizontal"
-        case .checkin: return "calendar.badge.checkmark"
-        }
-    }
-}
-
 /// AICC 主控制台：左侧固定导航 + 右侧工作区（标题栏 + 页面工具栏 + 内容）。
 ///
 /// 布局约定（PRD §2.3）：
@@ -83,20 +46,15 @@ struct MainConsoleView: View {
             // 顶部留出红绿灯的位置（窗口用了全尺寸内容 + 透明标题栏）。
             Color.clear.frame(height: 22)
 
-            HStack(spacing: 9) {
+            HStack(spacing: 10) {
                 AppMark()
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("AICC")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(ConsoleTheme.text)
-                    Text("AI 工作台")
-                        .font(ConsoleType.caption)
-                        .foregroundStyle(ConsoleTheme.secondaryText)
-                }
+                Text("AICC")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(ConsoleTheme.text)
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 14)
-            .padding(.bottom, 14)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 24)
 
             VStack(spacing: 2) {
                 ForEach(ConsolePage.allCases) { item in
@@ -107,9 +65,16 @@ struct MainConsoleView: View {
 
             Spacer(minLength: 12)
 
-            statusFooter
-                .padding(.horizontal, 14)
-                .padding(.bottom, 14)
+            if let connectionNotice = store.connectionNotice {
+                ConsoleInlineNotice(
+                    kind: .warning,
+                    message: connectionNotice,
+                    actionTitle: "设置",
+                    action: openSettings
+                )
+                .padding(.horizontal, 12)
+                .padding(.bottom, 16)
+            }
         }
         .frame(width: ConsoleTheme.sidebarWidth)
         .frame(maxHeight: .infinity, alignment: .top)
@@ -142,20 +107,6 @@ struct MainConsoleView: View {
         .help(item.subtitle)
     }
 
-    /// 系统健康状态固定在侧栏底部，不占主页面。
-    private var statusFooter: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ConsoleStatusDot(
-                color: store.workerHealthColor,
-                text: store.workerHealthText
-            )
-            ConsoleStatusDot(
-                color: store.magpieHealthColor,
-                text: store.magpieHealthText
-            )
-        }
-    }
-
     // MARK: 工作区
 
     private var workArea: some View {
@@ -171,17 +122,11 @@ struct MainConsoleView: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: 10) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(nav.page.title)
-                    .font(ConsoleType.pageTitle)
-                    .foregroundStyle(ConsoleTheme.text)
-                    .lineLimit(1)
-                Text(nav.page.subtitle)
-                    .font(ConsoleType.pageSubtitle)
-                    .foregroundStyle(ConsoleTheme.secondaryText)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 8)
+            Text(nav.page.title)
+                .font(ConsoleType.pageTitle)
+                .foregroundStyle(ConsoleTheme.text)
+                .lineLimit(1)
+            Spacer(minLength: 12)
 
             if refreshing {
                 ProgressView().controlSize(.small)
@@ -191,7 +136,7 @@ struct MainConsoleView: View {
                 Task { await refreshCurrentPage() }
             } label: {
                 Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 13, weight: .medium))
             }
             .buttonStyle(ConsoleIconButtonStyle())
             .help("刷新当前页")
@@ -199,7 +144,7 @@ struct MainConsoleView: View {
 
             Button(action: openSettings) {
                 Image(systemName: "gearshape")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 13, weight: .medium))
             }
             .buttonStyle(ConsoleIconButtonStyle())
             .help("设置")
@@ -238,7 +183,8 @@ struct MainConsoleView: View {
             async let accounts: Void = store.refreshAccounts()
             async let qoder: Void = store.refreshQoder(silent: true)
             async let quota: Void = store.refreshQuota(force: false)
-            _ = await (overview, accounts, qoder, quota)
+            async let rotation: Void = store.refreshWorkbuddyRotation(silent: true)
+            _ = await (overview, accounts, qoder, quota, rotation)
         case .accounts:
             async let accounts: Void = store.refreshAccounts()
             async let qoder: Void = store.refreshQoder(silent: true)
@@ -288,7 +234,7 @@ struct ConsolePageScaffold<Toolbar: View, Content: View>: View {
                     content
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, ConsoleTheme.pagePadding)
-                        .padding(.bottom, 20)
+                        .padding(.bottom, ConsoleTheme.pageBottomPadding)
                 }
             } else {
                 content
@@ -299,6 +245,18 @@ struct ConsolePageScaffold<Toolbar: View, Content: View>: View {
 }
 
 extension ConsoleStore {
+    /// 正常连接不占界面；只有用户需要处理时才出现。
+    var connectionNotice: String? {
+        #if AICC_VISUAL_TEST && AICC_CONSOLE_VISUAL
+        return nil
+        #else
+        if case .failed = worker.state { return "账号服务连接失败" }
+        if case .running(let health) = worker.state, !health.isHealthy { return "账号服务需要检查" }
+        if let snapshot, !snapshot.available { return "Magpie 连接不可用" }
+        return nil
+        #endif
+    }
+
     var workerHealthText: String {
         if case .running(let health) = worker.state {
             return health.isHealthy ? "账号助手正常" : "账号助手降级"
