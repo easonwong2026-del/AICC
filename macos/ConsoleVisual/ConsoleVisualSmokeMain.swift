@@ -435,6 +435,44 @@ extension ConsoleVisualFixture {
                 "credits": ["state": "unsupported", "supported": false],
                 "error": "该版本没有已证实的 Credits 接口，未发送任何请求",
             ]),
+            // 长名称 + 超长数字：960 宽下也不允许出现省略号或重叠。
+            WorkerQuotaRow(json: [
+                "accountId": "acc-wb-long",
+                "provider": "workbuddy",
+                "nickname": "王翊 · 融影（上海）实业有限公司市场部日常运营主账号（超长名称）",
+                "source": "own",
+                "status": "ok",
+                "unit": "credits",
+                "total": 900_000_000,
+                "used": 99_999_999,
+                "remaining": 123_456_789.5,
+                "plan": "企业版",
+                "usage": ["windowDays": 7, "requests": 1280, "credits": 9988.5, "truncated": false],
+                "capturedAt": "2026-11-14T14:04:00Z",
+            ]),
+            WorkerQuotaRow(json: [
+                "accountId": "acc-wb-3",
+                "provider": "workbuddy",
+                "nickname": "失效备用账号",
+                "source": "own",
+                "status": "unauthorized",
+                "error": "授权已过期，需要重新登录",
+                "capturedAt": "2026-11-13T08:00:00Z",
+            ]),
+            // 同一行既有余额又有每日奖励：奖励不得进入余额列。
+            WorkerQuotaRow(json: [
+                "accountId": "qsa-cn-2",
+                "provider": "qoder_cn",
+                "nickname": "Qoder CN 备用",
+                "source": "own",
+                "status": "ok",
+                "unit": "credits",
+                "total": 500,
+                "remaining": 320,
+                "usage": ["windowDays": 7, "requests": 12, "credits": 88.5, "truncated": false],
+                "credits": ["state": "already", "supported": true, "today": ["credits": 50, "claimStatus": "claimed"]],
+                "capturedAt": "2026-11-14T14:01:00Z",
+            ]),
         ].compactMap { $0 }
 
         fixture.wbSwitchNotice =
@@ -673,6 +711,71 @@ extension ConsoleVisualFixture {
         return fixture
     }
 
+    /// 30 天用量窗口：余额不变，只有用量统计变化。
+    static var quota30: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.workerQuotaWindowDays = 30
+        fixture.workerQuotaRows = [
+            WorkerQuotaRow(json: [
+                "accountId": "acc-wb-1",
+                "provider": "workbuddy",
+                "nickname": "王翊 · 融影（上海）实业有限公司市场部日常运营主账号",
+                "source": "own",
+                "status": "ok",
+                "unit": "credits",
+                "total": 5000,
+                "remaining": 4597.75,
+                "plan": "标准版",
+                "usage": ["windowDays": 30, "requests": 812, "credits": 5043.2, "truncated": false],
+                "capturedAt": "2026-11-14T14:02:11Z",
+            ]),
+            WorkerQuotaRow(json: [
+                "accountId": "qsa-cn-1",
+                "provider": "qoder_cn",
+                "nickname": "Qoder CN 主账号",
+                "source": "own",
+                "status": "ok",
+                "unit": "credits",
+                "total": 500,
+                "remaining": 320,
+                "usage": ["windowDays": 30, "requests": 96, "credits": 388.5, "truncated": false],
+                "credits": ["state": "already", "supported": true, "today": ["credits": 50]],
+                "capturedAt": "2026-11-14T14:00:00Z",
+            ]),
+        ].compactMap { $0 }
+        return fixture
+    }
+
+    /// 旧快照：Magpie 整份数据过期，每行都应显示"旧快照"。
+    static var quotaAllStale: ConsoleVisualFixture {
+        var fixture = sample
+        if let snapshot = fixture.snapshot {
+            var stale = snapshot
+            stale.stale = true
+            stale.state = "Cached"
+            stale.accounts = stale.accounts.map { card in
+                var copy = card
+                copy.stale = true
+                return copy
+            }
+            fixture.snapshot = stale
+        }
+        return fixture
+    }
+
+    /// 只留 WorkBuddy 一张卡：在 960×640 下专门验收长名称与长数值。
+    static var quotaMagpieLongOnly: ConsoleVisualFixture {
+        var fixture = sample
+        if let snapshot = fixture.snapshot {
+            var only = snapshot
+            only.providers = ["workbuddy"]
+            only.accounts = snapshot.accounts.filter { $0.provider == "workbuddy" }
+            only.stale = false
+            fixture.snapshot = only
+        }
+        return fixture
+    }
+
     /// 异常授权样本：acc-bulk-1 令牌已过期且不是当前登录账号。
     /// 与「当前登录 = acc-wb-2」的正常样本刻意分开，避免两张截图冒充两种状态。
     static var expiredAuth: ConsoleVisualFixture {
@@ -729,7 +832,7 @@ extension ConsoleVisualFixture {
           "state": "Ready",
           "stale": false,
           "providers": ["codex", "claude"],
-          "updated_at": "11-14 22:10",
+          "updated_at": "11-21 12:00",
           "refresh_seconds": 300,
           "fetched_at": 0,
           "accounts": [
@@ -767,6 +870,22 @@ extension ConsoleVisualFixture {
               "balance_parts": [{"label": "赠送", "text": "¥ 20.00", "percent": null}],
               "resets_count": null, "renew": null, "last_served_at": null, "last": false,
               "failed": false, "deferred": false, "stale": false, "read_at": null
+            },
+            {
+              "id": "magpie-wb-1", "provider": "workbuddy", "provider_name": "WorkBuddy",
+              "account_label": "王翊 · 融影（上海）实业有限公司市场部日常运营主账号",
+              "kind": "subscription", "plan": "标准版",
+              "items": [
+                {"name": "5 小时窗口", "used": 6.0, "remaining": 94.0, "remaining_text": "4705.75",
+                 "display": null, "amount": 294.25, "limit": 5000, "unit": "credits",
+                 "unlimited": false, "reset": "2026-11-21 18:00", "resets_at": null, "pool": null},
+                {"name": "周窗口", "used": 8.0, "remaining": 92.0, "remaining_text": "92%",
+                 "display": null, "amount": null, "limit": null, "unit": null,
+                 "unlimited": false, "reset": "2026-11-24 09:00", "resets_at": null, "pool": null}
+              ],
+              "balance": null, "balance_parts": [], "resets_count": 2, "renew": null,
+              "last_served_at": null, "last": false, "failed": false, "deferred": false,
+              "stale": false, "read_at": null
             }
           ]
         }
@@ -821,6 +940,18 @@ struct ConsoleVisualSmokeMain {
         let expiredStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
         expiredStore.applyVisualFixture(.expiredAuth)
 
+        // 额度页专属状态：30 天窗口、整份旧快照、空/错误/加载。
+        let quota30Store = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        quota30Store.applyVisualFixture(.quota30)
+        let quotaStaleStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        quotaStaleStore.applyVisualFixture(.quotaAllStale)
+        let quotaErrorStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        quotaErrorStore.applyVisualFixture(.failure)
+        let quotaLoadingStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        quotaLoadingStore.applyVisualFixture(.loading)
+        let quotaLongStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        quotaLongStore.applyVisualFixture(.quotaMagpieLongOnly)
+
         // 关键状态与弹层
         // 用闭包延迟构造：视图必须在渲染前一刻创建，否则 QA 钩子读到的会是最后一组参数。
         let extras: [(String, () -> AnyView, CGSize, ColorScheme)] = [
@@ -838,6 +969,73 @@ struct ConsoleVisualSmokeMain {
              { AnyView(consoleView(store: recoveryStore, settings: settings, scheme: .dark,
                                    page: .overview)) },
              CGSize(width: 1120, height: 760), .dark),
+            // 额度页关键状态：30 天窗口、整份旧快照、账号额度为空/错误/加载。
+            ("quota-accounts-30d-1120x760-light",
+             { AnyView(consoleView(store: quota30Store, settings: settings, scheme: .light,
+                                   page: .quota, quotaSource: "accounts")) },
+             CGSize(width: 1120, height: 760), .light),
+            ("quota-accounts-30d-1120x760-dark",
+             { AnyView(consoleView(store: quota30Store, settings: settings, scheme: .dark,
+                                   page: .quota, quotaSource: "accounts")) },
+             CGSize(width: 1120, height: 760), .dark),
+            ("quota-magpie-stale-1120x760-light",
+             { AnyView(consoleView(store: quotaStaleStore, settings: settings, scheme: .light,
+                                   page: .quota)) },
+             CGSize(width: 1120, height: 760), .light),
+            ("quota-magpie-stale-1120x760-dark",
+             { AnyView(consoleView(store: quotaStaleStore, settings: settings, scheme: .dark,
+                                   page: .quota)) },
+             CGSize(width: 1120, height: 760), .dark),
+            ("quota-accounts-error-1120x760-light",
+             { AnyView(consoleView(store: quotaErrorStore, settings: settings, scheme: .light,
+                                   page: .quota, quotaSource: "accounts")) },
+             CGSize(width: 1120, height: 760), .light),
+            ("quota-accounts-loading-1120x760-light",
+             { AnyView(consoleView(store: quotaLoadingStore, settings: settings, scheme: .light,
+                                   page: .quota, quotaSource: "accounts")) },
+             CGSize(width: 1120, height: 760), .light),
+            // 账号额度 3 尺寸 × 浅深色。
+            ("quota-accounts-960x640-light",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
+                                   page: .quota, quotaSource: "accounts")) },
+             CGSize(width: 960, height: 640), .light),
+            ("quota-accounts-960x640-dark",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .dark,
+                                   page: .quota, quotaSource: "accounts")) },
+             CGSize(width: 960, height: 640), .dark),
+            ("quota-accounts-1120x760-light",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
+                                   page: .quota, quotaSource: "accounts")) },
+             CGSize(width: 1120, height: 760), .light),
+            ("quota-accounts-1120x760-dark",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .dark,
+                                   page: .quota, quotaSource: "accounts")) },
+             CGSize(width: 1120, height: 760), .dark),
+            ("quota-accounts-1440x900-light",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
+                                   page: .quota, quotaSource: "accounts")) },
+             CGSize(width: 1440, height: 900), .light),
+            ("quota-accounts-1440x900-dark",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .dark,
+                                   page: .quota, quotaSource: "accounts")) },
+             CGSize(width: 1440, height: 900), .dark),
+            ("quota-accounts-filter-qoder-1120x760-light",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
+                                   page: .quota, quotaSource: "accounts", quotaProvider: "qoder_cn")) },
+             CGSize(width: 1120, height: 760), .light),
+            ("quota-magpie-filter-claude-1120x760-light",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
+                                   page: .quota, quotaProvider: "claude")) },
+             CGSize(width: 1120, height: 760), .light),
+            // 960 最小窗口下只留 WorkBuddy 长名称/长数值卡。
+            ("quota-magpie-workbuddy-960x640-light",
+             { AnyView(consoleView(store: quotaLongStore, settings: settings, scheme: .light,
+                                   page: .quota)) },
+             CGSize(width: 960, height: 640), .light),
+            ("quota-magpie-workbuddy-960x640-dark",
+             { AnyView(consoleView(store: quotaLongStore, settings: settings, scheme: .dark,
+                                   page: .quota)) },
+             CGSize(width: 960, height: 640), .dark),
             ("accounts-qoder-detail-1120x760-light",
              { AnyView(consoleView(store: store, settings: settings, scheme: .light,
                                    page: .accounts, account: "qoderService:qsa-cn-1")) },
@@ -896,10 +1094,6 @@ struct ConsoleVisualSmokeMain {
              { AnyView(consoleView(store: store, settings: settings, scheme: .light,
                                    page: .accounts, account: "workbuddy:acc-mag-1")) },
              CGSize(width: 1120, height: 760), .light),
-            ("quota-accounts-1120x760-light",
-             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
-                                   page: .quota, quotaSource: "accounts")) },
-             CGSize(width: 1120, height: 760), .light),
             ("checkin-credits-1120x760-light",
              { AnyView(consoleView(store: store, settings: settings, scheme: .light,
                                    page: .checkin, checkinPlatform: "qoder")) },
@@ -947,7 +1141,7 @@ struct ConsoleVisualSmokeMain {
             let stateStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
             stateStore.applyVisualFixture(fixture)
             for scheme in [ColorScheme.light, .dark] {
-                for page in [ConsolePage.overview, .accounts, .checkin] {
+                for page in [ConsolePage.overview, .accounts, .checkin, .quota] {
                     UserDefaults.standard.set(page.rawValue, forKey: "AICCConsolePage")
                     let view = MainConsoleView(store: stateStore, openSettings: {})
                         .environmentObject(settings)
@@ -977,12 +1171,14 @@ struct ConsoleVisualSmokeMain {
         page: ConsolePage? = nil,
         account: String? = nil,
         quotaSource: String? = nil,
+        quotaProvider: String? = nil,
         checkinPlatform: String? = nil,
         workbuddyTask: String? = nil
     ) -> some View {
         UserDefaults.standard.set(page?.rawValue, forKey: "AICCConsolePage")
         UserDefaults.standard.set(account, forKey: "AICCConsoleAccount")
         UserDefaults.standard.set(quotaSource, forKey: "AICCConsoleQuotaSource")
+        UserDefaults.standard.set(quotaProvider, forKey: "AICCConsoleQuotaProvider")
         UserDefaults.standard.set(checkinPlatform, forKey: "AICCConsoleCheckinPlatform")
         UserDefaults.standard.set(workbuddyTask, forKey: "AICCConsoleWorkbuddyTask")
         return MainConsoleView(store: store, openSettings: {})

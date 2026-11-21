@@ -82,6 +82,9 @@ final class ConsoleNavigation: ObservableObject {
            let source = ConsoleQuotaSource(rawValue: raw) {
             quotaSource = source
         }
+        if let raw = defaults.string(forKey: "AICCConsoleQuotaProvider"), !raw.isEmpty {
+            quotaProvider = raw
+        }
         if let raw = defaults.string(forKey: "AICCConsoleCheckinPlatform"),
            let platform = ConsoleTaskPlatform(rawValue: raw) {
             checkinPlatform = platform

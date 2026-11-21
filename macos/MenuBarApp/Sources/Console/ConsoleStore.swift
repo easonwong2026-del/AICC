@@ -1379,10 +1379,12 @@ extension ConsoleStore {
         snapshot = fixture.snapshot
         quotaError = fixture.quotaError
         lastQuotaRefresh = fixture.lastAccountsRefresh
+        loadingQuota = fixture.isLoading
 
         workerQuotaRows = fixture.workerQuotaRows
         workerQuotaError = fixture.workerQuotaError
         workerQuotaWindowDays = fixture.workerQuotaWindowDays
+        loadingWorkerQuota = fixture.isLoading
 
         tasksOverview = fixture.tasksOverview
         tasksOverviewError = fixture.tasksOverviewError

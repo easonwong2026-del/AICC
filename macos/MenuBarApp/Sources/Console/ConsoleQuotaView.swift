@@ -1,27 +1,34 @@
 import SwiftUI
 
-/// 额度看板（PRD §5）：顶部切换来源，两套数据不混排、不相加。
-///
-/// - **Magpie 额度**：继续用 `WidgetStatusLoader` + `QuotaSnapshot.slots`，一行代码都没换；
-/// - **账号额度**：`quota.board` 的账号级余额与用量。
-///
-/// 这里**只读**：不发签到、不发领取。领取统一在签到任务页。
+/// 额度看板：Magpie 网关额度与服务账号官方额度是两条互不相加的链路。
+/// 这里只读；每日奖励的领取在签到任务页。
 struct ConsoleQuotaView: View {
     @ObservedObject var store: ConsoleStore
     @EnvironmentObject private var nav: ConsoleNavigation
 
-    @State private var providerQuery = ""
+    private enum Column {
+        static let accountMin: CGFloat = 140
+        static let magpieWindow: CGFloat = 96
+        static let magpieRemaining: CGFloat = 116
+        static let magpieUsed: CGFloat = 88
+        static let magpieReset: CGFloat = 96
+        static let accountRemaining: CGFloat = 128
+        static let accountUsage: CGFloat = 166
+        static let accountUpdated: CGFloat = 92
+        static let status: CGFloat = 72
+        static let spacing: CGFloat = 8
+        static let inset: CGFloat = 16
+    }
 
     var body: some View {
         ConsolePageScaffold {
             toolbar
         } content: {
             VStack(alignment: .leading, spacing: ConsoleTheme.sectionSpacing) {
+                summaryRow
                 switch nav.quotaSource {
-                case .magpie:
-                    magpieContent
-                case .accounts:
-                    accountContent
+                case .magpie: magpieContent
+                case .accounts: accountContent
                 }
             }
         }
@@ -30,7 +37,7 @@ struct ConsoleQuotaView: View {
     // MARK: - 工具栏
 
     private var toolbar: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             Picker("来源", selection: $nav.quotaSource) {
                 ForEach(ConsoleQuotaSource.allCases) { source in
                     Text(source.title).tag(source)
@@ -39,34 +46,19 @@ struct ConsoleQuotaView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .tint(ConsoleTheme.accent)
-            .frame(width: 220)
+            .frame(width: 236)
 
             Spacer(minLength: 8)
 
             switch nav.quotaSource {
             case .magpie:
-                if !providerOptions.isEmpty {
-                    ConsoleFilterMenu(
-                        title: "服务商筛选",
-                        options: providerOptions,
-                        label: { $0.title },
-                        selection: Binding(
-                            get: {
-                                providerOptions.first { $0.id == nav.quotaProvider }
-                                    ?? providerOptions[0]
-                            },
-                            set: { nav.quotaProvider = $0.id }
-                        )
-                    )
+                if magpieProviderOptions.count > 1 {
+                    providerFilter(options: magpieProviderOptions, title: "服务商")
                 }
-                if store.loadingQuota {
-                    ProgressView().controlSize(.small)
-                }
-                Button("刷新额度") {
-                    Task { await store.refreshQuota(force: true) }
-                }
-                .buttonStyle(ConsolePrimaryButtonStyle())
-                .disabled(store.loadingQuota)
+                if store.loadingQuota { ProgressView().controlSize(.small) }
+                Button("刷新") { Task { await store.refreshQuota(force: true) } }
+                    .buttonStyle(ConsolePrimaryButtonStyle())
+                    .disabled(store.loadingQuota)
             case .accounts:
                 Picker("窗口", selection: Binding(
                     get: { store.workerQuotaWindowDays },
@@ -78,83 +70,106 @@ struct ConsoleQuotaView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .tint(ConsoleTheme.accent)
-                .frame(width: 130)
+                .frame(width: 120)
 
-                if store.loadingWorkerQuota {
-                    ProgressView().controlSize(.small)
+                if accountProviderOptions.count > 1 {
+                    providerFilter(options: accountProviderOptions, title: "平台")
                 }
-                Button("刷新额度") {
-                    Task { await store.refreshWorkerQuota(force: true) }
-                }
-                .buttonStyle(ConsolePrimaryButtonStyle())
-                .disabled(store.loadingWorkerQuota)
+                if store.loadingWorkerQuota { ProgressView().controlSize(.small) }
+                Button("刷新") { Task { await store.refreshWorkerQuota(force: true) } }
+                    .buttonStyle(ConsolePrimaryButtonStyle())
+                    .disabled(store.loadingWorkerQuota)
             }
         }
     }
-
-    // MARK: - Magpie 额度
 
     private struct ProviderOption: Identifiable, Equatable {
         let id: String
         let title: String
     }
 
-    private var providerOptions: [ProviderOption] {
+    private var magpieProviderOptions: [ProviderOption] {
         guard let snapshot = store.snapshot else { return [] }
-        var seen: Set<String> = []
         var options = [ProviderOption(id: "", title: "全部服务商")]
+        var seen: Set<String> = []
         for provider in snapshot.providers where !seen.contains(provider) {
             seen.insert(provider)
-            options.append(ProviderOption(
-                id: provider,
-                title: MagpieQuotaParser.providerName(provider)
-            ))
+            options.append(ProviderOption(id: provider, title: MagpieQuotaParser.providerName(provider)))
         }
         return options
     }
 
+    private var accountProviderOptions: [ProviderOption] {
+        var options = [ProviderOption(id: "", title: "全部平台")]
+        var seen: Set<String> = []
+        for row in store.workerQuotaRows where !seen.contains(row.provider) {
+            seen.insert(row.provider)
+            options.append(ProviderOption(id: row.provider, title: row.providerName))
+        }
+        return options
+    }
+
+    /// 导航可能带着另一个来源的 provider（例如从账号详情跳来）；不匹配时按“全部”显示，
+    /// 但不覆写用户状态。
+    private func effectiveProvider(_ options: [ProviderOption]) -> String {
+        options.contains(where: { $0.id == nav.quotaProvider }) ? nav.quotaProvider : ""
+    }
+
+    private func providerFilter(options: [ProviderOption], title: String) -> some View {
+        let effective = effectiveProvider(options)
+        return ConsoleFilterMenu(
+            title: title,
+            options: options,
+            label: { $0.title },
+            selection: Binding(
+                get: { options.first { $0.id == effective } ?? options[0] },
+                set: { nav.quotaProvider = $0.id }
+            )
+        )
+    }
+
+    // MARK: - 摘要
+
     @ViewBuilder
-    private var magpieContent: some View {
-        dataStatusRow
-
-        if let snapshot = store.snapshot, !snapshot.accounts.isEmpty {
-            providerSections(snapshot)
-        } else {
-            ConsoleCard {
-                ConsoleEmptyState(
-                    symbol: "chart.bar.doc.horizontal",
-                    title: "没有读到额度",
-                    message: store.quotaError ?? "启动 Magpie 后这里会显示各服务商的额度窗口。",
-                    actionTitle: "重新读取",
-                    action: { Task { await store.refreshQuota(force: true) } }
-                )
-            }
-        }
-    }
-
-    private var dataStatusRow: some View {
-        HStack(spacing: 8) {
-            if let snapshot = store.snapshot {
-                ConsoleBadge(
-                    text: snapshot.stale ? "缓存" : "实时",
-                    tint: snapshot.stale ? ConsoleTheme.warning : ConsoleTheme.success
-                )
-                Text("\(snapshot.providers.count) 个服务商 · \(snapshot.accounts.count) 张额度卡")
-                    .font(ConsoleType.small)
-                    .foregroundStyle(ConsoleTheme.secondaryText)
-                if let updated = snapshot.updatedAt {
-                    Text("更新于 \(updated)")
-                        .font(ConsoleType.caption)
-                        .foregroundStyle(ConsoleTheme.tertiaryText)
+    private var summaryRow: some View {
+        switch nav.quotaSource {
+        case .magpie:
+            // 没有数据时由正文的加载/空/错误状态说明，摘要不再重复一遍。
+            if let snapshot = store.snapshot, !snapshot.accounts.isEmpty {
+                HStack(spacing: 8) {
+                    Text("\(filteredMagpieCards.count) 个账号 · \(filteredGroups.count) 个服务商")
+                        .font(ConsoleType.small)
+                        .foregroundStyle(ConsoleTheme.secondaryText)
+                    if snapshot.stale {
+                        ConsoleBadge(text: "缓存", tint: ConsoleTheme.warning)
+                    }
+                    if let updated = snapshot.updatedAt, !updated.isEmpty {
+                        Text("更新于 \(updated)")
+                            .font(ConsoleType.micro)
+                            .foregroundStyle(ConsoleTheme.tertiaryText)
+                    }
+                    Spacer(minLength: 0)
                 }
-            } else {
-                Text("尚未读取 Magpie 额度")
-                    .font(ConsoleType.small)
-                    .foregroundStyle(ConsoleTheme.secondaryText)
             }
-            Spacer(minLength: 0)
+        case .accounts:
+            if !filteredAccountRows.isEmpty {
+                HStack(spacing: 8) {
+                    Text("\(filteredAccountRows.count) 个账号 · 近 \(store.workerQuotaWindowDays) 天用量")
+                        .font(ConsoleType.small)
+                        .foregroundStyle(ConsoleTheme.secondaryText)
+                    let staleCount = filteredAccountRows.filter {
+                        QuotaDisplayState.worker($0) == .stale || QuotaDisplayState.worker($0) == .cached
+                    }.count
+                    if staleCount > 0 {
+                        ConsoleBadge(text: "旧快照 \(staleCount)", tint: ConsoleTheme.warning)
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
         }
     }
+
+    // MARK: - Magpie 额度
 
     private struct ProviderGroup {
         let provider: String
@@ -162,201 +177,187 @@ struct ConsoleQuotaView: View {
         let cards: [QuotaCard]
     }
 
-    private func groupedByProvider(_ snapshot: QuotaSnapshot) -> [ProviderGroup] {
+    private var filteredMagpieCards: [QuotaCard] {
+        guard let snapshot = store.snapshot else { return [] }
+        let provider = effectiveProvider(magpieProviderOptions)
+        guard !provider.isEmpty else { return snapshot.accounts }
+        return snapshot.accounts.filter { $0.provider == provider }
+    }
+
+    private var filteredGroups: [ProviderGroup] {
         var order: [String] = []
         var buckets: [String: [QuotaCard]] = [:]
-        for card in snapshot.accounts {
+        for card in filteredMagpieCards {
             if buckets[card.provider] == nil {
                 order.append(card.provider)
                 buckets[card.provider] = []
             }
             buckets[card.provider]?.append(card)
         }
-        return order
-            .filter { nav.quotaProvider.isEmpty || $0 == nav.quotaProvider }
-            .map { provider in
-                let cards = buckets[provider] ?? []
-                return ProviderGroup(
-                    provider: provider,
-                    name: cards.first?.providerName ?? MagpieQuotaParser.providerName(provider),
-                    cards: cards
-                )
-            }
-    }
-
-    private func providerSections(_ snapshot: QuotaSnapshot) -> some View {
-        let groups = groupedByProvider(snapshot)
-        return VStack(alignment: .leading, spacing: ConsoleTheme.sectionSpacing) {
-            ForEach(groups, id: \.provider) { group in
-                VStack(alignment: .leading, spacing: 8) {
-                    ConsoleSectionHeader(title: group.name, detail: "\(group.cards.count) 个账号") {
-                        EmptyView()
-                    }
-                    LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: 300), spacing: ConsoleTheme.cardSpacing)],
-                        spacing: ConsoleTheme.cardSpacing
-                    ) {
-                        ForEach(group.cards) { card in
-                            quotaCard(card)
-                        }
-                    }
-                }
-            }
+        return order.map { provider in
+            let cards = buckets[provider] ?? []
+            return ProviderGroup(
+                provider: provider,
+                name: cards.first?.providerName ?? MagpieQuotaParser.providerName(provider),
+                cards: cards
+            )
         }
     }
-
-    private func quotaCard(_ card: QuotaCard) -> some View {
-        ConsoleCard(padding: 12) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(card.accountLabel)
-                        .font(ConsoleType.rowTitle)
-                        .foregroundStyle(ConsoleTheme.text)
-                        .lineLimit(1)
-                    if let plan = card.plan, !plan.isEmpty {
-                        ConsoleBadge(text: plan, tint: ConsoleTheme.secondaryText)
-                    }
-                    Spacer(minLength: 0)
-                    if card.stale {
-                        ConsoleBadge(text: "缓存", tint: ConsoleTheme.warning)
-                    }
-                }
-
-                if card.isBalance {
-                    balanceRows(card)
-                } else if card.items.isEmpty {
-                    Text("该账号没有可显示的额度窗口")
-                        .font(ConsoleType.small)
-                        .foregroundStyle(ConsoleTheme.secondaryText)
-                } else {
-                    VStack(spacing: 9) {
-                        ForEach(Array(card.items.enumerated()), id: \.offset) { _, item in
-                            itemRow(item)
-                        }
-                    }
-                }
-
-                if let status = card.statusText, !status.isEmpty {
-                    Text(status)
-                        .font(ConsoleType.caption)
-                        .foregroundStyle(ConsoleTheme.secondaryText)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-        }
-    }
-
-    private func itemRow(_ item: QuotaItem) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(item.name)
-                    .font(ConsoleType.small)
-                    .foregroundStyle(ConsoleTheme.secondaryText)
-                    .lineLimit(1)
-                Spacer(minLength: 6)
-                Text(item.primaryText)
-                    .font(ConsoleType.body)
-                    .monospacedDigit()
-                    .foregroundStyle(ConsoleTheme.text)
-            }
-            if let share = item.remaining, item.isPercentage {
-                ConsoleShareBar(share: share, tone: barTone(share))
-            }
-            HStack(spacing: 8) {
-                if let total = item.totalText {
-                    Text(total)
-                        .font(ConsoleType.caption)
-                        .foregroundStyle(ConsoleTheme.tertiaryText)
-                }
-                if let reset = item.reset, !reset.isEmpty {
-                    Text("重置于 \(reset)")
-                        .font(ConsoleType.caption)
-                        .foregroundStyle(ConsoleTheme.tertiaryText)
-                }
-                Spacer(minLength: 0)
-            }
-        }
-    }
-
-    private func balanceRows(_ card: QuotaCard) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(card.balanceText)
-                .font(ConsoleType.metricSmall)
-                .monospacedDigit()
-                .foregroundStyle(ConsoleTheme.text)
-            ForEach(Array(card.balanceParts.enumerated()), id: \.offset) { _, part in
-                HStack(spacing: 6) {
-                    Text(part.label ?? "余额")
-                        .font(ConsoleType.caption)
-                        .foregroundStyle(ConsoleTheme.secondaryText)
-                    Text(part.text)
-                        .font(ConsoleType.caption)
-                        .foregroundStyle(ConsoleTheme.tertiaryText)
-                    Spacer(minLength: 0)
-                }
-            }
-        }
-    }
-
-    private func barTone(_ share: Double) -> Color {
-        if share <= 10 { return ConsoleTheme.danger }
-        if share <= 30 { return ConsoleTheme.warning }
-        return ConsoleTheme.accent
-    }
-
-    // MARK: - 账号额度（官方接口）
 
     @ViewBuilder
-    private var accountContent: some View {
-        HStack(spacing: 8) {
-            Text("账号级余额与用量。每日奖励不是余额，不与余额相加。")
-                .font(ConsoleType.small)
-                .foregroundStyle(ConsoleTheme.secondaryText)
-            Spacer(minLength: 0)
-        }
-
-        if let error = store.workerQuotaError, store.workerQuotaRows.isEmpty {
-            ConsoleCard {
-                ConsoleEmptyState(
-                    symbol: "gauge.with.dots.needle.33percent",
-                    title: "没有读到账号额度",
-                    message: error,
-                    actionTitle: "重新读取",
-                    action: { Task { await store.refreshWorkerQuota(force: true) } }
-                )
+    private var magpieContent: some View {
+        if store.loadingQuota && store.snapshot == nil {
+            ConsoleLoadingRow(text: "正在读取 Magpie 额度")
+        } else if store.snapshot != nil, !filteredMagpieCards.isEmpty {
+            ForEach(filteredGroups, id: \.provider) { group in
+                magpieTable(group)
             }
-        } else if store.workerQuotaRows.isEmpty {
-            ConsoleCard {
-                ConsoleLoadingRow(text: "正在向官方接口读取账号额度…")
+        } else if let error = store.quotaError {
+            errorState(title: "没有读到 Magpie 额度", message: error) {
+                Task { await store.refreshQuota(force: true) }
             }
+        } else if store.snapshot != nil, !magpieProviderOptions.isEmpty,
+                  !effectiveProvider(magpieProviderOptions).isEmpty {
+            filteredEmptyState(
+                title: "该服务商没有额度",
+                message: "当前筛选下没有可显示的服务商额度。",
+                actionTitle: "显示全部"
+            ) { nav.quotaProvider = "" }
         } else {
-            ForEach(platformGroups, id: \.name) { group in
-                VStack(alignment: .leading, spacing: 8) {
-                    ConsoleSectionHeader(title: group.name, detail: "\(group.rows.count) 个账号") {
-                        EmptyView()
-                    }
-                    LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: 300), spacing: ConsoleTheme.cardSpacing)],
-                        spacing: ConsoleTheme.cardSpacing
-                    ) {
-                        ForEach(group.rows) { row in
-                            accountQuotaCard(row)
+            emptyState(
+                title: "还没有额度数据",
+                message: "刷新后会显示 Magpie 采集到的服务商额度。"
+            ) { Task { await store.refreshQuota(force: true) } }
+        }
+    }
+
+    private func magpieTable(_ group: ProviderGroup) -> some View {
+        let rows = group.cards.flatMap {
+            MagpieQuotaDisplayRow.rows(for: $0, snapshotStale: store.snapshot?.stale == true)
+        }
+        return VStack(alignment: .leading, spacing: 8) {
+            ConsoleSectionHeader(title: group.name, detail: "\(group.cards.count) 个账号") {
+                EmptyView()
+            }
+            ConsoleListSurface(horizontalPadding: 0) {
+                VStack(spacing: 0) {
+                    magpieHeader
+                    Divider().overlay(ConsoleTheme.border)
+                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                        magpieTableRow(row)
+                        if index < rows.count - 1 {
+                            Divider().overlay(ConsoleTheme.border).padding(.leading, Column.inset)
                         }
                     }
                 }
             }
         }
     }
+
+    private var magpieHeader: some View {
+        HStack(spacing: Column.spacing) {
+            headerCell("账号", width: nil)
+            headerCell("窗口", width: Column.magpieWindow)
+            headerCell("剩余额度", width: Column.magpieRemaining)
+            headerCell("已用", width: Column.magpieUsed)
+            headerCell("重置", width: Column.magpieReset)
+            headerCell("状态", width: Column.status)
+        }
+        .padding(.horizontal, Column.inset)
+        .padding(.vertical, 8)
+    }
+
+    private func magpieTableRow(_ row: MagpieQuotaDisplayRow) -> some View {
+        HStack(spacing: Column.spacing) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.accountName)
+                    .font(row.isFirstRow ? ConsoleType.rowTitle : ConsoleType.small)
+                    .foregroundStyle(row.isFirstRow ? ConsoleTheme.text : ConsoleTheme.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(row.accountName)
+                if row.isFirstRow, let plan = row.plan, !plan.isEmpty {
+                    Text(plan).font(ConsoleType.micro).foregroundStyle(ConsoleTheme.tertiaryText)
+                }
+            }
+            .frame(minWidth: Column.accountMin, maxWidth: .infinity, alignment: .leading)
+
+            Text(row.windowName)
+                .font(ConsoleType.small)
+                .foregroundStyle(ConsoleTheme.secondaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(width: Column.magpieWindow, alignment: .leading)
+                .help(row.windowName)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text(row.remaining)
+                        .font(ConsoleType.rowTitle)
+                        .monospacedDigit()
+                        .foregroundStyle(row.remaining == "—" ? ConsoleTheme.secondaryText : ConsoleTheme.text)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.65)
+                    if let unit = row.unit {
+                        Text(unit)
+                            .font(ConsoleType.micro)
+                            .foregroundStyle(ConsoleTheme.tertiaryText)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.65)
+                    }
+                }
+                if let share = row.remainingShare {
+                    ConsoleShareBar(share: share, tone: shareTone(share))
+                        .frame(maxWidth: 88)
+                }
+                if let detail = row.detail {
+                    Text(detail)
+                        .font(ConsoleType.micro)
+                        .foregroundStyle(ConsoleTheme.tertiaryText)
+                        .lineLimit(1)
+                        .help(detail)
+                }
+            }
+            .frame(width: Column.magpieRemaining, alignment: .leading)
+
+            Text(row.usedText ?? "—")
+                .font(ConsoleType.body)
+                .monospacedDigit()
+                .foregroundStyle(ConsoleTheme.secondaryText)
+                .frame(width: Column.magpieUsed, alignment: .leading)
+
+            Text(row.reset ?? "—")
+                .font(ConsoleType.caption)
+                .foregroundStyle(ConsoleTheme.tertiaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(width: Column.magpieReset, alignment: .leading)
+
+            statusCell(row.state)
+                .frame(width: Column.status, alignment: .leading)
+        }
+        .padding(.horizontal, Column.inset)
+        .padding(.vertical, 8)
+        .frame(minHeight: ConsoleTheme.rowHeight)
+    }
+
+    // MARK: - 账号额度
 
     private struct PlatformGroup {
         let name: String
         let rows: [WorkerQuotaRow]
     }
 
+    private var filteredAccountRows: [WorkerQuotaRow] {
+        let provider = effectiveProvider(accountProviderOptions)
+        guard !provider.isEmpty else { return store.workerQuotaRows }
+        return store.workerQuotaRows.filter { $0.provider == provider }
+    }
+
     private var platformGroups: [PlatformGroup] {
         var order: [String] = []
         var buckets: [String: [WorkerQuotaRow]] = [:]
-        for row in store.workerQuotaRows {
+        for row in filteredAccountRows {
             let name = row.providerName
             if buckets[name] == nil {
                 order.append(name)
@@ -367,152 +368,231 @@ struct ConsoleQuotaView: View {
         return order.map { PlatformGroup(name: $0, rows: buckets[$0] ?? []) }
     }
 
-    private func accountQuotaCard(_ row: WorkerQuotaRow) -> some View {
-        ConsoleCard(padding: 12) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(row.nickname.isEmpty ? row.accountId : row.nickname)
-                        .font(ConsoleType.rowTitle)
-                        .foregroundStyle(ConsoleTheme.text)
-                        .lineLimit(1)
-                    if let plan = row.plan, !plan.isEmpty {
-                        ConsoleBadge(text: plan, tint: ConsoleTheme.secondaryText)
-                    }
-                    Spacer(minLength: 0)
-                    if row.stale {
-                        ConsoleBadge(text: "过期", tint: ConsoleTheme.danger)
-                    } else if row.cached {
-                        ConsoleBadge(text: "缓存", tint: ConsoleTheme.warning)
-                    }
-                }
+    @ViewBuilder
+    private var accountContent: some View {
+        if store.loadingWorkerQuota && store.workerQuotaRows.isEmpty {
+            ConsoleLoadingRow(text: "正在读取账号额度")
+        } else if !filteredAccountRows.isEmpty {
+            ForEach(platformGroups, id: \.name) { group in
+                accountTable(group)
+            }
+        } else if let error = store.workerQuotaError {
+            errorState(title: "没有读到账号额度", message: error) {
+                Task { await store.refreshWorkerQuota(force: true) }
+            }
+        } else if !store.workerQuotaRows.isEmpty,
+                  !effectiveProvider(accountProviderOptions).isEmpty {
+            filteredEmptyState(
+                title: "该平台没有额度",
+                message: "当前筛选下没有可显示的账号额度。",
+                actionTitle: "显示全部"
+            ) { nav.quotaProvider = "" }
+        } else {
+            emptyState(
+                title: "还没有账号额度",
+                message: "刷新后会读取账号级余额与用量。"
+            ) { Task { await store.refreshWorkerQuota(force: true) } }
+        }
+    }
 
-                if let credits = row.credits {
-                    creditsReadOnlyBlock(credits, row: row)
-                } else {
-                    quotaBody(row)
-                }
-
-                HStack(spacing: 6) {
-                    Text(row.sourceName)
-                    if let capturedAt = row.capturedAt, !capturedAt.isEmpty {
-                        Text("· 数据于 \(ConsoleQuotaView.localTimestamp(capturedAt))")
+    private func accountTable(_ group: PlatformGroup) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ConsoleSectionHeader(title: group.name, detail: "\(group.rows.count) 个账号") { EmptyView() }
+            ConsoleListSurface(horizontalPadding: 0) {
+                VStack(spacing: 0) {
+                    accountHeader
+                    Divider().overlay(ConsoleTheme.border)
+                    ForEach(Array(group.rows.enumerated()), id: \.element.id) { index, source in
+                        accountTableRow(AccountQuotaDisplay(row: source))
+                        if index < group.rows.count - 1 {
+                            Divider().overlay(ConsoleTheme.border).padding(.leading, Column.inset)
+                        }
                     }
-                    Spacer(minLength: 0)
-                }
-                .font(ConsoleType.caption)
-                .foregroundStyle(ConsoleTheme.tertiaryText)
-
-                if let error = row.error, !error.isEmpty {
-                    Text(error)
-                        .font(ConsoleType.caption)
-                        .foregroundStyle(ConsoleTheme.tertiaryText)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
     }
 
-    @ViewBuilder
-    private func quotaBody(_ row: WorkerQuotaRow) -> some View {
-        switch row.status {
-        case "ok", "stale":
-            if let text = row.remainingText {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(text)
-                        .font(ConsoleType.metricSmall)
+    private var accountHeader: some View {
+        HStack(spacing: Column.spacing) {
+            headerCell("账号", width: nil)
+            headerCell("剩余额度", width: Column.accountRemaining)
+            headerCell("用量", width: Column.accountUsage)
+            headerCell("更新", width: Column.accountUpdated)
+            headerCell("状态", width: Column.status)
+        }
+        .padding(.horizontal, Column.inset)
+        .padding(.vertical, 8)
+    }
+
+    private func accountTableRow(_ row: AccountQuotaDisplay) -> some View {
+        HStack(spacing: Column.spacing) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.accountName)
+                    .font(ConsoleType.rowTitle)
+                    .foregroundStyle(ConsoleTheme.text)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(row.accountName)
+                if let plan = row.plan, !plan.isEmpty {
+                    Text(plan).font(ConsoleType.micro).foregroundStyle(ConsoleTheme.tertiaryText)
+                }
+                if let credits = row.creditsBadge {
+                    Button {
+                        nav.openCheckin(platform: .qoder)
+                    } label: {
+                        Text(credits)
+                            .font(ConsoleType.micro)
+                            .foregroundStyle(ConsoleTheme.accent)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!row.creditsNavigatesToCheckin)
+                    .help(row.creditsHelp ?? "")
+                }
+            }
+            .frame(minWidth: Column.accountMin, maxWidth: .infinity, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text(row.remainingValue)
+                        .font(ConsoleType.rowTitle)
                         .monospacedDigit()
-                        .foregroundStyle(ConsoleTheme.text)
+                        .foregroundStyle(row.remainingValue == "—" || row.remainingValue == "未知"
+                                         ? ConsoleTheme.secondaryText : ConsoleTheme.text)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.65)
                     if let unit = row.unit {
                         Text(unit)
-                            .font(ConsoleType.caption)
+                            .font(ConsoleType.micro)
                             .foregroundStyle(ConsoleTheme.tertiaryText)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.65)
                     }
-                    Spacer(minLength: 0)
                 }
                 if let share = row.remainingShare {
-                    ConsoleShareBar(share: share, tone: share <= 30 ? ConsoleTheme.warning : ConsoleTheme.accent)
+                    ConsoleShareBar(share: share, tone: shareTone(share))
+                        .frame(maxWidth: 96)
                 }
-                if let total = row.totalText {
-                    Text(total)
-                        .font(ConsoleType.caption)
+            }
+            .frame(width: Column.accountRemaining, alignment: .leading)
+            .help([row.remainingHelp, row.sourceHelp].compactMap { $0 }.joined(separator: "\n"))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.usagePrimary)
+                    .font(ConsoleType.body)
+                    .foregroundStyle(row.usagePrimary == "读取失败" ? ConsoleTheme.warning : ConsoleTheme.text)
+                    .lineLimit(1)
+                if let secondary = row.usageSecondary {
+                    Text(secondary)
+                        .font(ConsoleType.micro)
                         .foregroundStyle(ConsoleTheme.tertiaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        .help(secondary)
                 }
+            }
+            .frame(width: Column.accountUsage, alignment: .leading)
+            .help(row.usageHelp ?? "")
+
+            Text(row.updatedText ?? "—")
+                .font(ConsoleType.micro)
+                .foregroundStyle(ConsoleTheme.tertiaryText)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(width: Column.accountUpdated, alignment: .leading)
+
+            statusCell(row.state)
+                .frame(width: Column.status, alignment: .leading)
+        }
+        .padding(.horizontal, Column.inset)
+        .padding(.vertical, 8)
+        .frame(minHeight: ConsoleTheme.rowHeight)
+    }
+
+    // MARK: - 共用单元格
+
+    private func headerCell(_ title: String, width: CGFloat?) -> some View {
+        Text(title)
+            .font(ConsoleType.micro)
+            .foregroundStyle(ConsoleTheme.tertiaryText)
+            .lineLimit(1)
+            .frame(width: width, alignment: .leading)
+            .frame(maxWidth: width == nil ? .infinity : nil, alignment: .leading)
+    }
+
+    private func statusCell(_ state: QuotaDisplayState) -> some View {
+        Group {
+            if let label = state.label {
+                Text(label)
+                    .font(ConsoleType.micro)
+                    .foregroundStyle(stateColor(state))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .help(state.help ?? "")
             } else {
-                // 拿到 200 但没拿到额度：显示未知，不显示 0。
-                Text("额度未知")
-                    .font(ConsoleType.body)
-                    .foregroundStyle(ConsoleTheme.secondaryText)
-            }
-            if let usage = row.usage, usage.requests > 0 {
-                Text("近 \(usage.windowDays) 天 \(usage.requests) 次请求 · 消耗 "
-                    + "\(WorkerQuotaRow.format(usage.credits))\(usage.truncated ? "（已截断）" : "")")
-                    .font(ConsoleType.caption)
-                    .foregroundStyle(ConsoleTheme.tertiaryText)
-            } else if let usageError = row.usageError, !usageError.isEmpty {
-                Text("用量读取失败：\(usageError)")
-                    .font(ConsoleType.caption)
-                    .foregroundStyle(ConsoleTheme.warning)
-            }
-        case "unverified":
-            Text("未验证（该平台没有已证实的接口，未发送请求）")
-                .font(ConsoleType.small)
-                .foregroundStyle(ConsoleTheme.secondaryText)
-        case "unauthorized":
-            Text("授权不可用，需要重新登录")
-                .font(ConsoleType.small)
-                .foregroundStyle(ConsoleTheme.danger)
-        default:
-            Text("读取失败")
-                .font(ConsoleType.small)
-                .foregroundStyle(ConsoleTheme.danger)
-        }
-    }
-
-    /// Qoder 卡片里的 Credits：**活动状态，不是余额**。
-    ///
-    /// 额度页只做看和跳转：领取按钮在签到任务页（PRD §5.4）。
-    private func creditsReadOnlyBlock(_ credits: QoderCreditsInfo, row: WorkerQuotaRow) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(credits.summary)
-                    .font(ConsoleType.body)
-                    .foregroundStyle(credits.state == "error" || credits.state == "unauthorized"
-                        ? ConsoleTheme.warning : ConsoleTheme.text)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 0)
-                ConsoleBadge(text: "每日奖励", tint: ConsoleTheme.secondaryText)
-            }
-            if let end = credits.windowEnd {
-                Text("活动窗口截止 \(Self.localTimestamp(Self.epochToRFC3339(end)))（服务端时间）")
-                    .font(ConsoleType.caption)
-                    .foregroundStyle(ConsoleTheme.tertiaryText)
-            }
-            HStack(spacing: 8) {
-                Button("到签到任务查看") {
-                    nav.openCheckin(platform: .qoder)
-                }
-                .buttonStyle(ConsoleSecondaryButtonStyle())
-                Text("领取操作只在签到任务页执行")
-                    .font(ConsoleType.caption)
-                    .foregroundStyle(ConsoleTheme.tertiaryText)
-                Spacer(minLength: 0)
+                // 正常状态不写字：只留一个弱提示点，异常才占用这一列。
+                Circle()
+                    .fill(ConsoleTheme.success)
+                    .frame(width: 5, height: 5)
+                    .help(state.help ?? "实时数据")
             }
         }
     }
 
-    /// Unix 秒 → RFC3339，交给 `localTimestamp` 统一按本机时区显示。
-    static func epochToRFC3339(_ seconds: Int) -> String {
-        let date = Date(timeIntervalSince1970: TimeInterval(seconds))
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.string(from: date)
+    private func stateColor(_ state: QuotaDisplayState) -> Color {
+        switch state.tone {
+        case .normal: return ConsoleTheme.secondaryText
+        case .neutral: return ConsoleTheme.tertiaryText
+        case .warning: return ConsoleTheme.warning
+        case .danger: return ConsoleTheme.danger
+        }
     }
 
-    /// RFC3339（UTC）→ 本机时区的 `MM-dd HH:mm`。
+    private func shareTone(_ share: Double) -> Color {
+        if share <= 10 { return ConsoleTheme.danger }
+        if share <= 30 { return ConsoleTheme.warning }
+        return ConsoleTheme.accent
+    }
+
+    // MARK: - 空 / 错误
+
+    private func emptyState(title: String, message: String, action: @escaping () -> Void) -> some View {
+        ConsoleEmptyState(
+            symbol: "chart.bar.doc.horizontal",
+            title: title,
+            message: message,
+            actionTitle: "刷新",
+            action: action
+        )
+    }
+
+    private func errorState(title: String, message: String, action: @escaping () -> Void) -> some View {
+        ConsoleEmptyState(
+            symbol: "exclamationmark.triangle",
+            title: title,
+            message: message,
+            actionTitle: "重新读取",
+            action: action
+        )
+    }
+
+    private func filteredEmptyState(title: String, message: String, actionTitle: String, action: @escaping () -> Void) -> some View {
+        ConsoleEmptyState(
+            symbol: "line.3.horizontal.decrease.circle",
+            title: title,
+            message: message,
+            actionTitle: actionTitle,
+            action: action
+        )
+    }
+
+    /// 供其他控制台区块复用的时间格式化（保留既有调用点）。
     static func localTimestamp(_ raw: String) -> String {
-        guard let date = ConsoleFormat.parse(raw) else {
-            return String(raw.prefix(16)).replacingOccurrences(of: "T", with: " ")
-        }
-        return ConsoleFormat.shortDateTime(date)
+        QuotaPresentation.localTimestamp(raw)
+            ?? String(raw.prefix(16)).replacingOccurrences(of: "T", with: " ")
     }
 }
+
