@@ -254,7 +254,7 @@ Qoder 每日 Credits：
 | `Sources/Console/ConsoleStore.swift` | **只加视觉夹具字段**（`#if AICC_VISUAL_TEST && AICC_CONSOLE_VISUAL`）：acting/batching、growthAuto/runs/expanded、reports/runs、loading 标记、`visualFixtureLoaded` |
 | `Sources/Console/MainConsoleView.swift` | 只改 `.checkin` 分支的刷新范围（全部只读），未动其他页面分支 |
 | `ConsoleVisual/ConsoleVisualSmokeMain.swift` | 任务中心样本：8 个签到账号、3 个成长账号、4 个旅行账号、3 个 Credits 账号，以及 10 个状态变体；修正成长夹具字段名（`taskCode/acceptStatus` → `code/rawStatus/current/target/class`） |
-| `Tests/TaskCenterPresentationTests.swift`（新增） | 22 个纯展示用例 |
+| `Tests/TaskCenterPresentationTests.swift`（新增） | 26 个纯展示用例 |
 
 - 复用 `ConsoleTheme` / `ConsoleType` / `ConsoleListSurface` / `ConsoleEmptyState` / `ConsoleInlineNotice` /
   `ConsoleBadge` / 三种按钮样式；**没有新增配色、字号或第二套 Token**。
@@ -319,7 +319,7 @@ Qoder 每日 Credits：
 
 ## 8. 测试
 
-`Tests/TaskCenterPresentationTests.swift`（22 个用例）：
+`Tests/TaskCenterPresentationTests.swift`（26 个用例）：
 
 - 状态映射：签到 11 个状态、成长 7 个任务状态 + 3 个账号状态、旅行 8 个阶段、Credits 9 种报告态。
 - 成功 vs 待确认：`unknown → 待确认`，`claimed → 已完成`，`claimed(true) → 领取成功`。
