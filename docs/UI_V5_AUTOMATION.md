@@ -379,3 +379,4 @@
 - 新增 `AutomationAsyncFlowTests`（11 个）：用 continuation 制造乱序返回，覆盖 A 预演未回 → B 落地 → A 返回。
 - `RotationManagerModelTests` 增加仅保存文案用例（22 个）。
 - 截图仍为 137 张；`automation-degraded` 现在严格渲染「无缓存 + 读取失败」，`automation-stale` 渲染「上次状态 + 当前无法确认」。
+- CI：run `44955055832`（HEAD `73a8c91`）**completed success**（changes / swift-test / macos-build；其余按路径 skipped）。
