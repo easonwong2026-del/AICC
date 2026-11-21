@@ -196,6 +196,13 @@
 
 系统 `alert` / `confirmationDialog` 无法真实离屏渲染，因此没有伪造截图；确认文案与触发条件由模型测试和源码核验覆盖（`RotationSaveFlow`、`RotationFeedbackText`、`runNow` / `restore` 的 alert）。
 
+仓库内保存 17 张（`docs/console-v5/automation/after/`）；完整 126 张由 CI Artifact `console-ui-visuals` 承载。
+
+改造前对照（旧单页弹层，来自 #115 验收集）：
+
+- `docs/console-v5/after/rotation-sheet-560x660-light.png`
+- `docs/console-v5/after/rotation-recovery-560x660-light.png`
+
 ## 10. 测试与 CI
 
 （待 CI 完成后补齐）
