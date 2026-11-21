@@ -345,6 +345,21 @@ SettingsRootView（既有，未改）
 
 `CredentialMigrationModelsTests`（12 个用例）此前已存在于仓库但**没有进 testTarget**，本轮一并纳入，凭据盘点解析从此真正受测。
 
+### 9.1 CI 发现并修复的两处
+
+| 现象 | 根因 | 处理 |
+|---|---|---|
+| `swift-test` 的「Render companion settings acceptance images」失败 | `macos/Widget/DashboardVisualSmokeMain.swift` 调用无参 `SettingsView()`；设置页现在需要 model | 给它构造 `SettingsModel` 并渲染新的 760×620；它守的「桥接开关 → 关窗退出」断言保留 |
+| 修完上一条后 `swift test` 编译失败 | 新纳入的 `CredentialMigrationModelsTests` 引用 `AccountWorkerManager`，而后者被排除在 AICCCore 之外 | 把 `reasonSummary` 移到 `CredentialMigrationModels` 的 `CredentialRelinkSummary`，Manager 转发；测试改测纯函数 |
+
+### 9.2 结果
+
+- CI run `44889194707`（HEAD `2bd3fd1`）**completed success**：
+  `changes` / `test` / `lint` / `rust` / `swift-test` / `macos-build` / `android` / `android-visual` 全部 success。
+- `swift-test` 内：`swift test` 通过（含本 PR 的 30 + 12 个新用例），设置页 51 张渲染并上传 artifact `settings-ui-visuals`。
+- `macos-dmg` 在 PR 上按设计跳过。
+- 本机无 Xcode/XCTest，无法 `swift test`；额外用一份 XCTest 替身跑过 `SettingsCenterTests`（170 个断言）与 `CredentialMigrationModelsTests`（42 个断言），均 0 失败。
+
 ## 10. 未验证的真实环境情况
 
 - 未在真实 `NSWindow` 里手动点击验证（本轮验收全部是真实 SwiftUI 视图的离屏渲染，不是网页模拟）。窗口复用、最小化恢复、关闭后退出仍由原有 `SettingsWindowCoordinator` 负责，未改。
