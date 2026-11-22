@@ -122,7 +122,7 @@ struct ConsoleCheckinSection: View {
             }
             .frame(minWidth: Column.accountMin, maxWidth: .infinity, alignment: .leading)
 
-            TaskCenterStatusCell(status: row.status, help: row.detail)
+            TaskCenterStatusCell(status: row.status, help: row.help)
                 .frame(width: Column.status, alignment: .leading)
 
             Text(row.reward)
@@ -174,21 +174,42 @@ struct ConsoleCheckinSection: View {
             : "开启后每天 09:00 自动检查一次；服务端已签到就跳过"
     }
 
+    /// 操作列只有一个按钮，文案与动作都来自 `CheckinRowAction`：
+    /// 已完成 / 待确认只给「复查」（只读），待签到才给「立即签到」，授权失效给「去登录」。
+    @ViewBuilder
     private func actionCell(_ row: CheckinRowDisplay) -> some View {
-        Button(row.isBusy ? "执行中" : "立即签到") {
-            guard let raw = store.checkin.row(row.accountId) else { return }
-            Task { await store.runCheckin(raw) }
+        switch row.action {
+        case .none:
+            if row.isBusy {
+                ProgressView().controlSize(.mini)
+            } else {
+                Text("—")
+                    .font(ConsoleType.body)
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+            }
+        case .login:
+            Button(row.action.title) { nav.page = .accounts }
+                .buttonStyle(ConsoleSecondaryButtonStyle())
+                .help(row.actionHelp)
+        case .signIn, .retry, .recheck, .check:
+            Button(row.action.title) { perform(row) }
+                .buttonStyle(ConsoleSecondaryButtonStyle())
+                .disabled(!row.canPerformAction)
+                .help(row.actionHelp)
         }
-        .buttonStyle(ConsoleSecondaryButtonStyle())
-        .disabled(!row.canRun)
-        .help(helpText(row))
     }
 
-    private func helpText(_ row: CheckinRowDisplay) -> String {
-        if let blocked = row.blockedReason { return blocked }
-        return row.status.isDone
-            ? "今天已签到：会先查服务端，不会重复提交"
-            : "先查服务端状态，确认未签到才会提交"
+    /// 只读动作只调单账号状态查询，绝不经过 `runCheckin`。
+    private func perform(_ row: CheckinRowDisplay) {
+        guard let raw = store.checkin.row(row.accountId) else { return }
+        switch row.action {
+        case .signIn, .retry:
+            Task { await store.runCheckin(raw) }
+        case .recheck, .check:
+            Task { await store.recheckCheckin(accountId: row.accountId) }
+        case .login, .none:
+            break
+        }
     }
 
     // MARK: - 页脚

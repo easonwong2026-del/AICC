@@ -141,11 +141,10 @@ struct ConsoleCreditsSection: View {
             .controlSize(.mini)
             .labelsHidden()
             .frame(width: Column.auto, alignment: .leading)
-            .disabled(!row.supportsAuto || row.isBusy)
-            .opacity(row.supportsAuto && !row.isBusy ? 1 : 0.45)
-            .help(row.supportsAuto
-                  ? "每天按服务端活动窗口检查一次；不会增加额外领取"
-                  : "该版本没有已证实的 Credits 接口")
+            .disabled(!row.canToggleAuto)
+            // macOS 的 switch 在 disabled 时几乎不变色；显式降透明度才看得出不可点。
+            .opacity(row.canToggleAuto ? 1 : 0.45)
+            .help(toggleHelp(row))
 
             lastRunCell(row)
                 .frame(width: Column.lastRun, alignment: .leading)
@@ -156,6 +155,15 @@ struct ConsoleCreditsSection: View {
         .padding(.horizontal, TaskCenterColumn.inset)
         .padding(.vertical, 8)
         .frame(minHeight: ConsoleTheme.rowHeight)
+    }
+
+    /// 开关的 help 必须和禁用原因说同一件事：
+    /// 失去资格但仍开着的账号要能关，所以这里的文案按「能不能切」而不是「支不支持」来写。
+    private func toggleHelp(_ row: CreditsRowDisplay) -> String {
+        if let lock = row.autoLockReason { return lock }
+        return row.autoEnabled
+            ? "关闭后不再自动领取；已经领到的 Credits 不受影响"
+            : "每天按服务端活动窗口检查一次；不会增加额外领取"
     }
 
     @ViewBuilder

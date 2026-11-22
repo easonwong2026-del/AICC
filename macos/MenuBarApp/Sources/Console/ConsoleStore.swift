@@ -958,13 +958,24 @@ final class ConsoleStore: ObservableObject {
         qoderCreditsBusy = accountId
         qoderCreditsNotice = nil
         defer { qoderCreditsBusy = nil }
+        var accepted = false
         do {
             try await worker.setQoderCreditsAuto(accountId: accountId, enabled: enabled)
-            qoderCreditsNotice = enabled ? "已开启自动领取（默认每天检查一次）" : "已关闭自动领取"
+            accepted = true
         } catch {
             qoderCreditsNotice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
+        // 成功、失败都重读一次：界面上的开关只能是服务端真实状态，不是刚才那一下的乐观结果。
         await refreshQoderCredits(silent: true)
+        guard accepted else { return }
+        let actual = qoderCreditsAuto.first { $0.accountId == accountId }?.autoEnabled
+        if actual == enabled {
+            qoderCreditsNotice = enabled ? "已开启自动领取（默认每天检查一次）" : "已关闭自动领取"
+        } else if let error = qoderCreditsError {
+            qoderCreditsNotice = "没能确认这次修改：\(error)"
+        } else {
+            qoderCreditsNotice = "服务端没有确认这次修改，已重新读取真实状态"
+        }
     }
 
     func loadQoderCreditRuns(accountId: String) async {
@@ -1321,6 +1332,33 @@ final class ConsoleStore: ObservableObject {
         if checkinError == nil {
             let checked = checkin.counts.checked
             checkinNotice = "已刷新 \(checkin.counts.accounts) 个账号，今日 \(checked) 个已签到"
+        }
+    }
+
+    /// 单账号只读复查：只调 `checkin.status`，**不会**提交签到。
+    ///
+    /// 「今天已完成」的行不该再挂一个会写服务端的按钮；复查只把这一行的真实状态读回来。
+    /// 只替换那一行、不动整队的 `counts`：摘要是从展示行派生的，不需要第二套计数。
+    func recheckCheckin(accountId: String) async {
+        guard checkinActing == nil, !checkinBatching, !checkinLoading else { return }
+        checkinActing = accountId
+        defer { checkinActing = nil }
+        guard await ensureWorkerReady() else {
+            checkinNotice = workerFailureText
+            return
+        }
+        do {
+            let json = try await worker.checkinStatus(accountIds: [accountId], cached: false)
+            guard let fresh = CheckinFleetStatus(json: json).row(accountId) else {
+                checkinNotice = "服务端没有返回这个账号的今日状态"
+                return
+            }
+            if let index = checkin.rows.firstIndex(where: { $0.accountId == accountId }) {
+                checkin.rows[index] = fresh
+            }
+            checkinError = nil
+        } catch {
+            checkinNotice = message(for: error)
         }
     }
 
