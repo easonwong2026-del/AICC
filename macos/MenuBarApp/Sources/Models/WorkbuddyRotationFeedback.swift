@@ -80,6 +80,42 @@ enum RotationFeedbackText {
         }
     }
 
+    /// 关闭计划后，"停止这一轮"走到了哪一步。
+    ///
+    /// 这五种情况必须分开说：把 `stop_requested` 说成"已恢复"是撒谎，
+    /// 把恢复失败说成"已关闭"会让人以为账号已经回到原样。
+    enum DisableState: Equatable {
+        /// 本来就没有进行中的轮次。
+        case nothingRunning
+        /// 另一个轮换操作占着执行权，结束时会恢复。
+        case anotherOperationRunning
+        /// 请求已落库，等当前切换安全收尾。
+        case waitingForSafeStop
+        /// 已经恢复原账号。
+        case restored
+        /// 关闭成功，但原账号没能自动恢复。
+        case restoreFailed
+        /// 关闭成功，没有需要恢复的东西。
+        case closedOnly
+    }
+
+    static func disableState(stopStatus: String?, restored: Bool?) -> DisableState {
+        switch stopStatus {
+        case "nothing_to_stop", "not_running":
+            return .nothingRunning
+        case "busy":
+            return .anotherOperationRunning
+        case "stop_requested", "restoring":
+            return .waitingForSafeStop
+        default:
+            switch restored {
+            case .some(true): return .restored
+            case .some(false): return .restoreFailed
+            case .none: return .closedOnly
+            }
+        }
+    }
+
     /// 开关的返回。关闭是两件事：停止后续、把账号恢复回来。
     static func toggle(
         enabled: Bool,
@@ -89,56 +125,25 @@ enum RotationFeedbackText {
         if enabled {
             return .init("已打开。计划只在 AICC 运行时执行；开始前会先检查凭据，凭据不对就跳过那个账号。")
         }
-        switch (stopStatus, restored) {
-        case ("busy", _):
-            return .init("计划已关闭；当前还有一个轮换操作在执行，结束后会自动恢复原账号。")
-        case ("stop_requested", _):
-            return .init("计划已关闭；已请求停止这一轮，当前操作结束后会自动恢复原账号。")
-        case (_, .some(true)):
-            return .init("已关闭，并且已恢复原账号。")
-        case (_, .some(false)):
-            return .init("已关闭，但原账号没能自动恢复；请点「恢复最初账号…」并确认。", isFailure: true)
-        default:
-            return .init("已关闭，不会再自动切换客户端。")
+        return disableFeedback(disableState(stopStatus: stopStatus, restored: restored))
+    }
+
+    static func disableFeedback(_ state: DisableState) -> RotationFeedback {
+        switch state {
+        case .nothingRunning:
+            return .init("计划已关闭；当前没有正在执行的一轮。")
+        case .anotherOperationRunning:
+            return .init("计划已关闭；另一个轮换操作仍在执行，结束后会恢复原账号。")
+        case .waitingForSafeStop:
+            // 只说到"会恢复"，不能说"已恢复"。
+            return .init("计划已关闭；已请求停止这一轮，会在当前操作安全收尾后恢复原账号。")
+        case .restored:
+            return .init("计划已关闭，并且已恢复原账号。")
+        case .restoreFailed:
+            return .init("计划已关闭，但原账号没能自动恢复；请点「恢复最初账号…」并确认。", isFailure: true)
+        case .closedOnly:
+            return .init("计划已关闭，不会再自动切换客户端。")
         }
-    }
-
-    /// 开关的**执行步骤**。视图照着跑，测试照着断言。
-    ///
-    /// 关键一条：**关闭不需要保存表单**。用户可能在编辑一个已经无效的配置
-    /// （星期全空、起止时间相同），这时点关闭是想让它停下来，不能被
-    /// "保存失败" 挡住 —— 旧实现就是这么把关闭请求吞掉的。
-    enum ToggleStep: Equatable {
-        case save
-        case enable
-        case disable
-    }
-
-    static func toggleSteps(enabled: Bool, dirty: Bool) -> [ToggleStep] {
-        guard enabled else { return [.disable] }
-        return dirty ? [.save, .enable] : [.enable]
-    }
-
-    /// 执行开关动作。放在这里而不是视图里，是为了让测试跑的是同一条路径。
-    /// 返回 `false` = 中止（保存失败）。
-    @discardableResult
-    static func applyToggle(
-        enabled: Bool,
-        dirty: Bool,
-        save: () async -> Bool,
-        setEnabled: (Bool) async -> Void
-    ) async -> Bool {
-        for step in toggleSteps(enabled: enabled, dirty: dirty) {
-            switch step {
-            case .save:
-                guard await save() else { return false }
-            case .enable:
-                await setEnabled(true)
-            case .disable:
-                await setEnabled(false)
-            }
-        }
-        return true
     }
 
     /// 表单门禁：有未保存的修改时，预演与立即执行都必须禁用。

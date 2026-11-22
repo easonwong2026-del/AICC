@@ -1,76 +1,115 @@
 import SwiftUI
 
-/// 签到任务中心（UI V5 Phase 2A-2）。
+/// 任务中心（原「签到任务」）。
 ///
-/// 页面只回答三个问题：今天完成了什么、还有什么要处理、现在能做什么。
+/// 两个模式：
+/// - **今日任务**：四个任务域的今日状态、手动操作与只读检查（保持原样）；
+/// - **自动计划**：五类自动化一个入口看全，管理跳回对应任务域或轮换管理。
 ///
 /// 三条纪律（与旧页面一致，不能因为改版而丢）：
 /// 1. 一次只渲染**一个**任务域，不把四个模块纵向铺开；
 /// 2. 只读（检查状态 / 扫描 / 重读快照）与写（签到 / 领取 / 派出）在按钮文案上分开；
-/// 3. 页面加载、切平台、切任务、刷新都**不会**隐式触发任何写操作。
+/// 3. 页面加载、切平台、切任务、切模式、刷新都**不会**隐式触发任何写操作。
 struct ConsoleCheckinView: View {
     @ObservedObject var store: ConsoleStore
     @EnvironmentObject private var nav: ConsoleNavigation
 
     @State private var showRules = false
+    @State private var rotationShown = false
+    @State private var rotationFocus: RotationManagerFocus = .plan
+
+    private var mode: TaskCenterMode {
+        nav.taskCenterMode
+    }
 
     var body: some View {
         ConsolePageScaffold {
             toolbar
         } content: {
-            VStack(alignment: .leading, spacing: ConsoleTheme.sectionSpacing) {
-                // 没有账号时不摆一排 0：空状态自己会说明下一步。
-                if hasCurrentRows || currentLoading {
-                    summaryRow
+            if mode == .automation {
+                ConsoleAutomationSection(store: store)
+            } else {
+                VStack(alignment: .leading, spacing: ConsoleTheme.sectionSpacing) {
+                    // 没有账号时不摆一排 0：空状态自己会说明下一步。
+                    if hasCurrentRows || currentLoading {
+                        summaryRow
+                    }
+                    selectedSection
                 }
-                selectedSection
             }
         }
         .task { await initialLoad() }
+        .onAppear { consumeRotationRequest() }
+        .onChange(of: nav.rotationRequest) { _, _ in consumeRotationRequest() }
+        .sheet(isPresented: $rotationShown) {
+            RotationManagerView(store: store, focus: rotationFocus)
+        }
+    }
+
+    /// 自动计划 → 客户端轮换 → 管理。与账号页、总览共用同一条导航请求。
+    private func consumeRotationRequest() {
+        guard let request = nav.consumeRotationManagerRequest() else { return }
+        rotationFocus = request.focus
+        rotationShown = true
     }
 
     // MARK: - 工具栏
 
     private var toolbar: some View {
         HStack(spacing: 10) {
-            Picker("平台", selection: $nav.checkinPlatform) {
-                ForEach(ConsoleTaskPlatform.allCases) { platform in
-                    Text(platform.title).tag(platform)
+            Picker("模式", selection: $nav.taskCenterMode) {
+                ForEach(TaskCenterMode.allCases) { item in
+                    Text(item.title).tag(item)
                 }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .tint(ConsoleTheme.accent)
-            .frame(width: 226)
-            .help("只列出真正有任务的平台：WorkBuddy CN 与 Qoder CN")
+            .frame(width: 150)
+            .help("今日任务看状态，自动计划看五个自动化")
 
-            if nav.checkinPlatform == .workbuddy {
-                Picker("任务", selection: $nav.workbuddyTask) {
-                    ForEach(WorkbuddyTaskKind.allCases) { kind in
-                        Text(kind.title).tag(kind)
+            if mode == .today {
+                Picker("平台", selection: $nav.checkinPlatform) {
+                    ForEach(ConsoleTaskPlatform.allCases) { platform in
+                        Text(platform.title).tag(platform)
                     }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .tint(ConsoleTheme.accent)
-                .frame(width: 242)
+                .frame(width: 226)
+                .help("只列出真正有任务的平台：WorkBuddy CN 与 Qoder CN")
+
+                if nav.checkinPlatform == .workbuddy {
+                    Picker("任务", selection: $nav.workbuddyTask) {
+                        ForEach(WorkbuddyTaskKind.allCases) { kind in
+                            Text(kind.title).tag(kind)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .tint(ConsoleTheme.accent)
+                    .frame(width: 200)
+                }
             }
 
             Spacer(minLength: 8)
 
-            Button {
-                showRules = true
-            } label: {
-                Image(systemName: "questionmark.circle")
-                    .font(.system(size: 13, weight: .medium))
-            }
-            .buttonStyle(ConsoleIconButtonStyle())
-            .help("自动任务规则")
-            .popover(isPresented: $showRules, arrowEdge: .bottom) {
-                rulesPopover
-            }
+            if mode == .today {
+                Button {
+                    showRules = true
+                } label: {
+                    Image(systemName: "questionmark.circle")
+                        .font(.system(size: 13, weight: .medium))
+                }
+                .buttonStyle(ConsoleIconButtonStyle())
+                .help("自动任务规则")
+                .popover(isPresented: $showRules, arrowEdge: .bottom) {
+                    rulesPopover
+                }
 
-            readActionButton
+                readActionButton
+            }
         }
     }
 
