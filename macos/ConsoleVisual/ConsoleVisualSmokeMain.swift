@@ -30,6 +30,8 @@ struct ConsoleVisualFixture {
     /// 视觉样本：某个账号正在签到 / 批量签到进行中。
     var checkinActing: String?
     var checkinBatching = false
+    /// 视觉样本：单账号复查失败（行保持旧状态，错误单独一条）。
+    var checkinRecheckError: String?
     var growthResult: GrowthScanResult = .empty
     var growthError: String?
     var lastGrowthScan: Date?
@@ -1124,6 +1126,13 @@ extension ConsoleVisualFixture {
         return fixture
     }
 
+    /// 签到：单账号复查失败。已完成的行仍显示旧结论，错误单独一条并带原因。
+    static var tasksCheckinRecheckFailed: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.checkinRecheckError = "复查「批量账号 1」失败：读取签到状态超时（15s）"
+        return fixture
+    }
+
     /// 签到：真正的网络失败（非授权）。状态是「执行失败」，操作是「重试」。
     static var tasksCheckinNetworkFailed: ConsoleVisualFixture {
         var fixture = sample
@@ -1525,6 +1534,8 @@ struct ConsoleVisualSmokeMain {
         creditsErrorStore.applyVisualFixture(.tasksCreditsError)
         let tasksNetworkStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
         tasksNetworkStore.applyVisualFixture(.tasksCheckinNetworkFailed)
+        let tasksRecheckFailedStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        tasksRecheckFailedStore.applyVisualFixture(.tasksCheckinRecheckFailed)
         let creditsRevokedStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
         creditsRevokedStore.applyVisualFixture(.tasksCreditsRevoked)
 
@@ -1813,6 +1824,24 @@ struct ConsoleVisualSmokeMain {
              { AnyView(consoleView(store: tasksAttentionStore, settings: settings, scheme: .dark,
                                    page: .checkin)) },
              CGSize(width: 1120, height: 760), .dark),
+            // 「去登录」的落点：目标账号在 AI 账号页被选中（同一 selection 由导航模型测试钉住）。
+            ("accounts-login-target-1120x760-light",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
+                                   page: .accounts, account: "workbuddy:acc-wb-2")) },
+             CGSize(width: 1120, height: 760), .light),
+            // 复查失败：行保留旧结论，错误单独一条。
+            ("checkin-recheck-failed-1120x760-light",
+             { AnyView(consoleView(store: tasksRecheckFailedStore, settings: settings, scheme: .light,
+                                   page: .checkin)) },
+             CGSize(width: 1120, height: 760), .light),
+            ("checkin-recheck-failed-1120x760-dark",
+             { AnyView(consoleView(store: tasksRecheckFailedStore, settings: settings, scheme: .dark,
+                                   page: .checkin)) },
+             CGSize(width: 1120, height: 760), .dark),
+            ("checkin-recheck-failed-960x640-light",
+             { AnyView(consoleView(store: tasksRecheckFailedStore, settings: settings, scheme: .light,
+                                   page: .checkin)) },
+             CGSize(width: 960, height: 640), .light),
             // 网络失败（非授权）：必须是「执行失败 + 重试」，不能合并到「需要登录」。
             ("checkin-network-failed-1120x760-light",
              { AnyView(consoleView(store: tasksNetworkStore, settings: settings, scheme: .light,

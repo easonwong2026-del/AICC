@@ -9,6 +9,10 @@ struct ConsoleCheckinSection: View {
     let rows: [CheckinRowDisplay]
     @EnvironmentObject private var nav: ConsoleNavigation
 
+    /// 「去登录」找不到目标账号时的提示。找不到就**不跳转**，
+    /// 免得账号页把选择回落到列表第一项、让人以为那是目标账号。
+    @State private var loginTargetError: String?
+
     private enum Column {
         static let status: CGFloat = 96
         static let reward: CGFloat = 56
@@ -42,6 +46,13 @@ struct ConsoleCheckinSection: View {
                 ConsoleInlineNotice(kind: .error, message: error, actionTitle: "重试") {
                     Task { await store.refreshCheckinStatus() }
                 }
+            }
+            if let error = store.checkinRecheckError {
+                // 复查没成：行保持上一份已确认状态，原因在这里单独说明。
+                ConsoleInlineNotice(kind: .error, message: error)
+            }
+            if let warning = loginTargetError {
+                ConsoleInlineNotice(kind: .warning, message: warning)
             }
 
             content
@@ -188,7 +199,7 @@ struct ConsoleCheckinSection: View {
                     .foregroundStyle(ConsoleTheme.tertiaryText)
             }
         case .login:
-            Button(row.action.title) { nav.page = .accounts }
+            Button(row.action.title) { openLoginTarget(row) }
                 .buttonStyle(ConsoleSecondaryButtonStyle())
                 .help(row.actionHelp)
         case .signIn, .retry, .recheck, .check:
@@ -196,6 +207,24 @@ struct ConsoleCheckinSection: View {
                 .buttonStyle(ConsoleSecondaryButtonStyle())
                 .disabled(!row.canPerformAction)
                 .help(row.actionHelp)
+        }
+    }
+
+    /// 纯导航：定位到该签到账号在 AI 账号页里的详情。找不到就停在原地并说明原因，
+    /// 不提交授权、不签到、不切换客户端。
+    private func openLoginTarget(_ row: CheckinRowDisplay) {
+        let decision = ConsoleCheckinLoginRoute.decision(
+            accountId: row.accountId,
+            displayName: row.name,
+            accounts: store.accounts,
+            accountsError: store.accountsError
+        )
+        switch decision {
+        case .open(let filter, let selection):
+            loginTargetError = nil
+            nav.openAccounts(filter: filter, selection: selection)
+        case .blocked(let reason):
+            loginTargetError = reason
         }
     }
 

@@ -215,6 +215,71 @@ final class AutomationAsyncFlowTests: XCTestCase {
         XCTAssertFalse(row.summary.contains("当前无法确认"))
     }
 
+    // MARK: - P1 单账号签到复查（只读）
+
+    /// 成功：返回服务端这一行的最新状态，界面才允许替换旧行。
+    func testCheckinRecheckReturnsTheFreshRowOnSuccess() async {
+        let fleet = CheckinFleetStatus(json: [
+            "accounts": [[
+                "accountId": "acc-1", "nickname": "账号", "enabled": true,
+                "state": "claimed", "credits": 100,
+            ]],
+        ])
+        let outcome = await CheckinRecheckFlow.run(
+            accountId: "acc-1",
+            workerMessage: "账号助手未就绪",
+            ensureWorker: { true },
+            fetch: { fleet }
+        )
+        guard case .refreshed(let row) = outcome else {
+            return XCTFail("应当返回这一行的最新状态：\(outcome)")
+        }
+        XCTAssertEqual(row.accountId, "acc-1")
+        XCTAssertEqual(row.state, .claimed)
+    }
+
+    /// 超时：必须是失败，且不给出任何"新状态"，旧行由调用方保留。
+    func testCheckinRecheckTimeoutIsAFailureWithoutNewState() async {
+        let outcome = await CheckinRecheckFlow.run(
+            accountId: "acc-1",
+            workerMessage: "账号助手未就绪",
+            ensureWorker: { true },
+            fetch: { throw FlowTimeout.timeout }
+        )
+        guard case .failed(let reason) = outcome else {
+            return XCTFail("超时不能返回一行新状态：\(outcome)")
+        }
+        XCTAssertTrue(reason.contains("超时"), reason)
+    }
+
+    /// 助手不可用：一次请求都不发，原因原样交给界面。
+    func testCheckinRecheckWorkerUnavailableDoesNotFetch() async {
+        let outcome = await CheckinRecheckFlow.run(
+            accountId: "acc-1",
+            workerMessage: "账号助手未就绪",
+            ensureWorker: { false },
+            fetch: {
+                XCTFail("助手不可用时不应该发读取请求")
+                return CheckinFleetStatus()
+            }
+        )
+        XCTAssertEqual(outcome, .failed(reason: "账号助手未就绪"))
+    }
+
+    /// 返回里没有这个账号：不能拿别人的行顶替。
+    func testCheckinRecheckMismatchedAccountIsAFailure() async {
+        let fleet = CheckinFleetStatus(json: [
+            "accounts": [["accountId": "acc-2", "nickname": "别的账号", "state": "claimed"]],
+        ])
+        let outcome = await CheckinRecheckFlow.run(
+            accountId: "acc-1",
+            workerMessage: "账号助手未就绪",
+            ensureWorker: { true },
+            fetch: { fleet }
+        )
+        XCTAssertEqual(outcome, .failed(reason: "服务端没有返回这个账号的今日状态"))
+    }
+
     // MARK: - 样本
 
     private static func creditsInputs(_ outcome: QoderCreditsRefreshOutcome) -> AutomationInputs {
@@ -267,4 +332,10 @@ private enum FlowTestError: LocalizedError {
 @MainActor
 private final class PreviewGate {
     var continuation: CheckedContinuation<WorkbuddyRotationDryRun, Error>?
+}
+
+/// 复查超时用的错误：文案与 worker 的超时提示同形。
+private enum FlowTimeout: LocalizedError {
+    case timeout
+    var errorDescription: String? { "读取签到状态超时（15s）" }
 }
