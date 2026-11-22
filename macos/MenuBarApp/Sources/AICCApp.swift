@@ -499,6 +499,10 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
     private var hasStartedShutdown = false
     private var hasPresentedMainWindow = false
     private var widgetRefreshTask: Task<Void, Never>?
+    /// 菜单栏常驻图标。AICC 是 accessory 应用（没有 Dock 图标），
+    /// 桥接开启时关掉窗口也不会退出 —— 没有这个入口，用户只能翻到
+    /// 设置 → 高级与诊断 才能退出。
+    private var statusItem: NSStatusItem?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         guard singleInstance.acquire() else {
@@ -536,6 +540,8 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
             openSettings: { [weak self] in self?.presentSettings() },
             onClose: { [weak self] in self?.finishBackgroundRefresh() }
         )
+
+        installMenuBarItem()
 
         if AppSettings.shared.bridgeEnabled { serverManager.startMonitoring() }
         // 自动旅行跑在账号助手进程里。上次退出前有账号开着自动旅行的话，
@@ -596,6 +602,66 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: - 菜单栏
+
+    /// 菜单栏图标 + 三项菜单：打开主控制台 / 设置 / 退出。
+    ///
+    /// 只做导航与退出，不碰签到、授权、轮换或客户端切换。
+    private func installMenuBarItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = item.button {
+            let image = NSImage(
+                systemSymbolName: "square.stack.3d.up.fill",
+                accessibilityDescription: "AICC"
+            )
+            image?.isTemplate = true
+            button.image = image
+            button.toolTip = "AICC"
+        }
+
+        let menu = NSMenu()
+        let console = NSMenuItem(
+            title: "打开主控制台",
+            action: #selector(menuOpenConsole),
+            keyEquivalent: ""
+        )
+        console.target = self
+        menu.addItem(console)
+
+        let settings = NSMenuItem(
+            title: "设置…",
+            action: #selector(menuOpenSettings),
+            keyEquivalent: ","
+        )
+        settings.target = self
+        menu.addItem(settings)
+
+        menu.addItem(.separator())
+
+        let quit = NSMenuItem(
+            title: "退出 AICC",
+            action: #selector(menuQuit),
+            keyEquivalent: "q"
+        )
+        quit.target = self
+        menu.addItem(quit)
+
+        item.menu = menu
+        statusItem = item
+    }
+
+    @objc private func menuOpenConsole() {
+        presentConsole()
+    }
+
+    @objc private func menuOpenSettings() {
+        presentSettings()
+    }
+
+    @objc private func menuQuit() {
+        requestQuit()
+    }
+
     /// 主入口：启动、重新激活、点击 Dock 图标都走这里。
     private func presentConsole() {
         hasPresentedMainWindow = true
@@ -651,6 +717,7 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
         settingsWindowCoordinator = nil
         serverManager.stopMonitoring()
         serverManager.stopServer(reason: .appExit, waitForExit: true)
+        statusItem = nil
     }
 }
 
