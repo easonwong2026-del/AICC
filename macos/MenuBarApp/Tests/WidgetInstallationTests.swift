@@ -116,7 +116,7 @@ final class WidgetInstallationTests: XCTestCase {
     // MARK: - 修复计划（PR #123 P1-2）
 
     func testAnAlreadyRepairedBuildIsSkipped() {
-        let plan = WidgetHealthService.plan(
+        let plan = WidgetRepairPolicy.plan(
             runningPath: systemCopy,
             recordedKey: "2.14.0/26@aaaa",
             currentKey: "2.14.0/26@aaaa",
@@ -127,7 +127,7 @@ final class WidgetInstallationTests: XCTestCase {
     }
 
     func testANormalLaunchRepairsItsOwnBundle() {
-        let plan = WidgetHealthService.plan(
+        let plan = WidgetRepairPolicy.plan(
             runningPath: systemCopy,
             recordedKey: nil,
             currentKey: "2.14.0/26@aaaa",
@@ -140,7 +140,7 @@ final class WidgetInstallationTests: XCTestCase {
     /// 转位且找不到「同一个构建」的安装副本：不修，而且原因里要写清看了哪些路径、
     /// 每份副本是什么身份，否则黑块永远是黑盒。
     func testTranslocatedWithoutAMatchingCopyRepairsNothingAndSaysWhy() {
-        let plan = WidgetHealthService.plan(
+        let plan = WidgetRepairPolicy.plan(
             runningPath: translocated,
             recordedKey: nil,
             currentKey: "2.14.0/26@aaaa",
@@ -158,7 +158,7 @@ final class WidgetInstallationTests: XCTestCase {
 
     /// 转位但两份都在且其中一份就是当前构建：修那一份。
     func testTranslocatedRepairsTheVerifiedCopyOnly() {
-        let plan = WidgetHealthService.plan(
+        let plan = WidgetRepairPolicy.plan(
             runningPath: translocated,
             recordedKey: nil,
             currentKey: "2.14.0/26@aaaa",
@@ -171,7 +171,7 @@ final class WidgetInstallationTests: XCTestCase {
 
     /// 连自己的身份都取不到：不修，也不写「已修复」。
     func testAnUnidentifiableBuildRecordsNothing() {
-        let plan = WidgetHealthService.plan(
+        let plan = WidgetRepairPolicy.plan(
             runningPath: systemCopy,
             recordedKey: nil,
             currentKey: "",
@@ -185,26 +185,26 @@ final class WidgetInstallationTests: XCTestCase {
 
     /// 只有两步都成功才算修好；`killall chronod` 不参与这个判断。
     func testRepairCountsOnlyWhenBothStepsSucceed() {
-        XCTAssertTrue(WidgetHealthService.marksRepairComplete(clearedQuarantine: 0, registeredExtension: 0))
-        XCTAssertFalse(WidgetHealthService.marksRepairComplete(clearedQuarantine: 1, registeredExtension: 0))
-        XCTAssertFalse(WidgetHealthService.marksRepairComplete(clearedQuarantine: 0, registeredExtension: 1))
-        XCTAssertFalse(WidgetHealthService.marksRepairComplete(clearedQuarantine: -1, registeredExtension: -1))
+        XCTAssertTrue(WidgetRepairPolicy.marksRepairComplete(clearedQuarantine: 0, registeredExtension: 0))
+        XCTAssertFalse(WidgetRepairPolicy.marksRepairComplete(clearedQuarantine: 1, registeredExtension: 0))
+        XCTAssertFalse(WidgetRepairPolicy.marksRepairComplete(clearedQuarantine: 0, registeredExtension: 1))
+        XCTAssertFalse(WidgetRepairPolicy.marksRepairComplete(clearedQuarantine: -1, registeredExtension: -1))
     }
 
     /// 同版本、同 Build 重新构建 → cdhash 变了，修复键必须跟着变，否则会被当成
     /// 「已经修过」直接跳过，pluginkit 里留的还是旧注册。
     func testARebuildOfTheSameVersionGetsAFreshRepairKey() {
-        let first = WidgetHealthService.repairKey(version: "2.14.0", build: "26", cdhash: "aaaaaaaa1111")
-        let second = WidgetHealthService.repairKey(version: "2.14.0", build: "26", cdhash: "bbbbbbbb2222")
+        let first = WidgetRepairPolicy.key(version: "2.14.0", build: "26", cdhash: "aaaaaaaa1111")
+        let second = WidgetRepairPolicy.key(version: "2.14.0", build: "26", cdhash: "bbbbbbbb2222")
         XCTAssertNotEqual(first, second)
         XCTAssertEqual(first, "2.14.0/26@aaaaaaaa1111")
     }
 
     /// 没有 cdhash 时退回版本号，不要退化成空串（空串等于永远不修）。
     func testRepairKeyFallsBackToVersionAndBuild() {
-        XCTAssertEqual(WidgetHealthService.repairKey(version: "2.14.0", build: "26", cdhash: nil),
+        XCTAssertEqual(WidgetRepairPolicy.key(version: "2.14.0", build: "26", cdhash: nil),
                        "2.14.0/26")
-        XCTAssertEqual(WidgetHealthService.repairKey(version: "", build: "26", cdhash: "aaaa"), "")
+        XCTAssertEqual(WidgetRepairPolicy.key(version: "", build: "26", cdhash: "aaaa"), "")
     }
 
     // MARK: - 辅助

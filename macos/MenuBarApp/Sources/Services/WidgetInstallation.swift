@@ -116,3 +116,80 @@ enum WidgetInstallation {
         return nil
     }
 }
+
+/// What the first launch of a build has to do about the Widget extension.
+enum WidgetRepairPlan: Equatable {
+    /// This exact build already succeeded once; nothing to do.
+    case alreadyRepaired
+    /// Nothing may be touched, and the reason is worth writing down.
+    case nothingToRepair(reason: String)
+    /// `path` is the installed copy, verified to be the same build as the one
+    /// running.
+    case repair(path: String)
+}
+
+/// The decision itself, kept free of AppKit and `Process` so it can be pinned
+/// down by tests.
+enum WidgetRepairPolicy {
+    /// Decide what to repair, with every input injected.
+    ///
+    /// `currentKey` is empty when this build cannot be identified; a repair that
+    /// cannot be named cannot be marked done either, so it is skipped rather than
+    /// run on every launch.
+    static func plan(runningPath: String,
+                     recordedKey: String?,
+                     currentKey: String,
+                     roots: [String] = WidgetInstallation.installRoots(),
+                     identityAt: (String) -> InstalledAppIdentity? = { InstalledAppIdentity.read(at: $0) },
+                     exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> WidgetRepairPlan {
+        guard !currentKey.isEmpty else {
+            return .nothingToRepair(reason: "this build has no identity to record")
+        }
+        if recordedKey == currentKey { return .alreadyRepaired }
+
+        // Never heal the translocated copy: it is read-only, and WidgetKit will
+        // not register an extension that lives there.
+        if WidgetInstallation.isTranslocated(bundlePath: runningPath) {
+            let found = WidgetInstallation.installedPath(forBundlePath: runningPath,
+                                                         roots: roots,
+                                                         identityAt: identityAt,
+                                                         exists: exists)
+            if let found { return .repair(path: found) }
+            let candidates = WidgetInstallation.candidates(forBundlePath: runningPath,
+                                                           roots: roots,
+                                                           exists: exists)
+            let looked = candidates.isEmpty
+                ? roots.joined(separator: ", ")
+                : candidates.map { path in
+                    let identity = identityAt(path)?.summary ?? "unverifiable"
+                    return "\(path) [\(identity)]"
+                }.joined(separator: ", ")
+            return .nothingToRepair(
+                reason: "translocated and no installed copy matches this build; looked at \(looked)"
+            )
+        }
+        return .repair(path: runningPath)
+    }
+
+    /// Both steps that decide loadability have to succeed before the build is
+    /// recorded as repaired.
+    ///
+    /// `killall chronod` is deliberately **not** part of this: it returns
+    /// non-zero when the daemon is not running, which says nothing about the
+    /// registration. `xattr` and `pluginkit` do.
+    static func marksRepairComplete(clearedQuarantine: Int32, registeredExtension: Int32) -> Bool {
+        clearedQuarantine == 0 && registeredExtension == 0
+    }
+
+    /// Version + build + cdhash.
+    ///
+    /// The cdhash matters: a rebuild of the same version and build produces a new
+    /// signature, `pluginkit` still holds the old registration, and the widget
+    /// would stay blank while a version-only key says "already repaired".
+    static func key(version: String, build: String, cdhash: String?) -> String {
+        guard !version.isEmpty else { return "" }
+        let base = build.isEmpty ? version : "\(version)/\(build)"
+        guard let cdhash, !cdhash.isEmpty else { return base }
+        return "\(base)@\(cdhash.prefix(12))"
+    }
+}
