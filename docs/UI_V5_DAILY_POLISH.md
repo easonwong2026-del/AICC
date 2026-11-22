@@ -200,8 +200,13 @@
 
 ## 9. CI
 
-- 本轮 PR 的 `CI`（9 个 job）结果见 PR 检查页；`changes` 的路径过滤会让无关 job skipped，
-  出现时会在 PR 正文与最终回复里写明原因（本轮改动了 `macos/`，`swift-test`/`macos-build` 必跑）。
+- run `44974521849`（head `93d9e05`）：**success**。
+- success：`changes`、`macos-build`、`swift-test`（含 `swift test` 与 7 个视觉脚本，144 张控制台渲染）。
+- skipped 均因路径过滤 / 事件类型，不是失败：
+  - `test`、`lint`：本轮没有改 Python（`server.py` / `collectors/` / `tests/` 零 diff）。
+  - `rust`：没有改 `account-worker/`。
+  - `android`、`android-visual`：没有改 `android/`。
+  - `macos-dmg`：workflow 里明确只在非 `pull_request` 事件运行（PR 不产安装包）。
 
 ## 10. 修改文件与业务零改动证据
 
