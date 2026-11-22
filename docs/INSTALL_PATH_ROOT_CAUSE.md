@@ -98,24 +98,30 @@ codesign --force --sign "AICC Local Code Signing" --preserve-metadata=entitlemen
 能修的是它周围的三件事：
 
 1. **DMG 里写清放行步骤**（本轮新增 `macos/build-dmg.sh` 生成 `安装说明.txt`）：
-   拖到 Applications → 首次被拦时去「系统设置 → 隐私与安全性 → 仍要打开」，
-   或先执行 `xattr -dr com.apple.quarantine "<安装路径>"`。快捷方式仍指向 `/Applications`，
+   拖到 Applications → 首次被拦时走 Apple 官方流程
+   「系统设置 → 隐私与安全性 → 仍要打开」。快捷方式仍指向 `/Applications`，
    因为该位置实测可用；`~/Applications` 同样受支持，说明里一并写明。
+   `xattr -dr com.apple.quarantine` 只作为**开发排障**手段写在说明里并标注清楚 ——
+   它会绕过系统确认，不该是普通用户的默认安装步骤。
 2. **首次成功启动后自动清隔离**（既有 `WidgetHealthService`）：之后不再触发评估。
-3. **小组件自愈覆盖 `~/Applications`**（本轮修复 `WidgetInstallation.installRoots`）：
-   原来只查 `/Applications`，装在 `~/Applications` 的机器转位启动时找不到安装副本，
-   `xattr`/`pluginkit` 全打在只读副本上，小组件永远是黑块。现在按
-   `/Applications` → `~/Applications` 顺序查找，并分别记录「找不到安装副本」
-   与「清隔离失败」两种原因。
+3. **小组件自愈认身份，不认路径**（本轮修复）：
+   两个位置都可能有 AICC，早先只按 `/Applications` → `~/Applications` 的顺序取第一份
+   存在的，版本不同时会修到旧的那份。现在比较运行副本与候选副本的
+   Bundle ID + 主可执行文件 cdhash，只对同一个构建执行 `xattr` / `pluginkit`；
+   匹配不上就不动手，并在日志里列出候选路径与它们各自的版本。
+4. **修复失败不再算成功**：`xattr` 或 `pluginkit -a` 返回非 0 时不写完成标记，
+   下次启动重试；完成标记含 cdhash，同版本重新构建也会重新注册。
 
 ## 7. 给用户的一行处置
 
 旧机器上已经卡过的副本不需要删：
 
+优先走系统流程：点掉「未打开"AICC"」的确认框（「完成」），然后
+**系统设置 → 隐私与安全性 → 仍要打开**，再打开 AICC。确认过一次之后不会再拦。
+
+只有在做开发排障、且明确知道自己要绕过系统确认时，才用：
+
 ```bash
-# 1) 关掉可能还挂着的确认框：屏幕右上/中间找「未打开"AICC"」，点「完成」
-# 2) 清掉隔离属性（路径换成实际位置）
-xattr -dr com.apple.quarantine "/Applications/AICC.app"
-# 3) 重新打开
+xattr -dr com.apple.quarantine "/Applications/AICC.app"   # 会跳过 Gatekeeper 确认
 open "/Applications/AICC.app"
 ```

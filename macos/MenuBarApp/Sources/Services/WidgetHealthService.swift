@@ -1,6 +1,20 @@
 import AppKit
 import Foundation
 
+/// What the first launch of a build has to do about the Widget extension.
+///
+/// Split out of `repairIfNeeded` so the decision is a pure value that tests can
+/// pin down without a running WidgetKit daemon, a signed bundle or `Process`.
+enum WidgetRepairPlan: Equatable {
+    /// This exact build already succeeded once; nothing to do.
+    case alreadyRepaired
+    /// Nothing may be touched, and the reason is worth writing down.
+    case nothingToRepair(reason: String)
+    /// `path` is the installed copy, verified to be the same build as the one
+    /// running.
+    case repair(path: String)
+}
+
 /// Keeps the shipped Widget extension loadable after an upgrade.
 ///
 /// Three things break it, all outside the extension's own code:
@@ -23,62 +37,136 @@ import Foundation
 /// The host App repairs all three on the first launch of each build, because no
 /// amount of reinstalling makes a user run `xattr` and `killall` by hand.  It
 /// does not restart itself: clearing the quarantine flag is enough for the next
-/// launch to run from `/Applications`, and a self-relaunch mid-launch leaves the
-/// menu bar extra half-built.
+/// launch to run from the installed copy, and a self-relaunch mid-launch leaves
+/// the menu bar extra half-built.
+///
+/// **A repair only counts when it worked.**  The build key is written after the
+/// two steps that decide whether the extension is loadable — clearing quarantine
+/// and re-registering the appex.  If either fails, nothing is recorded and the
+/// next launch tries again; marking a half-done repair as done would leave a
+/// black tile that never heals.
 enum WidgetHealthService {
     private static let lastRepairedBuildKey = "aicc.widget.health.last-build"
 
     /// Idempotent. Cheap when nothing changed: one defaults read.
     @MainActor
-    static func repairIfNeeded(build: String = currentBuild()) {
-        guard !build.isEmpty else { return }
-        guard UserDefaults.standard.string(forKey: lastRepairedBuildKey) != build else { return }
-
-        let running = Bundle.main.bundleURL.path
-        // Always heal the installed copy, never the translocated one: that copy
-        // is read-only, so registering from there can never work.
-        let installed: URL
-        if let found = WidgetInstallation.installedPath(forBundlePath: running) {
-            installed = URL(fileURLWithPath: found, isDirectory: true)
-        } else if WidgetInstallation.isTranslocated(bundlePath: running) {
-            // Translocated with no installed copy under any known root: the App
-            // was launched straight out of the DMG / a random folder. Nothing
-            // here can be repaired, and running `xattr` on the read-only copy
-            // would only fail. Say so instead of leaving a silent black tile.
-            record("translocated with no installed copy; looked in "
-                   + WidgetInstallation.installRoots().joined(separator: ", ")
-                   + " (running from \(running))")
+    static func repairIfNeeded(key: String = currentRepairKey()) {
+        switch plan(runningPath: Bundle.main.bundleURL.path,
+                    recordedKey: UserDefaults.standard.string(forKey: lastRepairedBuildKey),
+                    currentKey: key) {
+        case .alreadyRepaired:
             return
-        } else {
-            installed = Bundle.main.bundleURL
+        case .nothingToRepair(let reason):
+            record("nothing to repair: \(reason)")
+            return
+        case .repair(let path):
+            performRepair(installedPath: path,
+                          runningPath: Bundle.main.bundleURL.path,
+                          key: key)
         }
-        let widget = installed.appendingPathComponent("Contents/PlugIns/AICCWidget.appex", isDirectory: true)
-        guard FileManager.default.fileExists(atPath: widget.path) else { return }
+    }
 
-        record("repairing \(installed.path) (running from \(running))")
+    /// The decision, with every input injected.
+    ///
+    /// `currentKey` is empty when this build cannot be identified; a repair that
+    /// cannot be named cannot be marked done either, so it is skipped rather
+    /// than run on every launch.
+    static func plan(runningPath: String,
+                     recordedKey: String?,
+                     currentKey: String,
+                     roots: [String] = WidgetInstallation.installRoots(),
+                     identityAt: (String) -> InstalledAppIdentity? = { InstalledAppIdentity.read(at: $0) },
+                     exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> WidgetRepairPlan {
+        guard !currentKey.isEmpty else {
+            return .nothingToRepair(reason: "this build has no identity to record")
+        }
+        if recordedKey == currentKey { return .alreadyRepaired }
+
+        // Never heal the translocated copy: it is read-only, and WidgetKit will
+        // not register an extension that lives there.
+        if WidgetInstallation.isTranslocated(bundlePath: runningPath) {
+            let found = WidgetInstallation.installedPath(forBundlePath: runningPath,
+                                                         roots: roots,
+                                                         identityAt: identityAt,
+                                                         exists: exists)
+            if let found { return .repair(path: found) }
+            let candidates = WidgetInstallation.candidates(forBundlePath: runningPath,
+                                                           roots: roots,
+                                                           exists: exists)
+            let looked = candidates.isEmpty
+                ? roots.joined(separator: ", ")
+                : candidates.map { path in
+                    let identity = identityAt(path)?.summary ?? "unverifiable"
+                    return "\(path) [\(identity)]"
+                }.joined(separator: ", ")
+            return .nothingToRepair(
+                reason: "translocated and no installed copy matches this build; looked at \(looked)"
+            )
+        }
+        return .repair(path: runningPath)
+    }
+
+    /// Both steps that decide loadability have to succeed before the build is
+    /// recorded as repaired.
+    ///
+    /// `killall chronod` is deliberately **not** part of this: it returns
+    /// non-zero when the daemon is not running, which says nothing about the
+    /// registration.  `xattr` and `pluginkit` do.
+    static func marksRepairComplete(clearedQuarantine: Int32, registeredExtension: Int32) -> Bool {
+        clearedQuarantine == 0 && registeredExtension == 0
+    }
+
+    @MainActor
+    private static func performRepair(installedPath: String, runningPath: String, key: String) {
+        let installed = URL(fileURLWithPath: installedPath, isDirectory: true)
+        let widget = installed.appendingPathComponent("Contents/PlugIns/AICCWidget.appex", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: widget.path) else {
+            record("no widget extension inside \(installed.path); will retry if it appears")
+            return
+        }
+
+        record("repairing \(installed.path) (running from \(runningPath), build \(key))")
         // Recursive: quarantine lands on the App *and* every nested file.
         let cleared = run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", installed.path])
         record("xattr rc=\(cleared)")
-        if cleared != 0 {
-            // Almost always "Operation not permitted" on a read-only location.
-            // The widget will stay a black tile, and the fix is about the copy
-            // the user actually installed, not this process.
-            record("could not clear quarantine on \(installed.path); widget may stay blank")
-        }
-        record("pluginkit rc=\(run("/usr/bin/pluginkit", ["-a", widget.path]))")
+        let registered = run("/usr/bin/pluginkit", ["-a", widget.path])
+        record("pluginkit rc=\(registered)")
         // chronod caches descriptors per bundle identity, so a re-registration
-        // only takes effect after it reloads them.
+        // only takes effect after it reloads them.  Failure here is not a
+        // reason to give up: the registration itself already succeeded.
         record("chronod rc=\(run("/usr/bin/killall", ["chronod"]))")
-        UserDefaults.standard.set(build, forKey: lastRepairedBuildKey)
-        record("repaired build \(build)")
+
+        guard marksRepairComplete(clearedQuarantine: cleared, registeredExtension: registered) else {
+            // Leave the key unwritten on purpose: the next launch retries
+            // instead of pretending a black tile is healthy.
+            record("repair incomplete (xattr=\(cleared), pluginkit=\(registered)); will retry next launch")
+            return
+        }
+        UserDefaults.standard.set(key, forKey: lastRepairedBuildKey)
+        record("repaired build \(key)")
     }
 
-    /// Version *and* build: an ad-hoc rebuild can reuse a build number.
-    static func currentBuild() -> String {
+    /// Version + build + cdhash.
+    ///
+    /// The cdhash matters: a rebuild of the same version and build produces a new
+    /// signature, `pluginkit` still holds the old registration, and the widget
+    /// would stay blank while a version-only key says "already repaired".
+    static func repairKey(version: String, build: String, cdhash: String?) -> String {
+        guard !version.isEmpty else { return "" }
+        let base = build.isEmpty ? version : "\(version)/\(build)"
+        guard let cdhash, !cdhash.isEmpty else { return base }
+        return "\(base)@\(cdhash.prefix(12))"
+    }
+
+    static func currentRepairKey() -> String {
         let info = Bundle.main.infoDictionary ?? [:]
         let version = info["CFBundleShortVersionString"] as? String ?? ""
         let build = info["CFBundleVersion"] as? String ?? ""
-        return version.isEmpty ? "" : "\(version)/\(build)"
+        // Bundle.main may be a translocation copy; its cdhash is identical to the
+        // installed one, which is exactly the identity this key is about.
+        return repairKey(version: version,
+                         build: build,
+                         cdhash: InstalledAppIdentity.cdhash(Bundle.main.bundleURL.path))
     }
 
     /// A one-line trail beside the server logs.

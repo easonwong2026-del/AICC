@@ -36,31 +36,52 @@ AICC ${VERSION}（Build ${BUILD_VERSION}）安装说明
 ========================================
 
 1. 安装位置
-   把 AICC.app 拖到右侧的 Applications 文件夹（系统标准位置）。
-   拖到「个人目录/Applications」也完全可以：两个位置都实测可用。
+   把 AICC.app 拖到同一个窗口里的 Applications 文件夹（系统标准位置）。
+   想装在个人目录也可以：访达按 ⇧⌘H 打开个人目录，自己建一个 Applications
+   文件夹拖进去。两个位置都实测可用。
 
-2. 首次打开可能被 macOS 拦住（重要）
-   这个构建用本机固定证书自签名，没有通过 Apple 公证。如果双击后没有任何
-   窗口出现，屏幕上有一条「未打开"AICC"…Apple 无法验证…」，那不是卡死：
-   进程被 Gatekeeper 停在启动之前，正在等确认。
+2. 首次打开被 macOS 拦住（重要）
+   这个构建用本机证书自签名，没有通过 Apple 公证。如果双击后没有任何窗口
+   出现，屏幕上有一条「未打开"AICC"…Apple 无法验证…」，那不是卡死：进程被
+   Gatekeeper 停在启动之前，正在等确认。
 
-   处理：打开「系统设置 → 隐私与安全性」，在页面底部点「仍要打开」，再确认一次。
+   正确做法（Apple 官方流程）：
+     打开「系统设置 → 隐私与安全性」，在页面底部找到关于 AICC 的提示，
+     点「仍要打开」，再输入一次密码确认。
    提示框里只有「完成」和「移到废纸篓」属于正常现象，新版 macOS 不再提供
-   「打开」按钮。
+   「打开」按钮。确认过这一次之后不会再提示。
 
-   也可以先在终端执行一行（路径换成你实际的安装位置），再打开 AICC：
+   ⚠️ 下面这条命令仅用于开发排障（知道自己在做什么再用），不是推荐安装步骤：
        xattr -dr com.apple.quarantine "/Applications/AICC.app"
-
-   确认过这一次之后不会再提示。
+   它会绕过系统的安全确认，普通用户请优先用上面的「仍要打开」。
 
 3. 退出 AICC
    点菜单栏的 AICC 图标 → 「退出 AICC」。
 
-4. 回滚
-   把备份的旧 AICC.app 放回原位，并把备份的数据库覆盖回
-   ~/Library/Application Support/AICC-Dashboard/accounts/accounts.sqlite。
-   ${VERSION} 会把本地数据库升级到更高的 schema 版本；只替换 .app 不还原数据库，
-   旧版本可能读不了，所以回滚要连数据库一起还原。
+4. 回滚（必须先把 AICC 完全停掉）
+   只替换 .app 不还原数据库不是受支持的回滚方式：${VERSION} 会把本地数据库
+   升级到更高的 schema 版本，旧版本可能读不了。
+
+   步骤：
+   a) 退出 AICC（菜单栏 → 退出 AICC），确认没有残留：
+         pgrep -fl "AICC.app/Contents"
+      列表为空再进行下一步 —— 数据库还在被 worker 或内置 Python 写的时候
+      覆盖文件会得到损坏的库。
+
+   b) 用备份还原 App 和数据库（路径换成你的实际备份）：
+         BACKUP="\$HOME/Library/Application Support/AICC-install-backups/<备份目录>"
+         APP="\$HOME/Applications/AICC.app"
+         APP_DATA="\$HOME/Library/Application Support/AICC-Dashboard/accounts"
+         rm -rf "\$APP"
+         ditto "\$BACKUP/app/AICC.app" "\$APP"
+         sqlite3 "\$BACKUP/db/accounts.sqlite" ".backup '\$APP_DATA/accounts.sqlite'"
+
+   c) 删掉旧库遗留的 WAL / SHM（AICC 已确认退出后才可删，否则会丢最近的写入）：
+         rm -f "\$APP_DATA/accounts.sqlite-wal" "\$APP_DATA/accounts.sqlite-shm"
+
+   d) 确认无误后重新打开 AICC。还原前后可以用
+         sqlite3 "<库路径>" "PRAGMA integrity_check;"
+      检查数据库是否完好。
 EOF
 
 # 压缩格式：UDBZ（bzip2），不是 hdiutil 的默认 UDZO。
