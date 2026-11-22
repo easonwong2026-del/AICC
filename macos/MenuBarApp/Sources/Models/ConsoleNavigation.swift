@@ -37,6 +37,23 @@ enum ConsolePage: String, CaseIterable, Identifiable {
         case .checkin: return "calendar.badge.checkmark"
         }
     }
+
+    /// 页头那个刷新图标这一下到底做什么。
+    ///
+    /// 四个页面的语义不同：额度是重新采集，任务是重读本地记录。
+    /// 说清楚它，才不会和页面里的「检查状态 / 扫描」被当成同一件事。
+    var refreshHint: String {
+        switch self {
+        case .overview:
+            return "刷新概览：重读本地汇总，额度优先用快照"
+        case .accounts:
+            return "刷新账号：向账号助手重读账号与 Qoder 状态"
+        case .quota:
+            return "刷新额度：向数据源重新读一次（只读，不会领取）"
+        case .checkin:
+            return "重读本地状态（不联网）；联网检查用页面里的按钮"
+        }
+    }
 }
 
 /// 主控制台的**页面内导航上下文**（PRD §9.2）。
@@ -125,6 +142,17 @@ final class ConsoleNavigation: ObservableObject {
         qoderTask = qoder
         taskCenterMode = mode
         page = .checkin
+    }
+
+    /// 切换额度来源。
+    ///
+    /// 只改"渲染哪张表"，不发任何请求、不改用量窗口：来源只是两条互不相加的链路，
+    /// 不是统计口径。服务商筛选按来源各有一套，切来源时一并复位，避免带着
+    /// 另一个来源的 provider 显示空表。
+    func selectQuotaSource(_ source: ConsoleQuotaSource) {
+        guard quotaSource != source else { return }
+        quotaSource = source
+        quotaProvider = ""
     }
 
     /// 请求打开自动轮换管理界面。只设置导航意图，不执行任何恢复。

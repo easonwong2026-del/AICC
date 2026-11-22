@@ -25,7 +25,7 @@ struct ConsoleQuotaView: View {
             toolbar
         } content: {
             VStack(alignment: .leading, spacing: ConsoleTheme.sectionSpacing) {
-                summaryRow
+                metaRow
                 switch nav.quotaSource {
                 case .magpie: magpieContent
                 case .accounts: accountContent
@@ -36,9 +36,15 @@ struct ConsoleQuotaView: View {
 
     // MARK: - 工具栏
 
+    /// 刷新只有一个入口：页头那个图标（`ConsolePage.refreshHint` 说明它做什么）。
+    /// 这里不再放第二个「刷新」按钮 —— 两个入口调的是同一条 `refreshQuota(force: true)` /
+    /// `refreshWorkerQuota(force: true)`，并排放只会让人猜它们有什么区别。
     private var toolbar: some View {
         HStack(spacing: 10) {
-            Picker("来源", selection: $nav.quotaSource) {
+            Picker("来源", selection: Binding(
+                get: { nav.quotaSource },
+                set: { nav.selectQuotaSource($0) }
+            )) {
                 ForEach(ConsoleQuotaSource.allCases) { source in
                     Text(source.title).tag(source)
                 }
@@ -56,9 +62,6 @@ struct ConsoleQuotaView: View {
                     providerFilter(options: magpieProviderOptions, title: "服务商")
                 }
                 if store.loadingQuota { ProgressView().controlSize(.small) }
-                Button("刷新") { Task { await store.refreshQuota(force: true) } }
-                    .buttonStyle(ConsolePrimaryButtonStyle())
-                    .disabled(store.loadingQuota)
             case .accounts:
                 Picker("窗口", selection: Binding(
                     get: { store.workerQuotaWindowDays },
@@ -71,14 +74,12 @@ struct ConsoleQuotaView: View {
                 .labelsHidden()
                 .tint(ConsoleTheme.accent)
                 .frame(width: 120)
+                .help(QuotaRefreshPlan.windowHint)
 
                 if accountProviderOptions.count > 1 {
                     providerFilter(options: accountProviderOptions, title: "平台")
                 }
                 if store.loadingWorkerQuota { ProgressView().controlSize(.small) }
-                Button("刷新") { Task { await store.refreshWorkerQuota(force: true) } }
-                    .buttonStyle(ConsolePrimaryButtonStyle())
-                    .disabled(store.loadingWorkerQuota)
             }
         }
     }
@@ -128,44 +129,22 @@ struct ConsoleQuotaView: View {
         )
     }
 
-    // MARK: - 摘要
+    // MARK: - 快照时间
 
+    /// 只补表格里没有的事实：Magpie 这份快照是什么时候采集的。
+    ///
+    /// 账号数 / 平台数 / 服务商数不再在这里重复 —— 分组标题已经写了，工具栏也已经写着
+    /// 当前窗口；同一屏说两遍只会让人怀疑两个数字是两回事。
     @ViewBuilder
-    private var summaryRow: some View {
-        switch nav.quotaSource {
-        case .magpie:
-            // 没有数据时由正文的加载/空/错误状态说明，摘要不再重复一遍。
-            if let snapshot = store.snapshot, !snapshot.accounts.isEmpty {
-                HStack(spacing: 8) {
-                    Text("\(filteredMagpieCards.count) 个账号 · \(filteredGroups.count) 个服务商")
-                        .font(ConsoleType.small)
-                        .foregroundStyle(ConsoleTheme.secondaryText)
-                    if snapshot.stale {
-                        ConsoleBadge(text: "缓存", tint: ConsoleTheme.warning)
-                    }
-                    if let updated = snapshot.updatedAt, !updated.isEmpty {
-                        Text("更新于 \(updated)")
-                            .font(ConsoleType.micro)
-                            .foregroundStyle(ConsoleTheme.tertiaryText)
-                    }
-                    Spacer(minLength: 0)
-                }
-            }
-        case .accounts:
-            if !filteredAccountRows.isEmpty {
-                HStack(spacing: 8) {
-                    Text("\(filteredAccountRows.count) 个账号 · 近 \(store.workerQuotaWindowDays) 天用量")
-                        .font(ConsoleType.small)
-                        .foregroundStyle(ConsoleTheme.secondaryText)
-                    let staleCount = filteredAccountRows.filter {
-                        QuotaDisplayState.worker($0) == .stale || QuotaDisplayState.worker($0) == .cached
-                    }.count
-                    if staleCount > 0 {
-                        ConsoleBadge(text: "旧快照 \(staleCount)", tint: ConsoleTheme.warning)
-                    }
-                    Spacer(minLength: 0)
-                }
-            }
+    private var metaRow: some View {
+        if nav.quotaSource == .magpie,
+           let snapshot = store.snapshot,
+           !snapshot.accounts.isEmpty,
+           let updated = snapshot.updatedAt, !updated.isEmpty {
+            Text("Magpie 快照 \(updated)")
+                .font(ConsoleType.micro)
+                .foregroundStyle(ConsoleTheme.tertiaryText)
+                .help("Magpie 最近一次采集的时间。行状态会单独标出「缓存」或「旧快照」。")
         }
     }
 
@@ -226,7 +205,7 @@ struct ConsoleQuotaView: View {
         } else {
             emptyState(
                 title: "还没有额度数据",
-                message: "刷新后会显示 Magpie 采集到的服务商额度。"
+                message: "Magpie 还没有采集到可显示的服务商额度。"
             ) { Task { await store.refreshQuota(force: true) } }
         }
     }
@@ -332,6 +311,7 @@ struct ConsoleQuotaView: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
                 .frame(width: Column.magpieReset, alignment: .leading)
+                .help(row.resetHelp ?? (row.reset == nil ? "服务端没有给出重置时间" : ""))
 
             statusCell(row.state)
                 .frame(width: Column.status, alignment: .leading)
@@ -390,7 +370,7 @@ struct ConsoleQuotaView: View {
         } else {
             emptyState(
                 title: "还没有账号额度",
-                message: "刷新后会读取账号级余额与用量。"
+                message: "账号助手还没有返回账号级余额与用量。"
             ) { Task { await store.refreshWorkerQuota(force: true) } }
         }
     }
@@ -534,12 +514,16 @@ struct ConsoleQuotaView: View {
                     .help(state.help ?? "")
             } else {
                 // 正常状态不写字：只留一个弱提示点，异常才占用这一列。
+                // 点必须带语义：颜色不能是唯一线索，读屏也不能听到一片空白。
                 Circle()
                     .fill(ConsoleTheme.success)
                     .frame(width: 5, height: 5)
                     .help(state.help ?? "实时数据")
             }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("额度状态"))
+        .accessibilityValue(Text(state.spokenLabel))
     }
 
     private func stateColor(_ state: QuotaDisplayState) -> Color {
@@ -564,7 +548,8 @@ struct ConsoleQuotaView: View {
             symbol: "chart.bar.doc.horizontal",
             title: title,
             message: message,
-            actionTitle: "刷新",
+            // 这个按钮真的会去读一次数据源，所以不叫「刷新」——「刷新」留给页头那个入口。
+            actionTitle: "读取额度",
             action: action
         )
     }
