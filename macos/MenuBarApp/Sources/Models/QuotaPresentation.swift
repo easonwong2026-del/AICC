@@ -57,6 +57,11 @@ enum QuotaDisplayState: Equatable {
         }
     }
 
+    /// VoiceOver 读到的状态。正常态只画一个点，所以点本身必须带语义 ——
+    /// 绿色不能是唯一线索，也不能让读屏用户听到这话时听到"空白"。
+    var spokenLabel: String { label ?? "实时" }
+
+
     static func worker(_ row: WorkerQuotaRow) -> QuotaDisplayState {
         switch row.status {
         case "ok":
@@ -169,6 +174,8 @@ struct MagpieQuotaDisplayRow: Identifiable, Equatable {
     let remainingShare: Double?
     let usedText: String?
     let reset: String?
+    /// 重置时间的原文。列宽只放得下压缩后的时间，完整值进 help。
+    let resetHelp: String?
     let state: QuotaDisplayState
     let detail: String?
     let isFirstRow: Bool
@@ -189,6 +196,7 @@ struct MagpieQuotaDisplayRow: Identifiable, Equatable {
                 remainingShare: nil,
                 usedText: nil,
                 reset: nil,
+                resetHelp: nil,
                 state: state,
                 detail: parts.isEmpty ? nil : parts,
                 isFirstRow: true
@@ -205,6 +213,7 @@ struct MagpieQuotaDisplayRow: Identifiable, Equatable {
                 remainingShare: nil,
                 usedText: nil,
                 reset: nil,
+                resetHelp: nil,
                 state: state,
                 detail: nil,
                 isFirstRow: true
@@ -222,6 +231,7 @@ struct MagpieQuotaDisplayRow: Identifiable, Equatable {
                 remainingShare: item.unlimited ? nil : item.remaining,
                 usedText: item.used.map { "\(Int($0.rounded()))%" },
                 reset: QuotaPresentation.compactReset(item.reset),
+                resetHelp: item.reset,
                 state: state,
                 detail: [item.totalText, percentage ? nil : item.unit]
                     .compactMap { $0 }
@@ -294,4 +304,45 @@ enum QuotaPresentation {
 
 private extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
+}
+
+// MARK: - 刷新入口
+
+/// 额度页的两个只读入口，语义必须分开：
+/// - 页头刷新：向数据源重新读一次（Magpie 网关 / 助手直连官方接口）；
+/// - 7 / 30 天切换：只重算用量窗口，助手优先用已有快照。
+///
+/// 写成枚举是为了让「哪个按钮到底调什么」只有一个答案：视图与刷新逻辑都从这里取，
+/// 测试可以直接断言实际动作，而不是只测一个布尔辅助函数。
+enum QuotaRefreshIntent: Equatable {
+    case reloadMagpie
+    case reloadAccounts
+    case changeWindow(days: Int)
+
+    /// 这一下会不会真的去问服务端 / 网关。切窗口是本地重算，不重新采集。
+    var readsServer: Bool {
+        switch self {
+        case .reloadMagpie, .reloadAccounts: return true
+        case .changeWindow: return false
+        }
+    }
+}
+
+enum QuotaRefreshPlan {
+    /// 页头刷新按当前来源走一条。两个来源都必须是「重新读」：
+    /// 页面不再提供第二个语义不同的刷新按钮。
+    static func pageRefresh(source: ConsoleQuotaSource) -> QuotaRefreshIntent {
+        switch source {
+        case .magpie: return .reloadMagpie
+        case .accounts: return .reloadAccounts
+        }
+    }
+
+    /// 窗口切换只改统计窗口。故意不接受来源参数：切来源不该顺手改窗口。
+    static func windowChange(days: Int) -> QuotaRefreshIntent {
+        .changeWindow(days: days)
+    }
+
+    /// 7 / 30 天控件上的说明。措辞必须点明"不重新采集"，否则会被当成刷新。
+    static let windowHint = "切换用量窗口：只重算近 7 / 30 天用量，余额与来源不变，不会重新采集"
 }

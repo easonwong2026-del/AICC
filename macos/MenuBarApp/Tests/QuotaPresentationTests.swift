@@ -238,6 +238,76 @@ final class QuotaPresentationTests: XCTestCase {
         XCTAssertEqual(rows[1].windowName, "周窗口")
     }
 
+    // MARK: - 刷新入口与来源口径（5.1 / 5.3 / 6.1）
+
+    /// 页头刷新按来源走两条真实链路，两条都必须"重新读"，不能悄悄降级成缓存。
+    func testQuotaRefreshEntryMapsToServerReadPerSource() {
+        for source in ConsoleQuotaSource.allCases {
+            let intent = QuotaRefreshPlan.pageRefresh(source: source)
+            XCTAssertTrue(intent.readsServer, "\(source)")
+            switch (source, intent) {
+            case (.magpie, .reloadMagpie), (.accounts, .reloadAccounts):
+                break
+            default:
+                XCTFail("\(source) 的刷新映射错了：\(intent)")
+            }
+        }
+    }
+
+    /// 7 / 30 天只重算统计窗口：不是刷新，也不改余额口径。
+    func testWindowChangeIsLocalRecalculationOnly() {
+        for days in [7, 30] {
+            let intent = QuotaRefreshPlan.windowChange(days: days)
+            XCTAssertEqual(intent, .changeWindow(days: days))
+            XCTAssertFalse(intent.readsServer)
+        }
+        XCTAssertTrue(QuotaRefreshPlan.windowHint.contains("不会重新采集"))
+    }
+
+    /// 页头刷新在额度页是"重新采集"，在任务页是"重读本地" —— 提示必须分开写。
+    func testRefreshHintsSeparateQuotaFromTasks() {
+        XCTAssertTrue(ConsolePage.quota.refreshHint.contains("只读"))
+        XCTAssertTrue(ConsolePage.quota.refreshHint.contains("数据源"))
+        XCTAssertTrue(ConsolePage.checkin.refreshHint.contains("不联网"))
+    }
+
+    /// 切来源只换表：不改窗口、清掉跨来源的筛选，数值口径与来源无关。
+    @MainActor
+    func testSwitchingSourceKeepsWindowAndRowsIndependent() {
+        let nav = ConsoleNavigation(page: .quota)
+        // 先把来源固定到 Magpie，避免 QA 钩子残留影响起始状态。
+        nav.selectQuotaSource(.magpie)
+        nav.quotaProvider = "qoder_cn"
+        let zero = AccountQuotaDisplay(row: workerRow(["remaining": 0, "unit": "credits"]))
+        let unknown = AccountQuotaDisplay(row: workerRow(["unit": "credits"]))
+
+        nav.selectQuotaSource(.accounts)
+
+        XCTAssertEqual(nav.quotaSource, .accounts)
+        XCTAssertEqual(nav.quotaProvider, "", "筛选不跨来源复用")
+        XCTAssertEqual(AccountQuotaDisplay(row: workerRow(["remaining": 0, "unit": "credits"])), zero)
+        XCTAssertEqual(AccountQuotaDisplay(row: workerRow(["unit": "credits"])), unknown)
+        // 0 是值、未知不是 0：这条语义不能因为切来源而变。
+        XCTAssertEqual(zero.remainingValue, "0")
+        XCTAssertEqual(zero.state, .live)
+        XCTAssertEqual(unknown.remainingValue, "未知")
+        XCTAssertEqual(unknown.state, .unknown)
+    }
+
+    /// 重置时间列只放得下压缩后的时间，原文必须留在 help 里。
+    func testMagpieResetKeepsFullTextInHelp() throws {
+        let card = try card([
+            "items": [item([
+                "name": "5 小时窗口", "used": 6.0, "remaining": 94.0,
+                "remaining_text": "4705.75", "amount": 294.25, "limit": 5000,
+                "unit": "credits", "reset": "2026-11-21 18:00",
+            ])],
+        ])
+        let row = try XCTUnwrap(MagpieQuotaDisplayRow.rows(for: card, snapshotStale: false).first)
+        XCTAssertEqual(row.reset, "11-21 18:00")
+        XCTAssertEqual(row.resetHelp, "2026-11-21 18:00")
+    }
+
     func testCreditsBadgeCoversUnsupportedAndAlready() {
         let unsupported = QoderCreditsInfo(json: [
             "state": "unsupported", "supported": false,

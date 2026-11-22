@@ -87,6 +87,9 @@ final class ConsoleStore: ObservableObject {
     @Published private(set) var checkinBatching = false
     /// 最近一次动作的一句话结果。
     @Published private(set) var checkinNotice: String?
+    /// 单账号复查失败的原因。必须单独显示成异常，不能混进普通提示；
+    /// 行本身保留上一份已确认状态。复查成功后清除。
+    @Published private(set) var checkinRecheckError: String?
 
     /// Qoder 双版本多账号（PR #70）。Profile 是 Qoder 的唯一数据源，
     /// 老的 `accounts` 表只留给 WorkBuddy。
@@ -958,13 +961,24 @@ final class ConsoleStore: ObservableObject {
         qoderCreditsBusy = accountId
         qoderCreditsNotice = nil
         defer { qoderCreditsBusy = nil }
+        var accepted = false
         do {
             try await worker.setQoderCreditsAuto(accountId: accountId, enabled: enabled)
-            qoderCreditsNotice = enabled ? "已开启自动领取（默认每天检查一次）" : "已关闭自动领取"
+            accepted = true
         } catch {
             qoderCreditsNotice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
+        // 成功、失败都重读一次：界面上的开关只能是服务端真实状态，不是刚才那一下的乐观结果。
         await refreshQoderCredits(silent: true)
+        guard accepted else { return }
+        let actual = qoderCreditsAuto.first { $0.accountId == accountId }?.autoEnabled
+        if actual == enabled {
+            qoderCreditsNotice = enabled ? "已开启自动领取（默认每天检查一次）" : "已关闭自动领取"
+        } else if let error = qoderCreditsError {
+            qoderCreditsNotice = "没能确认这次修改：\(error)"
+        } else {
+            qoderCreditsNotice = "服务端没有确认这次修改，已重新读取真实状态"
+        }
     }
 
     func loadQoderCreditRuns(accountId: String) async {
@@ -1321,6 +1335,41 @@ final class ConsoleStore: ObservableObject {
         if checkinError == nil {
             let checked = checkin.counts.checked
             checkinNotice = "已刷新 \(checkin.counts.accounts) 个账号，今日 \(checked) 个已签到"
+            // 整队都重新读过了，上一轮单账号复查的失败提示不再成立。
+            checkinRecheckError = nil
+        }
+    }
+
+    /// 单账号只读复查：只调 `checkin.status`，**不会**提交签到。
+    ///
+    /// 「今天已完成」的行不该再挂一个会写服务端的按钮；复查只把这一行的真实状态读回来。
+    /// 只替换那一行、不动整队的 `counts`：摘要是从展示行派生的，不需要第二套计数。
+    /// 失败时行保持上一份已确认状态，原因单独进 `checkinRecheckError`。
+    func recheckCheckin(accountId: String) async {
+        guard checkinActing == nil, !checkinBatching, !checkinLoading else { return }
+        checkinActing = accountId
+        defer { checkinActing = nil }
+
+        let outcome = await CheckinRecheckFlow.run(
+            accountId: accountId,
+            workerMessage: workerFailureText,
+            ensureWorker: { await ensureWorkerReady() },
+            fetch: {
+                let json = try await worker.checkinStatus(accountIds: [accountId], cached: false)
+                return CheckinFleetStatus(json: json)
+            }
+        )
+        switch outcome {
+        case .refreshed(let fresh):
+            if let index = checkin.rows.firstIndex(where: { $0.accountId == accountId }) {
+                checkin.rows[index] = fresh
+            }
+            checkinError = nil
+            checkinRecheckError = nil
+        case .failed(let reason):
+            // 旧行不动：没读成的那一次不是「最新已确认状态」。
+            let name = checkin.row(accountId)?.nickname ?? accountId
+            checkinRecheckError = "复查「\(name)」失败：\(reason)"
         }
     }
 
@@ -1465,6 +1514,7 @@ extension ConsoleStore {
         checkinLoading = fixture.isLoading
         checkinActing = fixture.checkinActing
         checkinBatching = fixture.checkinBatching
+        checkinRecheckError = fixture.checkinRecheckError
 
         growthResult = fixture.growthResult
         growthError = fixture.growthError

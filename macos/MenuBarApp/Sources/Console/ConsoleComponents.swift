@@ -393,7 +393,8 @@ struct ConsoleShareBar: View {
                 Capsule().fill(ConsoleTheme.border)
                 Capsule()
                     .fill(tone)
-                    .frame(width: max(2, geometry.size.width * min(1, max(0, share / 100))))
+                    // 0% 不画那 2pt 最小宽度：否则「已经用完」看起来像还剩一点。
+                    .frame(width: share <= 0 ? 0 : max(2, geometry.size.width * min(1, share / 100)))
             }
         }
         .frame(height: 3)

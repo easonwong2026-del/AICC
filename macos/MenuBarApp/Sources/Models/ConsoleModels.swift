@@ -611,6 +611,37 @@ enum ConsoleAccountSelection: Hashable {
     }
 }
 
+/// 签到行「去登录」的落点解析。
+///
+/// 账号页在选中项不可见时会把选择回落到列表第一项（`reconcileSelection`），
+/// 所以这里必须在跳转前确认目标账号真的在列表里：找不到时**不跳转**，
+/// 由调用方给出明确提示 —— 绝不传一个不存在的 selection 让页面兜底成另一个账号。
+enum ConsoleCheckinLoginRoute {
+    enum Decision: Equatable {
+        case open(filter: ConsolePlatformFilter, selection: ConsoleAccountSelection)
+        /// 目标账号不在 AI 账号列表里（未导入，或列表没加载成功）。
+        case blocked(reason: String)
+    }
+
+    static func decision(
+        accountId: String,
+        displayName: String,
+        accounts: [ConsoleAccount],
+        accountsError: String?
+    ) -> Decision {
+        // 签到只属于 WorkBuddy 国内版：即使 id 撞上别的平台，也不跳过去。
+        if let account = accounts.first(where: { $0.id == accountId }),
+           account.isWorkbuddy(international: false) {
+            return .open(filter: .workbuddy, selection: .workbuddy(account.id))
+        }
+        var reason = "没有在 AI 账号列表里找到「\(displayName)」"
+        let error = accountsError?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !error.isEmpty { reason += "：\(error)" }
+        reason += "。先刷新账号列表，或到「AI 账号」重新添加这个账号。"
+        return .blocked(reason: reason)
+    }
+}
+
 // MARK: - 总览页的平台统计（PRD §3.3）
 
 /// 四个服务平台。**只列真实存在的服务账号**：Qoder 本机 Profile 不算服务账号。

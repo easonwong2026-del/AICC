@@ -66,6 +66,42 @@ enum QoderCreditsRefreshFlow {
     }
 }
 
+// MARK: - 单账号签到复查
+
+/// 一次单账号签到复查的结果。
+///
+/// 只有真正读到这一行才算成功；失败时**保留**上一份已确认状态，
+/// 由界面把原因单独显示成异常，不能把"没读成"当成最新状态。
+enum CheckinRecheckOutcome: Equatable {
+    case refreshed(CheckinAccountRow)
+    case failed(reason: String)
+}
+
+/// `ConsoleStore.recheckCheckin` 实际调用的协调逻辑：只读一次 `checkin.status`，
+/// 不碰 `checkin.run`、不写任何记录。
+@MainActor
+enum CheckinRecheckFlow {
+    static func run(
+        accountId: String,
+        workerMessage: String,
+        ensureWorker: () async -> Bool,
+        fetch: () async throws -> CheckinFleetStatus
+    ) async -> CheckinRecheckOutcome {
+        guard await ensureWorker() else {
+            return .failed(reason: workerMessage)
+        }
+        do {
+            let fleet = try await fetch()
+            guard let fresh = fleet.row(accountId) else {
+                return .failed(reason: "服务端没有返回这个账号的今日状态")
+            }
+            return .refreshed(fresh)
+        } catch {
+            return .failed(reason: RotationRefreshOutcome.describe(error))
+        }
+    }
+}
+
 // MARK: - 轮换预演
 
 /// 一次预演请求的身份：发起时的序号、计划摘要与计划代次。

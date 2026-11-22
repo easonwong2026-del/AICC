@@ -30,6 +30,8 @@ struct ConsoleVisualFixture {
     /// 视觉样本：某个账号正在签到 / 批量签到进行中。
     var checkinActing: String?
     var checkinBatching = false
+    /// 视觉样本：单账号复查失败（行保持旧状态，错误单独一条）。
+    var checkinRecheckError: String?
     var growthResult: GrowthScanResult = .empty
     var growthError: String?
     var lastGrowthScan: Date?
@@ -1124,6 +1126,65 @@ extension ConsoleVisualFixture {
         return fixture
     }
 
+    /// 签到：单账号复查失败。已完成的行仍显示旧结论，错误单独一条并带原因。
+    static var tasksCheckinRecheckFailed: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.checkinRecheckError = "复查「批量账号 1」失败：读取签到状态超时（15s）"
+        return fixture
+    }
+
+    /// 签到：真正的网络失败（非授权）。状态是「执行失败」，操作是「重试」。
+    static var tasksCheckinNetworkFailed: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.checkin = CheckinFleetStatus(json: [
+            "today": "2026-11-14",
+            "counts": ["accounts": 4, "checked": 2, "enabled": 1, "unchecked": 1, "credit": 100],
+            "accounts": [
+                ["accountId": "acc-bulk-4", "nickname": "批量账号 4", "enabled": true,
+                 "state": "claimed", "credits": 100, "claimedByAiccToday": true,
+                 "localCheckedAt": "2026-11-14T01:02:44Z"],
+                ["accountId": "acc-bulk-1", "nickname": "批量账号 1", "enabled": false,
+                 "state": "already", "credits": 50, "localCheckedAt": "2026-11-14T01:01:02Z"],
+                ["accountId": "acc-bulk-2", "nickname": "批量账号 2", "enabled": true,
+                 "state": "unchecked"],
+                ["accountId": "acc-bulk-network", "nickname": "网络抖动账号", "enabled": false,
+                 "state": "failed", "errorKind": "network",
+                 "errorDetail": "读取签到状态超时（15s）"],
+            ],
+        ])
+        fixture.checkinAuto = CheckinAutoStatus(json: [
+            "enabled": true, "enabledAccounts": 1, "totalAccounts": 4,
+            "planTime": "09:00", "timezone": "UTC+8（北京时间）",
+            "lastTickAt": "2026-11-14T01:00:00Z",
+            "nextRunAt": "2026-11-15T01:00:00Z",
+        ])
+        return fixture
+    }
+
+    /// Credits：账号原先支持并已开启自动领取，后来服务端返回不支持。
+    /// 开关必须仍然可关（不能因为失去资格就停不下来）。
+    static var tasksCreditsRevoked: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.qoderCreditsReports = [:]
+        fixture.qoderCreditsRuns = [:]
+        fixture.qoderCreditsAuto = [
+            QoderCreditsAutoItem(json: [
+                "accountId": "qsa-cn-1", "edition": "qoder_cn", "nickname": "Qoder CN 主账号",
+                "autoEnabled": true, "supported": false,
+                "lastRun": ["id": 7, "trigger": "auto", "outcome": "unsupported",
+                            "errorDetail": "该版本没有已证实的 Credits 接口",
+                            "executedAt": "2026-11-13T00:30:00Z"],
+            ]),
+            QoderCreditsAutoItem(json: [
+                "accountId": "qsa-cn-2", "edition": "qoder_cn", "nickname": "Qoder CN 备用账号",
+                "autoEnabled": true, "supported": true,
+                "lastRun": ["id": 8, "trigger": "auto", "outcome": "ok", "credits": 50,
+                            "executedAt": "2026-11-14T00:30:00Z"],
+            ]),
+        ].compactMap { $0 }
+        return fixture
+    }
+
     static var loading: ConsoleVisualFixture {
         var fixture = empty
         fixture.lastAccountsRefresh = nil
@@ -1161,6 +1222,60 @@ extension ConsoleVisualFixture {
                 "usage": ["windowDays": 30, "requests": 96, "credits": 388.5, "truncated": false],
                 "credits": ["state": "already", "supported": true, "today": ["credits": 50]],
                 "capturedAt": "2026-11-14T14:00:00Z",
+            ]),
+        ].compactMap { $0 }
+        return fixture
+    }
+
+    /// 0 / 未知 / 缓存 / 授权失效四种数值语义同屏：0 是值，未知不是 0。
+    static var quotaZeroAndUnknown: ConsoleVisualFixture {
+        var fixture = sample
+        fixture.workerQuotaWindowDays = 7
+        fixture.workerQuotaRows = [
+            WorkerQuotaRow(json: [
+                "accountId": "acc-zero",
+                "provider": "workbuddy",
+                "nickname": "额度真正用完的账号",
+                "source": "own",
+                "status": "ok",
+                "unit": "credits",
+                "total": 500,
+                "remaining": 0,
+                "usage": ["windowDays": 7, "requests": 0, "credits": 0, "truncated": false],
+                "capturedAt": "2026-11-14T14:02:11Z",
+            ]),
+            WorkerQuotaRow(json: [
+                "accountId": "qsa-cn-1",
+                "provider": "qoder_cn",
+                "nickname": "Qoder CN 主账号（没有余额字段）",
+                "source": "own",
+                "status": "ok",
+                "credits": ["state": "claimable", "supported": true,
+                            "today": ["credits": 100, "claimStatus": "claimable"]],
+                "capturedAt": "2026-11-14T14:00:00Z",
+            ]),
+            WorkerQuotaRow(json: [
+                "accountId": "acc-cached",
+                "provider": "workbuddy",
+                "nickname": "缓存快照账号",
+                "source": "own",
+                "status": "ok",
+                "unit": "credits",
+                "remaining": 1234,
+                "cached": true,
+                "capturedAt": "2026-11-13T09:00:00Z",
+            ]),
+            WorkerQuotaRow(json: [
+                "accountId": "acc-big",
+                "provider": "workbuddy",
+                "nickname": "超长额度数值",
+                "source": "own",
+                "status": "ok",
+                "unit": "credits",
+                "total": 900_000_000,
+                "remaining": 123_456_789.5,
+                "usage": ["windowDays": 7, "requests": 1280, "credits": 9988.5, "truncated": false],
+                "capturedAt": "2026-11-14T14:04:00Z",
             ]),
         ].compactMap { $0 }
         return fixture
@@ -1393,6 +1508,8 @@ struct ConsoleVisualSmokeMain {
         quotaLoadingStore.applyVisualFixture(.loading)
         let quotaLongStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
         quotaLongStore.applyVisualFixture(.quotaMagpieLongOnly)
+        let quotaZeroStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        quotaZeroStore.applyVisualFixture(.quotaZeroAndUnknown)
 
         // 签到任务中心：每个业务状态一个独立 store，避免样本互相污染。
         let tasksDoneStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
@@ -1415,6 +1532,12 @@ struct ConsoleVisualSmokeMain {
         creditsLimitedStore.applyVisualFixture(.tasksCreditsLimited)
         let creditsErrorStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
         creditsErrorStore.applyVisualFixture(.tasksCreditsError)
+        let tasksNetworkStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        tasksNetworkStore.applyVisualFixture(.tasksCheckinNetworkFailed)
+        let tasksRecheckFailedStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        tasksRecheckFailedStore.applyVisualFixture(.tasksCheckinRecheckFailed)
+        let creditsRevokedStore = ConsoleStore(worker: AccountWorkerManager.shared, settings: settings)
+        creditsRevokedStore.applyVisualFixture(.tasksCreditsRevoked)
 
         // 关键状态与弹层
         // 用闭包延迟构造：视图必须在渲染前一刻创建，否则 QA 钩子读到的会是最后一组参数。
@@ -1458,6 +1581,19 @@ struct ConsoleVisualSmokeMain {
              { AnyView(consoleView(store: quotaLoadingStore, settings: settings, scheme: .light,
                                    page: .quota, quotaSource: "accounts")) },
              CGSize(width: 1120, height: 760), .light),
+            // 0 / 未知 / 缓存 / 长数值：数值语义与列宽。
+            ("quota-accounts-zero-unknown-1120x760-light",
+             { AnyView(consoleView(store: quotaZeroStore, settings: settings, scheme: .light,
+                                   page: .quota, quotaSource: "accounts")) },
+             CGSize(width: 1120, height: 760), .light),
+            ("quota-accounts-zero-unknown-1120x760-dark",
+             { AnyView(consoleView(store: quotaZeroStore, settings: settings, scheme: .dark,
+                                   page: .quota, quotaSource: "accounts")) },
+             CGSize(width: 1120, height: 760), .dark),
+            ("quota-accounts-zero-unknown-960x640-light",
+             { AnyView(consoleView(store: quotaZeroStore, settings: settings, scheme: .light,
+                                   page: .quota, quotaSource: "accounts")) },
+             CGSize(width: 960, height: 640), .light),
             // 账号额度 3 尺寸 × 浅深色。
             ("quota-accounts-960x640-light",
              { AnyView(consoleView(store: store, settings: settings, scheme: .light,
@@ -1688,6 +1824,33 @@ struct ConsoleVisualSmokeMain {
              { AnyView(consoleView(store: tasksAttentionStore, settings: settings, scheme: .dark,
                                    page: .checkin)) },
              CGSize(width: 1120, height: 760), .dark),
+            // 「去登录」的落点：目标账号在 AI 账号页被选中（同一 selection 由导航模型测试钉住）。
+            ("accounts-login-target-1120x760-light",
+             { AnyView(consoleView(store: store, settings: settings, scheme: .light,
+                                   page: .accounts, account: "workbuddy:acc-wb-2")) },
+             CGSize(width: 1120, height: 760), .light),
+            // 复查失败：行保留旧结论，错误单独一条。
+            ("checkin-recheck-failed-1120x760-light",
+             { AnyView(consoleView(store: tasksRecheckFailedStore, settings: settings, scheme: .light,
+                                   page: .checkin)) },
+             CGSize(width: 1120, height: 760), .light),
+            ("checkin-recheck-failed-1120x760-dark",
+             { AnyView(consoleView(store: tasksRecheckFailedStore, settings: settings, scheme: .dark,
+                                   page: .checkin)) },
+             CGSize(width: 1120, height: 760), .dark),
+            ("checkin-recheck-failed-960x640-light",
+             { AnyView(consoleView(store: tasksRecheckFailedStore, settings: settings, scheme: .light,
+                                   page: .checkin)) },
+             CGSize(width: 960, height: 640), .light),
+            // 网络失败（非授权）：必须是「执行失败 + 重试」，不能合并到「需要登录」。
+            ("checkin-network-failed-1120x760-light",
+             { AnyView(consoleView(store: tasksNetworkStore, settings: settings, scheme: .light,
+                                   page: .checkin)) },
+             CGSize(width: 1120, height: 760), .light),
+            ("checkin-network-failed-1120x760-dark",
+             { AnyView(consoleView(store: tasksNetworkStore, settings: settings, scheme: .dark,
+                                   page: .checkin)) },
+             CGSize(width: 1120, height: 760), .dark),
             ("growth-960x640-light",
              { AnyView(consoleView(store: store, settings: settings, scheme: .light,
                                    page: .checkin, workbuddyTask: "growth")) },
@@ -1732,6 +1895,15 @@ struct ConsoleVisualSmokeMain {
              { AnyView(consoleView(store: creditsErrorStore, settings: settings, scheme: .light,
                                    page: .checkin, checkinPlatform: "qoder")) },
              CGSize(width: 1120, height: 760), .light),
+            // 已开启但失去资格：开关仍然可以关。
+            ("credits-revoked-1120x760-light",
+             { AnyView(consoleView(store: creditsRevokedStore, settings: settings, scheme: .light,
+                                   page: .checkin, checkinPlatform: "qoder")) },
+             CGSize(width: 1120, height: 760), .light),
+            ("credits-revoked-1120x760-dark",
+             { AnyView(consoleView(store: creditsRevokedStore, settings: settings, scheme: .dark,
+                                   page: .checkin, checkinPlatform: "qoder")) },
+             CGSize(width: 1120, height: 760), .dark),
             ("add-account-platform-960x640-light",
              { AnyView(sheet(ConsoleAddAccountSheet(store: store, request: ConsoleAddRequest()) {})) },
              CGSize(width: 480, height: 420), .light),

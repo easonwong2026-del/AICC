@@ -112,6 +112,50 @@ extension CheckinState {
     }
 }
 
+/// 签到行上那个按钮到底做什么。
+///
+/// 三种性质必须分开，否则「已完成」的行会继续挂着「立即签到」：
+/// - 写：`signIn` / `retry` → `checkin.run`（服务端先查后写，幂等）；
+/// - 只读：`recheck` / `check` → `checkin.status`，绝不提交；
+/// - 纯导航：`login` → 去「AI 账号」修授权，不发 RPC。
+///
+/// `rpc` 是给测试钉住的契约：只读动作只允许出现 `checkin.status`。
+enum CheckinRowAction: Equatable {
+    /// 服务端确认未签到：可以提交。
+    case signIn
+    /// 上次失败但不是授权问题：可以重试（仍然先查后写）。
+    case retry
+    /// 今天已完成或状态未定：只能复查，不允许重复提交。
+    case recheck
+    /// 还没查过：只读检查一次。
+    case check
+    /// 授权失效：只引导去修授权。
+    case login
+    /// 该平台不支持，或本行正在执行：不提供第二个入口。
+    case none
+
+    var title: String {
+        switch self {
+        case .signIn: return "立即签到"
+        case .retry: return "重试"
+        case .recheck: return "复查"
+        case .check: return "检查"
+        case .login: return "去登录"
+        case .none: return ""
+        }
+    }
+
+    var isWrite: Bool { self == .signIn || self == .retry }
+
+    var rpc: String? {
+        switch self {
+        case .signIn, .retry: return "checkin.run"
+        case .recheck, .check: return "checkin.status"
+        case .login, .none: return nil
+        }
+    }
+}
+
 extension GrowthTaskStatus {
     var taskCenterStatus: TaskCenterStatus {
         switch self {
@@ -219,6 +263,14 @@ struct CheckinRowDisplay: Identifiable, Equatable {
     /// 自动签到开关当前不可用的原因（直接进 help）；`nil` 表示可以切换。
     let autoLockReason: String?
     let canToggleAuto: Bool
+    /// 操作列那一个按钮：已完成只给「复查」，待签到才给「立即签到」。
+    let action: CheckinRowAction
+    /// 这个动作现在能不能点。只读动作也受同一条全局互斥约束，避免和提交交错。
+    let canPerformAction: Bool
+    /// 操作按钮的 help。必须与按钮的真实性质（写 / 只读 / 导航）一致。
+    let actionHelp: String
+    /// 行内所有可解释信息的合并，供状态单元格与整行 help 使用。
+    let help: String
 
     var id: String { accountId }
 
@@ -227,30 +279,63 @@ struct CheckinRowDisplay: Identifiable, Equatable {
         name = row.nickname.isEmpty ? "未命名账号" : row.nickname
         let busy = row.running || acting == row.accountId
         isBusy = busy
-        status = busy ? .running : row.state.taskCenterStatus
-        detail = CheckinRowDisplay.detail(row, busy: busy)
+
+        // 授权失效要盖过「执行失败」：这类行再点一次只会拿到同一个 401。
+        let needsLogin = row.state == .unauthorized
+            || row.state == .noCredential
+            || row.errorKind == "unauthorized"
+        isActionable = !needsLogin && row.state != .unsupported
+        if row.state == .unsupported {
+            blockedReason = "该平台不支持签到"
+        } else if needsLogin {
+            blockedReason = "授权失效：先到「AI 账号」重新登录，再回来签到"
+        } else {
+            blockedReason = nil
+        }
+
+        status = busy ? .running : (needsLogin ? .needsLogin : row.state.taskCenterStatus)
+        detail = CheckinRowDisplay.detail(row, busy: busy, needsLogin: needsLogin)
         hasReward = row.credits != nil
         reward = row.credits.map { "+\($0)" } ?? "—"
         lastRunText = row.checkedAt.map { CheckinClock.describe($0) } ?? "—"
         autoEnabled = row.enabled
-        switch row.state {
-        case .unsupported:
-            isActionable = false
-            blockedReason = "该平台不支持签到"
-        case .unauthorized, .noCredential:
-            isActionable = false
-            blockedReason = "授权失效：先到「AI 账号」重新登录，再回来签到"
-        default:
-            // 失败但原因是授权失效：再点一次也只会拿到同一个 401。
-            if row.errorKind == "unauthorized" {
-                isActionable = false
-                blockedReason = "授权失效：先到「AI 账号」重新登录，再回来签到"
-            } else {
-                isActionable = true
-                blockedReason = nil
-            }
-        }
         canRun = !busy && acting == nil && !batching && isActionable
+
+        // 动作只在「这一行没在跑」时才给；执行中由状态列说明，不再摆第二个入口。
+        let desired: CheckinRowAction
+        switch row.state {
+        case .claimed, .already, .unknown:
+            desired = .recheck
+        case .unchecked, .waiting, .stopped:
+            desired = .signIn
+        case .disabled:
+            desired = .check
+        case .failed:
+            desired = needsLogin ? .login : .retry
+        case .unauthorized, .noCredential:
+            desired = .login
+        case .unsupported, .busy:
+            desired = .none
+        }
+        action = busy ? .none : desired
+        let canRead = !busy && acting == nil && !batching
+        switch action {
+        case .signIn, .retry:
+            canPerformAction = canRun
+        case .recheck, .check:
+            canPerformAction = canRead
+        case .login:
+            // 纯导航，不受任何执行锁影响。
+            canPerformAction = true
+        case .none:
+            canPerformAction = false
+        }
+        actionHelp = CheckinRowDisplay.actionHelp(
+            action,
+            done: status.isDone,
+            blockedReason: blockedReason
+        )
+
         canEnableAuto = isActionable
         // 已开启的账号永远允许关闭：异常账号不能被卡在「停不下来」的状态。
         if busy || acting != nil || batching {
@@ -263,6 +348,12 @@ struct CheckinRowDisplay: Identifiable, Equatable {
             autoLockReason = nil
         }
         canToggleAuto = autoLockReason == nil
+
+        var helpLines = [detail]
+        let rawError = row.errorDetail?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !rawError.isEmpty, rawError != detail { helpLines.append(rawError) }
+        if let blockedReason, blockedReason != detail { helpLines.append(blockedReason) }
+        help = helpLines.joined(separator: "\n")
     }
 
     static func rows(
@@ -274,8 +365,14 @@ struct CheckinRowDisplay: Identifiable, Equatable {
     }
 
     /// 一句话说明「谁签的 / 为什么没成」。技术机制不进这一行。
-    static func detail(_ row: CheckinAccountRow, busy: Bool) -> String {
+    static func detail(_ row: CheckinAccountRow, busy: Bool, needsLogin: Bool) -> String {
         if busy { return row.running ? "正在提交" : "正在处理" }
+        if needsLogin {
+            // 状态列已经写了「需要登录」，按钮也已经写着「去登录」；
+            // 这一行只补**原因**（令牌过期 / 没有凭据），不再重复同一句话。
+            let reason = row.errorDetail?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return reason.isEmpty ? "授权失效，先重新登录" : reason
+        }
         switch row.state {
         case .claimed:
             return "AICC 已确认"
@@ -302,6 +399,30 @@ struct CheckinRowDisplay: Identifiable, Equatable {
             return "开关已关闭，未提交"
         case .busy:
             return "已有一次执行在进行"
+        }
+    }
+
+    /// 按钮的 help 必须说出它会不会写：已完成的行点下去只是复查。
+    static func actionHelp(
+        _ action: CheckinRowAction,
+        done: Bool,
+        blockedReason: String?
+    ) -> String {
+        switch action {
+        case .signIn:
+            return "先查服务端状态，确认未签到才会提交"
+        case .retry:
+            return "上次没有完成：会先查服务端状态，确认未签到才提交"
+        case .recheck:
+            return done
+                ? "复查：只向服务端查一次状态，不会重复签到"
+                : "复查：只向服务端查一次状态，结果明确前不会提交"
+        case .check:
+            return "检查：只读一次今日状态，不会提交签到"
+        case .login:
+            return "授权失效：到「AI 账号」重新登录或从 Magpie 同步；这里不会提交签到"
+        case .none:
+            return blockedReason ?? ""
         }
     }
 }
@@ -420,6 +541,16 @@ struct GrowthAccountDisplay: Identifiable, Equatable {
         result.scans.map {
             GrowthAccountDisplay(scan: $0, runs: runs[$0.accountId], expanded: expanded == $0.accountId)
         }
+    }
+
+    /// 已领取的任务数：从**这一行展示出来的任务状态**数，而不是再读一遍 `scan.counts`。
+    var claimedTaskCount: Int {
+        tasks.filter { $0.status == .claimed }.count
+    }
+
+    /// 待处理 = 可接受 + 可领奖。已接受 / 进行中是在跑的任务，不占「待处理」。
+    var pendingTaskCount: Int {
+        tasks.filter { $0.status == .pending || $0.status == .claimable }.count
     }
 
     static func runText(_ run: GrowthRunRecord) -> String {
@@ -609,6 +740,11 @@ struct CreditsRowDisplay: Identifiable, Equatable {
     let canCheck: Bool
     let canClaim: Bool
     let isBusy: Bool
+    /// 自动领取开关能不能切换。
+    /// 关键：**已经开启**的账号即使后来失去资格也必须能关掉，否则用户停不下来。
+    let canToggleAuto: Bool
+    /// 开关不可用的原因（直接进 help）；`nil` 表示可以切换。
+    let autoLockReason: String?
     let runs: [CreditRunDisplay]
 
     var id: String { accountId }
@@ -664,6 +800,16 @@ struct CreditsRowDisplay: Identifiable, Equatable {
             && item.supported
             && report?.claimed != true
             && report?.taskCenterStatus == .claimable
+
+        if isBusy {
+            autoLockReason = "正在执行，结束后再切换"
+        } else if !item.supported && !item.autoEnabled {
+            // 只拦「新开启」。已开启的账号走下面的 else，仍然允许关闭。
+            autoLockReason = "该版本没有已证实的 Credits 接口，无法开启自动领取"
+        } else {
+            autoLockReason = nil
+        }
+        canToggleAuto = autoLockReason == nil
     }
 
     static func rows(
@@ -794,12 +940,11 @@ struct TaskCenterHeadline: Equatable {
         )
     }
 
-    static func growth(
-        _ rows: [GrowthAccountDisplay],
-        claimed: Int,
-        pending: Int,
-        loading: Bool
-    ) -> TaskCenterHeadline {
+    /// 三个数字全部从展示行派生：不再额外传一份 `scan.counts`，
+    /// 否则摘要与表格会各算一套。
+    static func growth(_ rows: [GrowthAccountDisplay], loading: Bool) -> TaskCenterHeadline {
+        let claimed = rows.reduce(0) { $0 + $1.claimedTaskCount }
+        let pending = rows.reduce(0) { $0 + $1.pendingTaskCount }
         let problems = GrowthProblemBreakdown(rows: rows).total
         return TaskCenterHeadline(
             doneLabel: "已领取",

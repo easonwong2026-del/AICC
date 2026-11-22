@@ -113,14 +113,16 @@ final class TaskCenterPresentationTests: XCTestCase {
         XCTAssertFalse(expiredRow.canRun)
         XCTAssertNotNil(expiredRow.blockedReason)
 
-        // 失败但 errorKind 是授权失效：状态仍是失败，但不该再发写请求。
+        // 失败但 errorKind 是授权失效：这是「需要登录」，不是「执行失败」。
+        // 同一行不能既说执行失败、又给一个点了只会拿到 401 的按钮。
         let expiredFailure = CheckinAccountRow(
             accountId: "acc-3", nickname: "账号", enabled: false,
             state: .failed, errorKind: "unauthorized"
         )
         let expiredFailureRow = CheckinRowDisplay(row: expiredFailure, acting: nil, batching: false)
-        XCTAssertEqual(expiredFailureRow.status, .failed)
+        XCTAssertEqual(expiredFailureRow.status, .needsLogin)
         XCTAssertFalse(expiredFailureRow.canRun)
+        XCTAssertEqual(expiredFailureRow.action, .login)
 
         let failed = CheckinAccountRow(
             accountId: "acc-4", nickname: "账号", enabled: false, state: .failed
@@ -171,6 +173,104 @@ final class TaskCenterPresentationTests: XCTestCase {
         XCTAssertFalse(busy.canToggleAuto)
         XCTAssertEqual(busy.autoLockReason, "正在执行，结束后再切换")
         XCTAssertFalse(CheckinRowDisplay(row: normal, acting: nil, batching: true).canToggleAuto)
+    }
+
+    // MARK: - 已完成 / 待签到 / 授权失效：操作必须对得上（6.2 / 6.3）
+
+    func testCompletedCheckinOnlyOffersReadOnlyRecheck() {
+        let claimedRaw = CheckinAccountRow(
+            accountId: "a", nickname: "账号", enabled: true, state: .claimed, credits: 100
+        )
+        let claimed = CheckinRowDisplay(row: claimedRaw, acting: nil, batching: false)
+        XCTAssertEqual(claimed.status, .done)
+        // 已完成的行只能复查：文案、RPC 都不能是签到。
+        XCTAssertEqual(claimed.action, .recheck)
+        XCTAssertEqual(claimed.action.title, "复查")
+        XCTAssertFalse(claimed.action.isWrite)
+        XCTAssertEqual(claimed.action.rpc, "checkin.status")
+        XCTAssertTrue(claimed.canPerformAction)
+        XCTAssertTrue(claimed.actionHelp.contains("不会重复签到"))
+
+        let already = CheckinRowDisplay(
+            row: CheckinAccountRow(accountId: "b", nickname: "账号", enabled: false, state: .already),
+            acting: nil, batching: false
+        )
+        XCTAssertEqual(already.action, .recheck)
+
+        let unchecked = CheckinRowDisplay(
+            row: CheckinAccountRow(accountId: "c", nickname: "账号", enabled: true, state: .unchecked),
+            acting: nil, batching: false
+        )
+        XCTAssertEqual(unchecked.status, .pending)
+        XCTAssertEqual(unchecked.action, .signIn)
+        XCTAssertTrue(unchecked.action.isWrite)
+        XCTAssertEqual(unchecked.action.rpc, "checkin.run")
+        XCTAssertTrue(unchecked.canPerformAction)
+
+        // 服务端没有结论：不许显示成功，也不许再提交一次。
+        let unknown = CheckinRowDisplay(
+            row: CheckinAccountRow(accountId: "d", nickname: "账号", enabled: true, state: .unknown),
+            acting: nil, batching: false
+        )
+        XCTAssertEqual(unknown.status, .needsConfirm)
+        XCTAssertEqual(unknown.action, .recheck)
+        XCTAssertFalse(unknown.action.isWrite)
+        XCTAssertTrue(unknown.actionHelp.contains("结果明确前不会提交"))
+
+        // 从没查过：只读检查，不是签到。
+        let never = CheckinRowDisplay(
+            row: CheckinAccountRow(accountId: "e", nickname: "账号", enabled: false, state: .disabled),
+            acting: nil, batching: false
+        )
+        XCTAssertEqual(never.status, .unknown)
+        XCTAssertEqual(never.action, .check)
+        XCTAssertEqual(never.action.rpc, "checkin.status")
+
+        // 网络等非授权失败：给重试，仍然先查后写。
+        let failed = CheckinRowDisplay(
+            row: CheckinAccountRow(accountId: "f", nickname: "账号", enabled: false,
+                                   state: .failed, errorKind: "network"),
+            acting: nil, batching: false
+        )
+        XCTAssertEqual(failed.status, .failed)
+        XCTAssertEqual(failed.action, .retry)
+        XCTAssertTrue(failed.action.isWrite)
+
+        // 授权失效：只给导航去修授权。
+        let expired = CheckinRowDisplay(
+            row: CheckinAccountRow(accountId: "g", nickname: "账号", enabled: false, state: .unauthorized),
+            acting: nil, batching: false
+        )
+        XCTAssertEqual(expired.action, .login)
+        XCTAssertNil(expired.action.rpc)
+        XCTAssertTrue(expired.canPerformAction)
+
+        let unsupported = CheckinRowDisplay(
+            row: CheckinAccountRow(accountId: "h", nickname: "账号", enabled: false, state: .unsupported),
+            acting: nil, batching: false
+        )
+        XCTAssertEqual(unsupported.action, CheckinRowAction.none)
+        XCTAssertFalse(unsupported.canPerformAction)
+
+        // 执行中：状态列已经写了「执行中」，操作列不再摆第二个入口。
+        let busy = CheckinRowDisplay(row: claimedRaw, acting: "a", batching: false)
+        XCTAssertEqual(busy.status, .running)
+        XCTAssertEqual(busy.action, CheckinRowAction.none)
+        XCTAssertFalse(busy.canPerformAction)
+    }
+
+    /// 只读动作只允许对应 `checkin.status`；写动作才配 `checkin.run`。
+    /// 这条契约是「复查不会绕过服务端规则、也不会偷偷发 POST」的兜底。
+    func testOnlyWriteActionsMapToCheckinRun() {
+        let actions: [CheckinRowAction] = [.signIn, .retry, .recheck, .check, .login, .none]
+        for action in actions {
+            XCTAssertEqual(action.isWrite, action.rpc == "checkin.run", "\(action)")
+            if !action.isWrite, let rpc = action.rpc {
+                XCTAssertEqual(rpc, "checkin.status", "\(action)")
+            }
+        }
+        XCTAssertNil(CheckinRowAction.login.rpc)
+        XCTAssertNil(CheckinRowAction.none.rpc)
     }
 
     func testCheckinSummaryMatchesRows() {
@@ -351,13 +451,40 @@ final class TaskCenterPresentationTests: XCTestCase {
         XCTAssertEqual(breakdown.tasks, 1)
         XCTAssertEqual(breakdown.total, 2)
 
-        let headline = TaskCenterHeadline.growth(rows, claimed: 0, pending: 1, loading: false)
+        let headline = TaskCenterHeadline.growth(rows, loading: false)
         XCTAssertEqual(headline.problems, "2")
         // 分区标题不再重复异常数，只留自动状态。
         XCTAssertEqual(
             TaskCenterSummary.growth(auto: GrowthAutoStatus(json: nil), scanned: true),
             "仅手动"
         )
+    }
+
+    /// 摘要必须由展示行派生：即使 `counts` 与任务列表互相矛盾，也只认列表。
+    func testGrowthHeadlineDerivesFromDisplayRows() throws {
+        let scan = try XCTUnwrap(GrowthAccountScan(json: [
+            "accountId": "acc-1", "nickname": "账号", "state": "ok",
+            // 故意与下面的任务列表不一致：摘要不许读这两个数字。
+            "counts": ["total": 4, "claimable": 9, "acceptable": 9],
+            "tasks": [
+                ["code": "a", "title": "A", "class": "automatic", "rawStatus": "claimed"],
+                ["code": "b", "title": "B", "class": "automatic", "rawStatus": "completed"],
+                ["code": "c", "title": "C", "class": "automatic", "rawStatus": "not_accepted"],
+                ["code": "d", "title": "D", "class": "automatic", "rawStatus": "in_progress"],
+            ],
+        ]))
+        let row = GrowthAccountDisplay(scan: scan, runs: nil, expanded: false)
+        XCTAssertEqual(row.claimedTaskCount, 1)
+        // 待处理 = 待领奖 + 未接受；已接受/进行中不占待处理。
+        XCTAssertEqual(row.pendingTaskCount, 2)
+
+        let headline = TaskCenterHeadline.growth([row], loading: false)
+        XCTAssertEqual(headline.done, "1")
+        XCTAssertEqual(headline.pending, "2")
+        XCTAssertEqual(headline.problems, "0")
+
+        // 加载中不伪造 0。
+        XCTAssertEqual(TaskCenterHeadline.growth([row], loading: true).done, "—")
     }
 
     func testGrowthTickIsPrimaryOnlyWhenAutoEnabled() {
@@ -553,6 +680,37 @@ final class TaskCenterPresentationTests: XCTestCase {
         XCTAssertFalse(row.canClaim)
         XCTAssertFalse(row.supportsAuto)
         XCTAssertEqual(row.reward, "—")
+    }
+
+    /// 自动领取开关：不支持只拦「新开启」，已开启的账号必须还能关。
+    func testCreditsAutoToggleKeepsDisablePathAfterLosingEligibility() throws {
+        let revoked = try XCTUnwrap(QoderCreditsAutoItem(json: [
+            "accountId": "q1", "edition": "qoder_global", "nickname": "Qoder International",
+            "autoEnabled": true, "supported": false,
+        ]))
+        let revokedRow = CreditsRowDisplay(item: revoked, report: nil, runs: [], busy: nil)
+        XCTAssertEqual(revokedRow.status, .unsupported)
+        XCTAssertTrue(revokedRow.canToggleAuto)
+        XCTAssertNil(revokedRow.autoLockReason)
+
+        let never = try XCTUnwrap(QoderCreditsAutoItem(json: [
+            "accountId": "q2", "edition": "qoder_global", "nickname": "Qoder International",
+            "autoEnabled": false, "supported": false,
+        ]))
+        let neverRow = CreditsRowDisplay(item: never, report: nil, runs: [], busy: nil)
+        XCTAssertFalse(neverRow.canToggleAuto)
+        XCTAssertTrue(neverRow.autoLockReason?.contains("无法开启") == true)
+
+        // 执行中：不允许重复提交。
+        let busyRow = CreditsRowDisplay(item: revoked, report: nil, runs: [], busy: "q1")
+        XCTAssertFalse(busyRow.canToggleAuto)
+        XCTAssertEqual(busyRow.autoLockReason, "正在执行，结束后再切换")
+
+        // 支持的账号正常可切。
+        let supported = try XCTUnwrap(QoderCreditsAutoItem(json: [
+            "accountId": "q3", "edition": "qoder_cn", "nickname": "Qoder CN", "supported": true,
+        ]))
+        XCTAssertTrue(CreditsRowDisplay(item: supported, report: nil, runs: [], busy: nil).canToggleAuto)
     }
 
     func testCreditsBusyDisablesActions() throws {

@@ -101,4 +101,78 @@ final class ConsoleNavigationTests: XCTestCase {
         XCTAssertEqual(nav.rotationRequest?.focus, .plan)
         XCTAssertEqual(nav.page, .checkin, "请求轮换管理不切页，由当前页决定是否弹层")
     }
+
+    // MARK: - 签到「去登录」的落点（PR #120 P1-1）
+
+    /// 原来停在别的平台、选着别的账号，也要能定位到这个签到账号。
+    @MainActor func testCheckinLoginRouteFindsTheTargetAccountFromAnotherPlatform() {
+        let nav = ConsoleNavigation(page: .checkin)
+        nav.accountsFilter = .qoder
+        nav.accountSelection = .qoderService("qsa-cn-9")
+
+        let accounts = [Self.account("acc-wb-1"), Self.account("acc-wb-2", nickname: "设计外包")]
+        let decision = ConsoleCheckinLoginRoute.decision(
+            accountId: "acc-wb-2",
+            displayName: "设计外包",
+            accounts: accounts,
+            accountsError: nil
+        )
+        guard case .open(let filter, let selection) = decision else {
+            return XCTFail("应当定位到 WorkBuddy 国内版账号：\(decision)")
+        }
+        XCTAssertEqual(filter, .workbuddy)
+        nav.openAccounts(filter: filter, selection: selection)
+
+        XCTAssertEqual(nav.page, .accounts)
+        XCTAssertEqual(nav.accountsFilter, .workbuddy)
+        XCTAssertEqual(nav.accountSelection, .workbuddy("acc-wb-2"))
+    }
+
+    /// 目标不在列表里：不跳转、不把选择换成列表第一项，并给出可读原因。
+    @MainActor func testCheckinLoginRouteDoesNotFallBackToAnotherAccount() {
+        let nav = ConsoleNavigation(page: .checkin)
+        nav.accountsFilter = .workbuddy
+        nav.accountSelection = .workbuddy("acc-wb-1")
+
+        let decision = ConsoleCheckinLoginRoute.decision(
+            accountId: "acc-missing",
+            displayName: "外包账号",
+            accounts: [Self.account("acc-wb-1")],
+            accountsError: "账号服务连接失败"
+        )
+        guard case .blocked(let reason) = decision else {
+            return XCTFail("找不到目标时不能给出 selection：\(decision)")
+        }
+        XCTAssertTrue(reason.contains("外包账号"), reason)
+        XCTAssertTrue(reason.contains("账号服务连接失败"), reason)
+
+        // 视图对 .blocked 分支什么都不做：页面与选中项都不能被改掉。
+        if case .open(let filter, let selection) = decision {
+            nav.openAccounts(filter: filter, selection: selection)
+        }
+        XCTAssertEqual(nav.page, .checkin)
+        XCTAssertEqual(nav.accountSelection, .workbuddy("acc-wb-1"))
+    }
+
+    /// id 撞上国际版也不能跳过去：签到只属于国内版。
+    func testCheckinLoginRouteRejectsInternationalAccount() {
+        let decision = ConsoleCheckinLoginRoute.decision(
+            accountId: "acc-ai",
+            displayName: "国际版账号",
+            accounts: [Self.account("acc-ai", provider: "workbuddy_ai")],
+            accountsError: nil
+        )
+        guard case .blocked(let reason) = decision else {
+            return XCTFail("国际版账号没有签到，不能作为登录目标：\(decision)")
+        }
+        XCTAssertTrue(reason.contains("没有在 AI 账号列表里找到"), reason)
+    }
+
+    private static func account(
+        _ id: String,
+        provider: String = "workbuddy",
+        nickname: String = "账号"
+    ) -> ConsoleAccount {
+        ConsoleAccount(id: id, platform: "workbuddy", provider: provider, uid: "uid-\(id)", nickname: nickname)
+    }
 }

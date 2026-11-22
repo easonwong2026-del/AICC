@@ -55,65 +55,113 @@ struct ConsoleCheckinView: View {
 
     // MARK: - 工具栏
 
+    /// 960 宽下三个分段选择器 + 检查按钮排不进一行（Qoder CN 会被挤到压住每日签到）。
+    /// 这里用 `ViewThatFits` 在窄窗口自动换成两行：控件一个不少，只是折行。
     private var toolbar: some View {
-        HStack(spacing: 10) {
-            Picker("模式", selection: $nav.taskCenterMode) {
-                ForEach(TaskCenterMode.allCases) { item in
-                    Text(item.title).tag(item)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .tint(ConsoleTheme.accent)
-            .frame(width: 150)
-            .help("今日任务看状态，自动计划看五个自动化")
+        ViewThatFits(in: .horizontal) {
+            toolbarRow(wrapped: false)
+            toolbarRow(wrapped: true)
+        }
+    }
 
+    @ViewBuilder
+    private func toolbarRow(wrapped: Bool) -> some View {
+        let controls = HStack(spacing: 10) {
+            modePicker
             if mode == .today {
-                Picker("平台", selection: $nav.checkinPlatform) {
-                    ForEach(ConsoleTaskPlatform.allCases) { platform in
-                        Text(platform.title).tag(platform)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .tint(ConsoleTheme.accent)
-                .frame(width: 226)
-                .help("只列出真正有任务的平台：WorkBuddy CN 与 Qoder CN")
-
+                platformPicker
                 if nav.checkinPlatform == .workbuddy {
-                    Picker("任务", selection: $nav.workbuddyTask) {
-                        ForEach(WorkbuddyTaskKind.allCases) { kind in
-                            Text(kind.title).tag(kind)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .tint(ConsoleTheme.accent)
-                    .frame(width: 200)
+                    taskPicker
                 }
             }
-
-            Spacer(minLength: 8)
-
+        }
+        // 规则与只读入口只属于「今日任务」；自动计划的工具条由它自己的视图负责。
+        let actions = HStack(spacing: 10) {
             if mode == .today {
-                Button {
-                    showRules = true
-                } label: {
-                    Image(systemName: "questionmark.circle")
-                        .font(.system(size: 13, weight: .medium))
-                }
-                .buttonStyle(ConsoleIconButtonStyle())
-                .help("自动任务规则")
-                .popover(isPresented: $showRules, arrowEdge: .bottom) {
-                    rulesPopover
-                }
-
+                helpButton
                 readActionButton
+            }
+        }
+        if wrapped {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    controls
+                    Spacer(minLength: 0)
+                }
+                if mode == .today {
+                    HStack(spacing: 10) {
+                        Spacer(minLength: 0)
+                        actions
+                    }
+                }
+            }
+        } else {
+            HStack(spacing: 10) {
+                controls
+                Spacer(minLength: 8)
+                actions
             }
         }
     }
 
-    /// 当前任务域的只读入口。一个页面只有这一个「刷新状态」，不再是四个图标。
+    private var modePicker: some View {
+        Picker("模式", selection: $nav.taskCenterMode) {
+            ForEach(TaskCenterMode.allCases) { item in
+                Text(item.title).tag(item)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .tint(ConsoleTheme.accent)
+        // 两个标签各 4 个字，150pt 足够；保持 #119 验收时的宽度，自动计划页零位移。
+        .frame(width: 150)
+        .help("今日任务看状态，自动计划看五个自动化")
+    }
+
+    private var platformPicker: some View {
+        Picker("平台", selection: $nav.checkinPlatform) {
+            ForEach(ConsoleTaskPlatform.allCases) { platform in
+                Text(platform.title).tag(platform)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .tint(ConsoleTheme.accent)
+        .fixedSize()
+        .help("只列出真正有任务的平台：WorkBuddy CN 与 Qoder CN")
+    }
+
+    private var taskPicker: some View {
+        Picker("任务", selection: $nav.workbuddyTask) {
+            ForEach(WorkbuddyTaskKind.allCases) { kind in
+                Text(kind.title).tag(kind)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .tint(ConsoleTheme.accent)
+        .fixedSize()
+    }
+
+    private var helpButton: some View {
+        Button {
+            showRules = true
+        } label: {
+            Image(systemName: "questionmark.circle")
+                .font(.system(size: 13, weight: .medium))
+        }
+        .buttonStyle(ConsoleIconButtonStyle())
+        .help("自动任务规则")
+        .popover(isPresented: $showRules, arrowEdge: .bottom) {
+            rulesPopover
+        }
+    }
+
+    /// 页面里那个**联网**的只读入口。
+    ///
+    /// 只有签到「检查状态」和成长「扫描」会真的去问服务端，所以它们值得一个写清楚的按钮；
+    /// 旅行与 Credits 的本地重读和页头刷新是同一个调用（`loadTravel` /
+    /// `refreshQoderCredits`），再摆一个按钮就是两个没有区别的刷新图标。
     @ViewBuilder
     private var readActionButton: some View {
         switch nav.checkinPlatform {
@@ -130,16 +178,12 @@ struct ConsoleCheckinView: View {
                     .disabled(store.growthLoading)
                     .help("扫描一次成长中心（只读，不会接受任务或领奖）")
             case .travel:
-                Button("重读快照") { Task { await store.loadTravel() } }
-                    .buttonStyle(ConsoleSecondaryButtonStyle())
-                    .disabled(store.travelLoading)
-                    .help("重新读取本地旅行快照，不打接口；单账号的真实状态用行内刷新")
+                // 页头刷新就是 `loadTravel()`：同一条调用，不重复给按钮。
+                EmptyView()
             }
         case .qoder:
-            Button("刷新") { Task { await store.refreshQoderCredits() } }
-                .buttonStyle(ConsoleSecondaryButtonStyle())
-                .disabled(store.qoderCreditsLoading)
-                .help("读取自动领取状态与最近结果；只读，不会领取")
+            // 页头刷新就是 `refreshQoderCredits()`：同一条调用，不重复给按钮。
+            EmptyView()
         }
     }
 
@@ -186,8 +230,6 @@ struct ConsoleCheckinView: View {
             case .growth:
                 return .growth(
                     growthRows,
-                    claimed: growthClaimed,
-                    pending: growthPending,
                     loading: store.growthLoading && store.growthResult.scans.isEmpty
                 )
             case .travel:
@@ -266,17 +308,6 @@ struct ConsoleCheckinView: View {
             runs: store.growthRuns,
             expanded: store.expandedGrowthAccount
         )
-    }
-
-    /// 已领取的任务数：按任务状态统计，不按账号数统计（一个账号可以有多个任务）。
-    private var growthClaimed: Int {
-        store.growthResult.scans.reduce(0) { total, scan in
-            total + scan.tasks.filter { $0.status == .claimed }.count
-        }
-    }
-
-    private var growthPending: Int {
-        store.growthResult.scans.reduce(0) { $0 + $1.counts.claimable + $1.counts.acceptable }
     }
 
     private var travelRows: [TravelRowDisplay] {

@@ -402,3 +402,13 @@ Qoder 每日 Credits：
 - `TaskCenterPresentationTests` 28 个用例（新增 `testCheckinAutoToggleRespectsEligibility`、
   `testTravelAutoToggleRespectsEligibility`，并补强 tick 文案断言）。
 - 后端 / RPC / SQLite / 调度 / 版本号零改动（`git diff --stat origin/main -- account-worker server.py collectors tests macos/Android macos/Widget VERSION` 为空）。
+
+## 12. 交互收口（2026-11-22，PR-B）
+
+- 已完成 / 待确认的签到行只给「复查」（只读 `checkin.status`），待签到才给「立即签到」，
+  网络失败给「重试」，授权失效给「去登录」（纯导航）；执行中不再摆第二个入口。
+- 旅行「重读快照」与 Credits「刷新」删除：它们和页头刷新是同一个调用。
+- 成长摘要改为从展示行派生，不再读 `scan.counts`。
+- Qoder Credits 自动领取：失去资格但已开启的账号仍可关闭；提交后回读真实状态再提示成功。
+- 960 宽工具栏改为自然宽度 + 窄窗口两行，修复分段控件互相压字。
+- 完整审计与截图见 `docs/UI_V5_DAILY_POLISH.md`。

@@ -139,7 +139,9 @@ struct MainConsoleView: View {
                     .font(.system(size: 13, weight: .medium))
             }
             .buttonStyle(ConsoleIconButtonStyle())
-            .help("刷新当前页")
+            // 四个页面的刷新语义不同（额度=重新采集，任务=重读本地），
+            // 提示必须跟着页面走，否则又会被当成一个"什么都刷"的按钮。
+            .help(nav.page.refreshHint)
             .disabled(refreshing)
 
             Button(action: openSettings) {
@@ -190,11 +192,15 @@ struct MainConsoleView: View {
             async let qoder: Void = store.refreshQoder(silent: true)
             _ = await (accounts, qoder)
         case .quota:
-            switch nav.quotaSource {
-            case .magpie:
+            // 额度页只有这一个刷新入口；具体读哪条链路由 `QuotaRefreshPlan` 决定，
+            // 与额度视图里的来源选择共用同一份映射。
+            switch QuotaRefreshPlan.pageRefresh(source: nav.quotaSource) {
+            case .reloadMagpie:
                 await store.refreshQuota(force: true)
-            case .accounts:
+            case .reloadAccounts:
                 await store.refreshWorkerQuota(force: true)
+            case .changeWindow:
+                break
             }
         case .checkin:
             // 只刷新当前任务域的本地状态，全部只读；联网检查由页面上的「检查状态/扫描」触发。
