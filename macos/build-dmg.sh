@@ -29,7 +29,7 @@ ln -s /Applications "$STAGING_DIR/Applications"
 # 图标的 AICC 看起来就像"点开没反应"。说明里必须写清这一步，否则用户只能
 # 以为是安装路径不对。
 cat > "$STAGING_DIR/安装说明.txt" <<EOF
-AICC $VERSION（Build $BUILD_VERSION）安装说明
+AICC ${VERSION}（Build ${BUILD_VERSION}）安装说明
 ========================================
 
 1. 安装位置
@@ -56,7 +56,7 @@ AICC $VERSION（Build $BUILD_VERSION）安装说明
 4. 回滚
    把备份的旧 AICC.app 放回原位，并把备份的数据库覆盖回
    ~/Library/Application Support/AICC-Dashboard/accounts/accounts.sqlite。
-   $VERSION 会把本地数据库升级到更高的 schema 版本；只替换 .app 不还原数据库，
+   ${VERSION} 会把本地数据库升级到更高的 schema 版本；只替换 .app 不还原数据库，
    旧版本可能读不了，所以回滚要连数据库一起还原。
 EOF
 
