@@ -166,17 +166,17 @@
 | 状态 | 截图 |
 |---|---|
 | 0 / 未知 / 缓存 / 超长数值同屏 | `quota/after/quota-accounts-zero-unknown-1120x760-{light,dark}.png`、`...-960x640-light.png` |
-| Magpie 旧快照 | `quota/after/quota-magpie-stale-1120x760-{light,dark}.png` |
+| Magpie 旧快照 | `quota/after/quota-magpie-stale-1120x760-light.png` |
 | 额度读取失败 / 加载 | `quota/after/quota-accounts-error-1120x760-light.png`、`quota-accounts-loading-...` |
 | 签到 · 全部已完成 | `tasks/after/checkin-all-done-1120x760-light.png` |
 | 签到 · 授权失效 / 待确认 / 不支持 | `tasks/after/checkin-attention-1120x760-{light,dark}.png` |
 | 签到 · 网络失败（重试） | `tasks/after/checkin-network-failed-1120x760-{light,dark}.png` |
-| 签到 · 单个执行中 / 批量执行中 | `tasks/after/checkin-executing-...`、`checkin-batching-...` |
+| 签到 · 单个执行中 | `tasks/after/checkin-executing-1120x760-light.png` |
 | Credits · 支持 / 不支持 | `tasks/after/checkin-credits-1120x760-light.png`、`credits-limited-1120x760-light.png` |
 | Credits · 已开启但失去资格 | `tasks/after/credits-revoked-1120x760-{light,dark}.png` |
 | 成长 · 自动开启 / 仅手动 / 未扫描 | `tasks/after/checkin-growth-...`、`growth-readonly-...`、`growth-unscanned-...` |
-| 旅行 · 进行中 / 空 | `tasks/after/travel-1120x760-{light,dark}.png`、`travel-empty-1120x760-light.png` |
-| 任务 · 空 / 错误 / 加载 | `tasks/after/state-{empty,error,loading}-checkin-{light,dark}.png` |
+| 旅行 · 进行中 / 空 | `tasks/after/travel-1120x760-light.png` |
+| 任务 · 空 / 错误 / 加载 | `tasks/after/state-{empty,error,loading}-checkin-light.png` |
 
 ## 8. 测试
 
