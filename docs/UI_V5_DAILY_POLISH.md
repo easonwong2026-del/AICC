@@ -135,7 +135,7 @@
 
 ## 6. 前后真实截图（真实 SwiftUI 离屏渲染）
 
-工具：`bash scripts/smoke-test-console-visual.sh`（本轮 144 张，CI Artifact `console-ui-visuals`）。
+工具：`bash scripts/smoke-test-console-visual.sh`（本轮 148 张，CI Artifact `console-ui-visuals`）。
 基线图来自 `origin/main` `8835887` 的同一脚本渲染（137 张），归档在 `docs/console-v5/polish/before/`。
 
 | 场景 | 改造前 | 改造后 |
@@ -196,6 +196,8 @@
 | `testOnlyWriteActionsMapToCheckinRun` | 只读动作绝不会映射到 `checkin.run` |
 | `testGrowthHeadlineDerivesFromDisplayRows` | 摘要与列表同源（counts 故意写错也不影响） |
 | `testCreditsAutoToggleKeepsDisablePathAfterLosingEligibility` | 失去资格仍可关、未开启不可开、执行中不可切 |
+| `testCheckinLoginRoute*`（3 项） | 「去登录」定位目标账号、缺失不回落、国际版拒绝（§12） |
+| `testCheckinRecheck*`（4 项） | 复查成功 / 超时 / 助手不可用 / 账号不匹配（§12） |
 | 既有用例 | 状态映射、奖励入口、旅行阶段、自动计划中心等回归（零改动） |
 
 ## 9. CI
@@ -215,6 +217,8 @@
 | `Sources/Models/QuotaPresentation.swift` | `spokenLabel`、`resetHelp`、`QuotaRefreshIntent` / `QuotaRefreshPlan` |
 | `Sources/Models/TaskCenterPresentation.swift` | `CheckinRowAction`、签到状态/动作/help、成长计数、Credits 开关资格 |
 | `Sources/Models/ConsoleNavigation.swift` | `ConsolePage.refreshHint`、`selectQuotaSource` |
+| `Sources/Models/ConsoleModels.swift` | `ConsoleCheckinLoginRoute`（去登录落点） |
+| `Sources/Models/AutomationAsyncFlows.swift` | `CheckinRecheckFlow` / `CheckinRecheckOutcome` |
 | `Sources/Console/ConsoleQuotaView.swift` | 删除重复刷新与重复统计、快照时间、a11y、重置 help |
 | `Sources/Console/MainConsoleView.swift` | 页头 help 按页、额度刷新走统一计划 |
 | `Sources/Console/ConsoleCheckinView.swift` | 窄窗口工具栏折行、只保留联网只读入口、成长摘要改签名 |
@@ -223,7 +227,7 @@
 | `Sources/Console/ConsoleStore.swift` | 新增只读 `recheckCheckin`；`setQoderCreditsAuto` 回读确认 |
 | `Sources/Console/ConsoleComponents.swift` | 0% 进度条不再画 2pt 最短宽度 |
 | `ConsoleVisual/ConsoleVisualSmokeMain.swift` | 新增 3 组样本 + 7 张渲染 |
-| `Tests/*` | 9 个新用例 + 2 处语义修正 |
+| `Tests/*` | 16 个新用例 + 2 处语义修正（含 §12 的 7 项） |
 | `docs/console-v5/*` | 关键截图刷新与 `polish/before` 基线 |
 
 ```bash
@@ -240,3 +244,42 @@ git diff --stat origin/main -- account-worker server.py collectors tests android
 - **服务端拒绝开关**：`setQoderCreditsAuto` 的回读分支只在代码层验证，没有构造服务端拒绝的真实请求。
 - **单账号 `checkin.status` 的返回形状**：按整队返回的同一结构解析（`accounts[]`），
   已在代码里对「返回里没有这个账号」做了兜底提示，但未用真实 worker 验证。
+
+## 12. 最终收口（2026-11-22，P1-1 / P1-2）
+
+### P1-1：「去登录」必须定位目标账号
+
+- 旧：`nav.page = .accounts`，只切页；平台筛选与选中项都留在原处，用户可能停在 Qoder 或别的账号上。
+- 新：`ConsoleCheckinLoginRoute.decision(...)` 先在 `store.accounts` 里确认目标存在且是
+  WorkBuddy 国内版，再交给 `nav.openAccounts(filter: .workbuddy, selection: .workbuddy(id))`。
+- 找不到时**不跳转**：页面出现一条 warning（附 `accountsError` 原因），页面与选中项都不动 ——
+  避免账号页的 `reconcileSelection()` 把选择回落到列表第一项、让人以为那是目标账号。
+- 纯导航：只改 `page / accountsFilter / accountSelection`；不提交授权、不签到、不切换客户端。
+
+| 用例（`ConsoleNavigationTests`） | 断言 |
+|---|---|
+| `testCheckinLoginRouteFindsTheTargetAccountFromAnotherPlatform` | 原在 Qoder、选中别的账号 → 跳转后 `filter == .workbuddy`、`selection == .workbuddy(目标)` |
+| `testCheckinLoginRouteDoesNotFallBackToAnotherAccount` | 目标缺失 → `.blocked`，页面与选中项保持原样，原因包含账号名与 `accountsError` |
+| `testCheckinLoginRouteRejectsInternationalAccount` | id 撞上国际版 → 拒绝，不当签到目标 |
+
+落点截图：`docs/console-v5/after/accounts-login-target-1120x760-light.png`。
+
+### P1-2：复查失败不能显示成普通成功
+
+- 旧：失败写进 `checkinNotice`（info 语气），和「已刷新 N 个账号」同一行。
+- 新：`CheckinRecheckFlow` 只读一次 `checkin.status`：成功 → `.refreshed(row)` 只替换那一行；
+  失败（超时 / 助手不可用 / 返回里没有这个账号）→ `.failed(reason)`，**不产生新状态**。
+- `ConsoleStore.checkinRecheckError` 单独承载原因，文案「复查「账号」失败：原因」，
+  界面用 `ConsoleInlineNotice(kind: .error)`；行保留上一份已确认状态。
+- 复查成功清除该提示；整队「检查状态」成功也清除（整队重读覆盖了单账号结论）。
+- 仍然只调 `checkin.status`，不会回落到 `checkin.run`。
+
+| 用例（`AutomationAsyncFlowTests`） | 场景 |
+|---|---|
+| `testCheckinRecheckReturnsTheFreshRowOnSuccess` | 成功 → 返回该行最新状态 |
+| `testCheckinRecheckTimeoutIsAFailureWithoutNewState` | 超时 → `.failed`，不携带新状态 |
+| `testCheckinRecheckWorkerUnavailableDoesNotFetch` | 助手不可用 → 一次请求都不发 |
+| `testCheckinRecheckMismatchedAccountIsAFailure` | 返回里没有该账号 → 失败，绝不拿别人的行顶替 |
+
+截图：`tasks/after/checkin-recheck-failed-1120x760-{light,dark}.png`、`...-960x640-light.png`
+（错误条在上、行状态仍是旧的「已完成 / +50」）。
