@@ -20,6 +20,9 @@ mkdir -p "$STAGING_DIR" "$RELEASE_DIR"
 cp -R "$APP_DIR" "$STAGING_DIR/"
 ln -s /Applications "$STAGING_DIR/Applications"
 
+# 说明里要写 Build 号，所以先取，不能等到 DMG 生成之后（那时 heredoc 已经执行过）。
+BUILD_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_DIR/Contents/Info.plist" 2>/dev/null || echo unknown)"
+
 # 安装引导：必须和实测支持的安装位置一致。
 #
 # `/Applications` 与 `~/Applications` 都实测可启动（同一份签名、同一份二进制），
@@ -90,7 +93,6 @@ mv "$TEMP_DMG" "$DMG_PATH"
 # 这份 DMG 里的二进制，和 dist/symbols 里的 dSYM 必须是同一次构建出来的。
 # 只靠版本号 + build 号是证明不了这件事的：同版本重新构建会得到不同的 UUID。
 # 校验方式是把 DMG 真挂起来，读卷内二进制的 UUID 和 sha256，与清单逐项比。
-BUILD_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_DIR/Contents/Info.plist" 2>/dev/null || echo unknown)"
 SYMBOLS_DIR="$ROOT/dist/symbols/$VERSION-$BUILD_VERSION"
 DMG_SHA="$(shasum -a 256 "$DMG_PATH" | awk '{ print $1 }')"
 
