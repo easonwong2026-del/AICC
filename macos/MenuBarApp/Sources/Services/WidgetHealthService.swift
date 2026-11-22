@@ -34,16 +34,37 @@ enum WidgetHealthService {
         guard !build.isEmpty else { return }
         guard UserDefaults.standard.string(forKey: lastRepairedBuildKey) != build else { return }
 
-        // Always heal the installed copy, never the translocated one: the copy
+        let running = Bundle.main.bundleURL.path
+        // Always heal the installed copy, never the translocated one: that copy
         // is read-only, so registering from there can never work.
-        let installed = WidgetInstallation.installedPath(forBundlePath: Bundle.main.bundleURL.path)
-            .map { URL(fileURLWithPath: $0, isDirectory: true) } ?? Bundle.main.bundleURL
+        let installed: URL
+        if let found = WidgetInstallation.installedPath(forBundlePath: running) {
+            installed = URL(fileURLWithPath: found, isDirectory: true)
+        } else if WidgetInstallation.isTranslocated(bundlePath: running) {
+            // Translocated with no installed copy under any known root: the App
+            // was launched straight out of the DMG / a random folder. Nothing
+            // here can be repaired, and running `xattr` on the read-only copy
+            // would only fail. Say so instead of leaving a silent black tile.
+            record("translocated with no installed copy; looked in "
+                   + WidgetInstallation.installRoots().joined(separator: ", ")
+                   + " (running from \(running))")
+            return
+        } else {
+            installed = Bundle.main.bundleURL
+        }
         let widget = installed.appendingPathComponent("Contents/PlugIns/AICCWidget.appex", isDirectory: true)
         guard FileManager.default.fileExists(atPath: widget.path) else { return }
 
-        record("repairing \(installed.path) (running from \(Bundle.main.bundleURL.path))")
+        record("repairing \(installed.path) (running from \(running))")
         // Recursive: quarantine lands on the App *and* every nested file.
-        record("xattr rc=\(run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", installed.path]))")
+        let cleared = run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", installed.path])
+        record("xattr rc=\(cleared)")
+        if cleared != 0 {
+            // Almost always "Operation not permitted" on a read-only location.
+            // The widget will stay a black tile, and the fix is about the copy
+            // the user actually installed, not this process.
+            record("could not clear quarantine on \(installed.path); widget may stay blank")
+        }
         record("pluginkit rc=\(run("/usr/bin/pluginkit", ["-a", widget.path]))")
         // chronod caches descriptors per bundle identity, so a re-registration
         // only takes effect after it reloads them.
