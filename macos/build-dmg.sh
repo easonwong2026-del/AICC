@@ -20,6 +20,46 @@ mkdir -p "$STAGING_DIR" "$RELEASE_DIR"
 cp -R "$APP_DIR" "$STAGING_DIR/"
 ln -s /Applications "$STAGING_DIR/Applications"
 
+# 安装引导：必须和实测支持的安装位置一致。
+#
+# `/Applications` 与 `~/Applications` 都实测可启动（同一份签名、同一份二进制），
+# 所以快捷方式保持系统标准位置。首次启动真正的拦阻来自 Gatekeeper：这个构建
+# 用本机证书自签名、没有公证，macOS 会把进程停在 dyld 之前等确认，而提示框
+# 属于 CoreServicesUIAgent、只有「完成 / 移到废纸篓」两个按钮 —— 没有 Dock
+# 图标的 AICC 看起来就像"点开没反应"。说明里必须写清这一步，否则用户只能
+# 以为是安装路径不对。
+cat > "$STAGING_DIR/安装说明.txt" <<EOF
+AICC $VERSION（Build $BUILD_VERSION）安装说明
+========================================
+
+1. 安装位置
+   把 AICC.app 拖到右侧的 Applications 文件夹（系统标准位置）。
+   拖到「个人目录/Applications」也完全可以：两个位置都实测可用。
+
+2. 首次打开可能被 macOS 拦住（重要）
+   这个构建用本机固定证书自签名，没有通过 Apple 公证。如果双击后没有任何
+   窗口出现，屏幕上有一条「未打开"AICC"…Apple 无法验证…」，那不是卡死：
+   进程被 Gatekeeper 停在启动之前，正在等确认。
+
+   处理：打开「系统设置 → 隐私与安全性」，在页面底部点「仍要打开」，再确认一次。
+   提示框里只有「完成」和「移到废纸篓」属于正常现象，新版 macOS 不再提供
+   「打开」按钮。
+
+   也可以先在终端执行一行（路径换成你实际的安装位置），再打开 AICC：
+       xattr -dr com.apple.quarantine "/Applications/AICC.app"
+
+   确认过这一次之后不会再提示。
+
+3. 退出 AICC
+   点菜单栏的 AICC 图标 → 「退出 AICC」。
+
+4. 回滚
+   把备份的旧 AICC.app 放回原位，并把备份的数据库覆盖回
+   ~/Library/Application Support/AICC-Dashboard/accounts/accounts.sqlite。
+   $VERSION 会把本地数据库升级到更高的 schema 版本；只替换 .app 不还原数据库，
+   旧版本可能读不了，所以回滚要连数据库一起还原。
+EOF
+
 # 压缩格式：UDBZ（bzip2），不是 hdiutil 的默认 UDZO。
 #
 # 实测（同一份 App 内容，v2.13.0 / 20,067,290 字节的 UDZO 基线）：
