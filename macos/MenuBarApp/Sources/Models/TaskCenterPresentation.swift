@@ -367,7 +367,12 @@ struct CheckinRowDisplay: Identifiable, Equatable {
     /// 一句话说明「谁签的 / 为什么没成」。技术机制不进这一行。
     static func detail(_ row: CheckinAccountRow, busy: Bool, needsLogin: Bool) -> String {
         if busy { return row.running ? "正在提交" : "正在处理" }
-        if needsLogin { return "授权失效，先到「AI 账号」重新登录" }
+        if needsLogin {
+            // 状态列已经写了「需要登录」，按钮也已经写着「去登录」；
+            // 这一行只补**原因**（令牌过期 / 没有凭据），不再重复同一句话。
+            let reason = row.errorDetail?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return reason.isEmpty ? "授权失效，先重新登录" : reason
+        }
         switch row.state {
         case .claimed:
             return "AICC 已确认"
