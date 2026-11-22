@@ -202,10 +202,11 @@
 
 ## 9. CI
 
-- run `44974521849`（head `93d9e05`）：**success**。
-- success：`changes`、`macos-build`、`swift-test`（含 `swift test` 与 7 个视觉脚本，144 张控制台渲染）。
-- skipped 均因路径过滤 / 事件类型，不是失败：
-  - `test`、`lint`：本轮没有改 Python（`server.py` / `collectors/` / `tests/` 零 diff）。
+- 结论记录在 PR 检查页；每一轮 head 的 `changes` / `macos-build` / `swift-test` 均为 **success**。
+- `swift-test`：`swift test` 459 → **466** 个用例 0 失败（含 §12 新增 7 项）；
+  7 个视觉脚本，控制台渲染 144 → **148** 张（Artifact `console-ui-visuals`）。
+- 6 个 skipped 均因路径过滤 / 事件类型，不是失败：
+  - `test`、`lint`：没有改 Python（`server.py` / `collectors/` / `tests/` 零 diff）。
   - `rust`：没有改 `account-worker/`。
   - `android`、`android-visual`：没有改 `android/`。
   - `macos-dmg`：workflow 里明确只在非 `pull_request` 事件运行（PR 不产安装包）。
