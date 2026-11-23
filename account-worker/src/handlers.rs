@@ -4965,14 +4965,23 @@ mod tests {
         let view_mismatch = dispatch(&app, "accounts.get", &json!({ "id": acc.id }))
             .await
             .expect("get mismatch");
-        assert_eq!(view_mismatch["tokenExpiresAt"].as_str(), Some(own_expiry.as_str()));
+        assert_eq!(
+            view_mismatch["tokenExpiresAt"].as_str(),
+            Some(own_expiry.as_str())
+        );
         let auths = view_mismatch["authorizations"].as_array().unwrap();
         let own_row = auths.iter().find(|a| a["kind"] == json!("own")).unwrap();
         let mag_row = auths.iter().find(|a| a["kind"] == json!("magpie")).unwrap();
         assert!(own_row["effectiveStatus"].is_null());
-        assert_eq!(own_row["tokenExpiresAt"].as_str(), Some(own_expiry.as_str()));
+        assert_eq!(
+            own_row["tokenExpiresAt"].as_str(),
+            Some(own_expiry.as_str())
+        );
         assert_eq!(mag_row["effectiveStatus"].as_str(), Some("mismatch"));
-        assert_eq!(mag_row["tokenExpiresAt"].as_str(), Some(m_snapshot.as_str()));
+        assert_eq!(
+            mag_row["tokenExpiresAt"].as_str(),
+            Some(m_snapshot.as_str())
+        );
 
         // 场景 B：Magpie 文件不可读
         magpie::test_set_unreadable();
