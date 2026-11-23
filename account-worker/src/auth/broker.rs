@@ -366,14 +366,16 @@ fn effective_dynamic_status(
     let Some(logins) = magpie_cache.get() else {
         return Some("unavailable");
     };
-    Some(match super::magpie_link::access_in(logins, account, source_key) {
-        Ok(_) => "valid",
-        Err(err) => match err.kind {
-            CredentialErrorKind::Conflict => "mismatch",
-            CredentialErrorKind::Unavailable => "unavailable",
-            _ => "expired",
+    Some(
+        match super::magpie_link::access_in(logins, account, source_key) {
+            Ok(_) => "valid",
+            Err(err) => match err.kind {
+                CredentialErrorKind::Conflict => "mismatch",
+                CredentialErrorKind::Unavailable => "unavailable",
+                _ => "expired",
+            },
         },
-    })
+    )
 }
 
 /// 账号层面的授权摘要：两份是否存在、当前会用哪一份。
