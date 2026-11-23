@@ -12,6 +12,7 @@ struct MainConsoleView: View {
 
     @StateObject private var nav: ConsoleNavigation
     @State private var refreshing = false
+    @State private var hoveredPage: ConsolePage?
 
     init(store: ConsoleStore, openSettings: @escaping () -> Void) {
         self.store = store
@@ -37,6 +38,10 @@ struct MainConsoleView: View {
             minHeight: ConsoleTheme.minWindowSize.height
         )
         .task { await store.loadIfNeeded() }
+        .onChange(of: nav.page) { _, page in
+            guard page == .overview || page == .accounts else { return }
+            Task { await store.refreshAccountsIfStale() }
+        }
     }
 
     // MARK: 侧边栏
@@ -57,8 +62,8 @@ struct MainConsoleView: View {
             .padding(.bottom, 24)
 
             VStack(spacing: 2) {
-                ForEach(ConsolePage.allCases) { item in
-                    sidebarRow(item)
+                ForEach(Array(ConsolePage.allCases.enumerated()), id: \.element.id) { index, item in
+                    sidebarRow(item, shortcutIndex: index + 1)
                 }
             }
             .padding(.horizontal, 8)
@@ -81,8 +86,21 @@ struct MainConsoleView: View {
         .background(ConsoleTheme.sidebar)
     }
 
-    private func sidebarRow(_ item: ConsolePage) -> some View {
+    private func sidebarBadgeCount(for item: ConsolePage) -> Int {
+        switch item {
+        case .accounts:
+            return store.fleet.issues
+        case .checkin:
+            return store.tasksOverview?.failureCount ?? 0
+        case .overview, .quota:
+            return 0
+        }
+    }
+
+    private func sidebarRow(_ item: ConsolePage, shortcutIndex: Int) -> some View {
         let selected = nav.page == item
+        let hovered = hoveredPage == item
+        let badgeCount = sidebarBadgeCount(for: item)
         return Button {
             nav.page = item
         } label: {
@@ -93,18 +111,33 @@ struct MainConsoleView: View {
                 Text(item.title)
                     .font(.system(size: 13, weight: selected ? .semibold : .regular))
                 Spacer(minLength: 0)
+                if badgeCount > 0 {
+                    Text("\(badgeCount)")
+                        .font(ConsoleType.micro)
+                        .monospacedDigit()
+                        .foregroundStyle(ConsoleTheme.warning)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(ConsoleTheme.warningSoft, in: Capsule())
+                }
             }
             .foregroundStyle(selected ? ConsoleTheme.text : ConsoleTheme.secondaryText)
             .padding(.horizontal, 10)
             .frame(height: 30)
             .background(
-                selected ? ConsoleTheme.selectionFill : Color.clear,
+                selected
+                    ? ConsoleTheme.selectionFill
+                    : (hovered ? ConsoleTheme.cardSubtle.opacity(0.85) : Color.clear),
                 in: RoundedRectangle(cornerRadius: 8)
             )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(item.subtitle)
+        .keyboardShortcut(KeyEquivalent(Character("\(shortcutIndex)")), modifiers: .command)
+        .onHover { inside in
+            hoveredPage = inside ? item : (hoveredPage == item ? nil : hoveredPage)
+        }
+        .help("\(item.subtitle)（⌘\(shortcutIndex)）")
     }
 
     // MARK: 工作区
@@ -130,6 +163,12 @@ struct MainConsoleView: View {
 
             if refreshing {
                 ProgressView().controlSize(.small)
+            } else if let updated = headerUpdatedTimeText {
+                Text(updated)
+                    .font(ConsoleType.micro)
+                    .monospacedDigit()
+                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .lineLimit(1)
             }
 
             Button {
@@ -139,9 +178,10 @@ struct MainConsoleView: View {
                     .font(.system(size: 13, weight: .medium))
             }
             .buttonStyle(ConsoleIconButtonStyle())
+            .keyboardShortcut("r", modifiers: .command)
             // 四个页面的刷新语义不同（额度=重新采集，任务=重读本地），
             // 提示必须跟着页面走，否则又会被当成一个"什么都刷"的按钮。
-            .help(nav.page.refreshHint)
+            .help("\(nav.page.refreshHint)（⌘R）")
             .disabled(refreshing)
 
             Button(action: openSettings) {
@@ -149,11 +189,20 @@ struct MainConsoleView: View {
                     .font(.system(size: 13, weight: .medium))
             }
             .buttonStyle(ConsoleIconButtonStyle())
-            .help("设置")
+            .keyboardShortcut(",", modifiers: .command)
+            .help("设置（⌘,）")
         }
         .padding(.horizontal, ConsoleTheme.pagePadding)
         .frame(height: ConsoleTheme.headerHeight)
         .background(ConsoleTheme.canvas)
+    }
+
+    private var headerUpdatedTimeText: String? {
+        guard nav.page == .overview || nav.page == .accounts,
+              let refreshed = store.lastAccountsRefresh else {
+            return nil
+        }
+        return "更新于 \(ConsoleFormat.shortTime(refreshed))"
     }
 
     @ViewBuilder

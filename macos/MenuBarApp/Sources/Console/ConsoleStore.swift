@@ -189,6 +189,10 @@ final class ConsoleStore: ObservableObject {
         qoderDeleteNotice = nil
     }
 
+    func clearQoderNotice() {
+        qoderNotice = nil
+    }
+
     /// 账号详情里的一次性结论（PAT 检测、移除结果等）。只写提示，不改数据。
     func showQoderNotice(_ text: String) {
         qoderNotice = text
@@ -213,7 +217,10 @@ final class ConsoleStore: ObservableObject {
         }
 
         let needQuota = snapshot == nil && !loadingQuota
-        let needAccounts = lastAccountsRefresh == nil && !loadingAccounts
+        let needAccounts = ConsoleAccountsRefreshPolicy.shouldRefreshOnLoad(
+            lastRefresh: lastAccountsRefresh,
+            loading: loadingAccounts
+        )
         let needQoder = qoderEditions.isEmpty && !qoderLoading
         let needWorkerQuota = workerQuotaRows.isEmpty && !loadingWorkerQuota
         let needWbClient = wbClientStatus == nil
@@ -809,14 +816,30 @@ final class ConsoleStore: ObservableObject {
         try await worker.workbuddyStatus(accountId: accountId)
     }
 
-    func refreshAccounts() async {
+    /// 窗口回到前台或切回总览 / 账号页时的静默刷新（只读，带冷却防抖）。
+    func refreshAccountsIfStale(ttl: TimeInterval = ConsoleAccountsRefreshPolicy.defaultTTL) async {
+        #if AICC_VISUAL_TEST && AICC_CONSOLE_VISUAL
+        return
+        #else
+        guard ConsoleAccountsRefreshPolicy.shouldRefreshOnRevisit(
+            lastRefresh: lastAccountsRefresh,
+            loading: loadingAccounts,
+            ttl: ttl
+        ) else { return }
+        await refreshAccounts(silent: true)
+        #endif
+    }
+
+    func refreshAccounts(silent: Bool = false) async {
         guard !loadingAccounts else { return }
         loadingAccounts = true
         defer { loadingAccounts = false }
 
         guard await ensureWorkerReady() else {
-            accountsError = workerFailureText
-            accounts = []
+            if !silent || accounts.isEmpty {
+                accountsError = workerFailureText
+                accounts = []
+            }
             lastAccountsRefresh = Date()
             return
         }
@@ -826,8 +849,10 @@ final class ConsoleStore: ObservableObject {
             accounts = rows.compactMap(ConsoleAccount.init(json:))
             accountsError = nil
         } catch {
-            accounts = []
-            accountsError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            if !silent || accounts.isEmpty {
+                accounts = []
+                accountsError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            }
         }
         lastAccountsRefresh = Date()
         // 账号增删会改变"哪些账号可以切"，顺手刷新客户端状态（只读，本地文件 + pgrep）。

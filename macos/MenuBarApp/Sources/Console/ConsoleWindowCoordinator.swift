@@ -104,6 +104,14 @@ final class ConsoleWindowCoordinator: NSObject, NSWindowDelegate {
             .store(in: &cancellables)
     }
 
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard let activeWindow = notification.object as? NSWindow, activeWindow === window else { return }
+        // 从浏览器/Magpie 重新授权切回主控制台时，若账号快照已过冷却时间，自动只读重读一次。
+        Task { [weak store] in
+            await store?.refreshAccountsIfStale()
+        }
+    }
+
     func windowWillClose(_ notification: Notification) {
         guard let closingWindow = notification.object as? NSWindow, closingWindow === window else { return }
         closingWindow.delegate = nil

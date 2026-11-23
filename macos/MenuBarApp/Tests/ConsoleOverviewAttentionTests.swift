@@ -113,4 +113,45 @@ final class ConsoleOverviewAttentionTests: XCTestCase {
         XCTAssertFalse(summary.statusUnknown)
         XCTAssertEqual(summary.headline, "一切正常")
     }
+
+    /// 账号列表刷新策略：冷启动 / 重开窗口会补刷过期快照；切回窗口 / 切页不会抢跑冷启动，且满 10 分钟才自动静默刷。
+    func testAccountsRefreshPolicyRespectsColdStartAndTTL() {
+        let base = Date(timeIntervalSince1970: 1_795_400_000)
+
+        XCTAssertEqual(ConsoleAccountsRefreshPolicy.defaultTTL, 600)
+
+        // 首次挂载：没有历史快照时必刷；加载中不重复。
+        XCTAssertTrue(ConsoleAccountsRefreshPolicy.shouldRefreshOnLoad(lastRefresh: nil, loading: false, now: base))
+        XCTAssertFalse(ConsoleAccountsRefreshPolicy.shouldRefreshOnLoad(lastRefresh: nil, loading: true, now: base))
+
+        // 重开窗口：未满 10 分钟不刷，满 10 分钟自动重读。
+        XCTAssertFalse(ConsoleAccountsRefreshPolicy.shouldRefreshOnLoad(
+            lastRefresh: base,
+            loading: false,
+            now: base.addingTimeInterval(599.9)
+        ))
+        XCTAssertTrue(ConsoleAccountsRefreshPolicy.shouldRefreshOnLoad(
+            lastRefresh: base,
+            loading: false,
+            now: base.addingTimeInterval(600.0)
+        ))
+
+        // 切回窗口 / 切页：冷启动未完成（lastRefresh == nil）时不抢跑；已加载后满 10 分钟才静默刷新。
+        XCTAssertFalse(ConsoleAccountsRefreshPolicy.shouldRefreshOnRevisit(lastRefresh: nil, loading: false, now: base))
+        XCTAssertFalse(ConsoleAccountsRefreshPolicy.shouldRefreshOnRevisit(
+            lastRefresh: base,
+            loading: true,
+            now: base.addingTimeInterval(900)
+        ))
+        XCTAssertFalse(ConsoleAccountsRefreshPolicy.shouldRefreshOnRevisit(
+            lastRefresh: base,
+            loading: false,
+            now: base.addingTimeInterval(599.9)
+        ))
+        XCTAssertTrue(ConsoleAccountsRefreshPolicy.shouldRefreshOnRevisit(
+            lastRefresh: base,
+            loading: false,
+            now: base.addingTimeInterval(600.0)
+        ))
+    }
 }
