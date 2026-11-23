@@ -258,9 +258,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult
             let record = app
                 .with_db(|db| db.get_account(&id))?
                 .ok_or_else(|| RpcError::not_found(format!("账号不存在：{id}")))?;
-            let mut value = json!(record);
-            value["authorizations"] = json!(crate::auth::broker::describe(app, &id)?);
-            Ok(value)
+            account_value(app, record)
         }
 
         "accounts.upsert" => {
@@ -1565,11 +1563,23 @@ fn with_authorizations(
 ) -> RpcResult<Vec<Value>> {
     let mut out = Vec::with_capacity(accounts.len());
     for account in accounts {
-        let mut value = json!(account);
-        value["authorizations"] = json!(crate::auth::broker::describe(app, &account.id)?);
-        out.push(value);
+        out.push(account_value(app, account)?);
     }
     Ok(out)
+}
+
+/// 账号的对外视图（列表与详情共用一条路径）。
+///
+/// 借用授权的真实到期时间在 Magpie 文件里，库里那列是导入时的快照。这里补一次
+/// 只读修正，否则界面的 `isTokenExpired` 会把一份可用授权一直显示成「已过期」。
+/// **只改返回值，不写库**；读不到 / 关联对不上时保留库里那份。
+fn account_value(app: &App, mut record: crate::storage::AccountRecord) -> RpcResult<Value> {
+    if let Some(expiry) = crate::auth::service::display_expiry(app, &record) {
+        record.token_expires_at = Some(expiry);
+    }
+    let mut value = json!(record);
+    value["authorizations"] = json!(crate::auth::broker::describe(app, &record.id)?);
+    Ok(value)
 }
 
 /// `health` 里的授权汇总：按 kind × status 计数，不含账号与令牌。
@@ -3152,15 +3162,40 @@ mod tests {
         (Arc::new(App::with_secure(paths, store)), dir)
     }
 
+    /// 「有效令牌」夹具的有效期：从现在起 30 天。
+    ///
+    /// 不写死绝对日期。写死的夹具到点就变成"过期令牌"：导入被判 `token_expired`，
+    /// 镜像兜底换选另一份授权，整组用例在某个日期之后莫名变红（这种炸弹在
+    /// 2.14.1 里已经排掉两个了）。断言也不要自己写日期 —— 用 `fixture_expiry()`
+    /// 从**同一份夹具**推导。
+    const FIXTURE_VALIDITY_DAYS: i64 = 30;
+
+    fn fixture_expiry_ms() -> i64 {
+        ((magpie::now_ms() / 1000) + FIXTURE_VALIDITY_DAYS * 86_400) * 1000
+    }
+
+    /// 「Magpie 后来换发的新令牌」：比夹具再晚 7 天。同样不写日期。
+    fn refreshed_expiry_ms() -> i64 {
+        ((magpie::now_ms() / 1000) + (FIXTURE_VALIDITY_DAYS + 7) * 86_400) * 1000
+    }
+
+    /// 夹具里那个到期时间对应的 RFC3339 —— 断言的期望值由它推导。
+    fn fixture_expiry(login: &magpie::MagpieLogin) -> String {
+        crate::providers::workbuddy_auth::ms_to_rfc3339(
+            login.expires_at_ms.expect("fixture 必须带到期时间"),
+        )
+        .expect("rfc3339")
+    }
+
     fn payload(uid: &str, access: &str, refresh: Option<&str>) -> TokenPayload {
         TokenPayload {
             access_token: access.to_string(),
             refresh_token: refresh.map(str::to_string),
             domain: "www.workbuddy.cn".to_string(),
-            // 远期时间：这份夹具代表"刚登录拿到的新令牌"。写死某个具体日期会变成
-            // 定时炸弹——到点之后 `is_usable()` 判过期，镜像兜底换选另一份授权，
+            // 相对时间：这份夹具代表"刚登录拿到的新令牌"。写死日期会变成定时
+            // 炸弹——到点之后 `is_usable()` 判过期，镜像兜底换选另一份授权，
             // 断言就会莫名其妙地红。
-            expires_at_ms: Some(1_900_000_000_000), // 2030-03-17T21:46:40Z
+            expires_at_ms: Some(fixture_expiry_ms()),
             profile: Profile {
                 uid: uid.to_string(),
                 nickname: Some("测试账号".to_string()),
@@ -3177,7 +3212,7 @@ mod tests {
             nickname: Some("借来的".to_string()),
             domain: "www.workbuddy.cn".to_string(),
             access_token: access.to_string(),
-            expires_at_ms: Some(1_795_525_945_623),
+            expires_at_ms: Some(fixture_expiry_ms()),
         }
     }
 
@@ -3389,7 +3424,7 @@ mod tests {
             nickname: None,
             domain: String::new(),
             access_token: access.to_string(),
-            expires_at_ms: Some(1_795_525_945_623),
+            expires_at_ms: Some(fixture_expiry_ms()),
         }
     }
 
@@ -4409,25 +4444,25 @@ mod tests {
     fn mirror_takes_magpie_expiry_from_the_file() {
         let (app, _dir) = test_app(SecureStore::memory());
         let uid = "6f1c2d94-aaaa-5555-6666-777788889999";
-        import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
+        let login = magpie_login(uid, "borrowed");
+        let snapshot = fixture_expiry(&login);
+        import_logins(&app, vec![login], &[]).expect("import");
         let acc = account(&app, uid);
         assert_eq!(
             acc.token_expires_at.as_deref(),
-            Some("2026-11-24T13:12:25Z"),
+            Some(snapshot.as_str()),
             "导入时先落 Magpie 快照"
         );
 
         // Magpie 换发新令牌：文件里的到期时间往后推。
         let mut fresh = magpie_login(uid, "borrowed");
-        fresh.expires_at_ms = Some(1_797_773_834_889); // 2026-12-20T13:37:14Z
+        fresh.expires_at_ms = Some(refreshed_expiry_ms());
+        let want = fixture_expiry(&fresh);
         magpie::test_set_logins(Some(vec![fresh]));
         service::sync_mirror(&app, &acc.id).expect("mirror");
 
         let acc = account(&app, uid);
-        assert_eq!(
-            acc.token_expires_at.as_deref(),
-            Some("2026-12-20T13:37:14Z")
-        );
+        assert_eq!(acc.token_expires_at.as_deref(), Some(want.as_str()));
         assert_eq!(acc.auth_status, "valid", "换个到期时间不是状态变化");
         assert_eq!(acc.auth_source, "magpie", "首选来源不变");
         magpie::test_reset();
@@ -4471,7 +4506,8 @@ mod tests {
             .expect("own row");
 
         let mut fresh = magpie_login(uid, "borrowed");
-        fresh.expires_at_ms = Some(1_797_773_834_889);
+        fresh.expires_at_ms = Some(refreshed_expiry_ms());
+        let want = fixture_expiry(&fresh);
         magpie::test_set_logins(Some(vec![fresh]));
         service::sync_mirror(&app, &acc.id).expect("mirror");
 
@@ -4484,7 +4520,7 @@ mod tests {
         assert_eq!(own_before.access_ref, own_after.access_ref);
         assert_eq!(
             account(&app, uid).token_expires_at.as_deref(),
-            Some("2026-12-20T13:37:14Z")
+            Some(want.as_str())
         );
         magpie::test_reset();
     }
@@ -4511,15 +4547,13 @@ mod tests {
 
         // 用户重新授权，Magpie 换发新令牌：刷新镜像即可恢复，不需要再登录一次。
         let mut fresh = magpie_login(uid, "borrowed");
-        fresh.expires_at_ms = Some(1_797_773_834_889);
+        fresh.expires_at_ms = Some(refreshed_expiry_ms());
+        let want = fixture_expiry(&fresh);
         magpie::test_set_logins(Some(vec![fresh]));
         service::sync_mirror(&app, &acc.id).expect("mirror");
 
         let acc = account(&app, uid);
-        assert_eq!(
-            acc.token_expires_at.as_deref(),
-            Some("2026-12-20T13:37:14Z")
-        );
+        assert_eq!(acc.token_expires_at.as_deref(), Some(want.as_str()));
         assert_eq!(acc.auth_status, "valid");
         let rows = app
             .with_db(|db| db.list_authorizations(&acc.id))
@@ -4532,6 +4566,176 @@ mod tests {
             );
             assert!(row.last_error.is_none(), "{}", row.kind);
         }
+        magpie::test_reset();
+    }
+
+    // -----------------------------------------------------------------------
+    // 账号页的**实际读取路径**：`accounts.list` / `accounts.get`
+    //
+    // 界面上的「已过期」判的是 `tokenExpiresAt` 这一列（ConsoleAccount.isTokenExpired）。
+    // 只修 `sync_mirror` 不够 —— 那要等下一次导入或刷新才生效，用户重开页面看到的
+    // 还是旧快照。读取路径必须自己就能给出新值，而且**不许写库**。
+    // -----------------------------------------------------------------------
+
+    /// 库里留着旧快照、Magpie 文件已换新令牌：不导入、不重新登录、不手动刷新镜像，
+    /// 账号页的两条 RPC 都要返回新到期时间。
+    #[tokio::test]
+    async fn accounts_rpcs_report_the_live_magpie_expiry_without_import_or_relogin() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-eeee-5555-6666-777788889999";
+
+        import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
+        persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
+        let acc = account(&app, uid);
+        assert_eq!(acc.auth_source, "magpie", "默认首选借用授权");
+
+        // 真实库里的样子：镜像和授权行都还是**导入时的旧快照**。
+        const STALE: &str = "2026-11-22T13:42:14Z";
+        let sql = format!(
+            "UPDATE accounts SET token_expires_at = '{STALE}' WHERE id = '{id}';
+             UPDATE account_authorizations SET token_expires_at = '{STALE}'
+              WHERE account_id = '{id}' AND kind = 'magpie';",
+            id = acc.id
+        );
+        app.with_db(|db| db.exec_raw(&sql)).expect("mark stale");
+
+        // Magpie 自己换发新令牌：**只改文件**。
+        let mut fresh = magpie_login(uid, "borrowed");
+        fresh.expires_at_ms = Some(refreshed_expiry_ms());
+        let want = fixture_expiry(&fresh);
+        magpie::test_set_logins(Some(vec![fresh]));
+
+        let list = dispatch(&app, "accounts.list", &json!({}))
+            .await
+            .expect("list");
+        let row = list["accounts"]
+            .as_array()
+            .expect("accounts")
+            .iter()
+            .find(|row| row["id"] == json!(acc.id))
+            .expect("account in list");
+        assert_eq!(
+            row["tokenExpiresAt"].as_str(),
+            Some(want.as_str()),
+            "列表卡片判过期看的就是这一列"
+        );
+
+        let one = dispatch(&app, "accounts.get", &json!({ "id": acc.id }))
+            .await
+            .expect("get");
+        assert_eq!(one["tokenExpiresAt"].as_str(), Some(want.as_str()));
+
+        let magpie_row = one["authorizations"]
+            .as_array()
+            .expect("authorizations")
+            .iter()
+            .find(|row| row["kind"] == json!("magpie"))
+            .expect("magpie row");
+        assert_eq!(
+            magpie_row["tokenExpiresAt"].as_str(),
+            Some(want.as_str()),
+            "同一份授权不能同时显示两个日期"
+        );
+
+        // 只读：展示路径没有把新值写回库里那份快照。
+        assert_eq!(
+            account(&app, uid).token_expires_at.as_deref(),
+            Some(STALE),
+            "为显示日期而写库是另一回事，这里明确不做"
+        );
+        magpie::test_reset();
+    }
+
+    /// 边界 1：Magpie 文件读不到 → 退回库里那份，不把「不知道」写成过期或空。
+    #[tokio::test]
+    async fn accounts_rpcs_fall_back_when_the_magpie_file_is_unreadable() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-ffff-5555-6666-777788889999";
+        let login = magpie_login(uid, "borrowed");
+        let snapshot = fixture_expiry(&login);
+        import_logins(&app, vec![login], &[]).expect("import");
+        let acc = account(&app, uid);
+
+        magpie::test_set_unreadable();
+        let one = dispatch(&app, "accounts.get", &json!({ "id": acc.id }))
+            .await
+            .expect("get");
+        assert_eq!(
+            one["tokenExpiresAt"].as_str(),
+            Some(snapshot.as_str()),
+            "读不到文件就保留旧值"
+        );
+        magpie::test_reset();
+    }
+
+    /// 边界 2：来源键 / 平台 / UID 任何一项对不上，都**不采用**这条到期时间。
+    #[tokio::test]
+    async fn accounts_rpcs_ignore_a_link_that_belongs_to_another_account() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-1111-5555-6666-777788889999";
+        let login = magpie_login(uid, "borrowed");
+        let snapshot = fixture_expiry(&login);
+        import_logins(&app, vec![login], &[]).expect("import");
+        let acc = account(&app, uid);
+
+        // 同一个来源键，UID 却是别人的：这是另一份凭据，不能拿来改这个账号的显示。
+        let mut foreign = magpie_login_with("workbuddy", "someone-else", "borrowed");
+        foreign.expires_at_ms = Some(refreshed_expiry_ms());
+        magpie::test_set_logins(Some(vec![foreign]));
+
+        let one = dispatch(&app, "accounts.get", &json!({ "id": acc.id }))
+            .await
+            .expect("get");
+        assert_eq!(
+            one["tokenExpiresAt"].as_str(),
+            Some(snapshot.as_str()),
+            "对不上的关联必须忽略，保留库里那份"
+        );
+        magpie::test_reset();
+    }
+
+    /// 边界 3：当前来源是自有授权时，Magpie 文件里换了什么都与这个账号的显示无关。
+    #[tokio::test]
+    async fn accounts_rpcs_never_let_magpie_override_an_own_source() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-2222-7777-6666-777788889999";
+        import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
+        persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
+        broker::set_preferred_source(&app, "own").expect("prefer own");
+        let acc = account(&app, uid);
+        service::sync_mirror(&app, &acc.id).expect("mirror");
+        let acc = account(&app, uid);
+        assert_eq!(acc.auth_source, "own");
+
+        let own_expiry = app
+            .with_db(|db| db.find_authorization(&acc.id, "own"))
+            .expect("query")
+            .expect("own row")
+            .token_expires_at
+            .expect("own expiry");
+
+        let mut fresh = magpie_login(uid, "borrowed");
+        fresh.expires_at_ms = Some(refreshed_expiry_ms());
+        magpie::test_set_logins(Some(vec![fresh]));
+
+        let one = dispatch(&app, "accounts.get", &json!({ "id": acc.id }))
+            .await
+            .expect("get");
+        assert_eq!(
+            one["tokenExpiresAt"].as_str(),
+            Some(own_expiry.as_str()),
+            "来源是自有授权，不能被 Magpie 文件覆盖"
+        );
         magpie::test_reset();
     }
 
