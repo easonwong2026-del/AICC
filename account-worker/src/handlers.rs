@@ -1561,9 +1561,10 @@ fn with_authorizations(
     app: &App,
     accounts: Vec<crate::storage::AccountRecord>,
 ) -> RpcResult<Vec<Value>> {
+    let magpie_cache = crate::auth::magpie_link::MagpieLoginsCache::new();
     let mut out = Vec::with_capacity(accounts.len());
     for account in accounts {
-        out.push(account_value(app, account)?);
+        out.push(account_value_with_cache(app, account, &magpie_cache)?);
     }
     Ok(out)
 }
@@ -1573,12 +1574,27 @@ fn with_authorizations(
 /// 借用授权的真实到期时间在 Magpie 文件里，库里那列是导入时的快照。这里补一次
 /// 只读修正，否则界面的 `isTokenExpired` 会把一份可用授权一直显示成「已过期」。
 /// **只改返回值，不写库**；读不到 / 关联对不上时保留库里那份。
-fn account_value(app: &App, mut record: crate::storage::AccountRecord) -> RpcResult<Value> {
-    if let Some(expiry) = crate::auth::service::display_expiry(app, &record) {
+fn account_value(app: &App, record: crate::storage::AccountRecord) -> RpcResult<Value> {
+    let magpie_cache = crate::auth::magpie_link::MagpieLoginsCache::new();
+    account_value_with_cache(app, record, &magpie_cache)
+}
+
+fn account_value_with_cache(
+    app: &App,
+    mut record: crate::storage::AccountRecord,
+    magpie_cache: &crate::auth::magpie_link::MagpieLoginsCache,
+) -> RpcResult<Value> {
+    if let Some(expiry) =
+        crate::auth::service::display_expiry_with_cache(app, &record, magpie_cache)
+    {
         record.token_expires_at = Some(expiry);
     }
     let mut value = json!(record);
-    value["authorizations"] = json!(crate::auth::broker::describe(app, &record.id)?);
+    value["authorizations"] = json!(crate::auth::broker::describe_with_cache(
+        app,
+        &record.id,
+        magpie_cache
+    )?);
     Ok(value)
 }
 

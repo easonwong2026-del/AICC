@@ -894,16 +894,20 @@ pub fn sync_mirror(app: &App, account_id: &str) -> RpcResult<MirrorReport> {
     Ok(MirrorReport { error })
 }
 
-/// 展示用的到期时间：当前镜像来源是**借用授权**时，现读 Magpie 文件。
+/// 展示用的到期时间：当前镜像来源是**借用授权**时，从单次 RPC 内的 Magpie 快照取到期时间。
 ///
 /// 只修显示、不写库：`accounts.list` / `accounts.get` 返回的 `tokenExpiresAt` 就是
 /// 界面判「已过期」的那一列（`ConsoleAccount.isTokenExpired`）。只靠 `sync_mirror`
 /// 不够 —— 那要等下一次导入或刷新才生效，用户重开页面看到的还是旧快照。
 ///
-/// 三条边界都在 `live_expiry` 里：文件读不到、来源键/平台/UID 对不上，一律 `None`，
+/// 三条边界都在 `live_expiry_in` 里：文件读不到、来源键/平台/UID 对不上，一律 `None`，
 /// 调用方保留库里那份。当前来源是自有授权时这里直接返回 `None`，Magpie 文件换了
 /// 什么都与这个账号无关。**不碰令牌、不改首选来源、不改授权优先级。**
-pub(crate) fn display_expiry(app: &App, account: &AccountRecord) -> Option<String> {
+pub(crate) fn display_expiry_with_cache(
+    app: &App,
+    account: &AccountRecord,
+    magpie_cache: &crate::auth::magpie_link::MagpieLoginsCache,
+) -> Option<String> {
     if account.auth_source != ids::KIND_MAGPIE {
         return None;
     }
@@ -916,7 +920,8 @@ pub(crate) fn display_expiry(app: &App, account: &AccountRecord) -> Option<Strin
     if row.kind != ids::KIND_MAGPIE {
         return None;
     }
-    crate::auth::magpie_link::live_expiry(account, row)
+    let logins = magpie_cache.get()?;
+    crate::auth::magpie_link::live_expiry_in(logins, account, row)
 }
 
 /// 把镜像所选的那份写进旧别名键（PR #65 的二进制读这里）。
@@ -1312,12 +1317,17 @@ pub fn purge_keys(app: &App, keys: &[String]) -> Vec<String> {
 
 /// 建账号时如果已经存在授权行（例如回填过），把行也带上：返回给 RPC 的账号视图。
 pub fn account_view(app: &App, account: &AccountRecord) -> RpcResult<Value> {
+    let magpie_cache = crate::auth::magpie_link::MagpieLoginsCache::new();
     let mut view = account.clone();
-    if let Some(expiry) = display_expiry(app, account) {
+    if let Some(expiry) = display_expiry_with_cache(app, account, &magpie_cache) {
         view.token_expires_at = Some(expiry);
     }
     let mut value = json!(view);
-    value["authorizations"] = json!(broker::describe(app, &account.id)?);
+    value["authorizations"] = json!(broker::describe_with_cache(
+        app,
+        &account.id,
+        &magpie_cache
+    )?);
     value["authorizationSummary"] = broker::summary(app, account);
     Ok(value)
 }
