@@ -305,7 +305,18 @@ fn unavailable_reason(err: &CredentialError, row: &crate::storage::Authorization
 }
 
 /// 界面 / `health` 用的授权快照。**不含令牌**，只给状态与指纹级信息。
+#[cfg(test)]
 pub fn describe(app: &App, account_id: &str) -> RpcResult<Vec<Value>> {
+    let cache = super::magpie_link::MagpieLoginsCache::new();
+    describe_with_cache(app, account_id, &cache)
+}
+
+/// 复用单次 RPC 内 Magpie 快照缓存的 `describe`（避免 `accounts.list` 重复读盘）。
+pub(crate) fn describe_with_cache(
+    app: &App,
+    account_id: &str,
+    magpie_cache: &super::magpie_link::MagpieLoginsCache,
+) -> RpcResult<Vec<Value>> {
     let rows = app.with_db(|db| db.list_authorizations(account_id))?;
     let account = app.with_db(|db| db.get_account(account_id))?;
     Ok(rows
@@ -315,13 +326,17 @@ pub fn describe(app: &App, account_id: &str) -> RpcResult<Vec<Value>> {
             // 但文件里的令牌已经刷新过，界面必须显示"可用"（否则用户会以为要重新登录）。
             let effective = account
                 .as_ref()
-                .and_then(|account| effective_dynamic_status(account, row));
+                .and_then(|account| effective_dynamic_status(account, row, magpie_cache));
             // 借用授权的到期时间同样以文件为准：库里那份是导入时的快照，
             // 和账号镜像一起显示两个日期比只修一个更让人困惑。
             let live_expiry = account
                 .as_ref()
-                .filter(|_| row.kind == ids::KIND_MAGPIE)
-                .and_then(|account| super::magpie_link::live_expiry(account, row));
+                .filter(|_| row.kind == ids::KIND_MAGPIE && row.source_key.is_some())
+                .and_then(|account| {
+                    magpie_cache
+                        .get()
+                        .and_then(|logins| super::magpie_link::live_expiry_in(logins, account, row))
+                });
             json!({
                 "id": row.id,
                 "kind": row.kind,
@@ -343,23 +358,39 @@ pub fn describe(app: &App, account_id: &str) -> RpcResult<Vec<Value>> {
 fn effective_dynamic_status(
     account: &AccountRecord,
     row: &crate::storage::AuthorizationRecord,
+    magpie_cache: &super::magpie_link::MagpieLoginsCache,
 ) -> Option<&'static str> {
     if row.storage_kind() != crate::storage::authz::STORAGE_MAGPIE {
         return None;
     }
     let source_key = row.source_key.as_deref()?;
-    Some(match super::magpie_link::access_for(account, source_key) {
-        Ok(_) => "valid",
-        Err(err) => match err.kind {
-            CredentialErrorKind::Conflict => "mismatch",
-            CredentialErrorKind::Unavailable => "unavailable",
-            _ => "expired",
+    let Some(logins) = magpie_cache.get() else {
+        return Some("unavailable");
+    };
+    Some(
+        match super::magpie_link::access_in(logins, account, source_key) {
+            Ok(_) => "valid",
+            Err(err) => match err.kind {
+                CredentialErrorKind::Conflict => "mismatch",
+                CredentialErrorKind::Unavailable => "unavailable",
+                _ => "expired",
+            },
         },
-    })
+    )
 }
 
 /// 账号层面的授权摘要：两份是否存在、当前会用哪一份。
 pub fn summary(app: &App, account: &AccountRecord) -> Value {
+    let cache = super::magpie_link::MagpieLoginsCache::new();
+    summary_with_cache(app, account, &cache)
+}
+
+/// 复用单次 RPC 内 Magpie 快照缓存的 `summary`（不改 `resolve` 优先级与读盘语义）。
+pub(crate) fn summary_with_cache(
+    app: &App,
+    account: &AccountRecord,
+    magpie_cache: &super::magpie_link::MagpieLoginsCache,
+) -> Value {
     let rows = app
         .with_db(|db| db.list_authorizations(&account.id))
         .unwrap_or_default();
@@ -383,7 +414,7 @@ pub fn summary(app: &App, account: &AccountRecord) -> Value {
         "hasOwn": has(ids::KIND_OWN),
         "hasMagpie": has(ids::KIND_MAGPIE),
         "selected": selected,
-        "authorizations": describe(app, &account.id).unwrap_or_default(),
+        "authorizations": describe_with_cache(app, &account.id, magpie_cache).unwrap_or_default(),
     })
 }
 

@@ -176,7 +176,7 @@ struct ConsoleOverviewView: View {
         case .loading, .clear:
             break
         }
-        for account in store.accounts where account.displayAuthTone == .error {
+        for account in store.accounts where account.displayAuthTone == .error || (account.isBorrowed && account.magpieAuthorization?.effectiveStatus == "unavailable") {
             items.append(PendingItem(
                 id: "wb-\(account.id)",
                 title: account.nickname,
@@ -207,7 +207,13 @@ struct ConsoleOverviewView: View {
             ))
         }
         if let error = store.accountsError {
-            items.append(PendingItem(id: "accounts-error", title: "账号更新失败", detail: error, selection: nil, filter: .all, destination: .accounts))
+            let detail: String
+            if let lastSuccess = store.lastAccountsRefresh {
+                detail = "当前保留旧快照（上次成功 \(ConsoleFormat.shortTime(lastSuccess))，数据已过期）· \(error)"
+            } else {
+                detail = error
+            }
+            items.append(PendingItem(id: "accounts-error", title: "账号更新失败", detail: detail, selection: nil, filter: .all, destination: .accounts))
         }
         if let error = store.qoderError {
             items.append(PendingItem(id: "qoder-error", title: "Qoder 更新失败", detail: error, selection: nil, filter: .all, destination: .accounts))

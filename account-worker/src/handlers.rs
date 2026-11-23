@@ -1561,9 +1561,10 @@ fn with_authorizations(
     app: &App,
     accounts: Vec<crate::storage::AccountRecord>,
 ) -> RpcResult<Vec<Value>> {
+    let magpie_cache = crate::auth::magpie_link::MagpieLoginsCache::new();
     let mut out = Vec::with_capacity(accounts.len());
     for account in accounts {
-        out.push(account_value(app, account)?);
+        out.push(account_value_with_cache(app, account, &magpie_cache)?);
     }
     Ok(out)
 }
@@ -1573,12 +1574,27 @@ fn with_authorizations(
 /// 借用授权的真实到期时间在 Magpie 文件里，库里那列是导入时的快照。这里补一次
 /// 只读修正，否则界面的 `isTokenExpired` 会把一份可用授权一直显示成「已过期」。
 /// **只改返回值，不写库**；读不到 / 关联对不上时保留库里那份。
-fn account_value(app: &App, mut record: crate::storage::AccountRecord) -> RpcResult<Value> {
-    if let Some(expiry) = crate::auth::service::display_expiry(app, &record) {
+fn account_value(app: &App, record: crate::storage::AccountRecord) -> RpcResult<Value> {
+    let magpie_cache = crate::auth::magpie_link::MagpieLoginsCache::new();
+    account_value_with_cache(app, record, &magpie_cache)
+}
+
+fn account_value_with_cache(
+    app: &App,
+    mut record: crate::storage::AccountRecord,
+    magpie_cache: &crate::auth::magpie_link::MagpieLoginsCache,
+) -> RpcResult<Value> {
+    if let Some(expiry) =
+        crate::auth::service::display_expiry_with_cache(app, &record, magpie_cache)
+    {
         record.token_expires_at = Some(expiry);
     }
     let mut value = json!(record);
-    value["authorizations"] = json!(crate::auth::broker::describe(app, &record.id)?);
+    value["authorizations"] = json!(crate::auth::broker::describe_with_cache(
+        app,
+        &record.id,
+        magpie_cache
+    )?);
     Ok(value)
 }
 
@@ -4735,6 +4751,354 @@ mod tests {
             one["tokenExpiresAt"].as_str(),
             Some(own_expiry.as_str()),
             "来源是自有授权，不能被 Magpie 文件覆盖"
+        );
+        magpie::test_reset();
+    }
+
+    /// 单次 `accounts.list` RPC 在多账号场景下只读一次 Magpie 文件，并准确区分：
+    /// 恢复有效（DB expired + 文件 valid）、文件已过期、UID 串号、纯自有账号。
+    #[tokio::test]
+    async fn accounts_list_reads_magpie_once_across_multiple_accounts_and_covers_dynamic_states() {
+        let (app, _dir) = test_app(SecureStore::memory());
+
+        let uid_recovered = "6f1c2d94-aa01-5555-6666-777788889999";
+        let uid_expired = "6f1c2d94-aa02-5555-6666-777788889999";
+        let uid_mismatch = "6f1c2d94-aa03-5555-6666-777788889999";
+        let uid_own = "6f1c2d94-aa04-5555-6666-777788889999";
+
+        let l1 = magpie_login_with("workbuddy#r1", uid_recovered, "tok-r1");
+        let l2 = magpie_login_with("workbuddy#r2", uid_expired, "tok-r2");
+        let l3 = magpie_login_with("workbuddy#r3", uid_mismatch, "tok-r3");
+        let l3_snapshot = fixture_expiry(&l3);
+        import_logins(&app, vec![l1, l2, l3], &[]).expect("import three");
+        persist_login(
+            &app,
+            &payload(uid_own, "own-only-access", Some("own-only-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("own login");
+
+        let acc_recovered = account(&app, uid_recovered);
+        let acc_expired = account(&app, uid_expired);
+        let acc_mismatch = account(&app, uid_mismatch);
+        let acc_own = account(&app, uid_own);
+
+        // 把 acc_recovered 的库快照标成过期，模拟旧导入快照。
+        const STALE: &str = "2020-09-13T12:26:40Z";
+        let sql = format!(
+            "UPDATE accounts SET auth_status = 'expired', token_expires_at = '{STALE}' WHERE id = '{id}';
+             UPDATE account_authorizations SET status = 'expired', token_expires_at = '{STALE}'
+              WHERE account_id = '{id}' AND kind = 'magpie';",
+            id = acc_recovered.id
+        );
+        app.with_db(|db| db.exec_raw(&sql)).expect("mark stale");
+
+        // 构造最新 Magpie 文件：r1 换新有效，r2 已过期，r3 串成别人的 UID。
+        let mut live_r1 = magpie_login_with("workbuddy#r1", uid_recovered, "tok-r1-fresh");
+        live_r1.expires_at_ms = Some(refreshed_expiry_ms());
+        let want_r1 = fixture_expiry(&live_r1);
+
+        let mut live_r2 = magpie_login_with("workbuddy#r2", uid_expired, "tok-r2-old");
+        live_r2.expires_at_ms = Some(1_600_000_000_000); // 2020-09-13T12:26:40Z
+        let want_r2 = fixture_expiry(&live_r2);
+
+        let mut live_r3 = magpie_login_with("workbuddy#r3", "foreign-uid-999", "tok-r3-foreign");
+        live_r3.expires_at_ms = Some(refreshed_expiry_ms());
+
+        magpie::test_set_logins(Some(vec![live_r1, live_r2, live_r3]));
+        magpie::test_reset_read_count();
+
+        let list = dispatch(&app, "accounts.list", &json!({}))
+            .await
+            .expect("list");
+        assert_eq!(
+            magpie::test_read_count(),
+            1,
+            "整次 accounts.list RPC 无论有多少借用账号，只允许读取一次 Magpie 文件"
+        );
+
+        let rows = list["accounts"].as_array().expect("accounts array");
+        let find_acc = |id: &str| {
+            rows.iter()
+                .find(|row| row["id"] == json!(id))
+                .expect("account present")
+        };
+        fn find_auth<'a>(acc_val: &'a Value, kind: &str) -> &'a Value {
+            acc_val["authorizations"]
+                .as_array()
+                .expect("authorizations")
+                .iter()
+                .find(|a| a["kind"] == json!(kind))
+                .expect("auth row")
+        }
+
+        // 1) 恢复有效：DB expired，文件 valid + 未来到期时间
+        let r1 = find_acc(&acc_recovered.id);
+        let r1_auth = find_auth(r1, "magpie");
+        assert_eq!(r1["tokenExpiresAt"].as_str(), Some(want_r1.as_str()));
+        assert_eq!(r1_auth["tokenExpiresAt"].as_str(), Some(want_r1.as_str()));
+        assert_eq!(r1_auth["effectiveStatus"].as_str(), Some("valid"));
+        assert_eq!(r1_auth["recoverable"], json!(true));
+
+        // 2) 文件已过期：上报真实过期时间 + effectiveStatus = expired
+        let r2 = find_acc(&acc_expired.id);
+        let r2_auth = find_auth(r2, "magpie");
+        assert_eq!(r2["tokenExpiresAt"].as_str(), Some(want_r2.as_str()));
+        assert_eq!(r2_auth["tokenExpiresAt"].as_str(), Some(want_r2.as_str()));
+        assert_eq!(r2_auth["effectiveStatus"].as_str(), Some("expired"));
+        assert_eq!(r2_auth["recoverable"], json!(false));
+
+        // 3) UID 串号：effectiveStatus = mismatch，绝不采信别人的到期时间
+        let r3 = find_acc(&acc_mismatch.id);
+        let r3_auth = find_auth(r3, "magpie");
+        assert_eq!(r3["tokenExpiresAt"].as_str(), Some(l3_snapshot.as_str()));
+        assert_eq!(
+            r3_auth["tokenExpiresAt"].as_str(),
+            Some(l3_snapshot.as_str())
+        );
+        assert_eq!(r3_auth["effectiveStatus"].as_str(), Some("mismatch"));
+
+        // 4) 纯自有账号：无动态状态且不受 Magpie 影响
+        let r4 = find_acc(&acc_own.id);
+        let r4_auth = find_auth(r4, "own");
+        assert!(r4_auth["effectiveStatus"].is_null());
+
+        // 保持纯只读：DB 里 acc_recovered 的旧快照一字未改
+        assert_eq!(
+            account(&app, uid_recovered).token_expires_at.as_deref(),
+            Some(STALE)
+        );
+        magpie::test_reset();
+    }
+
+    /// 文件不可读时，多账号 `accounts.list` 同样只尝试读一次（OnceCell 缓存 None），
+    /// 保留库快照并标注 `effectiveStatus = "unavailable"`。
+    #[tokio::test]
+    async fn accounts_list_unreadable_magpie_reads_once_and_preserves_snapshot() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let l1 = magpie_login_with("workbuddy#u1", "uid-u1", "tok-u1");
+        let l2 = magpie_login_with("workbuddy#u2", "uid-u2", "tok-u2");
+        let s1 = fixture_expiry(&l1);
+        let s2 = fixture_expiry(&l2);
+        import_logins(&app, vec![l1, l2], &[]).expect("import two");
+        let a1 = account(&app, "uid-u1");
+        let a2 = account(&app, "uid-u2");
+
+        magpie::test_set_unreadable();
+        magpie::test_reset_read_count();
+
+        let list = dispatch(&app, "accounts.list", &json!({}))
+            .await
+            .expect("list must succeed when magpie file is unreadable");
+        assert_eq!(
+            magpie::test_read_count(),
+            1,
+            "文件不可读时也只读一次，避免每账号重复失败 I/O"
+        );
+
+        let rows = list["accounts"].as_array().expect("accounts");
+        for (id, expected_expiry) in [(&a1.id, s1.as_str()), (&a2.id, s2.as_str())] {
+            let row = rows.iter().find(|r| r["id"] == json!(id)).expect("acc");
+            assert_eq!(row["tokenExpiresAt"].as_str(), Some(expected_expiry));
+            let auth = row["authorizations"]
+                .as_array()
+                .expect("auths")
+                .iter()
+                .find(|a| a["kind"] == json!("magpie"))
+                .expect("magpie auth");
+            assert_eq!(auth["effectiveStatus"].as_str(), Some("unavailable"));
+            assert_eq!(auth["tokenExpiresAt"].as_str(), Some(expected_expiry));
+        }
+        magpie::test_reset();
+    }
+
+    /// 只有自有授权的账号列表绝不触发 Magpie 读盘；同时拥有 own（当前生效）+ magpie 的账号，
+    /// 无论 Magpie 文件变成新令牌、串号还是不可读，自有授权展示与顶层到期时间都完全隔离。
+    #[tokio::test]
+    async fn own_auth_is_isolated_from_magpie_reads_and_mutations() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid_only_own = "6f1c2d94-bb01-5555-6666-777788889999";
+        persist_login(
+            &app,
+            &payload(uid_only_own, "own-a", Some("own-r")),
+            WbVariant::Cn,
+        )
+        .expect("own login");
+
+        // 只有 own 账号时，哪怕 Magpie 不可读也一次都不碰盘。
+        magpie::test_set_unreadable();
+        magpie::test_reset_read_count();
+        let list = dispatch(&app, "accounts.list", &json!({}))
+            .await
+            .expect("list own only");
+        assert_eq!(magpie::test_read_count(), 0, "无 Magpie 授权时不得读盘");
+        assert_eq!(list["accounts"].as_array().unwrap().len(), 1);
+        magpie::test_reset();
+
+        // 同时拥有 own（首选）与 magpie（次选）：
+        let uid_dual = "6f1c2d94-bb02-5555-6666-777788889999";
+        let m = magpie_login_with("workbuddy#dual", uid_dual, "tok-dual");
+        let m_snapshot = fixture_expiry(&m);
+        import_logins(&app, vec![m], &[]).expect("import dual");
+        persist_login(
+            &app,
+            &payload(uid_dual, "dual-own-access", Some("dual-own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("dual own login");
+        broker::set_preferred_source(&app, "own").expect("prefer own");
+        let acc = account(&app, uid_dual);
+        service::sync_mirror(&app, &acc.id).expect("sync mirror");
+        let acc = account(&app, uid_dual);
+        assert_eq!(acc.auth_source, "own");
+        let own_expiry = app
+            .with_db(|db| db.find_authorization(&acc.id, "own"))
+            .expect("query")
+            .expect("own row")
+            .token_expires_at
+            .expect("own expiry");
+
+        // 场景 A：Magpie 串号
+        let mut foreign = magpie_login_with("workbuddy#dual", "other-uid", "tok-other");
+        foreign.expires_at_ms = Some(refreshed_expiry_ms());
+        magpie::test_set_logins(Some(vec![foreign]));
+        let view_mismatch = dispatch(&app, "accounts.get", &json!({ "id": acc.id }))
+            .await
+            .expect("get mismatch");
+        assert_eq!(
+            view_mismatch["tokenExpiresAt"].as_str(),
+            Some(own_expiry.as_str())
+        );
+        let auths = view_mismatch["authorizations"].as_array().unwrap();
+        let own_row = auths.iter().find(|a| a["kind"] == json!("own")).unwrap();
+        let mag_row = auths.iter().find(|a| a["kind"] == json!("magpie")).unwrap();
+        assert!(own_row["effectiveStatus"].is_null());
+        assert_eq!(
+            own_row["tokenExpiresAt"].as_str(),
+            Some(own_expiry.as_str())
+        );
+        assert_eq!(mag_row["effectiveStatus"].as_str(), Some("mismatch"));
+        assert_eq!(
+            mag_row["tokenExpiresAt"].as_str(),
+            Some(m_snapshot.as_str())
+        );
+
+        // 场景 B：Magpie 文件不可读
+        magpie::test_set_unreadable();
+        let view_unreadable = dispatch(&app, "accounts.get", &json!({ "id": acc.id }))
+            .await
+            .expect("get unreadable");
+        assert_eq!(
+            view_unreadable["tokenExpiresAt"].as_str(),
+            Some(own_expiry.as_str())
+        );
+        let mag_row = view_unreadable["authorizations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == json!("magpie"))
+            .unwrap();
+        assert_eq!(mag_row["effectiveStatus"].as_str(), Some("unavailable"));
+        magpie::test_reset();
+    }
+
+    /// 跨站点平台不匹配（CN vs International）与来源键缺失：
+    /// 绝不采信错误站点的到期时间，并分别报告 `mismatch` / `expired`。
+    #[tokio::test]
+    async fn accounts_get_distinguishes_platform_mismatch_and_missing_source_key() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-cc01-5555-6666-777788889999";
+        let ai_login = magpie_login_with("workbuddy-ai#intl", uid, "tok-intl");
+        let snapshot = fixture_expiry(&ai_login);
+        import_logins(&app, vec![ai_login], &[]).expect("import ai");
+        let acc = account(&app, uid);
+        assert_eq!(acc.provider, "workbuddy_ai");
+
+        // 场景 A：文件里把同一条记录换成了国内版键，来源键缺失 -> effectiveStatus = expired，保留快照
+        let mut cn_login = magpie_login_with("workbuddy#cn", uid, "tok-cn");
+        cn_login.expires_at_ms = Some(refreshed_expiry_ms());
+        magpie::test_set_logins(Some(vec![cn_login]));
+        let missing = dispatch(&app, "accounts.get", &json!({ "id": acc.id }))
+            .await
+            .expect("get missing");
+        assert_eq!(missing["tokenExpiresAt"].as_str(), Some(snapshot.as_str()));
+        let mag = missing["authorizations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == json!("magpie"))
+            .unwrap();
+        assert_eq!(mag["effectiveStatus"].as_str(), Some("expired"));
+
+        // 场景 B：来源键存在，但数据库 provider 与 Magpie provider 跨站不匹配 -> effectiveStatus = mismatch
+        app.with_db(|db| {
+            db.exec_raw(&format!(
+                "UPDATE accounts SET provider = 'workbuddy' WHERE id = '{}';",
+                acc.id
+            ))
+        })
+        .expect("flip provider to cn");
+        let mut intl_fresh = magpie_login_with("workbuddy-ai#intl", uid, "tok-intl-fresh");
+        intl_fresh.expires_at_ms = Some(refreshed_expiry_ms());
+        magpie::test_set_logins(Some(vec![intl_fresh]));
+        let mismatch = dispatch(&app, "accounts.get", &json!({ "id": acc.id }))
+            .await
+            .expect("get platform mismatch");
+        assert_eq!(mismatch["tokenExpiresAt"].as_str(), Some(snapshot.as_str()));
+        let mag = mismatch["authorizations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == json!("magpie"))
+            .unwrap();
+        assert_eq!(mag["effectiveStatus"].as_str(), Some("mismatch"));
+        magpie::test_reset();
+    }
+
+    /// 旧式无 `source_key` 的 magpie 行不应触发 Magpie 读盘，且 `service::account_view`
+    /// 内部的 `describe` 应复用同一份 `MagpieLoginsCache`（不额外多读一次）。
+    #[tokio::test]
+    async fn legacy_magpie_without_source_key_skips_read_and_account_view_reuses_cache() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid_legacy = "6f1c2d94-dd01-5555-6666-777788889999";
+        let login = magpie_login_with("workbuddy#legacy", uid_legacy, "tok-legacy");
+        import_logins(&app, vec![login], &[]).expect("import");
+        let acc = account(&app, uid_legacy);
+        app.with_db(|db| {
+            db.exec_raw(&format!(
+                "UPDATE account_authorizations
+                    SET access_ref = 'keychain:legacy-key', source_key = NULL
+                  WHERE account_id = '{}' AND kind = 'magpie';",
+                acc.id
+            ))
+        })
+        .expect("convert to legacy keychain magpie");
+
+        magpie::test_set_unreadable();
+        magpie::test_reset_read_count();
+        let _ = dispatch(&app, "accounts.get", &json!({ "id": acc.id }))
+            .await
+            .expect("get legacy");
+        assert_eq!(
+            magpie::test_read_count(),
+            0,
+            "没有 source_key 的旧式 magpie 行不应触发 Magpie 读盘"
+        );
+        magpie::test_reset();
+
+        // 正常动态 magpie 账号走 service::account_view：
+        // display_expiry + describe + summary.describe 共享一份 cache（+ resolve 最多 1 次 = 总计 <= 2）。
+        let uid_view = "6f1c2d94-dd02-5555-6666-777788889999";
+        let live = magpie_login_with("workbuddy#view", uid_view, "tok-view");
+        import_logins(&app, vec![live.clone()], &[]).expect("import view");
+        let acc_view = account(&app, uid_view);
+        magpie::test_set_logins(Some(vec![live]));
+        magpie::test_reset_read_count();
+        let _ = service::account_view(&app, &acc_view).expect("account_view");
+        assert!(
+            magpie::test_read_count() <= 2,
+            "account_view 内的 summary.describe 应复用缓存，实测读盘 {} 次",
+            magpie::test_read_count()
         );
         magpie::test_reset();
     }

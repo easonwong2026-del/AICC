@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import AICCCore
 
@@ -464,6 +465,151 @@ final class ConsoleModelsTests: XCTestCase {
         XCTAssertEqual(summary.cardCount, 0)
         XCTAssertFalse(summary.stale)
         XCTAssertNil(summary.updatedAt)
+    }
+
+    // MARK: 授权子行过期与动态状态展示
+
+    func testAuthorizationDisplayStatusDetectsExpiredAndFractionalSeconds() throws {
+        let now = try Date.ISO8601FormatStyle().parse("2026-11-23T12:00:00Z")
+
+        let expiredRow = try XCTUnwrap(ConsoleAuthorization(json: [
+            "id": "a1",
+            "kind": "magpie",
+            "status": "valid",
+            "tokenExpiresAt": "2026-11-23T11:59:59.500Z",
+        ]))
+        XCTAssertTrue(expiredRow.isTokenExpired(now: now), "带小数秒的过期时间戳也必须判过期")
+        XCTAssertEqual(expiredRow.authLabel, "已授权", "静态 status 语义保持不变")
+        XCTAssertEqual(expiredRow.displayAuthLabel(now: now), "已过期", "界面展示不能和顶部过期状态自相矛盾")
+        XCTAssertEqual(expiredRow.displayAuthTone(now: now), .error)
+
+        let account = try XCTUnwrap(ConsoleAccount(json: row([
+            "tokenExpiresAt": "2026-11-23T11:59:59.500Z",
+        ])))
+        XCTAssertTrue(account.isTokenExpired(now: now))
+    }
+
+    func testAuthorizationDisplayStatusRespectsDynamicEffectiveStatus() throws {
+        let now = try Date.ISO8601FormatStyle().parse("2026-11-23T12:00:00Z")
+
+        // 库里标着 expired，但 Magpie 现读有效且到期时间在未来 → 界面展示已授权。
+        let recovered = try XCTUnwrap(ConsoleAuthorization(json: [
+            "id": "a2",
+            "kind": "magpie",
+            "status": "expired",
+            "effectiveStatus": "valid",
+            "tokenExpiresAt": "2026-12-21T12:04:58Z",
+        ]))
+        XCTAssertEqual(recovered.displayAuthLabel(now: now), "已授权")
+        XCTAssertEqual(recovered.displayAuthTone(now: now), .ok)
+
+        let mismatch = try XCTUnwrap(ConsoleAuthorization(json: [
+            "id": "a3",
+            "kind": "magpie",
+            "status": "valid",
+            "effectiveStatus": "mismatch",
+        ]))
+        XCTAssertEqual(mismatch.displayAuthLabel(now: now), "来源不匹配")
+        XCTAssertEqual(mismatch.displayAuthTone(now: now), .error)
+
+        let unavailable = try XCTUnwrap(ConsoleAuthorization(json: [
+            "id": "a4",
+            "kind": "magpie",
+            "status": "valid",
+            "effectiveStatus": "unavailable",
+        ]))
+        XCTAssertEqual(unavailable.displayAuthLabel(now: now), "暂不可读")
+        XCTAssertEqual(unavailable.displayAuthTone(now: now), .warning)
+    }
+
+    /// 借用账号顶层状态、总览健康统计必须与动态 Magpie 状态一致；自有授权账号则完全隔离。
+    func testAccountDisplayStatusAlignsWithBorrowedDynamicStateAndIsolatesOwnSource() throws {
+        let now = try Date.ISO8601FormatStyle().parse("2026-11-23T12:00:00Z")
+
+        // 1) 借用账号串号：顶层不能再显示「认证有效」，总览不能计为健康
+        let mismatch = try XCTUnwrap(ConsoleAccount(json: row([
+            "id": "acc-mismatch",
+            "authStatus": "valid",
+            "authSource": "magpie",
+            "tokenExpiresAt": "2026-12-30T00:00:00Z",
+            "authorizations": [[
+                "id": "m1",
+                "kind": "magpie",
+                "status": "valid",
+                "effectiveStatus": "mismatch",
+                "tokenExpiresAt": "2026-12-30T00:00:00Z",
+            ]] as [[String: Any]],
+        ])))
+        XCTAssertEqual(mismatch.displayAuthLabel(now: now), "来源不匹配")
+        XCTAssertEqual(mismatch.displayAuthTone(now: now), .error)
+        let mismatchFleet = ConsoleFleetSummary(accounts: [mismatch], qoderAccounts: [], qoderProfiles: [])
+        XCTAssertEqual(mismatchFleet.healthy, 0)
+        XCTAssertEqual(mismatchFleet.issues, 1)
+
+        // 2) 借用账号文件不可读：顶层显示「暂不可读」(.warning)
+        let unavailable = try XCTUnwrap(ConsoleAccount(json: row([
+            "id": "acc-unavail",
+            "authStatus": "valid",
+            "authSource": "magpie",
+            "tokenExpiresAt": "2026-12-30T00:00:00Z",
+            "authorizations": [[
+                "id": "m2",
+                "kind": "magpie",
+                "status": "valid",
+                "effectiveStatus": "unavailable",
+            ]] as [[String: Any]],
+        ])))
+        XCTAssertEqual(unavailable.displayAuthLabel(now: now), "暂不可读")
+        XCTAssertEqual(unavailable.displayAuthTone(now: now), .warning)
+
+        // 3) DB 快照标过期但 Magpie 已换新令牌：顶层与子行统一显示正常，且无 authorizationProblem
+        let recovered = try XCTUnwrap(ConsoleAccount(json: row([
+            "id": "acc-recovered",
+            "authStatus": "expired",
+            "authSource": "magpie",
+            "tokenExpiresAt": "2026-12-30T00:00:00Z",
+            "authorizations": [[
+                "id": "m3",
+                "kind": "magpie",
+                "status": "expired",
+                "effectiveStatus": "valid",
+                "tokenExpiresAt": "2026-12-30T00:00:00Z",
+            ]] as [[String: Any]],
+        ])))
+        XCTAssertEqual(recovered.displayAuthLabel(now: now), "认证有效")
+        XCTAssertEqual(recovered.displayAuthTone(now: now), .ok)
+        XCTAssertNil(recovered.authorizationProblem)
+        let recoveredFleet = ConsoleFleetSummary(accounts: [recovered], qoderAccounts: [], qoderProfiles: [])
+        XCTAssertEqual(recoveredFleet.healthy, 1)
+        XCTAssertEqual(recoveredFleet.issues, 0)
+
+        // 4) 自有授权账号（authSource = own）完全隔离：即使次选 Magpie 串号/过期也不影响顶层健康
+        let ownIsolated = try XCTUnwrap(ConsoleAccount(json: row([
+            "id": "acc-own",
+            "authStatus": "valid",
+            "authSource": "own",
+            "tokenExpiresAt": "2026-12-30T00:00:00Z",
+            "authorizations": [
+                [
+                    "id": "o1",
+                    "kind": "own",
+                    "status": "valid",
+                    "tokenExpiresAt": "2026-12-30T00:00:00Z",
+                ],
+                [
+                    "id": "m4",
+                    "kind": "magpie",
+                    "status": "valid",
+                    "effectiveStatus": "mismatch",
+                    "tokenExpiresAt": "2020-09-13T12:26:40Z",
+                ],
+            ] as [[String: Any]],
+        ])))
+        XCTAssertEqual(ownIsolated.displayAuthLabel(now: now), "认证有效")
+        XCTAssertEqual(ownIsolated.displayAuthTone(now: now), .ok)
+        let ownFleet = ConsoleFleetSummary(accounts: [ownIsolated], qoderAccounts: [], qoderProfiles: [])
+        XCTAssertEqual(ownFleet.healthy, 1)
+        XCTAssertEqual(ownFleet.issues, 0)
     }
 }
 

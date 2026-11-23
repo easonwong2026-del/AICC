@@ -19,6 +19,7 @@ struct ConsoleAccountsView: View {
     @State private var restorePromptShown = false
     @State private var rotationSheetShown = false
     @State private var rotationFocus: RotationManagerFocus = .plan
+    @State private var hoveredAccount: ConsoleAccountSelection?
     /// QA 钩子：离屏渲染需要一张“奖励已展开”的真实详情图；生产环境永远默认收起。
     @State private var rewardsExpanded = UserDefaults.standard.bool(forKey: "AICCConsoleExpandRewards")
 
@@ -343,9 +344,15 @@ struct ConsoleAccountsView: View {
                     }
                 }
                 if let error = store.accountsError ?? store.qoderError {
-                    ConsoleInlineNotice(kind: .error, message: error, actionTitle: "重试") {
+                    let message: String = if let accountsError = store.accountsError,
+                                             let lastSuccess = store.lastAccountsRefresh {
+                        "账号刷新失败，当前保留 \(ConsoleFormat.shortTime(lastSuccess)) 的旧快照（数据已过期）：\(accountsError)"
+                    } else {
+                        error
+                    }
+                    ConsoleInlineNotice(kind: .error, message: message, actionTitle: "重试") {
                         Task {
-                            await store.refreshAccounts()
+                            await store.refreshAccounts(trigger: .manual)
                             await store.refreshQoder(silent: false)
                             await refreshWbClient()
                         }
@@ -442,6 +449,7 @@ struct ConsoleAccountsView: View {
 
     private func accountRow(_ entry: Entry) -> some View {
         let selected = nav.accountSelection == entry.selection
+        let hovered = hoveredAccount == entry.selection
         return Button { nav.accountSelection = entry.selection } label: {
             HStack(spacing: 10) {
                 Image(systemName: entry.symbol)
@@ -473,10 +481,17 @@ struct ConsoleAccountsView: View {
             }
             .padding(.horizontal, 14)
             .frame(minHeight: ConsoleTheme.accountRowHeight)
-            .background(selected ? ConsoleTheme.selectionFill : Color.clear)
+            .background(
+                selected
+                    ? ConsoleTheme.selectionFill
+                    : (hovered ? ConsoleTheme.cardSubtle.opacity(0.65) : Color.clear)
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .onHover { inside in
+            hoveredAccount = inside ? entry.selection : (hoveredAccount == entry.selection ? nil : hoveredAccount)
+        }
     }
 
     // MARK: - 详情
@@ -551,13 +566,28 @@ struct ConsoleAccountsView: View {
             )
         }
         if let notice = store.qoderNotice {
-            ConsoleInlineNotice(kind: .info, message: notice)
+            ConsoleInlineNotice(
+                kind: .info,
+                message: notice,
+                actionTitle: "知道了",
+                action: { store.clearQoderNotice() }
+            )
         }
         if let notice = store.qoderDeleteNotice {
-            ConsoleInlineNotice(kind: .info, message: notice)
+            ConsoleInlineNotice(
+                kind: .info,
+                message: notice,
+                actionTitle: "知道了",
+                action: { store.clearQoderDeleteFeedback() }
+            )
         }
         if let error = store.qoderDeleteError {
-            ConsoleInlineNotice(kind: .error, message: error)
+            ConsoleInlineNotice(
+                kind: .error,
+                message: error,
+                actionTitle: "知道了",
+                action: { store.clearQoderDeleteFeedback() }
+            )
         }
         if let notice = store.wbSwitchNotice {
             ConsoleInlineNotice(
@@ -805,8 +835,14 @@ struct ConsoleAccountsView: View {
             if let own = account.ownAuthorization {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text("自有授权").font(ConsoleType.rowTitle).foregroundStyle(ConsoleTheme.text)
-                    Text(own.authLabel).font(ConsoleType.small).foregroundStyle(own.status == "valid" ? ConsoleTheme.secondaryText : ConsoleTheme.warning)
-                    if let expires = own.tokenExpiresAt { Text("有效至 \(ConsoleFormat.shortTimestamp(expires))").font(ConsoleType.caption).foregroundStyle(ConsoleTheme.tertiaryText) }
+                    Text(own.displayAuthLabel)
+                        .font(ConsoleType.small)
+                        .foregroundStyle(own.displayAuthTone == .ok ? ConsoleTheme.secondaryText : ConsoleTheme.tone(own.displayAuthTone))
+                    if let expires = own.tokenExpiresAt {
+                        Text("有效至 \(ConsoleFormat.shortTimestamp(expires))")
+                            .font(ConsoleType.caption)
+                            .foregroundStyle(ConsoleTheme.tertiaryText)
+                    }
                     Spacer(minLength: 4)
                     if busyAccount == account.id { ProgressView().controlSize(.mini) }
                     Button("验证") { Task { await verify(account) } }.buttonStyle(.borderless).font(ConsoleType.small)
@@ -815,8 +851,15 @@ struct ConsoleAccountsView: View {
             if let magpie = account.magpieAuthorization {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text("Magpie").font(ConsoleType.rowTitle).foregroundStyle(ConsoleTheme.text)
-                    Text(magpie.authLabel).font(ConsoleType.small).foregroundStyle(ConsoleTheme.secondaryText)
-                    Spacer()
+                    Text(magpie.displayAuthLabel)
+                        .font(ConsoleType.small)
+                        .foregroundStyle(magpie.displayAuthTone == .ok ? ConsoleTheme.secondaryText : ConsoleTheme.tone(magpie.displayAuthTone))
+                    if let expires = magpie.tokenExpiresAt {
+                        Text("有效至 \(ConsoleFormat.shortTimestamp(expires))")
+                            .font(ConsoleType.caption)
+                            .foregroundStyle(ConsoleTheme.tertiaryText)
+                    }
+                    Spacer(minLength: 4)
                     Text(account.isBorrowed ? "由 Magpie 管理" : "已保存访问令牌")
                         .font(ConsoleType.caption).foregroundStyle(ConsoleTheme.tertiaryText)
                         .help("Magpie 借用由 Magpie 刷新；其他访问令牌不在这里自动续期。")

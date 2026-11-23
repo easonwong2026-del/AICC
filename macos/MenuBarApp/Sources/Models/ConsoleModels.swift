@@ -1,5 +1,20 @@
 import Foundation
 
+private enum ConsoleTokenExpiryParser {
+    private static let plain = Date.ISO8601FormatStyle(includingFractionalSeconds: false)
+    private static let fractional = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+
+    static func parse(_ raw: String?) -> Date? {
+        guard let raw, !raw.isEmpty else { return nil }
+        return (try? plain.parse(raw)) ?? (try? fractional.parse(raw))
+    }
+
+    static func isExpired(_ raw: String?, now: Date) -> Bool {
+        guard let expiry = parse(raw) else { return false }
+        return expiry <= now
+    }
+}
+
 /// 一份授权的只读视图（`account_authorizations` 的一行）。
 ///
 /// 一个 WorkBuddy 账号可以同时有 `own`（AICC 自己扫码）与 `magpie`（从 Magpie 借用）
@@ -9,6 +24,8 @@ struct ConsoleAuthorization: Identifiable, Equatable {
     let id: String
     let kind: String
     let status: String
+    /// 动态借用授权（Magpie）的现读状态；非动态行或老助手为 `nil`。
+    let effectiveStatus: String?
     let tokenExpiresAt: String?
     let keyMigrationState: String
     let lastError: String?
@@ -17,6 +34,7 @@ struct ConsoleAuthorization: Identifiable, Equatable {
         id: String,
         kind: String,
         status: String,
+        effectiveStatus: String? = nil,
         tokenExpiresAt: String? = nil,
         keyMigrationState: String = "ready",
         lastError: String? = nil
@@ -25,6 +43,7 @@ struct ConsoleAuthorization: Identifiable, Equatable {
         self.id = id
         self.kind = kind
         self.status = status
+        self.effectiveStatus = effectiveStatus
         self.tokenExpiresAt = tokenExpiresAt
         self.keyMigrationState = keyMigrationState
         self.lastError = lastError
@@ -36,6 +55,7 @@ struct ConsoleAuthorization: Identifiable, Equatable {
             id: id,
             kind: kind,
             status: json["status"] as? String ?? "unknown",
+            effectiveStatus: json["effectiveStatus"] as? String,
             tokenExpiresAt: json["tokenExpiresAt"] as? String,
             keyMigrationState: json["keyMigrationState"] as? String ?? "ready",
             lastError: json["lastError"] as? String
@@ -57,6 +77,56 @@ struct ConsoleAuthorization: Identifiable, Equatable {
 
     var tone: ConsoleAccount.AuthTone {
         switch status {
+        case "valid": return .ok
+        case "expired", "invalid", "denied": return .error
+        case "unknown": return .neutral
+        default: return .warning
+        }
+    }
+
+    /// 令牌到期时间已过时返回 `true`（兼容带小数秒的 RFC3339）。
+    func isTokenExpired(now: Date = .now) -> Bool {
+        ConsoleTokenExpiryParser.isExpired(tokenExpiresAt, now: now)
+    }
+
+    /// 界面展示文案：优先采信动态现读状态（`effectiveStatus`），再结合到期时间判断，
+    /// 避免账号顶部显示「已过期」而下方授权子行仍写「已授权」。
+    var displayAuthLabel: String { displayAuthLabel(now: .now) }
+
+    func displayAuthLabel(now: Date) -> String {
+        switch effectiveStatus {
+        case "mismatch":
+            return "来源不匹配"
+        case "unavailable":
+            return "暂不可读"
+        case "expired":
+            return "已过期"
+        default:
+            break
+        }
+        if isTokenExpired(now: now) { return "已过期" }
+        switch effectiveStatus ?? status {
+        case "valid": return "已授权"
+        case "expired": return "已过期"
+        case "invalid": return "已失效"
+        case "denied": return "钥匙串被拒"
+        default: return "待验证"
+        }
+    }
+
+    var displayAuthTone: ConsoleAccount.AuthTone { displayAuthTone(now: .now) }
+
+    func displayAuthTone(now: Date) -> ConsoleAccount.AuthTone {
+        switch effectiveStatus {
+        case "mismatch", "expired":
+            return .error
+        case "unavailable":
+            return .warning
+        default:
+            break
+        }
+        if isTokenExpired(now: now) { return .error }
+        switch effectiveStatus ?? status {
         case "valid": return .ok
         case "expired", "invalid", "denied": return .error
         case "unknown": return .neutral
@@ -229,8 +299,9 @@ struct ConsoleAccount: Identifiable, Equatable {
             return error
         }
         // 注意不要用 `contains("valid")` 判断：`"invalid"` 里也有 "valid"。
-        let unusable: Set<String> = ["invalid", "expired", "denied"]
-        if !authorizations.isEmpty && authorizations.allSatisfy({ unusable.contains($0.status) }) {
+        // 对动态 Magpie 行优先采信现读的 `effectiveStatus`，避免库里旧 `expired` 掩盖已恢复的令牌。
+        let unusable: Set<String> = ["invalid", "expired", "denied", "mismatch"]
+        if !authorizations.isEmpty && authorizations.allSatisfy({ unusable.contains($0.effectiveStatus ?? $0.status) }) {
             return "两份授权都不可用，请重新扫码或去 Magpie 登录"
         }
         return nil
@@ -242,20 +313,50 @@ struct ConsoleAccount: Identifiable, Equatable {
     /// 令牌已过期（或没有到期时间却标着 valid）时，界面必须显示"已过期"，
     /// 不能让用户以为还能用。
     func isTokenExpired(now: Date = .now) -> Bool {
-        guard let tokenExpiresAt, !tokenExpiresAt.isEmpty else { return false }
-        let parser = ISO8601DateFormatter()
-        parser.formatOptions = [.withInternetDateTime]
-        guard let expiry = parser.date(from: tokenExpiresAt) else { return false }
-        return expiry <= now
+        ConsoleTokenExpiryParser.isExpired(tokenExpiresAt, now: now)
     }
 
-    /// 列表里显示的登录状态。
-    var displayAuthLabel: String {
-        isTokenExpired() ? "已过期" : authLabel
+    /// 列表与详情头部显示的登录状态。
+    ///
+    /// 当前来源是借用授权（`magpie`）时，优先采信 Magpie 授权行的动态现读状态，
+    /// 保证总览卡片、账号列表与授权详情子行三处口径一致；
+    /// 当前来源是自有授权（`own`）时完全隔离，不受次选 Magpie 行的动态状态影响。
+    var displayAuthLabel: String { displayAuthLabel(now: .now) }
+
+    func displayAuthLabel(now: Date) -> String {
+        if isBorrowed, let effective = magpieAuthorization?.effectiveStatus {
+            switch effective {
+            case "mismatch":
+                return "来源不匹配"
+            case "unavailable":
+                return "暂不可读"
+            case "expired":
+                return "已过期"
+            case "valid":
+                return isTokenExpired(now: now) ? "已过期" : "认证有效"
+            default:
+                break
+            }
+        }
+        return isTokenExpired(now: now) ? "已过期" : authLabel
     }
 
-    var displayAuthTone: AuthTone {
-        isTokenExpired() ? .error : authTone
+    var displayAuthTone: AuthTone { displayAuthTone(now: .now) }
+
+    func displayAuthTone(now: Date) -> AuthTone {
+        if isBorrowed, let effective = magpieAuthorization?.effectiveStatus {
+            switch effective {
+            case "mismatch", "expired":
+                return .error
+            case "unavailable":
+                return .warning
+            case "valid":
+                return isTokenExpired(now: now) ? .error : .ok
+            default:
+                break
+            }
+        }
+        return isTokenExpired(now: now) ? .error : authTone
     }
 
     /// 搜索用：昵称 + UID，统一小写。
@@ -715,7 +816,7 @@ struct ConsoleFleetSummary: Equatable {
     ) {
         func workbuddyCard(_ kind: ConsolePlatformKind, international: Bool) -> ConsolePlatformCard {
             let rows = accounts.filter { $0.isWorkbuddy(international: international) }
-            let healthy = rows.filter { $0.authStatus == "valid" && !$0.isTokenExpired() }.count
+            let healthy = rows.filter { $0.displayAuthTone == .ok }.count
             return ConsolePlatformCard(kind: kind, accounts: rows.count, healthy: healthy)
         }
 

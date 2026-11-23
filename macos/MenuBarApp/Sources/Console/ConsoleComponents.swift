@@ -466,14 +466,27 @@ struct ConsoleIconButtonStyle: ButtonStyle {
     var size: CGFloat = ConsoleTheme.controlHeight
 
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .foregroundStyle(ConsoleTheme.secondaryText)
-            .frame(width: size + 4, height: size)
-            .background(
-                configuration.isPressed ? ConsoleTheme.cardSubtle : Color.clear,
-                in: RoundedRectangle(cornerRadius: ConsoleTheme.controlRadius)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: ConsoleTheme.controlRadius))
+        StyleBody(size: size, configuration: configuration)
+    }
+
+    private struct StyleBody: View {
+        let size: CGFloat
+        let configuration: Configuration
+        @State private var hovered = false
+
+        var body: some View {
+            configuration.label
+                .foregroundStyle(hovered ? ConsoleTheme.text : ConsoleTheme.secondaryText)
+                .frame(width: size + 4, height: size)
+                .background(
+                    configuration.isPressed
+                        ? ConsoleTheme.cardSubtle
+                        : (hovered ? ConsoleTheme.cardSubtle.opacity(0.75) : Color.clear),
+                    in: RoundedRectangle(cornerRadius: ConsoleTheme.controlRadius)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: ConsoleTheme.controlRadius))
+                .onHover { hovered = $0 }
+        }
     }
 }
 
@@ -513,6 +526,13 @@ enum ConsoleFormat {
         let formatter = DateFormatter()
         formatter.locale = .current
         formatter.dateFormat = "MM-dd HH:mm"
+        return formatter.string(from: date)
+    }
+
+    static func shortTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = .current
+        formatter.dateFormat = "HH:mm"
         return formatter.string(from: date)
     }
 

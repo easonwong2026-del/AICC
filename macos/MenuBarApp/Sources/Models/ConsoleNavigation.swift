@@ -54,6 +54,11 @@ enum ConsolePage: String, CaseIterable, Identifiable {
             return "重读本地状态（不联网）；联网检查用页面里的按钮"
         }
     }
+
+    /// 是否承载账号快照展示并参与 10 分钟前台自动只读刷新。
+    var supportsAccountsAutoRefresh: Bool {
+        self == .overview || self == .accounts
+    }
 }
 
 /// 主控制台的**页面内导航上下文**（PRD §9.2）。

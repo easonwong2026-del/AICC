@@ -82,6 +82,39 @@ enum ConsoleColdStartLoadPolicy {
     }
 }
 
+/// 账号列表静默刷新策略：除首次启动加载外，后续仅在窗口回到前台、关闭重开或
+/// 切回总览 / AI 账号页且距上次刷新满 10 分钟时才静默重读一次（纯只读本地查询，
+/// 不会触发联网验证或写入）；平时以手动点刷新或登录/导入完成后的主动刷新为准。
+///
+/// 与冷启动分开判：冷启动仍由 `loadIfNeeded()` 统一编排顺序，避免窗口首次激活抢跑。
+enum ConsoleAccountsRefreshPolicy {
+    /// 10 分钟冷却：避免切窗 / 切页频繁触发刷新，长时间切回时自动补刷一次。
+    static let defaultTTL: TimeInterval = 600
+
+    /// 首次挂载 / 重开窗口时：未加载过或已过期都要拉取。
+    static func shouldRefreshOnLoad(
+        lastRefresh: Date?,
+        loading: Bool,
+        now: Date = .now,
+        ttl: TimeInterval = defaultTTL
+    ) -> Bool {
+        guard !loading else { return false }
+        guard let lastRefresh else { return true }
+        return now.timeIntervalSince(lastRefresh) >= ttl
+    }
+
+    /// 窗口重新激活 / 切回总览或账号页时：仅在完成首次加载且超过冷却时间后静默刷新。
+    static func shouldRefreshOnRevisit(
+        lastRefresh: Date?,
+        loading: Bool,
+        now: Date = .now,
+        ttl: TimeInterval = defaultTTL
+    ) -> Bool {
+        guard !loading, let lastRefresh else { return false }
+        return now.timeIntervalSince(lastRefresh) >= ttl
+    }
+}
+
 /// 总览首屏的"需要处理"汇总。
 ///
 /// 把原先散在视图里的计数与标题判断收拢成一个可测试的值；

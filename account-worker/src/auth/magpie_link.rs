@@ -103,6 +103,42 @@ pub fn find_link<'a>(
     Ok(login)
 }
 
+/// 单次 RPC 内的只读 Magpie 快照缓存。
+///
+/// `accounts.list` 会依次做镜像到期修正与每条授权行的动态状态/到期探测；
+/// 不缓存的话有 N 个借用账号就会把 `plugin-auth.json` 重复读盘并解析 3N 次。
+/// 按需惰性读取：没有 Magpie 关联时一次都不碰磁盘，有多个账号时整次调用只读 1 次。
+pub(crate) struct MagpieLoginsCache {
+    loaded: std::cell::OnceCell<Option<Vec<magpie::MagpieLogin>>>,
+}
+
+impl MagpieLoginsCache {
+    pub(crate) fn new() -> Self {
+        Self {
+            loaded: std::cell::OnceCell::new(),
+        }
+    }
+
+    pub(crate) fn get(&self) -> Option<&[magpie::MagpieLogin]> {
+        self.loaded
+            .get_or_init(|| magpie::read_logins().ok())
+            .as_deref()
+    }
+}
+
+/// 在已读出的 Magpie 登录列表中查找这条引用的到期时间（RFC3339）。
+pub(crate) fn live_expiry_in(
+    logins: &[magpie::MagpieLogin],
+    account: &AccountRecord,
+    row: &AuthorizationRecord,
+) -> Option<String> {
+    let source_key = row.source_key.as_deref()?;
+    let login = find_link(logins, account, source_key, None).ok()?;
+    login
+        .expires_at_ms
+        .and_then(crate::providers::workbuddy_auth::ms_to_rfc3339)
+}
+
 /// 现读 Magpie 文件里这条引用的到期时间（RFC3339）。
 ///
 /// 只用于**展示与镜像**：库里的 `token_expires_at` 是导入那一刻的快照，
@@ -113,12 +149,30 @@ pub fn find_link<'a>(
 /// `now_ms = None`：**已经过期的令牌也要拿到它的到期时间**，界面照实显示过期，
 /// 而不是因为"读不到"退回一份更旧的快照。
 pub(crate) fn live_expiry(account: &AccountRecord, row: &AuthorizationRecord) -> Option<String> {
-    let source_key = row.source_key.as_deref()?;
     let logins = magpie::read_logins().ok()?;
-    let login = find_link(&logins, account, source_key, None).ok()?;
-    login
-        .expires_at_ms
-        .and_then(crate::providers::workbuddy_auth::ms_to_rfc3339)
+    live_expiry_in(&logins, account, row)
+}
+
+/// 在已读出的 Magpie 登录列表中校验并返回可用访问令牌（**只返回 access**）。
+pub(crate) fn access_in(
+    logins: &[magpie::MagpieLogin],
+    account: &AccountRecord,
+    source_key: &str,
+) -> Result<String, CredentialError> {
+    let login =
+        find_link(logins, account, source_key, Some(magpie::now_ms())).map_err(|problem| {
+            CredentialError::new(
+                problem.error_kind(),
+                format!("Magpie 关联不可用：{}", problem.as_str()),
+            )
+        })?;
+    if login.access_token.trim().is_empty() {
+        return Err(CredentialError::new(
+            CredentialErrorKind::NotFound,
+            "Magpie 登录态没有访问令牌",
+        ));
+    }
+    Ok(login.access_token.clone())
 }
 
 /// 取当前可用的一条 Magpie 授权。**只返回 access**。
@@ -132,20 +186,7 @@ pub fn access_for(account: &AccountRecord, source_key: &str) -> Result<String, C
             ),
         )
     })?;
-    let login =
-        find_link(&logins, account, source_key, Some(magpie::now_ms())).map_err(|problem| {
-            CredentialError::new(
-                problem.error_kind(),
-                format!("Magpie 关联不可用：{}", problem.as_str()),
-            )
-        })?;
-    if login.access_token.trim().is_empty() {
-        return Err(CredentialError::new(
-            CredentialErrorKind::NotFound,
-            "Magpie 登录态没有访问令牌",
-        ));
-    }
-    Ok(login.access_token.clone())
+    access_in(&logins, account, source_key)
 }
 
 #[cfg(test)]
@@ -248,5 +289,22 @@ mod tests {
             LinkProblem::Expired.error_kind(),
             CredentialErrorKind::NotFound
         );
+    }
+
+    #[test]
+    fn logins_cache_reads_once_per_rpc_scope() {
+        magpie::test_set_logins(Some(vec![login("workbuddy#first", "uid-1", Some(10_000))]));
+        let cache = MagpieLoginsCache::new();
+        let first = cache.get().expect("first read");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].key, "workbuddy#first");
+
+        // 即使底层数据变化，同一缓存实例也绝不二次读盘。
+        magpie::test_set_logins(Some(vec![login("workbuddy#second", "uid-2", Some(20_000))]));
+        let cached = cache.get().expect("cached read");
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].key, "workbuddy#first");
+
+        magpie::test_reset();
     }
 }
