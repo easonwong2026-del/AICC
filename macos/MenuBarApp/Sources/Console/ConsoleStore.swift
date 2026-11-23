@@ -16,7 +16,10 @@ final class ConsoleStore: ObservableObject {
     @Published private(set) var quotaError: String?
     @Published private(set) var loadingAccounts = false
     @Published private(set) var loadingQuota = false
+    /// 账号快照的最后**成功**读取时间（刷新失败时绝不更新）。
     @Published private(set) var lastAccountsRefresh: Date?
+    /// 账号快照的最近一次刷新**尝试**时间（无论成功或失败均记录，用于退避与诊断）。
+    @Published private(set) var lastAccountsRefreshAttempt: Date?
     @Published private(set) var lastQuotaRefresh: Date?
 
     /// 助手侧的统一额度看板（四平台）。与上面的 `snapshot`（Magpie 额度卡）是两条
@@ -161,6 +164,12 @@ final class ConsoleStore: ObservableObject {
     private let settings: AppSettings
     /// 预演请求的序号：保证乱序返回时旧结果不能覆盖新结果。
     private let rotationPreviewCoordinator = RotationPreviewCoordinator()
+    /// 账号只读刷新的统一状态机：区分成功/尝试/错误、防重、失败退避、代次防覆盖。
+    private let accountsRefreshCoordinator: ConsoleAccountsRefreshCoordinator
+    /// 主窗口处于前台且在总览 / AI 账号页时的 10 分钟定时调度器。
+    private let accountsAutoRefreshScheduler: ConsoleAccountsAutoRefreshScheduler
+    private(set) var activeConsolePage: ConsolePage = .overview
+    private(set) var isConsoleWindowForeground = false
 
     #if AICC_VISUAL_TEST && AICC_CONSOLE_VISUAL
     /// 离屏渲染：样本已经灌好，页面不要再触发真实 RPC。
@@ -168,10 +177,23 @@ final class ConsoleStore: ObservableObject {
     private(set) var visualFixtureLoaded = false
     #endif
 
-    init(worker: AccountWorkerManager, settings: AppSettings) {
+    init(
+        worker: AccountWorkerManager,
+        settings: AppSettings,
+        accountsRefreshCoordinator: ConsoleAccountsRefreshCoordinator? = nil,
+        accountsAutoRefreshScheduler: ConsoleAccountsAutoRefreshScheduler? = nil
+    ) {
         self.worker = worker
         self.settings = settings
+        self.accountsRefreshCoordinator = accountsRefreshCoordinator ?? ConsoleAccountsRefreshCoordinator()
+        self.accountsAutoRefreshScheduler = accountsAutoRefreshScheduler ?? ConsoleAccountsAutoRefreshScheduler()
     }
+
+    /// 当前是否处于前台自动只读刷新排期中（用于测试与运行态观测）。
+    var isAccountsAutoRefreshScheduled: Bool { accountsAutoRefreshScheduler.isScheduled }
+
+    /// 账号快照是否已过期（已有旧快照但最近刷新失败，或距上次成功已满 10 分钟）。
+    var isAccountsSnapshotStale: Bool { accountsRefreshCoordinator.state.isSnapshotStale() }
 
     var stats: ConsoleOverviewStats { ConsoleOverviewStats(accounts: accounts) }
     var quotaSummary: ConsoleQuotaSummary { ConsoleQuotaSummary(snapshot: snapshot) }
@@ -217,10 +239,6 @@ final class ConsoleStore: ObservableObject {
         }
 
         let needQuota = snapshot == nil && !loadingQuota
-        let needAccounts = ConsoleAccountsRefreshPolicy.shouldRefreshOnLoad(
-            lastRefresh: lastAccountsRefresh,
-            loading: loadingAccounts
-        )
         let needQoder = qoderEditions.isEmpty && !qoderLoading
         let needWorkerQuota = workerQuotaRows.isEmpty && !loadingWorkerQuota
         let needWbClient = wbClientStatus == nil
@@ -232,17 +250,18 @@ final class ConsoleStore: ObservableObject {
         )
 
         async let quota: Void = needQuota ? refreshQuota(force: false) : ()
-        async let accounts: Void = needAccounts ? refreshAccounts() : ()
+        async let accounts: Void = { _ = await refreshAccounts(trigger: .initialLoad) }()
         async let qoder: Void = needQoder ? refreshQoder(silent: true) : ()
         async let workerQuota: Void = needWorkerQuota ? refreshWorkerQuota(force: false) : ()
         async let wbClient: Void = needWbClient ? refreshWorkbuddyClient(silent: true) : ()
         async let rotation: Void = needRotation ? refreshWorkbuddyRotation(silent: false) : ()
         _ = await (quota, accounts, qoder, workerQuota, wbClient, rotation)
+        reconcileAccountsAutoRefreshScheduler()
         #endif
     }
 
     func refreshAll() async {
-        async let accountsTask: Void = refreshAccounts()
+        async let accountsTask: Void = { _ = await refreshAccounts(trigger: .manual) }()
         async let quotaTask: Void = refreshQuota(force: true)
         async let qoderTask: Void = refreshQoder(silent: true)
         async let wbTask: Void = refreshWorkbuddyClient(silent: true)
@@ -816,47 +835,111 @@ final class ConsoleStore: ObservableObject {
         try await worker.workbuddyStatus(accountId: accountId)
     }
 
-    /// 窗口回到前台或切回总览 / 账号页时的静默刷新（只读，带冷却防抖）。
-    func refreshAccountsIfStale(ttl: TimeInterval = ConsoleAccountsRefreshPolicy.defaultTTL) async {
+    /// 切换主控制台当前页面：只在总览 / AI 账号页且窗口位于前台时调度 10 分钟自动只读刷新。
+    func setActiveConsolePage(_ page: ConsolePage) {
+        let changed = activeConsolePage != page
+        activeConsolePage = page
+        reconcileAccountsAutoRefreshScheduler()
+        guard changed, isConsoleWindowForeground, page.supportsAccountsAutoRefresh else { return }
+        Task { [weak self] in
+            await self?.refreshAccounts(trigger: .pageEntered)
+        }
+    }
+
+    /// 同步主控制台窗口的前后台状态：后台 / 最小化 / 关闭时立刻暂停定时调度；
+    /// 回到前台且处于总览 / AI 账号页时立即检查是否需要只读刷新并恢复定时调度。
+    func setConsoleWindowForeground(_ foreground: Bool) {
+        let changed = isConsoleWindowForeground != foreground
+        isConsoleWindowForeground = foreground
+        guard foreground else {
+            accountsAutoRefreshScheduler.stop()
+            return
+        }
+        reconcileAccountsAutoRefreshScheduler()
+        guard changed, activeConsolePage.supportsAccountsAutoRefresh else { return }
+        Task { [weak self] in
+            await self?.refreshAccounts(trigger: .windowActivated)
+        }
+    }
+
+    /// 窗口关闭或应用退出时立刻停止前台定时调度。
+    func stopAccountsAutoRefresh() {
+        isConsoleWindowForeground = false
+        accountsAutoRefreshScheduler.stop()
+    }
+
+    private func reconcileAccountsAutoRefreshScheduler() {
         #if AICC_VISUAL_TEST && AICC_CONSOLE_VISUAL
-        return
+        accountsAutoRefreshScheduler.stop()
         #else
-        guard ConsoleAccountsRefreshPolicy.shouldRefreshOnRevisit(
-            lastRefresh: lastAccountsRefresh,
-            loading: loadingAccounts,
-            ttl: ttl
-        ) else { return }
-        await refreshAccounts(silent: true)
+        accountsAutoRefreshScheduler.update(
+            isForeground: isConsoleWindowForeground,
+            activePage: activeConsolePage,
+            nextDelay: { [weak self] now in
+                self?.accountsRefreshCoordinator.nextAutoRefreshDelay(now: now)
+            },
+            onTick: { [weak self] in
+                guard let self else { return }
+                _ = await self.refreshAccounts(trigger: .scheduled)
+            }
+        )
         #endif
     }
 
-    func refreshAccounts(silent: Bool = false) async {
-        guard !loadingAccounts else { return }
-        loadingAccounts = true
-        defer { loadingAccounts = false }
+    /// 兼容旧入口：统一收敛到 `refreshAccounts(trigger:)`。
+    func refreshAccountsIfStale(trigger: ConsoleAccountsRefreshTrigger = .windowActivated) async {
+        _ = await refreshAccounts(trigger: trigger)
+    }
 
-        guard await ensureWorkerReady() else {
-            if !silent || accounts.isEmpty {
-                accountsError = workerFailureText
-                accounts = []
+    /// 统一账号只读刷新入口（手动、冷启动、切回前台、切页、10 分钟定时共用）。
+    ///
+    /// - 失败绝不更新 `lastAccountsRefresh`（成功时间），仅记录 `lastAccountsRefreshAttempt` 与 `accountsError`；
+    /// - 失败时保留旧的 `accounts` 快照，界面通过错误与「已过期」状态明确提示；
+    /// - 并发防重、失败指数退避、异步乱序结果防覆盖全部由 `accountsRefreshCoordinator` 保证。
+    @discardableResult
+    func refreshAccounts(trigger: ConsoleAccountsRefreshTrigger = .manual) async -> ConsoleAccountsRefreshOutcome {
+        #if AICC_VISUAL_TEST && AICC_CONSOLE_VISUAL
+        return .skipped(.fresh(remaining: ConsoleAccountsRefreshPolicy.defaultTTL))
+        #else
+        let outcome = await accountsRefreshCoordinator.run(
+            trigger: trigger,
+            workerUnavailableMessage: workerFailureText,
+            onStateChange: { [weak self] state in
+                self?.applyAccountsRefreshState(state)
+            },
+            ensureWorker: { [weak self] in
+                guard let self else { return false }
+                return await self.ensureWorkerReady()
+            },
+            fetch: { [weak self] in
+                guard let self else { return [] }
+                let rows = try await self.worker.listAccounts()
+                return rows.compactMap(ConsoleAccount.init(json:))
             }
-            lastAccountsRefresh = Date()
-            return
-        }
+        )
 
-        do {
-            let rows = try await worker.listAccounts()
-            accounts = rows.compactMap(ConsoleAccount.init(json:))
-            accountsError = nil
-        } catch {
-            if !silent || accounts.isEmpty {
-                accounts = []
-                accountsError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            }
+        switch outcome {
+        case .succeeded(let freshAccounts, _):
+            accounts = freshAccounts
+            reconcileAccountsAutoRefreshScheduler()
+            // 账号增删会改变"哪些账号可以切"，顺手刷新客户端状态（只读，本地文件 + pgrep）。
+            await refreshWorkbuddyClient(silent: true)
+        case .failed:
+            // 静默与手动失败都保留旧快照，不清空已有 accounts，也不推进 lastAccountsRefresh；
+            // 重新排期以进入退避窗口。
+            reconcileAccountsAutoRefreshScheduler()
+        case .skipped, .superseded:
+            break
         }
-        lastAccountsRefresh = Date()
-        // 账号增删会改变"哪些账号可以切"，顺手刷新客户端状态（只读，本地文件 + pgrep）。
-        await refreshWorkbuddyClient(silent: true)
+        return outcome
+        #endif
+    }
+
+    private func applyAccountsRefreshState(_ state: ConsoleAccountsRefreshState) {
+        loadingAccounts = state.isLoading
+        lastAccountsRefresh = state.lastSuccessAt
+        lastAccountsRefreshAttempt = state.lastAttemptAt
+        accountsError = state.lastError
     }
 
     /// 助手侧四平台额度。`refresh=false` 时助手优先用快照缓存（不打网络）。
@@ -1512,9 +1595,12 @@ extension ConsoleStore {
     func applyVisualFixture(_ fixture: ConsoleVisualFixture) {
         visualFixtureLoaded = true
         accounts = fixture.accounts
-        accountsError = fixture.accountsError
-        lastAccountsRefresh = fixture.lastAccountsRefresh
-        loadingAccounts = fixture.isLoading
+        accountsRefreshCoordinator.applyFixture(
+            lastSuccessAt: fixture.lastAccountsRefresh,
+            error: fixture.accountsError,
+            isLoading: fixture.isLoading
+        )
+        applyAccountsRefreshState(accountsRefreshCoordinator.state)
         qoderLoading = fixture.isLoading
 
         snapshot = fixture.snapshot

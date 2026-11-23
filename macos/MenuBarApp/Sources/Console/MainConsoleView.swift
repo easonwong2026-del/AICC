@@ -38,9 +38,9 @@ struct MainConsoleView: View {
             minHeight: ConsoleTheme.minWindowSize.height
         )
         .task { await store.loadIfNeeded() }
+        .onAppear { store.setActiveConsolePage(nav.page) }
         .onChange(of: nav.page) { _, page in
-            guard page == .overview || page == .accounts else { return }
-            Task { await store.refreshAccountsIfStale() }
+            store.setActiveConsolePage(page)
         }
     }
 
@@ -161,14 +161,15 @@ struct MainConsoleView: View {
                 .lineLimit(1)
             Spacer(minLength: 12)
 
-            if refreshing {
+            if refreshing || (nav.page.supportsAccountsAutoRefresh && store.loadingAccounts) {
                 ProgressView().controlSize(.small)
-            } else if let updated = headerUpdatedTimeText {
-                Text(updated)
+            } else if let status = headerAccountsStatus {
+                Text(status.text)
                     .font(ConsoleType.micro)
                     .monospacedDigit()
-                    .foregroundStyle(ConsoleTheme.tertiaryText)
+                    .foregroundStyle(status.tone == .warning ? ConsoleTheme.warning : ConsoleTheme.tertiaryText)
                     .lineLimit(1)
+                    .help(status.help)
             }
 
             Button {
@@ -197,12 +198,13 @@ struct MainConsoleView: View {
         .background(ConsoleTheme.canvas)
     }
 
-    private var headerUpdatedTimeText: String? {
-        guard nav.page == .overview || nav.page == .accounts,
-              let refreshed = store.lastAccountsRefresh else {
-            return nil
-        }
-        return "更新于 \(ConsoleFormat.shortTime(refreshed))"
+    private var headerAccountsStatus: ConsoleAccountsHeaderStatus? {
+        ConsoleAccountsHeaderStatus.make(
+            page: nav.page,
+            lastSuccessAt: store.lastAccountsRefresh,
+            error: store.accountsError,
+            formatTime: ConsoleFormat.shortTime
+        )
     }
 
     @ViewBuilder
@@ -231,13 +233,13 @@ struct MainConsoleView: View {
         switch nav.page {
         case .overview:
             async let overview: Void = store.refreshTasksOverview()
-            async let accounts: Void = store.refreshAccounts()
+            async let accounts: Void = { _ = await store.refreshAccounts(trigger: .manual) }()
             async let qoder: Void = store.refreshQoder(silent: true)
             async let quota: Void = store.refreshQuota(force: false)
             async let rotation: Void = store.refreshWorkbuddyRotation(silent: true)
             _ = await (overview, accounts, qoder, quota, rotation)
         case .accounts:
-            async let accounts: Void = store.refreshAccounts()
+            async let accounts: Void = { _ = await store.refreshAccounts(trigger: .manual) }()
             async let qoder: Void = store.refreshQoder(silent: true)
             _ = await (accounts, qoder)
         case .quota:

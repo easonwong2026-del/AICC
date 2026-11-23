@@ -344,9 +344,15 @@ struct ConsoleAccountsView: View {
                     }
                 }
                 if let error = store.accountsError ?? store.qoderError {
-                    ConsoleInlineNotice(kind: .error, message: error, actionTitle: "重试") {
+                    let message: String = if let accountsError = store.accountsError,
+                                             let lastSuccess = store.lastAccountsRefresh {
+                        "账号刷新失败，当前保留 \(ConsoleFormat.shortTime(lastSuccess)) 的旧快照（数据已过期）：\(accountsError)"
+                    } else {
+                        error
+                    }
+                    ConsoleInlineNotice(kind: .error, message: message, actionTitle: "重试") {
                         Task {
-                            await store.refreshAccounts()
+                            await store.refreshAccounts(trigger: .manual)
                             await store.refreshQoder(silent: false)
                             await refreshWbClient()
                         }

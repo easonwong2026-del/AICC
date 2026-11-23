@@ -35,6 +35,7 @@ final class ConsoleWindowCoordinator: NSObject, NSWindowDelegate {
         self.onClose = onClose
         super.init()
         observeTheme()
+        observeApplicationActivity()
     }
 
     func present() {
@@ -44,6 +45,7 @@ final class ConsoleWindowCoordinator: NSObject, NSWindowDelegate {
             if window.isMiniaturized { window.deminiaturize(nil) }
             window.makeKeyAndOrderFront(nil)
             window.orderFrontRegardless()
+            syncForegroundState()
             return
         }
 
@@ -51,9 +53,11 @@ final class ConsoleWindowCoordinator: NSObject, NSWindowDelegate {
         consoleWindow.makeKeyAndOrderFront(nil)
         consoleWindow.orderFrontRegardless()
         window = consoleWindow
+        syncForegroundState()
     }
 
     func tearDown() {
+        store.stopAccountsAutoRefresh()
         guard let window else {
             cancellables.removeAll()
             return
@@ -104,16 +108,66 @@ final class ConsoleWindowCoordinator: NSObject, NSWindowDelegate {
             .store(in: &cancellables)
     }
 
+    /// 监听应用前后台切换，保证主控制台在切到其它应用时立刻暂停 10 分钟定时调度，
+    /// 切回前台时立即恢复并在快照过期时触发只读刷新。
+    private func observeApplicationActivity() {
+        let center = NotificationCenter.default
+        center.publisher(for: NSApplication.didBecomeActiveNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.syncForegroundState()
+            }
+            .store(in: &cancellables)
+        center.publisher(for: NSApplication.didResignActiveNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.store.setConsoleWindowForeground(false)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func syncForegroundState() {
+        guard let window, window.isVisible, !window.isMiniaturized, NSApp.isActive else {
+            store.setConsoleWindowForeground(false)
+            return
+        }
+        let isFront = window.isKeyWindow || window.isMainWindow
+        store.setConsoleWindowForeground(isFront)
+    }
+
     func windowDidBecomeKey(_ notification: Notification) {
         guard let activeWindow = notification.object as? NSWindow, activeWindow === window else { return }
-        // 从浏览器/Magpie 重新授权切回主控制台时，若账号快照已过冷却时间，自动只读重读一次。
-        Task { [weak store] in
-            await store?.refreshAccountsIfStale()
-        }
+        syncForegroundState()
+    }
+
+    func windowDidBecomeMain(_ notification: Notification) {
+        guard let activeWindow = notification.object as? NSWindow, activeWindow === window else { return }
+        syncForegroundState()
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        guard let resignedWindow = notification.object as? NSWindow, resignedWindow === window else { return }
+        syncForegroundState()
+    }
+
+    func windowDidResignMain(_ notification: Notification) {
+        guard let resignedWindow = notification.object as? NSWindow, resignedWindow === window else { return }
+        syncForegroundState()
+    }
+
+    func windowDidMiniaturize(_ notification: Notification) {
+        guard let minimizedWindow = notification.object as? NSWindow, minimizedWindow === window else { return }
+        store.setConsoleWindowForeground(false)
+    }
+
+    func windowDidDeminiaturize(_ notification: Notification) {
+        guard let restoredWindow = notification.object as? NSWindow, restoredWindow === window else { return }
+        syncForegroundState()
     }
 
     func windowWillClose(_ notification: Notification) {
         guard let closingWindow = notification.object as? NSWindow, closingWindow === window else { return }
+        store.stopAccountsAutoRefresh()
         closingWindow.delegate = nil
         window = nil
         recentlyClosedWindows.append(closingWindow)
