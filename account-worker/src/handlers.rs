@@ -3157,7 +3157,10 @@ mod tests {
             access_token: access.to_string(),
             refresh_token: refresh.map(str::to_string),
             domain: "www.workbuddy.cn".to_string(),
-            expires_at_ms: Some(1_795_354_934_547),
+            // 远期时间：这份夹具代表"刚登录拿到的新令牌"。写死某个具体日期会变成
+            // 定时炸弹——到点之后 `is_usable()` 判过期，镜像兜底换选另一份授权，
+            // 断言就会莫名其妙地红。
+            expires_at_ms: Some(1_900_000_000_000), // 2030-03-17T21:46:40Z
             profile: Profile {
                 uid: uid.to_string(),
                 nickname: Some("测试账号".to_string()),
@@ -4394,6 +4397,142 @@ mod tests {
             }
             broker::Outcome::Unavailable { reason, .. } => panic!("不该不可用：{reason}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 借用授权的到期时间以 Magpie 文件为准（2.14.1）
+    // -----------------------------------------------------------------------
+
+    /// 导入时落库的是**快照**；Magpie 换过令牌之后，镜像必须现读文件里的到期时间，
+    /// 否则界面会把一份可用授权一直显示成「已过期」。
+    #[test]
+    fn mirror_takes_magpie_expiry_from_the_file() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-aaaa-5555-6666-777788889999";
+        import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
+        let acc = account(&app, uid);
+        assert_eq!(
+            acc.token_expires_at.as_deref(),
+            Some("2026-11-24T13:12:25Z"),
+            "导入时先落 Magpie 快照"
+        );
+
+        // Magpie 换发新令牌：文件里的到期时间往后推。
+        let mut fresh = magpie_login(uid, "borrowed");
+        fresh.expires_at_ms = Some(1_797_773_834_889); // 2026-12-20T13:37:14Z
+        magpie::test_set_logins(Some(vec![fresh]));
+        service::sync_mirror(&app, &acc.id).expect("mirror");
+
+        let acc = account(&app, uid);
+        assert_eq!(
+            acc.token_expires_at.as_deref(),
+            Some("2026-12-20T13:37:14Z")
+        );
+        assert_eq!(acc.auth_status, "valid", "换个到期时间不是状态变化");
+        assert_eq!(acc.auth_source, "magpie", "首选来源不变");
+        magpie::test_reset();
+    }
+
+    /// 文件读不到 / 没装 Magpie：保留原有镜像值，不把「不知道」写成「已过期」。
+    #[test]
+    fn mirror_keeps_the_snapshot_when_magpie_cannot_be_read() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-bbbb-5555-6666-777788889999";
+        import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
+        let acc = account(&app, uid);
+        let before = acc.token_expires_at.clone();
+        assert!(before.is_some());
+
+        magpie::test_set_unreadable();
+        service::sync_mirror(&app, &acc.id).expect("mirror");
+
+        let acc = account(&app, uid);
+        assert_eq!(acc.token_expires_at, before, "读不到就保留旧值");
+        assert_eq!(acc.auth_status, "valid");
+        magpie::test_reset();
+    }
+
+    /// 同时有 own 与 magpie：刷新镜像只动镜像的到期时间，own 那一行一个字节都不变。
+    #[test]
+    fn mirror_refresh_leaves_the_own_authorization_alone() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-cccc-5555-6666-777788889999";
+        import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
+        persist_login(
+            &app,
+            &payload(uid, "own-access", Some("own-refresh")),
+            WbVariant::Cn,
+        )
+        .expect("login");
+        let acc = account(&app, uid);
+        let own_before = app
+            .with_db(|db| db.find_authorization(&acc.id, "own"))
+            .expect("query")
+            .expect("own row");
+
+        let mut fresh = magpie_login(uid, "borrowed");
+        fresh.expires_at_ms = Some(1_797_773_834_889);
+        magpie::test_set_logins(Some(vec![fresh]));
+        service::sync_mirror(&app, &acc.id).expect("mirror");
+
+        let own_after = app
+            .with_db(|db| db.find_authorization(&acc.id, "own"))
+            .expect("query")
+            .expect("own row");
+        assert_eq!(own_before.token_expires_at, own_after.token_expires_at);
+        assert_eq!(own_before.version, own_after.version, "own 行不该被写");
+        assert_eq!(own_before.access_ref, own_after.access_ref);
+        assert_eq!(
+            account(&app, uid).token_expires_at.as_deref(),
+            Some("2026-12-20T13:37:14Z")
+        );
+        magpie::test_reset();
+    }
+
+    /// 镜像里的到期时间已经过去、文件里换成新令牌：刷新只更新到期时间，
+    /// 不标 expired、不写 last_error、不要求重新登录。
+    #[test]
+    fn refreshing_an_expired_mirror_does_not_ask_for_a_relogin() {
+        let (app, _dir) = test_app(SecureStore::memory());
+        let uid = "6f1c2d94-dddd-5555-6666-777788889999";
+        import_logins(&app, vec![magpie_login(uid, "borrowed")], &[]).expect("import");
+        let acc = account(&app, uid);
+
+        // Magpie 文件里换成一个**已经过期**的令牌：镜像照实显示过期。
+        let mut expired = magpie_login(uid, "borrowed");
+        expired.expires_at_ms = Some(1_600_000_000_000); // 2020-09-13
+        magpie::test_set_logins(Some(vec![expired]));
+        service::sync_mirror(&app, &acc.id).expect("mirror");
+        assert_eq!(
+            account(&app, uid).token_expires_at.as_deref(),
+            Some("2020-09-13T12:26:40Z"),
+            "文件里过期了，镜像就该说过期"
+        );
+
+        // 用户重新授权，Magpie 换发新令牌：刷新镜像即可恢复，不需要再登录一次。
+        let mut fresh = magpie_login(uid, "borrowed");
+        fresh.expires_at_ms = Some(1_797_773_834_889);
+        magpie::test_set_logins(Some(vec![fresh]));
+        service::sync_mirror(&app, &acc.id).expect("mirror");
+
+        let acc = account(&app, uid);
+        assert_eq!(
+            acc.token_expires_at.as_deref(),
+            Some("2026-12-20T13:37:14Z")
+        );
+        assert_eq!(acc.auth_status, "valid");
+        let rows = app
+            .with_db(|db| db.list_authorizations(&acc.id))
+            .expect("rows");
+        for row in rows {
+            assert_eq!(
+                row.status, "valid",
+                "刷新到期时间不是状态迁移：{}",
+                row.kind
+            );
+            assert!(row.last_error.is_none(), "{}", row.kind);
+        }
+        magpie::test_reset();
     }
 
     /// 首选那份失效时兜底到另一份，且不改另一份的状态。

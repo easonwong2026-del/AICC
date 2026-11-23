@@ -39,7 +39,9 @@ impl Session {
                     "refresh": "r".repeat(1622),
                     "uid": "6f1c2d94-1111-2222-3333-444455556666",
                     "domain": "www.workbuddy.cn",
-                    "expires": 1_795_354_934_547i64
+                    // 远期时间：写死具体日期会变成定时炸弹 —— 到点后导入会以
+                    // token_expired 跳过，整组用例莫名变红。
+                    "expires": 1_900_000_000_000i64 // 2030-03-17T21:46:40Z
                 }
             })
             .to_string(),

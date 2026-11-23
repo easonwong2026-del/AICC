@@ -850,6 +850,20 @@ pub fn sync_mirror(app: &App, account_id: &str) -> RpcResult<MirrorReport> {
         .unwrap_or(&rows[0])
         .clone();
 
+    // 借用授权的到期时间在 Magpie 文件里，库里那份只是**导入时的快照**。
+    // 不现读一次，Magpie 换过令牌之后镜像还抄旧快照，界面就会把一份可用授权
+    // 显示成「已过期」。读不到 / 关联对不上就保留原值 —— 宁可用旧快照，
+    // 也不能把"不知道"写成"已过期"。
+    let expires = if chosen.kind == ids::KIND_MAGPIE {
+        let account = app.with_db(|db| db.get_account(account_id))?;
+        account
+            .as_ref()
+            .and_then(|account| crate::auth::magpie_link::live_expiry(account, &chosen))
+            .or_else(|| chosen.token_expires_at.clone())
+    } else {
+        chosen.token_expires_at.clone()
+    };
+
     // 1) 账号镜像列：四件套 + 来源授权 ID（G6：镜像必须可追溯）
     app.with_db(|db| {
         db.set_account_mirror(
@@ -857,7 +871,7 @@ pub fn sync_mirror(app: &App, account_id: &str) -> RpcResult<MirrorReport> {
             &chosen.id,
             &chosen.kind,
             &chosen.status,
-            chosen.token_expires_at.as_deref(),
+            expires.as_deref(),
             Some(&chosen.access_ref),
         )
     })?;
