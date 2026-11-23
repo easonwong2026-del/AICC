@@ -316,13 +316,19 @@ pub fn describe(app: &App, account_id: &str) -> RpcResult<Vec<Value>> {
             let effective = account
                 .as_ref()
                 .and_then(|account| effective_dynamic_status(account, row));
+            // 借用授权的到期时间同样以文件为准：库里那份是导入时的快照，
+            // 和账号镜像一起显示两个日期比只修一个更让人困惑。
+            let live_expiry = account
+                .as_ref()
+                .filter(|_| row.kind == ids::KIND_MAGPIE)
+                .and_then(|account| super::magpie_link::live_expiry(account, row));
             json!({
                 "id": row.id,
                 "kind": row.kind,
                 "status": row.status,
                 "effectiveStatus": effective,
                 "recoverable": effective == Some("valid") && row.status != "valid",
-                "tokenExpiresAt": row.token_expires_at,
+                "tokenExpiresAt": live_expiry.or_else(|| row.token_expires_at.clone()),
                 "sourceKey": row.source_key,
                 "storageKind": row.storage_kind(),
                 "keyMigrationState": row.key_migration_state,

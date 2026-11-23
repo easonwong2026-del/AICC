@@ -13,6 +13,7 @@
 use crate::credentials::{CredentialError, CredentialErrorKind};
 use crate::providers::magpie;
 use crate::storage::AccountRecord;
+use crate::storage::AuthorizationRecord;
 
 /// 为什么这条关联不可用。分类是稳定契约，文案才是给人看的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +101,24 @@ pub fn find_link<'a>(
         }
     }
     Ok(login)
+}
+
+/// 现读 Magpie 文件里这条引用的到期时间（RFC3339）。
+///
+/// 只用于**展示与镜像**：库里的 `token_expires_at` 是导入那一刻的快照，
+/// Magpie 自己换过令牌之后它就过期了，镜像再照抄它，界面就会把一份可用授权
+/// 显示成「已过期」。这里只读时间，不碰令牌，也不改授权优先级。
+///
+/// 文件读不到、来源键不在、平台或 UID 对不上，一律返回 `None`，调用方保留原值。
+/// `now_ms = None`：**已经过期的令牌也要拿到它的到期时间**，界面照实显示过期，
+/// 而不是因为"读不到"退回一份更旧的快照。
+pub(crate) fn live_expiry(account: &AccountRecord, row: &AuthorizationRecord) -> Option<String> {
+    let source_key = row.source_key.as_deref()?;
+    let logins = magpie::read_logins().ok()?;
+    let login = find_link(&logins, account, source_key, None).ok()?;
+    login
+        .expires_at_ms
+        .and_then(crate::providers::workbuddy_auth::ms_to_rfc3339)
 }
 
 /// 取当前可用的一条 Magpie 授权。**只返回 access**。

@@ -850,6 +850,20 @@ pub fn sync_mirror(app: &App, account_id: &str) -> RpcResult<MirrorReport> {
         .unwrap_or(&rows[0])
         .clone();
 
+    // 借用授权的到期时间在 Magpie 文件里，库里那份只是**导入时的快照**。
+    // 不现读一次，Magpie 换过令牌之后镜像还抄旧快照，界面就会把一份可用授权
+    // 显示成「已过期」。读不到 / 关联对不上就保留原值 —— 宁可用旧快照，
+    // 也不能把"不知道"写成"已过期"。
+    let expires = if chosen.kind == ids::KIND_MAGPIE {
+        let account = app.with_db(|db| db.get_account(account_id))?;
+        account
+            .as_ref()
+            .and_then(|account| crate::auth::magpie_link::live_expiry(account, &chosen))
+            .or_else(|| chosen.token_expires_at.clone())
+    } else {
+        chosen.token_expires_at.clone()
+    };
+
     // 1) 账号镜像列：四件套 + 来源授权 ID（G6：镜像必须可追溯）
     app.with_db(|db| {
         db.set_account_mirror(
@@ -857,7 +871,7 @@ pub fn sync_mirror(app: &App, account_id: &str) -> RpcResult<MirrorReport> {
             &chosen.id,
             &chosen.kind,
             &chosen.status,
-            chosen.token_expires_at.as_deref(),
+            expires.as_deref(),
             Some(&chosen.access_ref),
         )
     })?;
@@ -878,6 +892,31 @@ pub fn sync_mirror(app: &App, account_id: &str) -> RpcResult<MirrorReport> {
     }
 
     Ok(MirrorReport { error })
+}
+
+/// 展示用的到期时间：当前镜像来源是**借用授权**时，现读 Magpie 文件。
+///
+/// 只修显示、不写库：`accounts.list` / `accounts.get` 返回的 `tokenExpiresAt` 就是
+/// 界面判「已过期」的那一列（`ConsoleAccount.isTokenExpired`）。只靠 `sync_mirror`
+/// 不够 —— 那要等下一次导入或刷新才生效，用户重开页面看到的还是旧快照。
+///
+/// 三条边界都在 `live_expiry` 里：文件读不到、来源键/平台/UID 对不上，一律 `None`，
+/// 调用方保留库里那份。当前来源是自有授权时这里直接返回 `None`，Magpie 文件换了
+/// 什么都与这个账号无关。**不碰令牌、不改首选来源、不改授权优先级。**
+pub(crate) fn display_expiry(app: &App, account: &AccountRecord) -> Option<String> {
+    if account.auth_source != ids::KIND_MAGPIE {
+        return None;
+    }
+    let rows = app.with_db(|db| db.list_authorizations(&account.id)).ok()?;
+    // 优先认镜像记录的那一行；老数据没有镜像 ID 时退到"唯一那条 magpie 行"。
+    let row = match account.auth_mirror_auth_id.as_deref() {
+        Some(id) => rows.iter().find(|row| row.id == id),
+        None => rows.iter().find(|row| row.kind == ids::KIND_MAGPIE),
+    }?;
+    if row.kind != ids::KIND_MAGPIE {
+        return None;
+    }
+    crate::auth::magpie_link::live_expiry(account, row)
 }
 
 /// 把镜像所选的那份写进旧别名键（PR #65 的二进制读这里）。
@@ -1273,7 +1312,11 @@ pub fn purge_keys(app: &App, keys: &[String]) -> Vec<String> {
 
 /// 建账号时如果已经存在授权行（例如回填过），把行也带上：返回给 RPC 的账号视图。
 pub fn account_view(app: &App, account: &AccountRecord) -> RpcResult<Value> {
-    let mut value = json!(account);
+    let mut view = account.clone();
+    if let Some(expiry) = display_expiry(app, account) {
+        view.token_expires_at = Some(expiry);
+    }
+    let mut value = json!(view);
     value["authorizations"] = json!(broker::describe(app, &account.id)?);
     value["authorizationSummary"] = broker::summary(app, account);
     Ok(value)
