@@ -305,6 +305,7 @@ fn unavailable_reason(err: &CredentialError, row: &crate::storage::Authorization
 }
 
 /// 界面 / `health` 用的授权快照。**不含令牌**，只给状态与指纹级信息。
+#[cfg(test)]
 pub fn describe(app: &App, account_id: &str) -> RpcResult<Vec<Value>> {
     let cache = super::magpie_link::MagpieLoginsCache::new();
     describe_with_cache(app, account_id, &cache)
@@ -330,7 +331,7 @@ pub(crate) fn describe_with_cache(
             // 和账号镜像一起显示两个日期比只修一个更让人困惑。
             let live_expiry = account
                 .as_ref()
-                .filter(|_| row.kind == ids::KIND_MAGPIE)
+                .filter(|_| row.kind == ids::KIND_MAGPIE && row.source_key.is_some())
                 .and_then(|account| {
                     magpie_cache
                         .get()
@@ -380,6 +381,16 @@ fn effective_dynamic_status(
 
 /// 账号层面的授权摘要：两份是否存在、当前会用哪一份。
 pub fn summary(app: &App, account: &AccountRecord) -> Value {
+    let cache = super::magpie_link::MagpieLoginsCache::new();
+    summary_with_cache(app, account, &cache)
+}
+
+/// 复用单次 RPC 内 Magpie 快照缓存的 `summary`（不改 `resolve` 优先级与读盘语义）。
+pub(crate) fn summary_with_cache(
+    app: &App,
+    account: &AccountRecord,
+    magpie_cache: &super::magpie_link::MagpieLoginsCache,
+) -> Value {
     let rows = app
         .with_db(|db| db.list_authorizations(&account.id))
         .unwrap_or_default();
@@ -403,7 +414,7 @@ pub fn summary(app: &App, account: &AccountRecord) -> Value {
         "hasOwn": has(ids::KIND_OWN),
         "hasMagpie": has(ids::KIND_MAGPIE),
         "selected": selected,
-        "authorizations": describe(app, &account.id).unwrap_or_default(),
+        "authorizations": describe_with_cache(app, &account.id, magpie_cache).unwrap_or_default(),
     })
 }
 

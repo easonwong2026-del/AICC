@@ -917,7 +917,7 @@ pub(crate) fn display_expiry_with_cache(
         Some(id) => rows.iter().find(|row| row.id == id),
         None => rows.iter().find(|row| row.kind == ids::KIND_MAGPIE),
     }?;
-    if row.kind != ids::KIND_MAGPIE {
+    if row.kind != ids::KIND_MAGPIE || row.source_key.is_none() {
         return None;
     }
     let logins = magpie_cache.get()?;
@@ -1328,7 +1328,7 @@ pub fn account_view(app: &App, account: &AccountRecord) -> RpcResult<Value> {
         &account.id,
         &magpie_cache
     )?);
-    value["authorizationSummary"] = broker::summary(app, account);
+    value["authorizationSummary"] = broker::summary_with_cache(app, account, &magpie_cache);
     Ok(value)
 }
 

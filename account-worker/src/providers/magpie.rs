@@ -168,6 +168,8 @@ pub fn read_logins() -> Result<Vec<MagpieLogin>, MagpieError> {
     // 单测里直接喂一份登录态：`MAGPIE_CONFIG_DIR` 是进程级环境变量，并行测试会互相打架。
     // 用线程局部变量是因为 libtest 每个用例一个线程，互不干扰；生产构建里这段不存在。
     #[cfg(test)]
+    TEST_READ_COUNT.with(|count| count.set(count.get() + 1));
+    #[cfg(test)]
     if TEST_UNREADABLE.with(|flag| flag.get()) {
         return Err(MagpieError::Unreadable(
             "测试：Magpie 文件不可读".to_string(),
@@ -178,6 +180,18 @@ pub fn read_logins() -> Result<Vec<MagpieLogin>, MagpieError> {
         return Ok(logins);
     }
     read_logins_from(&config_dir())
+}
+
+/// 仅测试：查询当前测试线程调用 `read_logins()` 的次数。
+#[cfg(test)]
+pub fn test_read_count() -> usize {
+    TEST_READ_COUNT.with(|count| count.get())
+}
+
+/// 仅测试：重置读取次数计数，便于在准备阶段之后单独断言单次 RPC 读盘次数。
+#[cfg(test)]
+pub fn test_reset_read_count() {
+    TEST_READ_COUNT.with(|count| count.set(0));
 }
 
 /// 仅测试：覆盖 `read_logins()` 的返回。传 `None` 恢复读真实文件。
@@ -197,6 +211,7 @@ pub fn test_set_unreadable() {
 pub fn test_reset() {
     TEST_LOGINS.with(|slot| *slot.borrow_mut() = None);
     TEST_UNREADABLE.with(|flag| flag.set(false));
+    TEST_READ_COUNT.with(|count| count.set(0));
 }
 
 #[cfg(test)]
@@ -204,6 +219,7 @@ thread_local! {
     static TEST_LOGINS: std::cell::RefCell<Option<Vec<MagpieLogin>>> =
         const { std::cell::RefCell::new(None) };
     static TEST_UNREADABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TEST_READ_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// 读取**所有支持 provider** 的账号。没有匹配到任何 provider 的键直接跳过。
