@@ -115,19 +115,48 @@ pub struct SystemIdle;
 
 impl IdleProbe for SystemIdle {
     fn idle_secs(&self) -> Option<i64> {
-        // `ioreg` 不需要任何权限，也不依赖辅助功能授权。
-        let output = std::process::Command::new("ioreg")
-            .args(["-c", "IOHIDSystem", "-d", "1"])
-            .output()
-            .ok()?;
-        let text = String::from_utf8_lossy(&output.stdout);
-        let marker = "\"HIDIdleTime\" =";
-        let start = text.find(marker)? + marker.len();
-        let rest = text[start..].trim_start();
-        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-        let nanos: i64 = digits.parse().ok()?;
-        Some(nanos / 1_000_000_000)
+        idle_secs_with(probe_ioreg)
     }
+}
+
+/// 两段式读取：先窄查询，再全量 dump。
+///
+/// 窄查询（`-c IOHIDSystem -d 1`）在旧系统上最快，但 **macOS 26/27 上它只回
+/// `Root`**：`IOHIDSystem` 不再作为 IOService 暴露，`HIDIdleTime` 一条都没有。
+/// 全量 `-l` 里仍然有这条属性（本机 0.16s 左右）。只认窄查询的写法会让
+/// "读不到空闲"变成常态，进而每一轮都保守跳过 —— 计划永远不执行。
+///
+/// 两段都失败仍然返回 `None`：**读不到不等于用户不在用**，不能据此关客户端。
+fn idle_secs_with(probe: impl Fn(&[&str]) -> Option<i64>) -> Option<i64> {
+    probe(&["-c", "IOHIDSystem", "-d", "1"]).or_else(|| probe(&["-l"]))
+}
+
+/// 跑一次 `ioreg` 并解析。绝对路径：GUI 进程的 `PATH` 不一定带 `/usr/sbin`。
+fn probe_ioreg(args: &[&str]) -> Option<i64> {
+    let output = std::process::Command::new("/usr/sbin/ioreg")
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_idle(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// `"HIDIdleTime" = <纳秒>` → 秒。
+///
+/// 属性缺失、值不是数字、溢出都返回 `None`；**不猜**，也不把失败当成 0 秒
+/// （0 秒的意思是"刚刚还在动"，会把一轮轮换一直推迟）。
+fn parse_idle(text: &str) -> Option<i64> {
+    const MARKER: &str = "\"HIDIdleTime\" =";
+    let start = text.find(MARKER)? + MARKER.len();
+    let digits: String = text[start..]
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    let nanos: i64 = digits.parse().ok()?;
+    Some(nanos / 1_000_000_000)
 }
 
 // 进程内互斥：tick、立即执行、暂停、恢复都可能同时被触发。
@@ -1998,4 +2027,97 @@ fn dry_run_warnings(plan: &RotationPlan, live: &client::LiveFile) -> Vec<String>
         plan.account_ids.len() + 1
     ));
     warnings
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    /// 正常值：纳秒 → 秒。
+    #[test]
+    fn parses_idle_nanoseconds_into_seconds() {
+        let text = "    | | |   \"HIDIdleTime\" = 153997320083\n";
+        assert_eq!(parse_idle(text), Some(153));
+    }
+
+    /// 0 是**真实值**（刚刚动过），不是"读不到"。
+    #[test]
+    fn zero_idle_time_is_a_value() {
+        assert_eq!(parse_idle("\"HIDIdleTime\" = 0"), Some(0));
+    }
+
+    /// 超过 120 秒阈值的那一侧照原样返回，阈值本身不在这里判。
+    #[test]
+    fn long_idle_time_is_returned_unchanged() {
+        assert_eq!(parse_idle("\"HIDIdleTime\" = 3600000000000"), Some(3600));
+        assert_eq!(parse_idle("\"HIDIdleTime\" = 126000000000"), Some(126));
+    }
+
+    /// 属性缺失：返回 None，绝不猜成"空闲 0 秒"。
+    #[test]
+    fn missing_property_is_unknown() {
+        assert_eq!(parse_idle("+-o Root  <class IORegistryEntry>\n"), None);
+        assert_eq!(parse_idle(""), None);
+    }
+
+    /// 格式不对（非数字 / 被截断）：同样是 None。
+    #[test]
+    fn malformed_value_is_unknown() {
+        assert_eq!(parse_idle("\"HIDIdleTime\" = abc"), None);
+        assert_eq!(parse_idle("\"HIDIdleTime\" ="), None);
+        assert_eq!(parse_idle("\"HIDIdleTime\""), None);
+    }
+
+    /// 窄查询拿不到时回落到全量 dump（本机 macOS 27 的真实情况）。
+    #[test]
+    fn falls_back_to_the_full_dump() {
+        let calls = Cell::new(0);
+        let idle = idle_secs_with(|args| {
+            calls.set(calls.get() + 1);
+            if args == ["-c", "IOHIDSystem", "-d", "1"] {
+                None // macOS 26/27：只回 Root
+            } else {
+                Some(0)
+            }
+        });
+        assert_eq!(idle, Some(0));
+        assert_eq!(calls.get(), 2, "第二段必须真的被调用");
+    }
+
+    /// 窄查询成功就不再多跑一次全量 dump。
+    #[test]
+    fn narrow_query_short_circuits() {
+        let calls = Cell::new(0);
+        let idle = idle_secs_with(|_| {
+            calls.set(calls.get() + 1);
+            Some(150)
+        });
+        assert_eq!(idle, Some(150));
+        assert_eq!(calls.get(), 1);
+    }
+
+    /// 两段都失败：None。调用方据此保守推迟，而不是当成"用户不在用"。
+    #[test]
+    fn both_probes_failing_stays_unknown() {
+        assert_eq!(idle_secs_with(|_| None), None);
+    }
+
+    /// 真机只读检查（CI 不跑，Linux 上没有 ioreg）：
+    ///
+    /// ```text
+    /// cargo test --offline real_ioreg -- --ignored --nocapture
+    /// ```
+    ///
+    /// 只断言"能读到一个数"，不判阈值 —— 空闲秒数随机器状态变化，写死会变成
+    /// 又一个定时炸弹。
+    #[test]
+    #[ignore = "读真实 ioreg：只在本机手动执行"]
+    fn real_ioreg_reports_idle_seconds() {
+        let idle = SystemIdle
+            .idle_secs()
+            .expect("macOS 上两段式探测必须读到 HIDIdleTime");
+        assert!(idle >= 0, "空闲秒数不应为负：{idle}");
+        println!("HIDIdleTime -> {idle}s");
+    }
 }
