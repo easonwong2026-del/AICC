@@ -903,7 +903,9 @@ final class ConsoleStore: ObservableObject {
         #else
         let outcome = await accountsRefreshCoordinator.run(
             trigger: trigger,
-            workerUnavailableMessage: workerFailureText,
+            workerUnavailableMessage: { [weak self] in
+                self?.workerFailureText ?? "账号助手未就绪"
+            },
             onStateChange: { [weak self] state in
                 self?.applyAccountsRefreshState(state)
             },

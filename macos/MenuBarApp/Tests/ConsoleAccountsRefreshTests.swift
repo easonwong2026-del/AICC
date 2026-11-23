@@ -30,7 +30,7 @@ final class ConsoleAccountsRefreshTests: XCTestCase {
         let first = await coordinator.run(
             trigger: .initialLoad,
             now: { current },
-            workerUnavailableMessage: "账号助手未就绪",
+            workerUnavailableMessage: { "账号助手未就绪" },
             ensureWorker: { true },
             fetch: { [self.sampleAccount("a1")] }
         )
@@ -49,7 +49,7 @@ final class ConsoleAccountsRefreshTests: XCTestCase {
         let failed = await coordinator.run(
             trigger: .scheduled,
             now: { current },
-            workerUnavailableMessage: "账号助手未就绪",
+            workerUnavailableMessage: { "账号助手未就绪" },
             ensureWorker: { false },
             fetch: {
                 XCTFail("worker 不可用时不应发起 listAccounts RPC")
@@ -67,6 +67,80 @@ final class ConsoleAccountsRefreshTests: XCTestCase {
         XCTAssertTrue(coordinator.state.isSnapshotStale(now: current))
     }
 
+    func testWorkerUnavailableMessageIsReadAfterEnsureWorkerCompletes() async {
+        let base = Date(timeIntervalSince1970: 1_795_400_000)
+        var current = base
+        let coordinator = ConsoleAccountsRefreshCoordinator(ttl: 600)
+
+        var workerFailureText = "账号助手未启动"
+        var evaluatedAtEnsureFinished = false
+        var ensureFinished = false
+        var evaluations = 0
+
+        let failed = await coordinator.run(
+            trigger: .initialLoad,
+            now: { current },
+            workerUnavailableMessage: {
+                evaluations += 1
+                evaluatedAtEnsureFinished = ensureFinished
+                return workerFailureText
+            },
+            ensureWorker: {
+                workerFailureText = "account-worker 启动失败：端口被占用"
+                ensureFinished = true
+                return false
+            },
+            fetch: {
+                XCTFail("worker 未就绪时不应调用 fetch")
+                return []
+            }
+        )
+
+        XCTAssertEqual(evaluations, 1, "仅应在 ensureWorker 失败后读取一次错误文案")
+        XCTAssertTrue(evaluatedAtEnsureFinished, "必须在 ensureWorker 结束后读取失败原因，而非启动前的旧状态")
+        XCTAssertEqual(
+            failed,
+            .failed(
+                error: "account-worker 启动失败：端口被占用",
+                attemptedAt: base,
+                preservedLastSuccessAt: nil
+            )
+        )
+        XCTAssertEqual(coordinator.state.lastError, "account-worker 启动失败：端口被占用")
+
+        // 空白错误文案回退到默认提示，不落空字符串
+        current = base.addingTimeInterval(35)
+        let emptyFallback = await coordinator.run(
+            trigger: .manual,
+            now: { current },
+            workerUnavailableMessage: { "   " },
+            ensureWorker: { false },
+            fetch: { [] }
+        )
+        XCTAssertEqual(
+            emptyFallback,
+            .failed(error: "账号助手未就绪", attemptedAt: current, preservedLastSuccessAt: nil)
+        )
+
+        // ensureWorker 成功时绝不应求值 workerUnavailableMessage
+        var evaluatedOnSuccess = false
+        current = base.addingTimeInterval(40)
+        let ok = await coordinator.run(
+            trigger: .manual,
+            now: { current },
+            workerUnavailableMessage: {
+                evaluatedOnSuccess = true
+                return "不应被读取"
+            },
+            ensureWorker: { true },
+            fetch: { [self.sampleAccount("ok")] }
+        )
+        guard case .succeeded = ok else {
+            return XCTFail("手动刷新应当成功：\(ok)")
+        }
+        XCTAssertFalse(evaluatedOnSuccess)
+    }
+
     func testFetchThrowPreservesLastSuccessAtAndColdFailureKeepsSuccessNil() async {
         let base = Date(timeIntervalSince1970: 1_795_400_000)
         var current = base
@@ -76,7 +150,7 @@ final class ConsoleAccountsRefreshTests: XCTestCase {
         let coldFail = await coordinator.run(
             trigger: .initialLoad,
             now: { current },
-            workerUnavailableMessage: "助手未运行",
+            workerUnavailableMessage: { "助手未运行" },
             ensureWorker: { true },
             fetch: { throw RefreshTestError.rpcTimeout }
         )
@@ -93,7 +167,7 @@ final class ConsoleAccountsRefreshTests: XCTestCase {
         let recovered = await coordinator.run(
             trigger: .manual,
             now: { current },
-            workerUnavailableMessage: "助手未运行",
+            workerUnavailableMessage: { "助手未运行" },
             ensureWorker: { true },
             fetch: { [self.sampleAccount("a2")] }
         )
@@ -111,7 +185,7 @@ final class ConsoleAccountsRefreshTests: XCTestCase {
         let secondFail = await coordinator.run(
             trigger: .manual,
             now: { current },
-            workerUnavailableMessage: "助手未运行",
+            workerUnavailableMessage: { "助手未运行" },
             ensureWorker: { true },
             fetch: { throw RefreshTestError.rpcTimeout }
         )
@@ -136,7 +210,7 @@ final class ConsoleAccountsRefreshTests: XCTestCase {
             await coordinator.run(
                 trigger: .initialLoad,
                 now: { base },
-                workerUnavailableMessage: "助手未运行",
+                workerUnavailableMessage: { "助手未运行" },
                 ensureWorker: { true },
                 fetch: {
                     fetchCalls += 1
@@ -155,7 +229,7 @@ final class ConsoleAccountsRefreshTests: XCTestCase {
             let outcome = await coordinator.run(
                 trigger: trigger,
                 now: { base.addingTimeInterval(1) },
-                workerUnavailableMessage: "助手未运行",
+                workerUnavailableMessage: { "助手未运行" },
                 ensureWorker: { true },
                 fetch: {
                     fetchCalls += 1
@@ -184,7 +258,7 @@ final class ConsoleAccountsRefreshTests: XCTestCase {
             await coordinator.run(
                 trigger: .initialLoad,
                 now: { current },
-                workerUnavailableMessage: "助手未运行",
+                workerUnavailableMessage: { "助手未运行" },
                 ensureWorker: { true },
                 fetch: {
                     try await withCheckedThrowingContinuation { slowGate.continuation = $0 }
@@ -202,7 +276,7 @@ final class ConsoleAccountsRefreshTests: XCTestCase {
         let manualOutcome = await coordinator.run(
             trigger: .manual,
             now: { current },
-            workerUnavailableMessage: "助手未运行",
+            workerUnavailableMessage: { "助手未运行" },
             ensureWorker: { true },
             fetch: { [self.sampleAccount("fresh", nickname: "新快照")] }
         )
@@ -237,7 +311,7 @@ final class ConsoleAccountsRefreshTests: XCTestCase {
         _ = await coordinator.run(
             trigger: .initialLoad,
             now: { current },
-            workerUnavailableMessage: "助手未运行",
+            workerUnavailableMessage: { "助手未运行" },
             ensureWorker: { false },
             fetch: { [] }
         )
@@ -248,7 +322,7 @@ final class ConsoleAccountsRefreshTests: XCTestCase {
         let skipped = await coordinator.run(
             trigger: .windowActivated,
             now: { current },
-            workerUnavailableMessage: "助手未运行",
+            workerUnavailableMessage: { "助手未运行" },
             ensureWorker: { true },
             fetch: { [] }
         )
@@ -259,7 +333,7 @@ final class ConsoleAccountsRefreshTests: XCTestCase {
         _ = await coordinator.run(
             trigger: .scheduled,
             now: { current },
-            workerUnavailableMessage: "助手未运行",
+            workerUnavailableMessage: { "助手未运行" },
             ensureWorker: { false },
             fetch: { [] }
         )
@@ -271,7 +345,7 @@ final class ConsoleAccountsRefreshTests: XCTestCase {
         let manual = await coordinator.run(
             trigger: .manual,
             now: { current },
-            workerUnavailableMessage: "助手未运行",
+            workerUnavailableMessage: { "助手未运行" },
             ensureWorker: { true },
             fetch: { [self.sampleAccount("ok")] }
         )
@@ -294,7 +368,7 @@ final class ConsoleAccountsRefreshTests: XCTestCase {
         _ = await coordinator.run(
             trigger: .initialLoad,
             now: { clock.now },
-            workerUnavailableMessage: "助手未运行",
+            workerUnavailableMessage: { "助手未运行" },
             ensureWorker: { true },
             fetch: { [self.sampleAccount("init")] }
         )
@@ -310,7 +384,7 @@ final class ConsoleAccountsRefreshTests: XCTestCase {
             let outcome = await coordinator.run(
                 trigger: .scheduled,
                 now: { clock.now },
-                workerUnavailableMessage: "助手未运行",
+                workerUnavailableMessage: { "助手未运行" },
                 ensureWorker: { true },
                 fetch: {
                     tickCount += 1
@@ -358,6 +432,163 @@ final class ConsoleAccountsRefreshTests: XCTestCase {
         // 关闭窗口 -> 停止调度
         scheduler.stop()
         XCTAssertFalse(scheduler.isScheduled)
+    }
+
+    func testSchedulerDoesNotBusyLoopWhenClockAdvancesAndDelayStaysZero() async {
+        let base = Date(timeIntervalSince1970: 1_795_400_000)
+        let clock = TestClock(now: base)
+        let sleepRecorder = SleepRecorder(clock: clock)
+        var ticks = 0
+
+        // 模拟真实时钟持续前进（每次读取 now 都 +1ms），且 nextDelay 始终返回 0
+        let scheduler = ConsoleAccountsAutoRefreshScheduler(
+            sleep: { seconds in try await sleepRecorder.sleep(seconds) },
+            now: {
+                let current = clock.now
+                clock.now = current.addingTimeInterval(0.001)
+                return current
+            },
+            minimumRetryDelay: 1.5
+        )
+
+        scheduler.update(
+            isForeground: true,
+            activePage: .overview,
+            nextDelay: { _ in 0 },
+            onTick: { ticks += 1 }
+        )
+
+        // 第 1 次 tick 后，即便时钟已经前进且 nextDelay 仍为 0，也必须先 sleep(minimumRetryDelay)
+        let retryDelay1 = await sleepRecorder.waitForNextSleep()
+        XCTAssertEqual(ticks, 1, "首次零延迟 tick 后必须等待退避，不能零延迟连发")
+        XCTAssertEqual(retryDelay1, 1.5)
+
+        sleepRecorder.advanceAndResume(1.5)
+        let retryDelay2 = await sleepRecorder.waitForNextSleep()
+        XCTAssertEqual(ticks, 2)
+        XCTAssertEqual(retryDelay2, 1.5)
+
+        scheduler.stop()
+        XCTAssertFalse(scheduler.isScheduled)
+    }
+
+    func testSchedulerHandlesTimerFiringWhileManualRefreshIsInFlightAndResumesAfterward() async {
+        let base = Date(timeIntervalSince1970: 1_795_400_000)
+        let clock = TestClock(now: base)
+        let coordinator = ConsoleAccountsRefreshCoordinator(ttl: 600)
+        let sleepRecorder = SleepRecorder(clock: clock)
+
+        _ = await coordinator.run(
+            trigger: .initialLoad,
+            now: { base },
+            workerUnavailableMessage: { "助手未运行" },
+            ensureWorker: { true },
+            fetch: { [self.sampleAccount("init")] }
+        )
+
+        var scheduledTicks = 0
+        var skippedInFlight = 0
+        let scheduler = ConsoleAccountsAutoRefreshScheduler(
+            sleep: { seconds in try await sleepRecorder.sleep(seconds) },
+            now: {
+                let current = clock.now
+                clock.now = current.addingTimeInterval(0.001)
+                return current
+            },
+            minimumRetryDelay: 1.0
+        )
+
+        let nextDelay: (Date) -> TimeInterval? = { coordinator.nextAutoRefreshDelay(now: $0) }
+        let onTick: () async -> Void = {
+            scheduledTicks += 1
+            let outcome = await coordinator.run(
+                trigger: .scheduled,
+                now: { clock.now },
+                workerUnavailableMessage: { "助手未运行" },
+                ensureWorker: { true },
+                fetch: { [self.sampleAccount("scheduled")] }
+            )
+            if outcome == .skipped(.inFlight) {
+                skippedInFlight += 1
+            }
+        }
+
+        scheduler.update(isForeground: true, activePage: .accounts, nextDelay: nextDelay, onTick: onTick)
+        let initialWait = await sleepRecorder.waitForNextSleep()
+        XCTAssertEqual(initialWait, 600, accuracy: 0.01)
+
+        // 第 599 秒：用户发起手动刷新，在途未返回
+        clock.now = base.addingTimeInterval(599)
+        let manualGate = AccountsGate()
+        let manualTask = Task { @MainActor in
+            await coordinator.run(
+                trigger: .manual,
+                now: { clock.now },
+                workerUnavailableMessage: { "助手未运行" },
+                ensureWorker: { true },
+                fetch: {
+                    try await withCheckedThrowingContinuation { manualGate.continuation = $0 }
+                }
+            )
+        }
+        for _ in 0..<2000 where manualGate.continuation == nil {
+            await Task.yield()
+        }
+        XCTAssertNotNil(manualGate.continuation)
+        XCTAssertNil(coordinator.nextAutoRefreshDelay(now: base.addingTimeInterval(600)), "刷新在途时应暂停排期")
+
+        // 第 600 秒：原本沉睡的定时器到点，触发一次 .skipped(.inFlight) 后立即干净退出，绝不忙循环
+        clock.now = base.addingTimeInterval(600)
+        sleepRecorder.advanceAndResume(0)
+        for _ in 0..<2000 where scheduler.isScheduled {
+            await Task.yield()
+        }
+        XCTAssertEqual(scheduledTicks, 1, "在途期间定时器最多触发 1 次防重跳过")
+        XCTAssertEqual(skippedInFlight, 1)
+        XCTAssertFalse(scheduler.isScheduled, "在途期间调度器应暂停而非空转")
+
+        // 第 602 秒：手动刷新完成并触发 reconcile -> 恢复 600 秒周期排期
+        clock.now = base.addingTimeInterval(602)
+        manualGate.continuation?.resume(returning: [sampleAccount("manual-ok")])
+        let manualOutcome = await manualTask.value
+        guard case .succeeded = manualOutcome else {
+            return XCTFail("手动刷新应当成功：\(manualOutcome)")
+        }
+
+        scheduler.reconcile(nextDelay: nextDelay, onTick: onTick)
+        XCTAssertTrue(scheduler.isScheduled)
+        let resumedWait = await sleepRecorder.waitForNextSleep()
+        XCTAssertEqual(resumedWait, 600, accuracy: 0.05)
+
+        scheduler.stop()
+    }
+
+    func testSchedulerDoesNotBlockMainThreadUnderRealClockWhenDelayStaysZero() async {
+        var ticks = 0
+        let scheduler = ConsoleAccountsAutoRefreshScheduler(
+            now: { Date() },
+            minimumRetryDelay: 0.04
+        )
+
+        scheduler.update(
+            isForeground: true,
+            activePage: .overview,
+            nextDelay: { _ in 0 },
+            onTick: { ticks += 1 }
+        )
+
+        // 主线程上的其他任务必须能正常获得调度，证明没有被零延迟忙循环饿死
+        var mainActorWorkRan = false
+        let probeTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 110_000_000)
+            mainActorWorkRan = true
+        }
+        await probeTask.value
+        scheduler.stop()
+
+        XCTAssertTrue(mainActorWorkRan, "主线程必须保持响应")
+        XCTAssertGreaterThanOrEqual(ticks, 1)
+        XCTAssertLessThanOrEqual(ticks, 5, "110ms 内按 40ms 退避不应出现高频空转（实际 ticks=\(ticks)）")
     }
 
     // MARK: - 4. 页头「账号更新于」文案只代表账号快照最后成功读取时间

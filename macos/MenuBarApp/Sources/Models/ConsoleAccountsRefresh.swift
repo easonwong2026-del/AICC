@@ -162,9 +162,13 @@ final class ConsoleAccountsRefreshCoordinator {
         return nil
     }
 
-    /// 计算下一次前台自动只读刷新的等待秒数；`nil` 表示冷启动尚未发生，暂不排期。
+    /// 计算下一次前台自动只读刷新的等待秒数；`nil` 表示冷启动尚未发生或已有刷新在途，暂不排期。
     func nextAutoRefreshDelay(now: Date) -> TimeInterval? {
         guard state.lastSuccessAt != nil || state.lastAttemptAt != nil else {
+            return nil
+        }
+        // 已有刷新在途时暂停排期，等在途请求落定后再由外层重新 reconcile，避免到点空转。
+        guard inFlightGeneration == nil else {
             return nil
         }
         if state.consecutiveFailures > 0, let lastAttempt = state.lastAttemptAt {
@@ -182,10 +186,13 @@ final class ConsoleAccountsRefreshCoordinator {
     }
 
     /// 统一执行一次账号只读刷新。
+    ///
+    /// `workerUnavailableMessage` 仅在 `ensureWorker()` 返回 `false` **之后**才求值，
+    /// 确保拿到的是本次启动检查结束后的真实失败原因，而不是检查前的旧状态。
     func run(
         trigger: ConsoleAccountsRefreshTrigger,
         now: () -> Date = { .now },
-        workerUnavailableMessage: String,
+        workerUnavailableMessage: () -> String,
         onStateChange: ((ConsoleAccountsRefreshState) -> Void)? = nil,
         ensureWorker: () async -> Bool,
         fetch: () async throws -> [ConsoleAccount]
@@ -206,15 +213,17 @@ final class ConsoleAccountsRefreshCoordinator {
         guard await ensureWorker() else {
             guard generation == latestGeneration else { return .superseded }
             let finishedAt = now()
+            let rawMessage = workerUnavailableMessage().trimmingCharacters(in: .whitespacesAndNewlines)
+            let message = rawMessage.isEmpty ? "账号助手未就绪" : rawMessage
             inFlightGeneration = nil
             inFlightTrigger = nil
             state.isLoading = false
             state.lastAttemptAt = finishedAt
-            state.lastError = workerUnavailableMessage
+            state.lastError = message
             state.consecutiveFailures += 1
             onStateChange?(state)
             return .failed(
-                error: workerUnavailableMessage,
+                error: message,
                 attemptedAt: finishedAt,
                 preservedLastSuccessAt: state.lastSuccessAt
             )
@@ -302,7 +311,7 @@ final class ConsoleAccountsAutoRefreshScheduler {
             try await ConsoleAccountsAutoRefreshScheduler.defaultSleep(seconds)
         }
         self.now = now
-        self.minimumRetryDelay = minimumRetryDelay
+        self.minimumRetryDelay = minimumRetryDelay > 0 ? minimumRetryDelay : 1.0
     }
 
     nonisolated static func defaultSleep(_ seconds: TimeInterval) async throws {
@@ -334,8 +343,21 @@ final class ConsoleAccountsAutoRefreshScheduler {
         activeTaskID = taskID
         scheduledTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            var hasTicked = false
             while !Task.isCancelled && self.isEligible && self.activeTaskID == taskID {
-                guard let delay = nextDelay(self.now()) else { break }
+                guard let rawDelay = nextDelay(self.now()) else { break }
+                let delay: TimeInterval
+                if rawDelay > 0 {
+                    delay = rawDelay
+                } else if hasTicked {
+                    // 已触发过 tick 后，若下一次延迟仍 <= 0（例如实时时钟持续前进、
+                    // 在途刷新导致本次 tick 被跳过或状态尚未推进截止时间），
+                    // 强制等待 minimumRetryDelay，绝不零延迟忙循环空转。
+                    delay = self.minimumRetryDelay
+                } else {
+                    delay = 0
+                }
+
                 if delay > 0 {
                     do {
                         try await self.sleep(delay)
@@ -344,17 +366,8 @@ final class ConsoleAccountsAutoRefreshScheduler {
                     }
                 }
                 guard !Task.isCancelled && self.isEligible && self.activeTaskID == taskID else { break }
-                let beforeTick = self.now()
+                hasTicked = true
                 await onTick()
-                guard !Task.isCancelled && self.isEligible && self.activeTaskID == taskID else { break }
-                // 防止异常情况下 nextDelay 连续返回 0 造成忙循环。
-                if let next = nextDelay(self.now()), next <= 0, self.now() <= beforeTick {
-                    do {
-                        try await self.sleep(self.minimumRetryDelay)
-                    } catch {
-                        break
-                    }
-                }
             }
             if self.activeTaskID == taskID {
                 self.scheduledTask = nil
