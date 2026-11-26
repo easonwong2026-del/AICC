@@ -1432,10 +1432,17 @@ fn restore_origin_settles_pending_temporary_switch_journal() {
         .is_some());
 
     // 到期触发恢复原账号 A。
+    let run_before_restore = h.run();
+    let origin_snapshot = PathBuf::from(run_before_restore.origin_snapshot_path.unwrap());
+    assert!(origin_snapshot.exists(), "恢复前原账号快照应存在");
     h.clock.advance_secs(300);
     let report = h.tick(false);
     assert_eq!(report["status"], STATE_COMPLETED, "{report}");
     assert_eq!(h.live_uid().as_deref(), Some("uid-a"));
+    assert!(
+        !origin_snapshot.exists(),
+        "恢复原账号成功后应删除原账号明文快照文件"
+    );
     assert!(
         h.app
             .with_db(|db| db.pending_temporary_restore())
@@ -1448,14 +1455,22 @@ fn restore_origin_settles_pending_temporary_switch_journal() {
     assert_eq!(client_status["restoreAvailable"], false);
     assert_eq!(client_status["temporaryRestore"], Value::Null);
 
-    // 场景 2：客户端已在原账号（already_origin），通过 restore_now 恢复时同样应结算旧临时记录。
-    h.app
+    // 场景 2：客户端已在原账号（already_origin），通过 restore_now 恢复时同样应结算旧临时记录并清理原账号快照。
+    let h2 = Harness::new();
+    h2.plan(&[&h2.b, &h2.c], 300);
+    h2.tick(false); // A -> B
+    let run2 = h2.run();
+    let origin_snapshot2 = PathBuf::from(run2.origin_snapshot_path.unwrap());
+    assert!(origin_snapshot2.exists());
+    // 模拟用户已手动切换回原账号 uid-a，但还留着一条未结算的临时切换记录。
+    std::fs::write(&h2.env.auth_path, auth_json(&h2.a.uid, "AT-A")).unwrap();
+    h2.app
         .with_db(|db| {
             db.begin_wb_switch(&NewSwitchJournal {
                 id: "j-temp-stale",
-                target_account_id: &h.c.id,
-                target_uid: &h.c.uid,
-                previous_uid: Some(&h.b.uid),
+                target_account_id: &h2.c.id,
+                target_uid: &h2.c.uid,
+                previous_uid: Some(&h2.b.uid),
                 previous_running: true,
                 previous_marker: false,
                 snapshot_path: "/tmp/unused2",
@@ -1470,10 +1485,14 @@ fn restore_origin_settles_pending_temporary_switch_journal() {
             db.close_wb_switch("j-temp-stale", PHASE_VERIFIED, Some("verified"))
         })
         .unwrap();
-    let res = rotation::restore_now(&h.app, &h.control, &h.env, None, false).unwrap();
+    let res = rotation::restore_now(&h2.app, &h2.control, &h2.env, None, false).unwrap();
     assert_eq!(res["ok"], true, "{res}");
     assert!(
-        h.app
+        !origin_snapshot2.exists(),
+        "already_origin 分支也应清理原账号明文快照"
+    );
+    assert!(
+        h2.app
             .with_db(|db| db.pending_temporary_restore())
             .unwrap()
             .is_none(),

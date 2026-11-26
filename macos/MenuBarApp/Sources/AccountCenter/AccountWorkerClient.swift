@@ -20,6 +20,7 @@ final class AccountWorkerClient: @unchecked Sendable {
     private let lock = NSLock()
     private let writeLock = NSLock()
     private var pending: [Int: CheckedContinuation<[String: Any], Error>] = [:]
+    private var timeouts: [Int: DispatchWorkItem] = [:]
     private var nextID = 1
     private var buffer = Data()
     private var closed = false
@@ -28,6 +29,10 @@ final class AccountWorkerClient: @unchecked Sendable {
     init(executable: URL, environment: [String: String] = [:]) {
         self.executable = executable
         self.environment = environment
+    }
+
+    deinit {
+        clearPipeHandlers()
     }
 
     var isRunning: Bool { process.isRunning }
@@ -49,17 +54,21 @@ final class AccountWorkerClient: @unchecked Sendable {
 
         stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard let self else { return }
             if data.isEmpty {
-                self.markClosed(reason: "助手关闭了输出管道")
-            } else {
-                self.ingest(data)
+                handle.readabilityHandler = nil
+                self?.markClosed(reason: "助手关闭了输出管道")
+                return
             }
+            self?.ingest(data)
         }
 
         stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard let self, !data.isEmpty else { return }
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            guard let self else { return }
             let text = String(decoding: data, as: UTF8.self)
             self.withLock {
                 self.stderrTail += text
@@ -73,7 +82,13 @@ final class AccountWorkerClient: @unchecked Sendable {
             self?.markClosed(reason: "助手进程退出（status \(proc.terminationStatus)）")
         }
 
-        try process.run()
+        do {
+            try process.run()
+        } catch {
+            clearPipeHandlers()
+            process.terminationHandler = nil
+            throw error
+        }
     }
 
     func call(
@@ -105,15 +120,22 @@ final class AccountWorkerClient: @unchecked Sendable {
                 return
             }
 
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
+            let timeoutWork = DispatchWorkItem { [weak self] in
                 self?.fail(id: id, error: .timeout)
+            }
+            let accepted = withLock { () -> Bool in
+                guard !closed, pending[id] != nil else { return false }
+                timeouts[id] = timeoutWork
+                return true
+            }
+            if accepted {
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutWork)
             }
         }
     }
 
     func stop() {
-        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
+        clearPipeHandlers()
 
         if process.isRunning {
             process.terminate()
@@ -123,6 +145,11 @@ final class AccountWorkerClient: @unchecked Sendable {
     }
 
     // MARK: - 内部
+
+    private func clearPipeHandlers() {
+        stdoutPipe.fileHandleForReading.readabilityHandler = nil
+        stderrPipe.fileHandleForReading.readabilityHandler = nil
+    }
 
     private func ingest(_ data: Data) {
         var results: [(CheckedContinuation<[String: Any], Error>, Result<[String: Any], Error>)] = []
@@ -136,6 +163,7 @@ final class AccountWorkerClient: @unchecked Sendable {
                     // 通知（没有 id）或没有人等待的响应，直接丢弃。
                     continue
                 }
+                timeouts.removeValue(forKey: id)?.cancel()
                 if let error = AccountWorkerJSON.rpcError(from: object) {
                     results.append((continuation, .failure(AccountWorkerFailure.remote(error))))
                 } else {
@@ -150,16 +178,25 @@ final class AccountWorkerClient: @unchecked Sendable {
     }
 
     private func fail(id: Int, error: AccountWorkerFailure) {
-        let continuation = withLock { pending.removeValue(forKey: id) }
+        let continuation = withLock { () -> CheckedContinuation<[String: Any], Error>? in
+            timeouts.removeValue(forKey: id)?.cancel()
+            return pending.removeValue(forKey: id)
+        }
         continuation?.resume(throwing: error)
     }
 
     private func markClosed(reason: String) {
+        clearPipeHandlers()
         let waiting = withLock { () -> [CheckedContinuation<[String: Any], Error>] in
             guard !closed else { return [] }
             closed = true
             let all = Array(pending.values)
             pending.removeAll()
+            for item in timeouts.values {
+                item.cancel()
+            }
+            timeouts.removeAll()
+            buffer.removeAll(keepingCapacity: false)
             return all
         }
         for continuation in waiting {

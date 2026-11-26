@@ -448,6 +448,21 @@ impl super::Db {
         )?)
     }
 
+    /// 已彻底收口（已恢复或已结算）且可安全删除磁盘快照的记录路径。
+    pub fn settled_snapshot_paths(&self, exclude_id: &str) -> RpcResult<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT snapshot_path FROM workbuddy_switch_journal
+              WHERE id <> ?1
+                AND open_slot IS NULL
+                AND snapshot_path <> ''
+                AND (restore_state = ?2 OR phase = ?3)",
+        )?;
+        let rows = stmt.query_map(params![exclude_id, RESTORE_DONE, PHASE_RESTORED], |row| {
+            row.get(0)
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// 改恢复状态。`done` 表示"这条不再提供恢复"。
     pub fn set_restore_state(&self, id: &str, state: &str) -> RpcResult<()> {
         let changed = self.conn.execute(

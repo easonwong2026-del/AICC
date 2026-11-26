@@ -43,6 +43,7 @@ final class SettingsModel: ObservableObject {
 
     /// 分类选择。切换只改值并记住选择，没有任何业务副作用。
     let navigation: SettingsNavigation
+    private var pairingCodeExpiryTask: Task<Void, Never>?
     private var navigationObserver: AnyCancellable?
 
     /// 一次性只读加载：切分类不会重跑。
@@ -146,7 +147,8 @@ final class SettingsModel: ObservableObject {
             }
         }
         guard !deferred.isEmpty else { return }
-        Task { @MainActor in
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             for effect in deferred {
                 await applyAsync(effect)
             }
@@ -156,6 +158,8 @@ final class SettingsModel: ObservableObject {
     private func apply(_ effect: SettingsEffect) {
         switch effect {
         case .clearPairingCode:
+            pairingCodeExpiryTask?.cancel()
+            pairingCodeExpiryTask = nil
             pairingCode = ""
         case .startBridgeMonitoring:
             server.startMonitoring()
@@ -228,9 +232,11 @@ final class SettingsModel: ObservableObject {
                   let code = payload["code"] as? String else { throw URLError(.badServerResponse) }
             pairingCode = code
             securityNotice = nil
-            Task {
+            pairingCodeExpiryTask?.cancel()
+            pairingCodeExpiryTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 120_000_000_000)
-                if pairingCode == code { pairingCode = "" }
+                guard !Task.isCancelled, let self else { return }
+                if self.pairingCode == code { self.pairingCode = "" }
             }
         } catch {
             securityNotice = "无法生成配对码，请检查桥接状态。"
@@ -244,6 +250,8 @@ final class SettingsModel: ObservableObject {
         server.stopServer(reason: .user, waitForExit: true)
         do {
             try BridgeCredential.revoke()
+            pairingCodeExpiryTask?.cancel()
+            pairingCodeExpiryTask = nil
             pairingCode = ""
             server.startMonitoring()
             securityNotice = "旧配对凭证已失效，所有设备需要重新配对。"

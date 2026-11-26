@@ -210,11 +210,12 @@ final class ServerManager: ObservableObject {
     func startMonitoring() {
         guard supervisorTask == nil else { return }
         supervisorTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            _ = await self.startServer()
+            guard let firstSelf = self else { return }
+            _ = await firstSelf.startServer()
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 60_000_000_000)
                 if Task.isCancelled { break }
+                guard let self else { break }
                 await self.superviseOnce()
             }
         }
@@ -710,11 +711,15 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
     private func shutDownForTermination() {
         guard !hasStartedShutdown else { return }
         hasStartedShutdown = true
+        widgetRefreshTask?.cancel()
+        widgetRefreshTask = nil
+        TravelAutomationService.shared.stop()
         consoleCoordinator?.tearDown()
         consoleCoordinator = nil
         consoleStore = nil
         settingsWindowCoordinator?.tearDown()
         settingsWindowCoordinator = nil
+        AccountWorkerManager.shared.stop()
         serverManager.stopMonitoring()
         serverManager.stopServer(reason: .appExit, waitForExit: true)
         statusItem = nil

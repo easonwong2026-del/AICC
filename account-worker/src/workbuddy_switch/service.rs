@@ -313,6 +313,7 @@ pub async fn switch_linked(
     // 新的一次切换已经成功，更早的临时记录就此结算：
     // 「恢复原账号」永远指"回到最近一次切换之前那一站"，不会攒出一堆待还原条目。
     let _ = app.with_db(|db| db.settle_pending_temporary_except(&applied.journal_id));
+    prune_settled_snapshots(app, env, &applied.journal_id);
 
     log_note(&format!(
         "WorkBuddy 账号切换：{} → {}（{}），phase={}",
@@ -473,6 +474,7 @@ fn apply_inner(
             return Err(finish_without_write(
                 app,
                 control,
+                env,
                 &journal_id,
                 running_before,
                 format!("生成认证内容失败，未改动客户端：{err}"),
@@ -483,6 +485,7 @@ fn apply_inner(
         return Err(finish_without_write(
             app,
             control,
+            env,
             &journal_id,
             running_before,
             format!("写入客户端认证文件失败，登录态未变：{err}"),
@@ -646,6 +649,9 @@ pub fn restore(
         }
         Ok(())
     })?;
+    if ok {
+        remove_snapshot_if_managed(Path::new(&journal.snapshot_path), &env.snapshot_dir);
+    }
     log_note(&format!(
         "WorkBuddy 账号恢复：journal={}，uid={}，ok={ok}",
         journal.id,
@@ -799,6 +805,12 @@ fn rollback(
             Some(&detail),
         )
     });
+    if ok {
+        remove_snapshot_if_managed(
+            &env.snapshot_dir.join(format!("{journal_id}.json")),
+            &env.snapshot_dir,
+        );
+    }
     log_note(&format!("WorkBuddy 账号切换失败：{detail}"));
     ok
 }
@@ -807,6 +819,7 @@ fn rollback(
 fn finish_without_write(
     app: &App,
     control: &dyn ClientControl,
+    env: &SwitchEnv,
     journal_id: &str,
     previous_running: bool,
     detail: String,
@@ -815,11 +828,29 @@ fn finish_without_write(
         let _ = control.launch();
     }
     let _ = app.with_db(|db| db.close_wb_switch(journal_id, PHASE_RESTORED, Some(&detail)));
+    remove_snapshot_if_managed(
+        &env.snapshot_dir.join(format!("{journal_id}.json")),
+        &env.snapshot_dir,
+    );
     RpcError::internal(detail).with_data(json!({
         "kind": "switch_failed",
         "restored": true,
         "journalId": journal_id,
     }))
+}
+
+fn remove_snapshot_if_managed(path: &Path, snapshot_dir: &Path) {
+    if path.starts_with(snapshot_dir) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+pub(crate) fn prune_settled_snapshots(app: &App, env: &SwitchEnv, exclude_id: &str) {
+    if let Ok(paths) = app.with_db(|db| db.settled_snapshot_paths(exclude_id)) {
+        for raw in paths {
+            remove_snapshot_if_managed(Path::new(&raw), &env.snapshot_dir);
+        }
+    }
 }
 
 fn switch_failed(

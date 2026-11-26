@@ -1312,6 +1312,7 @@ final class AccountWorkerManager: ObservableObject {
         )
         do {
             try worker.start()
+            client?.stop()
             client = worker
             restartCount += 1
             return true

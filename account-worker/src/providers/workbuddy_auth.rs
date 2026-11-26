@@ -79,6 +79,48 @@ fn sessions() -> &'static Mutex<HashMap<String, Session>> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+const FINISHED_SESSION_RETAIN_SECS: u64 = 120;
+const MAX_FINISHED_SESSIONS: usize = 16;
+
+/// 清理过期与已结束的旧会话，避免长时间运行后 `SESSIONS` 无限增长并滞留会话结果。
+fn prune_sessions(map: &mut HashMap<String, Session>) {
+    let max_age = std::time::Duration::from_secs((SESSION_TTL_SECONDS * 2) as u64);
+    let finished_age = std::time::Duration::from_secs(FINISHED_SESSION_RETAIN_SECS);
+    map.retain(|_, session| {
+        let elapsed = session.created.elapsed();
+        if elapsed > max_age {
+            return false;
+        }
+        if !matches!(session.phase, Phase::Pending | Phase::Committing) && elapsed > finished_age {
+            return false;
+        }
+        true
+    });
+
+    let mut finished: Vec<(String, Instant)> = map
+        .iter()
+        .filter(|(_, s)| !matches!(s.phase, Phase::Pending | Phase::Committing))
+        .map(|(k, s)| (k.clone(), s.created))
+        .collect();
+    if finished.len() > MAX_FINISHED_SESSIONS {
+        finished.sort_by_key(|(_, created)| *created);
+        for (id, _) in finished
+            .into_iter()
+            .take(map.len().min(MAX_FINISHED_SESSIONS + 1))
+        {
+            if map
+                .values()
+                .filter(|s| !matches!(s.phase, Phase::Pending | Phase::Committing))
+                .count()
+                <= MAX_FINISHED_SESSIONS
+            {
+                break;
+            }
+            map.remove(&id);
+        }
+    }
+}
+
 pub struct AuthError {
     pub kind: &'static str,
     pub message: String,
@@ -362,6 +404,7 @@ pub async fn start(variant: WbVariant) -> Result<StartInfo, AuthError> {
     }
 
     let mut map = sessions().lock().expect("sessions");
+    prune_sessions(&mut map);
     map.insert(
         login_id.clone(),
         Session {
@@ -1046,5 +1089,54 @@ mod tests {
             WbVariant::Cn,
             "https://%65vil.com/login"
         ));
+    }
+
+    #[test]
+    fn prune_sessions_evicts_expired_and_caps_finished_but_keeps_pending() {
+        let mut map = HashMap::new();
+        map.insert(
+            "pending".to_string(),
+            Session {
+                state: "s-p".to_string(),
+                variant: WbVariant::Cn,
+                created: Instant::now(),
+                phase: Phase::Pending,
+                result: None,
+                error: None,
+            },
+        );
+        map.insert(
+            "old-done".to_string(),
+            Session {
+                state: "s-d".to_string(),
+                variant: WbVariant::Cn,
+                created: Instant::now() - std::time::Duration::from_secs(300),
+                phase: Phase::Success,
+                result: Some(json!({"ok": true})),
+                error: None,
+            },
+        );
+        for idx in 0..20 {
+            map.insert(
+                format!("done-{idx}"),
+                Session {
+                    state: format!("s-{idx}"),
+                    variant: WbVariant::Cn,
+                    created: Instant::now() - std::time::Duration::from_secs(idx as u64),
+                    phase: Phase::Failed,
+                    result: None,
+                    error: Some(json!({"kind": "network"})),
+                },
+            );
+        }
+
+        prune_sessions(&mut map);
+        assert!(map.contains_key("pending"), "活跃会话不得被裁剪");
+        assert!(!map.contains_key("old-done"), "超龄终态会话必须被清理");
+        let finished_left = map
+            .values()
+            .filter(|s| !matches!(s.phase, Phase::Pending | Phase::Committing))
+            .count();
+        assert!(finished_left <= MAX_FINISHED_SESSIONS);
     }
 }

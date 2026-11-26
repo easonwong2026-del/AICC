@@ -24,6 +24,8 @@ struct AddWorkbuddyAccountSheet: View {
     @State private var now = Date()
     @State private var pollTask: Task<Void, Never>?
     @State private var variant: WorkbuddyVariant = .cn
+    @State private var cachedQRURL: String?
+    @State private var cachedQRImage: NSImage?
 
     /// 嵌在统一添加面板里时不再画自己的标题（外层已有面包屑），
     /// 单独作为 sheet 使用时保留标题。
@@ -64,9 +66,25 @@ struct AddWorkbuddyAccountSheet: View {
         .background(ConsoleTheme.canvas)
         .task { await begin() }
         .onDisappear { pollTask?.cancel() }
-        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { value in
-            now = value
+        .task(id: isTerminal) {
+            guard !isTerminal else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if Task.isCancelled { break }
+                now = Date()
+            }
         }
+        .task(id: trustedLoginURLString) {
+            let nextURL = trustedLoginURLString
+            guard cachedQRURL != nextURL else { return }
+            cachedQRURL = nextURL
+            cachedQRImage = nextURL.flatMap(Self.qrImage(from:))
+        }
+    }
+
+    private var trustedLoginURLString: String? {
+        guard let start else { return nil }
+        return variant.trustedLoginURL(start.verificationUri)?.absoluteString
     }
 
     private var header: some View {
@@ -157,7 +175,7 @@ struct AddWorkbuddyAccountSheet: View {
             // 二维码内容同样按可信域名过滤：扫出去的就是这个字符串，不能是任意链接。
             if let start,
                let url = variant.trustedLoginURL(start.verificationUri),
-               let image = Self.qrImage(from: url.absoluteString) {
+               let image = cachedQRImage ?? Self.qrImage(from: url.absoluteString) {
                 Image(nsImage: image)
                     .interpolation(.none)
                     .resizable()

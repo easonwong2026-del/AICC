@@ -342,10 +342,12 @@ final class ConsoleAccountsAutoRefreshScheduler {
         let taskID = UUID()
         activeTaskID = taskID
         scheduledTask = Task { @MainActor [weak self] in
-            guard let self else { return }
             var hasTicked = false
-            while !Task.isCancelled && self.isEligible && self.activeTaskID == taskID {
-                guard let rawDelay = nextDelay(self.now()) else { break }
+            while !Task.isCancelled {
+                guard let currentSelf = self,
+                      currentSelf.isEligible,
+                      currentSelf.activeTaskID == taskID,
+                      let rawDelay = nextDelay(currentSelf.now()) else { break }
                 let delay: TimeInterval
                 if rawDelay > 0 {
                     delay = rawDelay
@@ -353,24 +355,28 @@ final class ConsoleAccountsAutoRefreshScheduler {
                     // 已触发过 tick 后，若下一次延迟仍 <= 0（例如实时时钟持续前进、
                     // 在途刷新导致本次 tick 被跳过或状态尚未推进截止时间），
                     // 强制等待 minimumRetryDelay，绝不零延迟忙循环空转。
-                    delay = self.minimumRetryDelay
+                    delay = currentSelf.minimumRetryDelay
                 } else {
                     delay = 0
                 }
+                let sleepFn = currentSelf.sleep
 
                 if delay > 0 {
                     do {
-                        try await self.sleep(delay)
+                        try await sleepFn(delay)
                     } catch {
                         break
                     }
                 }
-                guard !Task.isCancelled && self.isEligible && self.activeTaskID == taskID else { break }
+                guard let tickSelf = self,
+                      !Task.isCancelled,
+                      tickSelf.isEligible,
+                      tickSelf.activeTaskID == taskID else { break }
                 hasTicked = true
                 await onTick()
             }
-            if self.activeTaskID == taskID {
-                self.scheduledTask = nil
+            if let currentSelf = self, currentSelf.activeTaskID == taskID {
+                currentSelf.scheduledTask = nil
             }
         }
     }
