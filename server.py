@@ -510,6 +510,15 @@ class LanServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
 
+    def shutdown_request(self, request):
+        # Match SSLSocket.accept() failure semantics: if the TLS handshake never
+        # succeeded, close without TCP SHUT_WR so rejected plaintext/bad peers
+        # get an immediate reset rather than a graceful half-close EOF.
+        if isinstance(request, ssl.SSLSocket) and request.cipher() is None:
+            self.close_request(request)
+            return
+        super().shutdown_request(request)
+
     def handle_error(self, request, client_address):
         # A device that aborts mid-handshake (wrong pin, plaintext probe, sleep)
         # is an expected event on a network listener, not a server fault.
@@ -626,8 +635,7 @@ def main():
             except OSError:
                 os._exit(0)
 
-    if lan_server is not None:
-        threading.Thread(target=poll, daemon=True).start()
+    threading.Thread(target=poll, daemon=True).start()
     if os.environ.get("AICC_PARENT_PID"):
         threading.Thread(target=watchdog, daemon=True).start()
     try:
