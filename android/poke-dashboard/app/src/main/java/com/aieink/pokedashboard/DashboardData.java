@@ -4,8 +4,14 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -16,7 +22,13 @@ import java.util.regex.Pattern;
  */
 final class DashboardData {
     static final int SCHEMA_VERSION = 3;
-    static final int CARDS_PER_PAGE = 4;
+    static final int GRID_CARDS_PER_PAGE = 6;
+    static final int CLOCK_CARDS_PER_PAGE = 4;
+
+    static final String LAYOUT_GRID = "grid";
+    static final String LAYOUT_CLOCK = "clock";
+    static final String SORT_LOWEST = "lowest";
+    static final String SORT_PROVIDER = "provider";
 
     static final class Item {
         String name = "";
@@ -36,6 +48,15 @@ final class DashboardData {
 
         boolean isPercent() {
             return !unlimited && display == null && remaining != null;
+        }
+
+        boolean isEstimated() {
+            String lower = name == null ? "" : name.toLowerCase(Locale.ROOT);
+            return lower.contains("(est") || lower.contains("est.") || lower.contains("estimated");
+        }
+
+        boolean isLow() {
+            return !unlimited && remaining != null && remaining <= 20.0;
         }
 
         String primaryText() {
@@ -69,6 +90,22 @@ final class DashboardData {
             return qualifier == null ? windowLabel() : windowLabel() + " · " + qualifier;
         }
 
+        /** Clean, deduplicated label for the single-account detail page. */
+        String detailLabel() {
+            String key = name == null ? "" : name.trim().toLowerCase(Locale.ROOT);
+            String base;
+            if ("credits".equals(key) || "credit".equals(key)) {
+                base = "基础积分";
+            } else if ("extra credits".equals(key)) {
+                base = "额外积分（Extra credits）";
+            } else if ("total credits".equals(key)) {
+                base = "总积分（Total credits）";
+            } else {
+                return label();
+            }
+            return qualifier == null ? base : base + " · " + qualifier;
+        }
+
         /** "3 天 4 时后重置"; falls back to the vendor's own text when no epoch. */
         String countdown(long nowSeconds) {
             if (resetAt == null) return reset == null || reset.isEmpty() ? null : reset;
@@ -90,7 +127,7 @@ final class DashboardData {
         /** Magpie names units in English; the panel is Chinese, like the widget. */
         String unitLabel() {
             if (unit == null || unit.isEmpty()) return null;
-            String key = unit.trim().toLowerCase(java.util.Locale.ROOT);
+            String key = unit.trim().toLowerCase(Locale.ROOT);
             if (key.startsWith("credit")) return "积分";
             if (key.startsWith("prompt") || key.startsWith("request") || key.startsWith("call")) return "次";
             return unit;
@@ -115,6 +152,10 @@ final class DashboardData {
             return providerName + " · " + label;
         }
 
+        String stableKey() {
+            return (id != null && !id.isEmpty()) ? id : (provider + "::" + label);
+        }
+
         boolean isBalance() {
             return "balance".equals(kind);
         }
@@ -131,11 +172,60 @@ final class DashboardData {
             return items.size() > 1 ? items.get(1) : null;
         }
 
+        /**
+         * Window representing this account on overview cards: lowest non-estimated
+         * numeric window first, falling back to estimated windows, then primary().
+         */
+        Item leadItem() {
+            if (items.isEmpty()) return null;
+            Item bestReal = null;
+            Item bestEst = null;
+            for (Item item : items) {
+                if (item.unlimited || item.remaining == null) continue;
+                if (item.isEstimated()) {
+                    if (bestEst == null || compareRemaining(item, bestEst) < 0) bestEst = item;
+                } else {
+                    if (bestReal == null || compareRemaining(item, bestReal) < 0) bestReal = item;
+                }
+            }
+            if (bestReal != null) return bestReal;
+            if (bestEst != null) return bestEst;
+            return primary();
+        }
+
+        double lowestRemaining() {
+            if (isBalance()) return Double.MAX_VALUE;
+            Item lead = leadItem();
+            if (lead == null || lead.unlimited || lead.remaining == null) return Double.MAX_VALUE;
+            return lead.remaining;
+        }
+
+        boolean hasLowItem() {
+            if (failed) return true;
+            for (Item item : items) {
+                if (!item.isEstimated() && item.isLow()) return true;
+            }
+            Item lead = leadItem();
+            return lead != null && lead.isLow();
+        }
+
         String statusText() {
             if (failed) return "读取失败";
             if (deferred) return "本轮跳过";
             if (stale) return "缓存";
             return null;
+        }
+    }
+
+    static final class ProviderOption {
+        final String provider;
+        final String providerName;
+        final int count;
+
+        ProviderOption(String provider, String providerName, int count) {
+            this.provider = provider;
+            this.providerName = providerName;
+            this.count = count;
         }
     }
 
@@ -159,18 +249,30 @@ final class DashboardData {
     String state = "Connecting";
     boolean available;
     boolean offline;
-    /** Cards wanted on screen: 1, 2, or every account (paged four at a time). */
-    int displayLimit = CARDS_PER_PAGE;
+    /** Cards wanted on screen: 1, 2, or every account. */
+    int displayLimit = Integer.MAX_VALUE;
+    String layoutMode = LAYOUT_GRID;
+    String sortMode = SORT_LOWEST;
+    String providerFilter = "";
     int page;
+    String selectedAccountId;
 
     static DashboardData parse(String raw) throws Exception {
-        return parse(raw, "all");
+        return parse(raw, "all", LAYOUT_GRID, SORT_LOWEST, "");
     }
 
     static DashboardData parse(String raw, String displayMode) throws Exception {
+        return parse(raw, displayMode, LAYOUT_GRID, SORT_LOWEST, "");
+    }
+
+    static DashboardData parse(String raw, String displayMode, String layoutMode,
+                               String sortMode, String providerFilter) throws Exception {
         JSONObject root = new JSONObject(raw);
         DashboardData data = new DashboardData();
         data.displayLimit = limitFor(displayMode);
+        data.layoutMode = LAYOUT_CLOCK.equals(layoutMode) ? LAYOUT_CLOCK : LAYOUT_GRID;
+        data.sortMode = SORT_PROVIDER.equals(sortMode) ? SORT_PROVIDER : SORT_LOWEST;
+        data.providerFilter = providerFilter == null ? "" : providerFilter.trim();
         data.offline = false;
         data.updatedAt = root.optString("updated_at", "--");
         data.state = root.optString("state", "Connected");
@@ -191,15 +293,24 @@ final class DashboardData {
         if (data.updatedAt == null || data.updatedAt.isEmpty() || "--".equals(data.updatedAt)) {
             data.updatedAt = "--";
         }
-        data.renderKey = key(data);
+        data.refreshRenderKey();
         return data;
+    }
+
+    void refreshRenderKey() {
+        this.renderKey = key(this);
     }
 
     private static int limitFor(String mode) {
         if ("one".equals(mode)) return 1;
         if ("two".equals(mode)) return 2;
-        // Every account: shown in pages of four, not silently cut to four.
         return Integer.MAX_VALUE;
+    }
+
+    private static int compareRemaining(Item a, Item b) {
+        int cmp = Double.compare(a.remaining, b.remaining);
+        if (cmp != 0) return cmp;
+        return Double.compare(resetTime(a), resetTime(b));
     }
 
     private static Account account(JSONObject row) {
@@ -351,7 +462,12 @@ final class DashboardData {
     /** Everything that should repaint the panel, and nothing that should not. */
     private static String key(DashboardData data) {
         StringBuilder key = new StringBuilder(data.state).append('|').append(data.available ? 1 : 0)
-                .append('|').append(data.displayLimit).append('|').append(data.page);
+                .append('|').append(data.displayLimit)
+                .append('|').append(data.layoutMode)
+                .append('|').append(data.sortMode)
+                .append('|').append(data.providerFilter)
+                .append('|').append(data.page)
+                .append('|').append(data.selectedAccountId == null ? "" : data.selectedAccountId);
         for (Account account : data.accounts) {
             key.append('|').append(account.provider).append('/').append(account.label)
                     .append('/').append(account.kind).append('/').append(account.stale ? 1 : 0)
@@ -365,62 +481,218 @@ final class DashboardData {
         return key.toString();
     }
 
-    List<Account> shownAccounts() {
-        if (displayLimit >= accounts.size()) return new ArrayList<>(accounts);
-        return new ArrayList<>(accounts.subList(0, Math.max(0, displayLimit)));
-    }
-
-    /**
-     * Accounts that need a page of their own: the ones with more windows than the
-     * overview can show.  An account with one or two windows is already told in
-     * full by its summary row (and by the hero caption), so an extra page would
-     * only be a near-empty screen.
-     */
-    List<Account> detailAccounts() {
-        List<Account> detail = new ArrayList<>();
-        for (Account account : shownAccounts()) {
-            if (account.items.size() >= 3) detail.add(account);
+    List<ProviderOption> availableProviders() {
+        Map<String, ProviderOption> map = new LinkedHashMap<>();
+        for (Account account : accounts) {
+            String p = account.provider.toLowerCase(Locale.ROOT);
+            ProviderOption existing = map.get(p);
+            if (existing == null) {
+                map.put(p, new ProviderOption(account.provider, account.providerName, 1));
+            } else {
+                map.put(p, new ProviderOption(existing.provider, existing.providerName, existing.count + 1));
+            }
         }
-        return detail;
+        return new ArrayList<>(map.values());
     }
 
-    /** Page 0 is the overview; each account with three or more windows follows. */
+    List<Account> filteredAccounts() {
+        List<Account> filtered = new ArrayList<>();
+        String filter = providerFilter == null ? "" : providerFilter.trim();
+        for (Account account : accounts) {
+            if (!filter.isEmpty() && !filter.equalsIgnoreCase(account.provider)) continue;
+            filtered.add(account);
+            if (filtered.size() >= displayLimit) break;
+        }
+        return filtered;
+    }
+
+    List<Account> shownAccounts() {
+        return filteredAccounts();
+    }
+
+    List<Account> orderedAccounts() {
+        List<Account> base = filteredAccounts();
+        if (base.size() <= 1) return base;
+
+        final Map<Account, Integer> order = new LinkedHashMap<>();
+        for (int i = 0; i < base.size(); i++) order.put(base.get(i), i);
+
+        List<Account> sorted = new ArrayList<>(base);
+        if (SORT_PROVIDER.equals(sortMode)) {
+            Collections.sort(sorted, new Comparator<Account>() {
+                @Override public int compare(Account a, Account b) {
+                    int p = a.providerName.compareToIgnoreCase(b.providerName);
+                    if (p != 0) return p;
+                    int r = Double.compare(a.lowestRemaining(), b.lowestRemaining());
+                    if (r != 0) return r;
+                    return Integer.compare(order.get(a), order.get(b));
+                }
+            });
+            return sorted;
+        }
+
+        Collections.sort(sorted, new Comparator<Account>() {
+            @Override public int compare(Account a, Account b) {
+                if (a.failed != b.failed) return a.failed ? -1 : 1;
+                int r = Double.compare(a.lowestRemaining(), b.lowestRemaining());
+                if (r != 0) return r;
+                Item ia = a.leadItem();
+                Item ib = b.leadItem();
+                double ra = ia == null ? Double.MAX_VALUE : resetTime(ia);
+                double rb = ib == null ? Double.MAX_VALUE : resetTime(ib);
+                int rt = Double.compare(ra, rb);
+                if (rt != 0) return rt;
+                return Integer.compare(order.get(a), order.get(b));
+            }
+        });
+
+        // In Swiss Grid mode, diversify slots 2..5 on page 1 so 3 identical
+        // full-credit accounts don't crowd out other providers on the first screen.
+        if (LAYOUT_GRID.equals(layoutMode) && sorted.size() > GRID_CARDS_PER_PAGE && providerFilter.isEmpty()) {
+            List<Account> diversified = new ArrayList<>(sorted.size());
+            Set<Account> used = new HashSet<>();
+            Set<String> seenProviders = new HashSet<>();
+
+            for (int i = 0; i < 2; i++) {
+                Account focus = sorted.get(i);
+                diversified.add(focus);
+                used.add(focus);
+                seenProviders.add(focus.provider.toLowerCase(Locale.ROOT));
+            }
+            for (Account account : sorted) {
+                if (diversified.size() >= GRID_CARDS_PER_PAGE) break;
+                if (used.contains(account)) continue;
+                String p = account.provider.toLowerCase(Locale.ROOT);
+                if (!seenProviders.contains(p)) {
+                    diversified.add(account);
+                    used.add(account);
+                    seenProviders.add(p);
+                }
+            }
+            for (Account account : sorted) {
+                if (!used.contains(account)) diversified.add(account);
+            }
+            return diversified;
+        }
+        return sorted;
+    }
+
+    int cardsPerPage() {
+        return LAYOUT_CLOCK.equals(layoutMode) ? CLOCK_CARDS_PER_PAGE : GRID_CARDS_PER_PAGE;
+    }
+
     int pageCount() {
-        return 1 + detailAccounts().size();
+        int count = orderedAccounts().size();
+        if (count == 0) return 1;
+        return (count + cardsPerPage() - 1) / cardsPerPage();
+    }
+
+    List<Account> pageAccounts() {
+        List<Account> all = orderedAccounts();
+        if (all.isEmpty()) return all;
+        int perPage = cardsPerPage();
+        int safePage = Math.max(0, Math.min(page, pageCount() - 1));
+        int from = safePage * perPage;
+        if (from >= all.size()) return Collections.emptyList();
+        int to = Math.min(all.size(), from + perPage);
+        return all.subList(from, to);
     }
 
     void clampPage() {
         page = Math.max(0, Math.min(page, pageCount() - 1));
+        if (selectedAccountId != null && detailAccount() == null) {
+            selectedAccountId = null;
+        }
     }
 
-    /** The account a detail page is about, or null on the overview. */
+    /** The account currently opened in single-account detail view, or null. */
     Account detailAccount() {
-        List<Account> detail = detailAccounts();
-        int index = page - 1;
-        return index >= 0 && index < detail.size() ? detail.get(index) : null;
+        if (selectedAccountId == null || selectedAccountId.isEmpty()) return null;
+        for (Account account : orderedAccounts()) {
+            if (selectedAccountId.equals(account.stableKey())) return account;
+        }
+        return null;
+    }
+
+    int detailAccountIndex() {
+        Account target = detailAccount();
+        if (target == null) return -1;
+        List<Account> all = orderedAccounts();
+        for (int i = 0; i < all.size(); i++) {
+            if (all.get(i) == target) return i;
+        }
+        return -1;
+    }
+
+    void openDetail(Account account) {
+        selectedAccountId = account == null ? null : account.stableKey();
+        refreshRenderKey();
+    }
+
+    void closeDetail() {
+        selectedAccountId = null;
+        refreshRenderKey();
+    }
+
+    void goHome() {
+        selectedAccountId = null;
+        page = 0;
+        refreshRenderKey();
+    }
+
+    void prevPage() {
+        int count = pageCount();
+        page = (page - 1 + count) % count;
+        refreshRenderKey();
+    }
+
+    void nextPage() {
+        page = (page + 1) % pageCount();
+        refreshRenderKey();
+    }
+
+    void prevDetailAccount() {
+        List<Account> all = orderedAccounts();
+        if (all.isEmpty()) return;
+        int idx = detailAccountIndex();
+        int nextIdx = idx <= 0 ? all.size() - 1 : idx - 1;
+        selectedAccountId = all.get(nextIdx).stableKey();
+        refreshRenderKey();
+    }
+
+    void nextDetailAccount() {
+        List<Account> all = orderedAccounts();
+        if (all.isEmpty()) return;
+        int idx = detailAccountIndex();
+        int nextIdx = (idx + 1) % all.size();
+        selectedAccountId = all.get(nextIdx).stableKey();
+        refreshRenderKey();
     }
 
     /**
      * The window the overview leads with: whatever is closest to running out.
-     * Ties go to the window that resets first, so a stale-but-full account never
-     * takes the hero slot from a nearly empty one.
+     * Real subscription/credit windows take precedence over estimated ones.
      */
     Slot hero() {
-        Slot best = null;
-        for (Account account : shownAccounts()) {
+        Slot bestReal = null;
+        Slot bestEst = null;
+        for (Account account : filteredAccounts()) {
             for (Item item : account.items) {
                 if (item.remaining == null || item.unlimited) continue;
-                if (best == null) { best = new Slot(account, item); continue; }
-                double left = item.remaining;
-                double current = best.item.remaining;
-                if (left < current) { best = new Slot(account, item); continue; }
-                if (left == current && resetTime(item) < resetTime(best.item)) {
-                    best = new Slot(account, item);
+                if (item.isEstimated()) {
+                    if (bestEst == null || compareRemaining(item, bestEst.item) < 0) {
+                        bestEst = new Slot(account, item);
+                    }
+                } else {
+                    if (bestReal == null || compareRemaining(item, bestReal.item) < 0) {
+                        bestReal = new Slot(account, item);
+                    }
                 }
             }
         }
-        if (best != null) return best;
-        for (Account account : shownAccounts()) {
+        if (bestReal != null) return bestReal;
+        if (bestEst != null) return bestEst;
+        for (Account account : filteredAccounts()) {
             if (!account.items.isEmpty()) return new Slot(account, account.items.get(0));
         }
         return null;
@@ -430,30 +702,12 @@ final class DashboardData {
         return item.resetAt == null ? Double.MAX_VALUE : item.resetAt;
     }
 
-    /** Up to three accounts under the hero, never the hero's own account. */
-    List<Account> summaryAccounts() {
-        Slot hero = hero();
-        List<Account> rows = new ArrayList<>();
-        for (Account account : shownAccounts()) {
-            if (hero != null && account == hero.account) continue;
-            rows.add(account);
-        }
-        return rows;
-    }
-
-    int hiddenAccountCount() {
-        return Math.max(0, summaryAccounts().size() - DashboardView.SUMMARY_ROWS);
-    }
-
     int providerCount() {
         List<String> seen = new ArrayList<>();
-        for (Account account : shownAccounts()) {
-            if (!seen.contains(account.provider)) seen.add(account.provider);
+        for (Account account : filteredAccounts()) {
+            String key = account.provider.toLowerCase(Locale.ROOT);
+            if (!seen.contains(key)) seen.add(key);
         }
         return seen.size();
-    }
-
-    void nextPage() {
-        page = (page + 1) % pageCount();
     }
 }

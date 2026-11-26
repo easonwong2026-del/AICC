@@ -43,16 +43,17 @@ public final class DashboardVisualTest extends Instrumentation {
     }
 
     public void testRenderAccountStates() throws Exception {
-        for (String scenario : new String[]{"one", "two", "many", "empty", "cached", "unknown", "mixed", "long"}) {
+        for (String scenario : new String[]{"one", "two", "many", "empty", "cached", "unknown", "mixed", "long", "clock", "detail", "offline"}) {
             DashboardData data = parse(scenario);
             File directory = getTargetContext().getExternalFilesDir("visual");
             if (directory == null) throw new AssertionError("Missing output directory");
             runOnMainSync(() -> {
                 DashboardView view = new DashboardView(getTargetContext());
+                view.setClock(() -> 1795678260_000L);
                 view.layout(0, 0, 758, 1024);
                 view.setData(data);
                 save(view, new File(directory, scenario + ".png"));
-                if (data.pageCount() > 1) {
+                if (data.pageCount() > 1 && data.detailAccount() == null) {
                     view.nextPage();
                     save(view, new File(directory, scenario + "-page-2.png"));
                 }
@@ -62,7 +63,8 @@ public final class DashboardVisualTest extends Instrumentation {
 
     /** Schema-3 snapshots, exactly what the bridge answers a v3 client. */
     private DashboardData parse(String scenario) throws Exception {
-        boolean many = "many".equals(scenario) || "mixed".equals(scenario);
+        boolean many = "many".equals(scenario) || "mixed".equals(scenario)
+                || "clock".equals(scenario) || "detail".equals(scenario) || "offline".equals(scenario);
         int count = many ? 7 : "empty".equals(scenario) ? 0 : "two".equals(scenario) ? 2 : 1;
         JSONArray accounts = new JSONArray();
         for (int index = 0; index < count; index++) {
@@ -91,7 +93,7 @@ public final class DashboardVisualTest extends Instrumentation {
             } else if ("unknown".equals(scenario)) {
                 items.put(new JSONObject().put("name", "5 hours").put("remaining", JSONObject.NULL));
             } else {
-                items.put(new JSONObject().put("name", "5 hours").put("remaining", 91 - index * 5)
+                items.put(new JSONObject().put("name", "5 hours").put("remaining", 91 - index * 12)
                         .put("reset", "2026-10-20 19:40"));
                 items.put(new JSONObject().put("name", "Credits").put("remaining", 88 - index * 5)
                         .put("display", (4723 - index * 100) + " / 4723").put("unit", "credits"));
@@ -107,7 +109,15 @@ public final class DashboardVisualTest extends Instrumentation {
                 .put("stale", "cached".equals(scenario))
                 .put("updated_at", "2026-10-20 16:30")
                 .put("accounts", accounts);
-        return DashboardData.parse(document.toString(), "all");
+        String layout = "clock".equals(scenario) ? DashboardData.LAYOUT_CLOCK : DashboardData.LAYOUT_GRID;
+        DashboardData parsed = DashboardData.parse(document.toString(), "all", layout, DashboardData.SORT_LOWEST, "");
+        if ("offline".equals(scenario)) {
+            parsed.offline = true;
+        }
+        if ("detail".equals(scenario) && !parsed.orderedAccounts().isEmpty()) {
+            parsed.openDetail(parsed.orderedAccounts().get(0));
+        }
+        return parsed;
     }
 
     private void testCredentialStorage() throws Exception {
@@ -137,12 +147,12 @@ public final class DashboardVisualTest extends Instrumentation {
         runOnMainSync(() -> {
             android.app.Dialog dialog = ((MainActivity) activity).showSettings();
             android.view.View decor = dialog.getWindow().getDecorView();
-            int width = (int) (activity.getResources().getDisplayMetrics().widthPixels * .94f);
-            int height = (int) (activity.getResources().getDisplayMetrics().heightPixels * .78f);
+            int width = (int) (activity.getResources().getDisplayMetrics().widthPixels * .93f);
+            int height = (int) (activity.getResources().getDisplayMetrics().heightPixels * .88f);
             decor.measure(android.view.View.MeasureSpec.makeMeasureSpec(width, android.view.View.MeasureSpec.EXACTLY),
                     android.view.View.MeasureSpec.makeMeasureSpec(height, android.view.View.MeasureSpec.EXACTLY));
             decor.layout(0, 0, width, height);
-            if (!dialog.isShowing() || !containsText(decor, "Magpie 墨水屏伴侣") || !containsText(decor, "配对这台电脑")) {
+            if (!dialog.isShowing() || !containsText(decor, "AICC 墨水屏设置") || !containsText(decor, "配对")) {
                 throw new AssertionError("Pairing dialog missing");
             }
             Bitmap screenshot = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
