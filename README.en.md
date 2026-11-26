@@ -2,10 +2,11 @@
 
 [简体中文](README.md)
 
-AICC shows the quota Magpie already knows about: a native macOS Widget and an Android e-ink panel covering every
-provider and account in Magpie. Magpie owns authentication, accounts, routing and quota reads. AICC has no status
-item, popover or web dashboard, no vendor collectors of its own, and never reads vendor credential files.
-Current release: **2.13.0 / macOS Build 25** ([Releases](https://github.com/easonwong2026-del/AICC/releases)).
+AICC provides a macOS main console (UI V5), desktop widgets, and an Android e-ink quota panel covering every provider
+and account in [Magpie](https://github.com/yetone/magpie), alongside WorkBuddy / Qoder account management, daily
+check-ins, growth rewards, and scheduled WorkBuddy account rotation. AICC exposes a lightweight menu-bar status item
+(Open Console / Settings / Quit), never launches a model proxy, and drops legacy standalone Codex / DeepSeek collectors.
+Current release: **2.14.1 / macOS Build 28** ([Releases](https://github.com/easonwong2026-del/AICC/releases)).
 The widget kind, its shared settings domain and existing instances are unchanged, so upgrading needs no re-adding.
 
 ## What it shows
@@ -88,8 +89,12 @@ subscription windows, credits, plans and balances, with real cached/offline/fail
 changes. BOOX flash calibration, sleep pause and wake refresh are preserved.
 
 Devices declare `X-AICC-Schema: 3`; the bridge serves the old `codex` shape only when explicitly asked (`?format=2`).
-Bridge credentials are separate from Magpie's gateway key, stored in the Mac Keychain, handed to Python on stdin and
-encrypted with Android Keystore; backup stays disabled. The LAN bridge is unencrypted HTTP — trusted networks only.
+Local control stays on loopback HTTP (`127.0.0.1:8765`), while LAN access listens on **HTTPS (`0.0.0.0:8767`, TLS 1.3 preferred)**
+with **root certificate SPKI pinning** confirmed during pairing (see [BRIDGE_TLS](docs/BRIDGE_TLS.md)).
+Bridge credentials are separate from Magpie's gateway key, stored in a `0600` file at
+`~/Library/Application Support/AICC-Dashboard/bridge-token` (passed to Python on stdin), and encrypted on Android with
+Android Keystore (`usesCleartextTraffic="false"`, backup disabled). LAN HTTPS Android code is merged on `main`;
+signed `1.2.8` APK packaging is pending JDK 17 setup on the signing machine.
 
 ## Build and acceptance
 

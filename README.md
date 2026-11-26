@@ -2,11 +2,10 @@
 
 [English](README.en.md)
 
-AICC 提供 macOS 桌面小组件和 Android 墨水屏的**额度显示**，覆盖 Magpie 里所有服务商与账号。
-账号登录、模型路由和额度采集都由 [Magpie](https://github.com/yetone/magpie) 负责。AICC 没有菜单栏图标、
-弹出看板或 Web 看板，不启动代理、不读取供应商密钥，也不再自带 Codex / WorkBuddy / DeepSeek 采集器。
+AICC 提供 macOS 主控制台、桌面小组件与 Android 墨水屏看板，覆盖 Magpie 全服务商额度以及 WorkBuddy / Qoder 账号管理、每日签到、成长奖励与夜间自动轮换。
+其中额度路由与共享额度采集由 [Magpie](https://github.com/yetone/magpie) 负责；AICC 提供轻量化菜单栏入口（打开主控制台 / 设置… / 退出），不启动代理，也不再自带旧版 Codex / DeepSeek 独立采集器。
 
-当前版本 **2.13.0 / macOS Build 25**，见 [Releases](https://github.com/easonwong2026-del/AICC/releases)。
+当前版本 **2.14.1 / macOS Build 28**，见 [Releases](https://github.com/easonwong2026-del/AICC/releases)。
 Widget 的 kind 标识、共享设置域与既有实例配置保持不变，升级后不用重新添加小组件。
 
 ## 显示什么
@@ -38,8 +37,10 @@ AICC 打开就是一个窗口：左侧四页（总览 / AI 账号 / 额度看板
 - **额度看板**：顶部切换 Magpie 额度与官方账号额度，两套数据不合并、不相加；领取操作只发生在任务页。
 - **签到任务**：今日摘要 → 平台 → 任务类型，一次只看一个任务；只读检查与写入按钮分得很清楚。
 
-界面规范、组件清单、业务入口映射与回归清单见 [主控制台 UI V3](docs/UI_CONSOLE_V3.md)，
-验收截图在 `docs/console-v3/`，可用 `bash scripts/smoke-test-console-visual.sh` 重新生成。
+- **设置中心与自动计划中心**：设置分四类收口在单一窗口；自动计划中心集中管理签到、旅行、成长、Credits 与 WorkBuddy 夜间轮换。
+
+界面规范、设计系统与验收记录见 [主控制台 UI V5](docs/UI_V5.md)，
+控制台离屏验收截图可用 `bash scripts/smoke-test-console-visual.sh` 重新生成。
 
 ## 桌面小组件
 
@@ -107,11 +108,11 @@ codesign --verify --deep --strict /Applications/AICC.app # 必须 valid on disk
 
 ## 墨水屏 APK
 
-1. 打开 AICC 设置，启用“墨水屏桥接”。此时桥接**只监听本机**（`127.0.0.1:8765`），
+1. 打开 AICC 设置，启用“墨水屏桥接”。此时桥接**只监听本机**（`127.0.0.1:8765` 明文 HTTP），
    墨水屏连不上 —— 这是默认状态，只用小组件时够用。
-2. 要让墨水屏连接，再打开同一页的“允许局域网设备连接”。这一步会把桥接绑到所有网卡，
-   并开启 UDP 设备发现（8766）；关掉它会立刻重启服务、收回端口。
-   **只在可信网络里打开**：配对码之外，传输仍是未加密的 HTTP。
+2. 要让墨水屏连接，再打开同一页的“允许局域网设备连接”。这一步会启动 **HTTPS 监听（`0.0.0.0:8767`，TLS 1.3 优先）**
+   并开启 UDP 设备发现（`8766`）；关掉它会立刻停止 8767/8766、收回网络端口。
+   局域网通信采用自签根证书 + **根 SPKI 指纹 Pinning**（首次配对需在 Mac 与设备端人工核对指纹，见 [BRIDGE_TLS](docs/BRIDGE_TLS.md)）。
 3. APK 长按打开设置，自动发现或输入 Mac 地址，然后在 Mac 点击“生成配对码”，
    在 APK 输入 8 位码配对。有效期 2 分钟，只能使用一次。
    猜错次数按**来源 IP** 计（5 次/2 分钟），别的设备猜错不会让你的码作废；
@@ -135,8 +136,8 @@ APK 显示同样的通用额度，分两类页面：
 
 桥接是独立的只读权限：网络设备只能读匿名额度快照，不能刷新上游、管理账号、改路由或关闭服务。
 客户端用 `X-AICC-Schema: 3` 显式协商版本；旧 `codex` 结构由同一份快照派生（`?format=2`），不做字段级猜测。
-配对凭据在 Mac 上以 `0600` 文件保存在 `~/Library/Application Support/AICC-Dashboard/bridge-token`（旧版本的钥匙串条目只在首次启动时尝试读取一次，之后不再访问），通过标准输入交给 Python；Android 用 Keystore 加密，关闭备份。
-当前 LAN HTTP 传输没有加密，因此只适合可信局域网，不要开放到公网或公共 Wi-Fi。
+配对凭据在 Mac 上以 `0600` 文件保存在 `~/Library/Application Support/AICC-Dashboard/bridge-token`（旧版本的钥匙串条目只在首次启动时尝试读取一次，之后不再访问），通过标准输入交给 Python；Android 用 Keystore 加密，关闭备份与明文 HTTP（`usesCleartextTraffic=false`）。
+当前源码已合入 LAN HTTPS + SPKI Pinning；签名的 `1.2.8` APK 待重新配置 JDK 17 后发布，此前请勿在不可信网络开放旧版明文 APK。
 
 ## 开发与验收
 

@@ -4,7 +4,21 @@
 
 This file summarizes the current and recent public releases. The Chinese changelog contains the older detailed history.
 
-## Unreleased
+## 2.14.1 - 2026-11-26
+
+### Fixes & Console Polish (#124, #125)
+
+- **Scheduled rotation idle probe (#124):** falls back from `ioreg -c IOHIDSystem -d 1` to `/usr/sbin/ioreg -l` on macOS 26/27 so nightly rotation no longer skips every tick as "idle unreadable".
+- **Borrowed authorization expiry mirror (#124):** `sync_mirror` reads live `expires` from `plugin-auth.json` for Magpie-backed rows without copying tokens or changing broker priority.
+- **10-minute foreground refresh & state consistency (#125):** unified `ConsoleAccountsRefreshCoordinator` and `ConsoleAccountsAutoRefreshScheduler`, separated `lastSuccessAt` / `lastAttemptAt` / `lastError`, added spin prevention and lazy worker failure lookup, and aligned authorization rows with fleet summary status.
+- **Read-only cache & polish (#125):** added `MagpieLoginsCache` (`OnceCell`) in `account-worker`, sidebar attention badges, shortcuts (`⌘R`, `⌘,`, `⌘1–⌘4`), native hover feedback and Qoder banner dismissal.
+
+## 2.14.0 - 2026-11-22
+
+### UI V5 & Menu Bar (#115–#121)
+
+- **UI V5 console redesign:** unified design system across Overview, AI Accounts, Quota Dashboard, Task Center, Settings Center (#118) and Automation Center (#119), with single refresh entry points and state-driven check-in actions (#120).
+- **Menu bar status item (#121):** added Open Console / Settings / Quit actions so the `.accessory` app is always reachable and cleanly quittable.
 
 ### WorkBuddy nightly account rotation (#113)
 
@@ -22,7 +36,12 @@ This file summarizes the current and recent public releases. The Chinese changel
   reported separately from "switch succeeded" and "credential accepted".
 - The scheduler lives inside AICC's account worker: **it stops when AICC quits or the Mac
   sleeps**, and the UI says so.
-- Database v27; 7 new RPCs plus a dry-run mode.
+- Database migrated to v29 (`workbuddy_rotation_plan` / `run` / `step`); 7 new RPCs plus a dry-run mode.
+
+### Install & Widget Self-Heal (#123)
+
+- **Confirmed support for both `/Applications` and `~/Applications`** (`docs/INSTALL_PATH_ROOT_CAUSE.md`), with `安装说明.txt` in the DMG explaining Gatekeeper approval.
+- **Identity-based widget self-repair:** matches Bundle ID + main binary `cdhash` before clearing quarantine / re-registering `pluginkit`, retrying when a step fails.
 
 ## 2.13.0 - 2026-11-18
 

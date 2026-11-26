@@ -103,8 +103,8 @@ Mac `192.168.0.14`（AICC 2.12.2 自带运行时 + 根证书 gen 2）／POKE4S `
 真机探针记录（USB + `adb reverse`，ECDSA 13/13）在 `docs/verification/poke4s-ecdsa-probe.txt`，
 与上面的 Wi-Fi 验收是两件事，不能互相替代。
 
-## 还没做
+## 状态
 
-- Swift 客户端：开关语义、指纹展示、`tls.ensure` 调用、内置解释器优先、重置入口。
-- Android 正式客户端：HTTPS 发现、首次确认 UI、SPKI pinning、禁明文、证书异常处理。
-- 真实 Wi-Fi 下的发现 → 确认 → 配对 → 读额度 → 断网重连。
+- Swift 端开关语义、指纹展示、`tls.ensure` / `tls.reset` 与重置重启桥接已合入 `main`。
+- Android 正式客户端的 HTTPS 发现、首次指纹核对 UI、SPKI pinning 与 `usesCleartextTraffic="false"` 已合入 `main` 并通过 POKE4S 真机 Wi-Fi 验收（见上表）。
+- 待补齐项：在签名机配置 JDK 17 后打包并发布带签名的 `1.2.8` APK 资产（详见 Issue #78）。
