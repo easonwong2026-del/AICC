@@ -445,7 +445,7 @@ struct RotationManagerView: View {
     // MARK: - 编辑内容
 
     @ViewBuilder private var setupContent: some View {
-        if let draft = model.draft, let plan = model.plan {
+        if let draft = model.draft, model.plan != nil {
             RotationSetupView(
                 store: store,
                 draft: Binding(
