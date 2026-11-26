@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SwiftUI
 import AppKit
@@ -500,10 +501,13 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
     private var hasStartedShutdown = false
     private var hasPresentedMainWindow = false
     private var widgetRefreshTask: Task<Void, Never>?
+    private var updateCheckTask: Task<Void, Never>?
+    private var updateObserverCancellables = Set<AnyCancellable>()
     /// 菜单栏常驻图标。AICC 是 accessory 应用（没有 Dock 图标），
     /// 桥接开启时关掉窗口也不会退出 —— 没有这个入口，用户只能翻到
     /// 设置 → 高级与诊断 才能退出。
     private var statusItem: NSStatusItem?
+    private var updateAvailableMenuItem: NSMenuItem?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         guard singleInstance.acquire() else {
@@ -539,10 +543,12 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
             loginAtLaunch: LaunchAtLoginService.shared,
             store: store,
             openSettings: { [weak self] in self?.presentSettings() },
+            openUpdateSettings: { [weak self] in self?.presentSettings(category: .general) },
             onClose: { [weak self] in self?.finishBackgroundRefresh() }
         )
 
         installMenuBarItem()
+        observeUpdateAvailability()
 
         if AppSettings.shared.bridgeEnabled { serverManager.startMonitoring() }
         // 自动旅行跑在账号助手进程里。上次退出前有账号开着自动旅行的话，
@@ -567,6 +573,10 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
             // 不再要求 NSApp.isActive：accessory 应用从 Finder / open 启动时
             // 这一刻还没被激活，以前那样判断会导致"点了图标什么都不出现"。
             presentConsole()
+        }
+
+        if !urlLaunch && !(!AppSettings.shared.bridgeEnabled && loginLaunch) {
+            scheduleAutomaticUpdateCheck()
         }
     }
 
@@ -621,6 +631,16 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let menu = NSMenu()
+        let updateBanner = NSMenuItem(
+            title: "",
+            action: #selector(menuOpenUpdateSettings),
+            keyEquivalent: ""
+        )
+        updateBanner.target = self
+        updateBanner.isHidden = true
+        menu.addItem(updateBanner)
+        updateAvailableMenuItem = updateBanner
+
         let console = NSMenuItem(
             title: "打开主控制台",
             action: #selector(menuOpenConsole),
@@ -637,6 +657,14 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
         settings.target = self
         menu.addItem(settings)
 
+        let checkUpdates = NSMenuItem(
+            title: "检查更新…",
+            action: #selector(menuCheckForUpdates),
+            keyEquivalent: ""
+        )
+        checkUpdates.target = self
+        menu.addItem(checkUpdates)
+
         menu.addItem(.separator())
 
         let quit = NSMenuItem(
@@ -649,6 +677,41 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
 
         item.menu = menu
         statusItem = item
+        syncUpdateMenuIndicator()
+    }
+
+    private func observeUpdateAvailability() {
+        updateObserverCancellables.removeAll()
+        UpdateService.shared.$state
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.syncUpdateMenuIndicator() }
+            .store(in: &updateObserverCancellables)
+        UpdateService.shared.$ignoredVersion
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.syncUpdateMenuIndicator() }
+            .store(in: &updateObserverCancellables)
+    }
+
+    private func syncUpdateMenuIndicator() {
+        if let update = UpdateService.shared.visibleUpdate {
+            updateAvailableMenuItem?.title = "发现新版本 v\(update.version)…"
+            updateAvailableMenuItem?.isHidden = false
+            statusItem?.button?.toolTip = "AICC · 发现新版本 v\(update.version)"
+        } else {
+            updateAvailableMenuItem?.isHidden = true
+            statusItem?.button?.toolTip = "AICC"
+        }
+    }
+
+    private func scheduleAutomaticUpdateCheck() {
+        updateCheckTask?.cancel()
+        updateCheckTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled, self != nil else { return }
+            _ = await UpdateService.shared.checkForUpdatesIfDue(
+                autoCheckEnabled: AppSettings.shared.autoCheckUpdates
+            )
+        }
     }
 
     @objc private func menuOpenConsole() {
@@ -657,6 +720,14 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func menuOpenSettings() {
         presentSettings()
+    }
+
+    @objc private func menuOpenUpdateSettings() {
+        presentSettings(category: .general)
+    }
+
+    @objc private func menuCheckForUpdates() {
+        presentSettings(category: .general, checkForUpdates: true)
     }
 
     @objc private func menuQuit() {
@@ -670,8 +741,8 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// 右上角齿轮进入设置。设置不再作为默认首页。
-    private func presentSettings() {
-        settingsWindowCoordinator?.present()
+    private func presentSettings(category: SettingsCategory? = nil, checkForUpdates: Bool = false) {
+        settingsWindowCoordinator?.present(category: category, checkForUpdates: checkForUpdates)
     }
 
     func finishBackgroundRefresh() {
@@ -713,6 +784,10 @@ class AICCAppDelegate: NSObject, NSApplicationDelegate {
         hasStartedShutdown = true
         widgetRefreshTask?.cancel()
         widgetRefreshTask = nil
+        updateCheckTask?.cancel()
+        updateCheckTask = nil
+        updateObserverCancellables.removeAll()
+        updateAvailableMenuItem = nil
         TravelAutomationService.shared.stop()
         consoleCoordinator?.tearDown()
         consoleCoordinator = nil

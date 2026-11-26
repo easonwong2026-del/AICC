@@ -21,11 +21,11 @@ let package = Package(
                 // 只有 Manager 依赖 SwiftUI；Client 是纯 Foundation，进测试目标。
                 "AccountCenter/AccountWorkerManager.swift",
                 "Console",
-                "Helpers",
                 "Services/BridgeCredential.swift",
                 "Services/LaunchAtLoginService.swift",
                 "Services/SettingsWindowCoordinator.swift",
                 "Services/SingleInstanceService.swift",
+                "Services/TravelAutomationService.swift",
                 "Services/WidgetHealthService.swift",
                 "Settings",
             ],
@@ -77,7 +77,6 @@ let package = Package(
             name: "AICCCoreTests",
             dependencies: ["AICCCore"],
             path: "Tests",
-            exclude: ["Fixtures"],
             sources: [
                 "AccountWorkerClientTests.swift",
                 "AccountWorkerProtocolTests.swift",

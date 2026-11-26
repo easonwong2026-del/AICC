@@ -341,15 +341,16 @@ print(published)
 PY
 )" || { rm -f "$REL_BODY"; die "release has no published_at — refusing to write a manifest without it"; }
   rm -f "$REL_BODY"
-  python3 - "$VERSION" "$BUILD" "$PUBLISHED" "$OWNER" "$REPO" <<'PY'
+  MIN_SYS="$(plutil -extract LSMinimumSystemVersion raw -o - "$APP_PLIST" 2>/dev/null || plutil -extract LSMinimumSystemVersion raw -o - "macos/MenuBarApp/Info.plist" 2>/dev/null || true)"
+  python3 - "$VERSION" "$BUILD" "$PUBLISHED" "$OWNER" "$REPO" "$MIN_SYS" <<'PY'
 import json, pathlib, sys
-version, build, published, owner, repo = sys.argv[1:6]
+version, build, published, owner, repo, min_sys = sys.argv[1:7]
 path = pathlib.Path("updates/aicc-update.json")
 current = json.loads(path.read_text(encoding="utf-8"))
 updated = {
     "version": version,
     "build": build,
-    "minimumSystemVersion": current.get("minimumSystemVersion", "14.0"),
+    "minimumSystemVersion": min_sys.strip() or current.get("minimumSystemVersion", "14.0"),
     "downloadURL": f"https://github.com/{owner}/{repo}/releases/download/v{version}/AICC-{version}.dmg",
     "releaseNotesURL": f"https://github.com/{owner}/{repo}/releases/tag/v{version}",
     "publishedAt": published,

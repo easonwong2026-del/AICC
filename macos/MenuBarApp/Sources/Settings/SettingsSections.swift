@@ -48,13 +48,102 @@ struct GeneralSettingsSection: View {
                 }
             }
 
-            SettingsGroup(title: "关于") {
-                SettingsRow(title: "项目与更新") {
-                    Button("打开") {
-                        NSWorkspace.shared.open(URL(string: "https://github.com/easonwong2026-del/AICC/releases")!)
-                    }
-                    .buttonStyle(ConsoleSecondaryButtonStyle())
+            SettingsGroup(title: "关于与更新") {
+                SettingsValueRow(title: "当前版本", value: model.appVersionDisplay, mono: true)
+
+                SettingsRowDivider()
+
+                SettingsRow(
+                    title: "自动检查更新",
+                    help: "启动后在后台静默检查新版本，每 24 小时最多一次，不会弹窗打扰。"
+                ) {
+                    Toggle("自动检查更新", isOn: $settings.autoCheckUpdates)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
                 }
+
+                SettingsRowDivider()
+
+                updateCheckRows
+
+                SettingsRowDivider()
+
+                SettingsRow(title: "项目与发布页") {
+                    Button("打开") { model.openReleasePage() }
+                        .buttonStyle(ConsoleSecondaryButtonStyle())
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var updateCheckRows: some View {
+        switch model.updateState {
+        case .idle:
+            SettingsRow(title: "版本更新", detail: model.updateLastCheckedText) {
+                Button("检查更新") { Task { await model.checkForUpdates() } }
+                    .buttonStyle(ConsoleSecondaryButtonStyle())
+            }
+        case .checking:
+            SettingsRow(title: "版本更新", detail: "正在连接更新服务器…") {
+                ProgressView()
+                    .controlSize(.small)
+            }
+        case .upToDate:
+            SettingsRow(
+                title: "版本更新",
+                detail: model.updateLastCheckedText.map { "已是最新版本 · \($0)" } ?? "已是最新版本",
+                detailTone: .ok
+            ) {
+                Button("重新检查") { Task { await model.checkForUpdates() } }
+                    .buttonStyle(ConsoleSecondaryButtonStyle())
+            }
+        case .updateAvailable(let info):
+            let detail: String = {
+                if let summary = info.releaseSummary, !summary.isEmpty {
+                    return summary
+                }
+                if let date = info.formattedPublishedDate {
+                    return "发布于 \(date)"
+                }
+                return "有新版本可供下载"
+            }()
+            SettingsRow(
+                title: "发现新版本 \(info.displayVersion)",
+                detail: detail,
+                detailTone: .accent
+            ) {
+                Button("下载安装包") { model.openUpdateDownload(info) }
+                    .buttonStyle(ConsolePrimaryButtonStyle())
+            }
+            HStack(spacing: 8) {
+                Spacer(minLength: 8)
+                Button("更新说明") { model.openUpdateReleaseNotes(info) }
+                    .buttonStyle(ConsoleSecondaryButtonStyle())
+                if model.updater.ignoredVersion != info.version {
+                    Button("忽略此版本") { model.ignoreUpdate(info) }
+                        .buttonStyle(ConsoleSecondaryButtonStyle())
+                }
+            }
+            .padding(.bottom, 8)
+        case .incompatibleSystem(let info, let required):
+            SettingsRow(
+                title: "发现新版本 \(info.displayVersion)",
+                detail: "需要 macOS \(required) 及以上（当前系统不满足要求）",
+                detailTone: .warning
+            ) {
+                Button("查看说明") { model.openUpdateReleaseNotes(info) }
+                    .buttonStyle(ConsoleSecondaryButtonStyle())
+            }
+        case .failed(let message):
+            SettingsRow(title: "版本更新", detail: message, detailTone: .error) {
+                Button("重试") { Task { await model.checkForUpdates() } }
+                    .buttonStyle(ConsoleSecondaryButtonStyle())
+            }
+        case .notConfigured:
+            SettingsRow(title: "版本更新", detail: "未配置更新源") {
+                Button("打开发布页") { model.openReleasePage() }
+                    .buttonStyle(ConsoleSecondaryButtonStyle())
             }
         }
     }
