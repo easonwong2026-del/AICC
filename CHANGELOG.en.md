@@ -4,6 +4,20 @@
 
 This file summarizes the current and recent public releases. The Chinese changelog contains the older detailed history.
 
+## 2.15.0 - 2026-11-26
+
+### In-App Update Checker & Experience (#131)
+
+- **Hardened update engine:** forward-compatible `UpdateInfo` decoding (with optional `sha256` and `releaseSummary`), pre-network `currentVersion` validation, SemVer + same-version `build` comparison, `minimumSystemVersion` macOS compatibility checks, streaming byte-cap via `URLSession.bytes(for:)`, HTTPS + trusted GitHub/configured host enforcement on redirects and responses, `#if DEBUG` gating for `AICC_UPDATE_MANIFEST_URL`, strict SemVer 2.0.0 prerelease leading-zero rejection, and zero warnings under Swift 6 strict concurrency.
+- **Settings, Console & Menu Bar integration:** Settings → General → About & Updates shows current version/build, a 24-hour silent auto-check toggle, last-checked timestamp, and one-click Download / Release Notes / Ignore Version actions; Menu Bar adds "Check for Updates…" plus a dynamic update banner and tooltip; Main Console sidebar displays a non-intrusive inline update notice.
+- **Release & CI guardrails:** added `scripts/validate-update-manifest.sh` to CI, updated `scripts/release-publish.sh` to read `LSMinimumSystemVersion` from `Info.plist`, and expanded `UpdateServiceTests` to 21 unit tests.
+
+### Stability, Leak Fixes & Hygiene (#127, #128, #129, #130)
+
+- **WorkBuddy stale temporary-restore fix (#128):** settles temporary restore metadata on rotation recovery and guards against UID mismatches so locally authorized accounts are not mislabeled as temporary logins.
+- **Full-stack resource, session, snapshot & TLS leak fixes (#129):** cleans up macOS pipe readability handlers, timeout timers, shutdown tasks, `URLSession` delegate retain cycles, and sheet timers/QR re-renders; bounds Rust auth session maps, shares `reqwest::Client`, adds RAII tick guards, and removes plaintext switch snapshots after settlement; moves Python LAN TLS handshake off the accept thread and fixes lock descriptor leaks.
+- **Refactoring, cleanup & restored tests (#127, #130):** split Rust `handlers` module with zero compiler warnings, removed orphaned fixtures and dead code, bounded `widget-health.log`, and restored 36 previously skipped Swift unit tests in `Package.swift`.
+
 ## 2.14.1 - 2026-11-26
 
 ### Fixes & Console Polish (#124, #125)

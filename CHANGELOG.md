@@ -2,6 +2,20 @@
 
 [English](CHANGELOG.en.md)
 
+## 2.15.0 - 2026-11-26
+
+### 应用内更新检查正式上线（#131）
+
+- **更新引擎安全与可靠性加固**：`UpdateInfo` 改为前向兼容解码（预留 `sha256` / `releaseSummary`，忽略未来扩展键）；联网前先校验本机版本，同时比较 SemVer 与同版本号 `build`，并根据 `minimumSystemVersion` 校验 macOS 系统兼容性；`URLSession.bytes(for:)` 流式上限检查防止超大响应占满内存；重定向与响应强制 HTTPS + 受信任 GitHub/配置域名；`AICC_UPDATE_MANIFEST_URL` 环境变量覆盖仅限 `#if DEBUG`；SemVer 2.0.0 严格拒绝预发布数字前导零，并通过 Swift 6 严格并发零警告编译。
+- **设置页、主控制台与菜单栏三端联动**：设置页「常规 → 关于与更新」展示当前版本与 Build 号、24 小时静默自动检查开关、一键检查更新/下载安装包/查看更新说明/忽略此版本；菜单栏新增「检查更新…」及新版本动态入口与 tooltip；主控制台侧边栏展示温和的内联新版本提示条。
+- **发布与 CI 护栏**：新增 `scripts/validate-update-manifest.sh` 接入 CI；`scripts/release-publish.sh` 改为动态读取 `Info.plist` 中的 `LSMinimumSystemVersion`；`UpdateServiceTests` 扩充至 21 个单元测试。
+
+### 稳定性、内存与安全泄漏治理（#127、#128、#129、#130）
+
+- **WorkBuddy 临时登录态恢复修复（#128）**：轮换恢复成功时正确结清遗留临时恢复标记并增加 UID 不匹配保护，避免本地已有授权登录账号时仍被误标为「临时登录」。
+- **全栈资源与内存泄漏修复（#129）**：清理 macOS 端管道 `readabilityHandler`、请求超时 `DispatchWorkItem`、退出时定时任务与子进程、`URLSession` 代理循环引用、登录弹窗定时器和二维码重复生成；修复 Rust `account-worker` 会话内存无界增长、HTTP 客户端重复创建、异常中断状态锁残留与明文切换快照未清理问题；修复 Python `server.py` 慢客户端阻塞 TLS 握手与锁句柄泄漏。
+- **代码清理与测试恢复（#127、#130）**：拆分 Rust `handlers` 模块并消除全部编译警告；清理废弃脚本、过期 fixture 与死代码；在 `Package.swift` 中恢复 36 个被跳过的 Swift 单元测试，限制 `widget-health.log` 日志体积。
+
 ## 2.14.1 - 2026-11-26
 
 ### 修复与打磨（#124、#125）
