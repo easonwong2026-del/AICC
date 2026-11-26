@@ -108,6 +108,10 @@ impl AppTokens<'_> {
 
     /// 借用授权的恢复：重新从 Magpie 读一次 access（**不刷新**）。
     fn resync_magpie(&self, account: &AccountRecord) -> Result<String, String> {
+        let before =
+            crate::auth::service::read_access(self.app, account, crate::auth::ids::KIND_MAGPIE)
+                .ok()
+                .flatten();
         match crate::handlers::resync_magpie_access(self.app, account) {
             Ok(report) => {
                 if report.get("state").and_then(Value::as_str) != Some("valid") {
@@ -118,7 +122,14 @@ impl AppTokens<'_> {
                         .unwrap_or("Magpie 里的令牌也已过期")
                         .to_string());
                 }
-                <Self as Tokens>::access(self, account)
+                let after = <Self as Tokens>::access(self, account)?;
+                if before.as_deref() == Some(after.as_str()) {
+                    return Err(
+                        "Magpie 借用令牌虽未到标注过期时间，但已被服务端拒绝（401）；请在 Magpie 重新登录，或为该账号添加自有授权"
+                            .to_string(),
+                    );
+                }
+                Ok(after)
             }
             // 手上这份账号快照已经过期（期间用户扫码换了授权，或者账号刚被写过）：
             // 不算失败，直接用手上现有的令牌继续，下一轮自然读到新账号。
@@ -383,4 +394,144 @@ pub fn auto_status(app: &App) -> Value {
         "lastTick": last_tick(),
         "today": crate::clock::beijing_date(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paths::Paths;
+    use crate::providers::magpie;
+    use crate::securestore::SecureStore;
+    use crate::storage::{AccountInput, AuthorizationRecord};
+    use tempfile::TempDir;
+
+    fn test_app() -> (TempDir, App) {
+        let dir = TempDir::new().expect("tempdir");
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).expect("create data dir");
+        let paths = Paths {
+            db_path: data.join("accounts.sqlite"),
+            backups_dir: data.join("backups"),
+            logs_dir: data.join("logs"),
+            wb_switch_home: data.join("wb-switch-home"),
+            data_dir: data,
+            wb_home_owned: true,
+        };
+        let app = App::with_secure(paths, SecureStore::memory());
+        app.with_db(|db| db.migrate().map(|_| ()))
+            .expect("migrate db");
+        (dir, app)
+    }
+
+    fn seed_magpie_account(app: &App, token: &str) -> AccountRecord {
+        let id = app
+            .with_db(|db| {
+                db.upsert_account(&AccountInput {
+                    platform: "workbuddy".to_string(),
+                    uid: "uid-stale-magpie".to_string(),
+                    nickname: Some("高亮".to_string()),
+                    auth_domain: Some("www.workbuddy.cn".to_string()),
+                    auth_source: Some("magpie".to_string()),
+                    auth_status: Some("valid".to_string()),
+                    token_expires_at: Some("2099-12-31T00:00:00Z".to_string()),
+                    travel_enabled: Some(true),
+                    ..Default::default()
+                })
+            })
+            .expect("seed account")
+            .id;
+        let account = app
+            .with_db(|db| db.get_account(&id))
+            .expect("get account")
+            .expect("account exists");
+        let now = crate::clock::now_rfc3339();
+        let row = AuthorizationRecord {
+            id: "auth-magpie-stale".to_string(),
+            account_id: account.id.clone(),
+            kind: crate::auth::ids::KIND_MAGPIE.to_string(),
+            access_ref: "magpie:v1:workbuddy#stale".to_string(),
+            refresh_ref: None,
+            auth_domain: Some("www.workbuddy.cn".to_string()),
+            token_expires_at: Some("2099-12-31T00:00:00Z".to_string()),
+            status: "valid".to_string(),
+            version: 1,
+            key_migration_state: "ready".to_string(),
+            source_key: Some("workbuddy#stale".to_string()),
+            last_used_at: None,
+            last_error: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        app.with_db(|db| db.upsert_authorization(&row))
+            .expect("seed magpie auth");
+        magpie::test_set_logins(Some(vec![magpie::MagpieLogin {
+            key: "workbuddy#stale".to_string(),
+            provider: magpie::provider_of("workbuddy").expect("provider"),
+            uid: "uid-stale-magpie".to_string(),
+            nickname: Some("高亮".to_string()),
+            domain: "www.workbuddy.cn".to_string(),
+            access_token: token.to_string(),
+            expires_at_ms: Some(magpie::now_ms() + 86_400_000),
+        }]));
+        account
+    }
+
+    #[tokio::test]
+    async fn resync_magpie_reports_clear_error_when_magpie_file_token_is_unchanged() {
+        let (_dir, app) = test_app();
+        let account = seed_magpie_account(&app, "revoked-access-token");
+
+        let tokens = AppTokens { app: &app };
+        let err = tokens
+            .resync(&account)
+            .await
+            .expect_err("unchanged revoked token must not pretend resync succeeded");
+        magpie::test_reset();
+
+        assert!(
+            err.contains("Magpie 借用令牌") && err.contains("401") && err.contains("自有授权"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resync_magpie_falls_back_to_own_when_magpie_token_is_unchanged() {
+        let (_dir, app) = test_app();
+        let account = seed_magpie_account(&app, "revoked-access-token");
+
+        // 同时补一份可用自有授权：Magpie 未更新时应无感兜底到自有授权。
+        let now = crate::clock::now_rfc3339();
+        let keys = crate::auth::service::own_keys(&account.id);
+        app.secure
+            .set(&keys.access, b"fresh-own-access-token")
+            .expect("store own token");
+        let own_row = AuthorizationRecord {
+            id: "auth-own-valid".to_string(),
+            account_id: account.id.clone(),
+            kind: crate::auth::ids::KIND_OWN.to_string(),
+            access_ref: format!("keychain:{}", keys.access),
+            refresh_ref: keys.refresh.map(|k| format!("keychain:{k}")),
+            auth_domain: Some("www.workbuddy.cn".to_string()),
+            token_expires_at: Some("2099-12-31T00:00:00Z".to_string()),
+            status: "valid".to_string(),
+            version: 1,
+            key_migration_state: "ready".to_string(),
+            source_key: None,
+            last_used_at: None,
+            last_error: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        app.with_db(|db| db.upsert_authorization(&own_row))
+            .expect("seed own auth");
+
+        let tokens = AppTokens { app: &app };
+        let token = tokens
+            .resync(&account)
+            .await
+            .expect("should fall back to own token");
+        magpie::test_reset();
+
+        assert_eq!(token, "fresh-own-access-token");
+    }
 }
