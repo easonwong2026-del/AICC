@@ -18,9 +18,11 @@
 //! 2. `findings`：我们**想知道答案的那几个字段**在响应里的真实位置与类型 ——
 //!    这是给人看的结论，比原样贴一份 JSON 有用得多。
 
+#[cfg(any(debug_assertions, test))]
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
+#[cfg(any(debug_assertions, test))]
 use super::api::ReadOnlyEndpoints;
 
 /// 单条字符串最多保留多少字符。
@@ -34,6 +36,7 @@ const MAX_ARRAY_ITEMS: usize = 800;
 const MAX_DEPTH: usize = 8;
 
 /// 一个接口的采集结果。
+#[cfg(any(debug_assertions, test))]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CapturedEndpoint {
@@ -56,6 +59,7 @@ pub struct CapturedEndpoint {
 }
 
 /// 一条"这个字段到底在哪"的结论。
+#[cfg(any(debug_assertions, test))]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct FieldFinding {
@@ -83,6 +87,7 @@ pub struct FieldFinding {
     pub note: &'static str,
 }
 
+#[cfg(any(debug_assertions, test))]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EvidenceReport {
@@ -191,6 +196,7 @@ fn sanitize_at(value: &Value, depth: usize) -> Value {
 /// 按**完整路径**取值。路径里的 `[]` 表示"遍历这一层数组"。
 ///
 /// 例如 `data.redemption_status.tiers[].chances`：只认这条链，不做全局同名搜索。
+#[cfg(any(debug_assertions, test))]
 pub fn lookup_path(root: &Value, path: &str) -> Vec<(String, Value)> {
     let mut current: Vec<(String, Value)> = vec![(String::new(), root.clone())];
     for segment in path.split('.') {
@@ -228,12 +234,14 @@ pub fn lookup_path(root: &Value, path: &str) -> Vec<(String, Value)> {
 }
 
 /// 在 JSON 里找某个键，返回所有路径（点号分隔，数组用 `[]`）。
+#[cfg(test)]
 pub fn find_paths(value: &Value, key: &str) -> Vec<(String, Value)> {
     let mut out = Vec::new();
     walk(value, "", key, 0, &mut out);
     out
 }
 
+#[cfg(test)]
 fn walk(value: &Value, prefix: &str, key: &str, depth: usize, out: &mut Vec<(String, Value)>) {
     if depth >= MAX_DEPTH {
         return;
@@ -262,6 +270,7 @@ fn walk(value: &Value, prefix: &str, key: &str, depth: usize, out: &mut Vec<(Str
     }
 }
 
+#[cfg(any(debug_assertions, test))]
 fn kind_of(value: &Value) -> &'static str {
     match value {
         Value::Number(_) => "number",
@@ -276,6 +285,7 @@ fn kind_of(value: &Value) -> &'static str {
 /// 按权威位置取一条字段。**只在指定接口的指定路径上取值**。
 ///
 /// 找不到就是 `missing`，等级留在 C —— 不做"全局同名搜索"来凑一个命中。
+#[cfg(any(debug_assertions, test))]
 fn finding(
     corpus: &[(String, Value)],
     field: &'static str,
@@ -314,22 +324,12 @@ fn finding(
     }
 }
 
-/// 在一组"接口 → 响应"里找键。返回带接口名的路径，便于定位。
-fn find_paths_in(corpus: &[(String, Value)], key: &str) -> Vec<(String, Value)> {
-    let mut out = Vec::new();
-    for (name, body) in corpus {
-        for (path, value) in find_paths(body, key) {
-            out.push((format!("{name}:{path}"), value));
-        }
-    }
-    out
-}
-
 // ---------------------------------------------------------------------------
 // 采集
 // ---------------------------------------------------------------------------
 
 /// 抓四个只读接口。**全部是 GET**，不改变任何服务端状态。
+#[cfg(any(debug_assertions, test))]
 pub async fn capture(access: &str, uid: &str, domain: &str) -> EvidenceReport {
     let endpoints = ReadOnlyEndpoints::new(access, uid, domain);
     let (streak, redeem, heatmap, chances) = tokio::join!(

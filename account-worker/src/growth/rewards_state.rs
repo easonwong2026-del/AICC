@@ -22,7 +22,9 @@ use chrono::{Datelike, NaiveDate};
 use super::api::{GrowthError, ReadOnlyEndpoints};
 use super::models::as_i64;
 use super::scanner::{dig_i64, FieldError};
-use super::streak_rewards::{LedgerPhase, Tier};
+#[cfg(test)]
+use super::streak_rewards::LedgerPhase;
+use super::streak_rewards::Tier;
 
 /// 活动起始日：官方前端 `canMakeup` 写死的下限。
 pub const ACTIVITY_START: (i32, u32, u32) = (2026, 6, 17);
@@ -523,6 +525,7 @@ pub fn operation_view(op: &crate::storage::reward_ops::RewardOp) -> OperationVie
 }
 
 /// 这条记录下一步会变成什么（只读提示，不执行）。
+#[cfg(test)]
 pub fn phase_hint(phase: &str) -> &'static str {
     if phase == LedgerPhase::Unknown.as_str() {
         "等待回查服务端状态"

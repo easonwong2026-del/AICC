@@ -22,11 +22,14 @@
 //!        → verdict() → resolve_reward_op → 返回脱敏后的响应
 //! ```
 
-use serde_json::{json, Value};
+#[cfg(any(debug_assertions, test))]
+use serde_json::json;
+use serde_json::Value;
 
 use super::reward_ledger::{self, Next, Observation, Verdict};
 use super::streak_rewards::{self, Command, Outcome, Tier};
 use crate::rpc::{RpcError, RpcResult};
+#[cfg(any(debug_assertions, test))]
 use crate::storage::reward_ops::Resolution;
 use crate::storage::Db;
 
@@ -102,6 +105,7 @@ pub enum ProbeDecision {
 ///
 /// 顺序与正式接线一致：先 `open_reward_op`（落盘 / 复用），再 `plan()`。
 /// `plan` 说 `Recheck` 或 `Blocked` 时，这里绝不返回 `Send`。
+#[cfg(any(debug_assertions, test))]
 pub fn decide(db: &mut Db, account_id: &str, command: &Command) -> RpcResult<ProbeDecision> {
     decide_with(db, account_id, command, true)
 }
@@ -233,15 +237,6 @@ impl ProbeSender for HttpSender {
     async fn send(&self, suffix: &str, body: Value) -> Result<Value, super::api::GrowthError> {
         super::api::post_exact(&self.payload, suffix, body).await
     }
-}
-
-/// 发一次。封装在这里，让正式写路径与探针共用同一条"只发一次"的实现。
-pub async fn send_once<S: ProbeSender>(
-    sender: &S,
-    suffix: &str,
-    body: Value,
-) -> Result<Value, super::api::GrowthError> {
-    sender.send(suffix, body).await
 }
 
 /// 发送前的只读检查结果。**余额/可领性为 0 时不许发**。
@@ -437,6 +432,7 @@ pub fn status_for_error(err: &super::api::GrowthError) -> u16 {
 ///
 /// `readiness` 由调用方先算好传进来：测试可以绕过真实 GET，
 /// 但仍然走同一套"余额不足不发"的判断。
+#[cfg(any(debug_assertions, test))]
 pub async fn run_with<S: ProbeSender>(
     app: &std::sync::Arc<crate::app::App>,
     account_id: &str,
@@ -541,6 +537,7 @@ pub async fn run_with<S: ProbeSender>(
 }
 
 /// 预览：只读，返回账号、动作、当前余额与预计消耗，**不发送任何写请求**。
+#[cfg(any(debug_assertions, test))]
 pub async fn preview(
     app: &std::sync::Arc<crate::app::App>,
     account_id: &str,
@@ -562,6 +559,7 @@ pub async fn preview(
     }))
 }
 
+#[cfg(any(debug_assertions, test))]
 fn cost_text(command: &Command) -> &'static str {
     match command {
         Command::LotteryDraw => "消耗 1 次抽奖机会",
@@ -571,6 +569,7 @@ fn cost_text(command: &Command) -> &'static str {
 }
 
 /// 解析账号 + 跑只读 readiness。执行与预览共用。
+#[cfg(any(debug_assertions, test))]
 async fn prepare(
     app: &std::sync::Arc<crate::app::App>,
     account_id: &str,
@@ -605,6 +604,7 @@ async fn prepare(
 }
 
 /// 执行一次探针：先只读核对余额，再决定要不要发。
+#[cfg(any(debug_assertions, test))]
 pub async fn execute(
     app: &std::sync::Arc<crate::app::App>,
     account_id: &str,
@@ -954,7 +954,7 @@ mod tests {
     /// 取证与探针两条 RPC 只能出现在 `#[cfg(debug_assertions)]` 下。
     #[test]
     fn the_dev_only_rpcs_stay_behind_debug_assertions() {
-        let handlers = include_str!("../handlers.rs");
+        let handlers = include_str!("../handlers/automation.rs");
         for method in ["growth.rewards.evidence", "growth.rewards.probe"] {
             let index = handlers
                 .find(&format!("\"{method}\" =>"))

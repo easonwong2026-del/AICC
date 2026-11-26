@@ -1458,7 +1458,7 @@ mod tests {
     /// 官方文档：调试探针只能出现在 debug 构建里，正式包不许带。
     #[test]
     fn dev_only_probes_stay_behind_debug_assertions() {
-        let source = include_str!("../handlers.rs");
+        let source = include_str!("../handlers/automation.rs");
         let index = source
             .find("\"growth.rewards.evidence\"")
             .expect("方法应存在");

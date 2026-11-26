@@ -352,6 +352,7 @@ mod tests {
 /// 只读取证：四个 GET 抓下来，脱敏后返回（PR #100）。
 ///
 /// 与 `reward_state` 共用凭据解析；**没有任何写接口**参与。
+#[cfg(any(debug_assertions, test))]
 pub async fn capture_evidence(
     app: &Arc<App>,
     account_id: &str,

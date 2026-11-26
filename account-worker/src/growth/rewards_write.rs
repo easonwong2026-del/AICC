@@ -15,7 +15,9 @@
 use serde_json::{json, Value};
 
 use super::probe::{self, command as build_command, ProbeAction, ProbeDecision};
-use super::streak_rewards::{Command, Outcome, Tier};
+#[cfg(test)]
+use super::streak_rewards::Tier;
+use super::streak_rewards::{Command, Outcome};
 use crate::rpc::{RpcError, RpcResult};
 use crate::storage::reward_ops::Resolution;
 
@@ -372,11 +374,6 @@ fn cost_text(action: ProbeAction) -> &'static str {
         ProbeAction::Redeem => "消耗 1 个连登档位",
         ProbeAction::MakeupCard => "消耗 1 张补签卡",
     }
-}
-
-/// 档位标识 → `Tier`，供 RPC 层做参数校验。
-pub fn parse_tier(raw: &str) -> RpcResult<Tier> {
-    Tier::parse(raw).ok_or_else(|| RpcError::invalid_params("target 只能是 7d / 14d / 28d"))
 }
 
 #[cfg(test)]

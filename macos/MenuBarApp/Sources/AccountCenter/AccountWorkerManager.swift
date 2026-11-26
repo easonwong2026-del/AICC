@@ -10,9 +10,9 @@ final class AccountWorkerManager: ObservableObject {
     /// 整个 App 只有一个助手进程：主控制台和设置页共用这一个实例。
     /// 每个页面各建一个会让 `health` 探针重复起进程（PRD §七.2）。
     ///
-    /// `nonisolated(unsafe)`：实例是常量，所有可变状态仍然只在主线程读写
+    /// 实例是常量，所有可变状态仍然只在主线程读写
     /// （方法全在 `@MainActor` 上），这里只是让 SwiftUI 的属性初始化器能拿到它。
-    nonisolated(unsafe) static let shared = AccountWorkerManager()
+    static let shared = AccountWorkerManager()
 
     enum State: Equatable {
         case stopped
