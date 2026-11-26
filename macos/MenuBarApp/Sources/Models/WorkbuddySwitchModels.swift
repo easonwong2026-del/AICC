@@ -457,11 +457,23 @@ struct WorkbuddyClientStatus: Equatable {
         return candidates.first { $0.uid == uid }?.accountId
     }
 
+    /// 这条历史切换记录是否仍对应当前客户端登录态。
+    ///
+    /// 客户端已登录到另一个账号时（例如轮换已恢复原账号或用户手动换号），
+    /// 不应把旧记录的“临时登录 / 可恢复”贴到当前账号上；
+    /// 客户端未登录时仍保留恢复入口（临时令牌过期掉线后需要回到原账号）。
+    private func matchesLiveState(_ journal: WorkbuddySwitchJournal) -> Bool {
+        guard live.loggedIn else { return true }
+        return live.uid == journal.targetUid
+    }
+
     /// 左栏要提示的那条"可恢复"记录：未完成的切换优先，其次是待还原的临时登录。
     var restoreOffer: WorkbuddySwitchJournal? {
         if let pendingSwitch, pendingSwitch.isPending { return pendingSwitch }
-        if let temporaryRestore { return temporaryRestore }
-        if let lastSwitch, lastSwitch.needsRestoreOffer { return lastSwitch }
+        if let temporaryRestore, matchesLiveState(temporaryRestore) { return temporaryRestore }
+        if let lastSwitch, lastSwitch.needsRestoreOffer, matchesLiveState(lastSwitch) {
+            return lastSwitch
+        }
         return nil
     }
 }

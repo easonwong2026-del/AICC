@@ -175,6 +175,70 @@ final class WorkbuddySwitchModelsTests: XCTestCase {
         XCTAssertEqual(journal?.temporaryNote?.contains("临时登录"), true)
     }
 
+    /// 若客户端当前已登录别的账号，历史未结算的临时切换/最近切换不得贴到当前账号上。
+    func testStaleTemporaryRestoreForDifferentLiveAccountIsIgnored() {
+        var json = status()
+        json["live"] = [
+            "uid": "uid-a",
+            "loggedIn": true,
+            "temporary": false,
+        ]
+        json["temporaryRestore"] = [
+            "id": "j-1",
+            "targetAccountId": "acc-c",
+            "targetUid": "uid-c",
+            "previousUid": "uid-b",
+            "phase": "verified",
+            "temporary": true,
+            "authSource": "magpie",
+            "accessExpiresAt": iso(2_400),
+            "restoreState": "pending",
+        ]
+        json["lastSwitch"] = [
+            "id": "j-1",
+            "targetAccountId": "acc-c",
+            "targetUid": "uid-c",
+            "previousUid": "uid-b",
+            "phase": "verified",
+            "temporary": true,
+            "authSource": "magpie",
+            "accessExpiresAt": iso(2_400),
+            "restoreState": "pending",
+        ]
+        json["restoreAvailable"] = false
+
+        let model = WorkbuddyClientStatus(json: json)
+        XCTAssertNil(
+            model.restoreOffer,
+            "客户端已回到原账号 uid-a，不应把 uid-c 的临时登录恢复挂到 uid-a 头上"
+        )
+    }
+
+    /// 临时令牌过期导致客户端掉线（loggedIn == false）时，必须保留恢复入口。
+    func testTemporaryRestoreStaysAvailableWhenClientLoggedOut() {
+        var json = status()
+        json["live"] = [
+            "uid": "uid-c",
+            "loggedIn": false,
+            "temporary": false,
+        ]
+        json["temporaryRestore"] = [
+            "id": "j-1",
+            "targetAccountId": "acc-c",
+            "targetUid": "uid-c",
+            "previousUid": "uid-a",
+            "phase": "verified",
+            "temporary": true,
+            "authSource": "magpie",
+            "accessExpiresAt": iso(-60),
+            "restoreState": "pending",
+        ]
+        json["restoreAvailable"] = true
+
+        let model = WorkbuddyClientStatus(json: json)
+        XCTAssertEqual(model.restoreOffer?.id, "j-1")
+    }
+
     /// 自有授权的成功切换不主动提示恢复；恢复过（done）或被取代（superseded）也不再提示。
     func testRestoreOfferOnlyWhenThereIsSomethingToGoBackTo() {
         let verifiedOwn = WorkbuddySwitchJournal(json: [

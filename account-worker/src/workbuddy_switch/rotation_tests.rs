@@ -1388,3 +1388,95 @@ fn a_manual_write_stops_the_run_without_switching_back() {
         "不能覆盖用户选的账号"
     );
 }
+
+/// 自动轮换恢复原账号（含 `already_origin`）后，必须一并结算待还原的临时切换记录，
+/// 否则左侧「当前客户端」会把上一站（如 Magpie 临时登录）的有效期和"恢复原账号"误挂在原账号头上。
+#[test]
+fn restore_origin_settles_pending_temporary_switch_journal() {
+    use crate::storage::wb_switch::{NewSwitchJournal, PHASE_VERIFIED};
+    use crate::workbuddy_switch::service;
+
+    // 场景 1：正常从临时账号 C 恢复回原账号 A（restored）。
+    let h = Harness::new();
+    h.plan(&[&h.b, &h.c], 300);
+    h.tick(false); // A -> B
+    h.clock.advance_secs(300);
+    h.tick(false); // B -> C
+
+    // 模拟这一轮最后切到的 C 是一条 temporary=1 的切换记录（restore_state=pending）。
+    h.app
+        .with_db(|db| {
+            db.begin_wb_switch(&NewSwitchJournal {
+                id: "j-temp-c",
+                target_account_id: &h.c.id,
+                target_uid: &h.c.uid,
+                previous_uid: Some(&h.b.uid),
+                previous_running: true,
+                previous_marker: false,
+                snapshot_path: "/tmp/unused",
+                snapshot_sha256: "00",
+                token_form: Some("plaintext"),
+                auth_source: "magpie",
+                temporary: true,
+                access_expires_at: Some("2099-01-01T00:00:00Z"),
+                access_fingerprint: Some("deadbeef"),
+                source_key: Some("workbuddy#temp"),
+            })?;
+            db.close_wb_switch("j-temp-c", PHASE_VERIFIED, Some("verified"))
+        })
+        .unwrap();
+    assert!(h
+        .app
+        .with_db(|db| db.pending_temporary_restore())
+        .unwrap()
+        .is_some());
+
+    // 到期触发恢复原账号 A。
+    h.clock.advance_secs(300);
+    let report = h.tick(false);
+    assert_eq!(report["status"], STATE_COMPLETED, "{report}");
+    assert_eq!(h.live_uid().as_deref(), Some("uid-a"));
+    assert!(
+        h.app
+            .with_db(|db| db.pending_temporary_restore())
+            .unwrap()
+            .is_none(),
+        "恢复原账号后 pending 临时记录必须结算为 done"
+    );
+    let client_status = service::status(&h.app, &h.control, &h.env).unwrap();
+    assert_eq!(client_status["live"]["temporary"], false);
+    assert_eq!(client_status["restoreAvailable"], false);
+    assert_eq!(client_status["temporaryRestore"], Value::Null);
+
+    // 场景 2：客户端已在原账号（already_origin），通过 restore_now 恢复时同样应结算旧临时记录。
+    h.app
+        .with_db(|db| {
+            db.begin_wb_switch(&NewSwitchJournal {
+                id: "j-temp-stale",
+                target_account_id: &h.c.id,
+                target_uid: &h.c.uid,
+                previous_uid: Some(&h.b.uid),
+                previous_running: true,
+                previous_marker: false,
+                snapshot_path: "/tmp/unused2",
+                snapshot_sha256: "00",
+                token_form: Some("plaintext"),
+                auth_source: "magpie",
+                temporary: true,
+                access_expires_at: Some("2099-01-01T00:00:00Z"),
+                access_fingerprint: Some("deadbeef"),
+                source_key: Some("workbuddy#temp"),
+            })?;
+            db.close_wb_switch("j-temp-stale", PHASE_VERIFIED, Some("verified"))
+        })
+        .unwrap();
+    let res = rotation::restore_now(&h.app, &h.control, &h.env, None, false).unwrap();
+    assert_eq!(res["ok"], true, "{res}");
+    assert!(
+        h.app
+            .with_db(|db| db.pending_temporary_restore())
+            .unwrap()
+            .is_none(),
+        "already_origin 分支也必须顺手结算旧的 pending 临时记录"
+    );
+}
