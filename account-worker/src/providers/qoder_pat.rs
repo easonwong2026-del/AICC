@@ -21,7 +21,7 @@
 //! 生成入口：`https://qoder.com/account/integrations`（国际）/
 //! `https://qoder.cn/account/integrations`（国内）。
 
-use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -104,14 +104,22 @@ pub fn pat_key(account_id: &str) -> String {
     format!("qoder/{account_id}/pat/token")
 }
 
+fn client() -> Result<&'static reqwest::Client, PatError> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map_err(|e| PatError::new(KIND_NETWORK, format!("HTTP 客户端创建失败：{e}")))
+}
+
 /// 用一次 `userinfo` 换身份。**这是唯一能证明"这张 PAT 属于这个账号"的动作。**
 pub async fn verify(edition: QoderEdition, pat: &str) -> Result<Identity, PatError> {
-    let client = reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .map_err(|e| PatError::new(KIND_NETWORK, format!("HTTP 客户端创建失败：{e}")))?;
-    let mut headers = HashMap::new();
-    headers.insert("Accept".to_string(), "application/json".to_string());
+    let client = client()?;
     let resp = client
         .get(userinfo_url(edition))
         .header("Authorization", format!("Bearer {pat}"))

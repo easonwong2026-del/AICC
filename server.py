@@ -60,6 +60,10 @@ def version():
     return (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 
 
+_host_id_cache = {}
+_host_id_cache_lock = threading.Lock()
+
+
 def host_id():
     """Stable identity of this Mac, created once and never rewritten.
 
@@ -71,6 +75,11 @@ def host_id():
     caller in turn.
     """
     path = DATA_PATH.parent / "host_id"
+    cache_key = str(path)
+    with _host_id_cache_lock:
+        cached = _host_id_cache.get(cache_key)
+        if cached:
+            return cached
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         guard = _host_id_lock(path)
@@ -82,6 +91,8 @@ def host_id():
         except (FileNotFoundError, OSError):
             value = ""
         if value:
+            with _host_id_cache_lock:
+                _host_id_cache[cache_key] = value
             return value
         value = uuid.uuid4().hex
         temporary = path.with_name("host_id.tmp")
@@ -93,6 +104,8 @@ def host_id():
             os.replace(temporary, path)
         except OSError:
             return value
+        with _host_id_cache_lock:
+            _host_id_cache[cache_key] = value
         return value
     finally:
         if guard is not None:
@@ -104,7 +117,11 @@ def _host_id_lock(path):
     import fcntl
 
     handle = os.open(str(path.with_name("host_id.lock")), os.O_CREAT | os.O_RDWR, 0o600)
-    fcntl.flock(handle, fcntl.LOCK_EX)
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+    except OSError:
+        os.close(handle)
+        raise
     return _FdGuard(handle)
 
 
@@ -243,9 +260,9 @@ _warned_cards = set()
 def _warn_bad_card(card_id):
     """每张坏卡片只吼一次，不刷日志（面板每 60 秒就轮询一次）。"""
     key = str(card_id)[:32]
-    if key in _warned_cards:
-        return
-    if len(_warned_cards) < 64:
+    with _lock:
+        if key in _warned_cards or len(_warned_cards) >= 64:
+            return
         _warned_cards.add(key)
     print("[bridge] skipping a cached account without id/label", file=sys.stderr)
 
@@ -453,6 +470,16 @@ class LanHandler(DashboardHandler):
     how an account-management endpoint ends up exposed to the whole subnet.
     """
 
+    def setup(self):
+        # Run the TLS handshake inside the per-connection handler thread under
+        # a 10s socket timeout so a stalled peer on port 8767 cannot block the
+        # accept loop or deadlock server.shutdown(). StreamRequestHandler.setup()
+        # sets `self.connection = self.request` and opens rfile/wfile afterward.
+        self.request.settimeout(10)
+        if isinstance(self.request, ssl.SSLSocket) and self.request.cipher() is None:
+            self.request.do_handshake()
+        super().setup()
+
     def is_local_request(self):
         return False
 
@@ -579,7 +606,9 @@ def main():
     material, context = lan_bootstrap()
     if context is not None:
         lan_server = LanServer((LAN_HOST, bridge_tls.LAN_PORT), LanHandler)
-        lan_server.socket = context.wrap_socket(lan_server.socket, server_side=True)
+        lan_server.socket = context.wrap_socket(
+            lan_server.socket, server_side=True, do_handshake_on_connect=False
+        )
         threading.Thread(target=lan_server.serve_forever, daemon=True).start()
         start_discovery(bridge_tls.LAN_PORT)
 
@@ -597,7 +626,8 @@ def main():
             except OSError:
                 os._exit(0)
 
-    threading.Thread(target=poll, daemon=True).start()
+    if lan_server is not None:
+        threading.Thread(target=poll, daemon=True).start()
     if os.environ.get("AICC_PARENT_PID"):
         threading.Thread(target=watchdog, daemon=True).start()
     try:

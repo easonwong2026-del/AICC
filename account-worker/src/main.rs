@@ -100,6 +100,8 @@ fn serve() {
         log(&format!("数据目录创建失败：{err}"));
     }
     let app = Arc::new(App::new(paths));
+    let _ = crate::credentials::localjson::LocalJsonStore::for_paths(&app.paths)
+        .sweep_orphans(std::time::Duration::from_secs(60));
     log(&format!(
         "worker {} 启动，protocol {}，数据目录 {}",
         version::WORKER_VERSION,

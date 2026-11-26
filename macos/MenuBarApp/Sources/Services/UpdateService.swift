@@ -46,6 +46,7 @@ final class UpdateService: ObservableObject {
     let releasePageURL: URL
 
     private let session: UpdateURLSession
+    private let ownedSession: URLSession?
     private let timeoutInterval: TimeInterval
     private let sessionDelegate: HTTPSOnlyRedirectDelegate?
 
@@ -64,12 +65,19 @@ final class UpdateService: ObservableObject {
         self.state = manifestURL == nil ? .notConfigured : .idle
         if let session {
             self.session = session
+            self.ownedSession = nil
             self.sessionDelegate = nil
         } else {
             let delegate = HTTPSOnlyRedirectDelegate()
-            self.session = Self.makeSession(timeoutInterval: max(1, timeoutInterval), delegate: delegate)
+            let created = Self.makeSession(timeoutInterval: max(1, timeoutInterval), delegate: delegate)
+            self.session = created
+            self.ownedSession = created
             self.sessionDelegate = delegate
         }
+    }
+
+    deinit {
+        ownedSession?.invalidateAndCancel()
     }
 
     @discardableResult

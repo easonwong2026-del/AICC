@@ -156,6 +156,13 @@ pub async fn run_tick(app: &std::sync::Arc<App>, force: bool) -> Value {
     {
         return json!({ "skipped": "already_running" });
     }
+    struct TickGuard;
+    impl Drop for TickGuard {
+        fn drop(&mut self) {
+            TICK_RUNNING.store(false, Ordering::SeqCst);
+        }
+    }
+    let _tick_guard = TickGuard;
 
     let started = now_rfc3339();
     let options = options_for(enabled(app));
@@ -163,7 +170,6 @@ pub async fn run_tick(app: &std::sync::Arc<App>, force: bool) -> Value {
     let accounts = match app.with_db(|db| db.list_accounts(&Default::default())) {
         Ok(list) => list,
         Err(err) => {
-            TICK_RUNNING.store(false, Ordering::SeqCst);
             return json!({ "error": err.message });
         }
     };
@@ -236,7 +242,6 @@ pub async fn run_tick(app: &std::sync::Arc<App>, force: bool) -> Value {
         let _ = app.with_db(|db| db.set_setting(SETTING_LAST_RESULT, &summary));
     }
 
-    TICK_RUNNING.store(false, Ordering::SeqCst);
     json!({
         "skipped": Value::Null,
         "startedAt": started,

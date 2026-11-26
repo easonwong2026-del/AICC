@@ -413,11 +413,18 @@ fn headers(token: &str) -> reqwest::header::HeaderMap {
     map
 }
 
-fn client() -> Result<reqwest::Client, CreditsError> {
-    reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .map_err(|e| CreditsError::Network(e.to_string()))
+fn client() -> Result<&'static reqwest::Client, CreditsError> {
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
+        std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map_err(|e| CreditsError::Network(e.clone()))
 }
 
 fn classify_response(status: u16, body: &Value) -> Result<Value, CreditsError> {

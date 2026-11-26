@@ -103,6 +103,45 @@ fn sessions() -> &'static Mutex<HashMap<String, Session>> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+const FINISHED_SESSION_RETAIN_SECS: u64 = 120;
+const MAX_FINISHED_SESSIONS: usize = 16;
+
+/// 清理过期与已结束的旧会话，避免 `SESSIONS` 无限增长并滞留 PKCE 秘密。
+fn prune_sessions(map: &mut HashMap<String, Session>) {
+    let max_age = std::time::Duration::from_secs((SESSION_TTL_SECONDS * 2) as u64);
+    let finished_age = std::time::Duration::from_secs(FINISHED_SESSION_RETAIN_SECS);
+    map.retain(|_, session| {
+        let elapsed = session.created.elapsed();
+        if elapsed > max_age {
+            return false;
+        }
+        if !matches!(session.phase, Phase::Pending | Phase::Committing) && elapsed > finished_age {
+            return false;
+        }
+        true
+    });
+
+    let mut finished: Vec<(String, Instant)> = map
+        .iter()
+        .filter(|(_, s)| !matches!(s.phase, Phase::Pending | Phase::Committing))
+        .map(|(k, s)| (k.clone(), s.created))
+        .collect();
+    if finished.len() > MAX_FINISHED_SESSIONS {
+        finished.sort_by_key(|(_, created)| *created);
+        for (id, _) in finished {
+            if map
+                .values()
+                .filter(|s| !matches!(s.phase, Phase::Pending | Phase::Committing))
+                .count()
+                <= MAX_FINISHED_SESSIONS
+            {
+                break;
+            }
+            map.remove(&id);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PKCE 与登录地址（纯函数，便于单测）
 // ---------------------------------------------------------------------------
@@ -311,6 +350,7 @@ pub fn start(edition: QoderEdition) -> StartInfo {
     let verification_uri = authorize_url(edition, &challenge, &nonce, &machine_id);
 
     let mut map = sessions().lock().expect("sessions");
+    prune_sessions(&mut map);
     map.insert(
         login_id.clone(),
         Session {
@@ -1150,5 +1190,54 @@ mod tests {
             .with_db(|db| db.list_qoder_authorizations(&first.account_id))
             .unwrap();
         assert_eq!(rows.len(), 1, "同一来源重复授权不应多出一行");
+    }
+
+    #[test]
+    fn prune_sessions_evicts_expired_and_caps_finished_but_keeps_pending() {
+        let mut map = HashMap::new();
+        map.insert(
+            "pending".to_string(),
+            Session {
+                nonce: "n".to_string(),
+                verifier: "v".to_string(),
+                edition: QoderEdition::Cn,
+                created: Instant::now(),
+                phase: Phase::Pending,
+                error: None,
+            },
+        );
+        map.insert(
+            "old-done".to_string(),
+            Session {
+                nonce: "n-d".to_string(),
+                verifier: "v-d".to_string(),
+                edition: QoderEdition::Cn,
+                created: Instant::now() - std::time::Duration::from_secs(300),
+                phase: Phase::Success,
+                error: None,
+            },
+        );
+        for idx in 0..20 {
+            map.insert(
+                format!("done-{idx}"),
+                Session {
+                    nonce: format!("n-{idx}"),
+                    verifier: format!("v-{idx}"),
+                    edition: QoderEdition::Cn,
+                    created: Instant::now() - std::time::Duration::from_secs(idx as u64),
+                    phase: Phase::Cancelled,
+                    error: None,
+                },
+            );
+        }
+
+        prune_sessions(&mut map);
+        assert!(map.contains_key("pending"), "活跃会话不得被裁剪");
+        assert!(!map.contains_key("old-done"), "超龄终态会话必须被清理");
+        let finished_left = map
+            .values()
+            .filter(|s| !matches!(s.phase, Phase::Pending | Phase::Committing))
+            .count();
+        assert!(finished_left <= MAX_FINISHED_SESSIONS);
     }
 }

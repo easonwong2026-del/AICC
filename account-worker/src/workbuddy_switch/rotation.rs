@@ -1554,6 +1554,21 @@ pub fn restore_origin(
             detail: "这一轮没有改动过登录态，不需要恢复".to_string(),
         });
     };
+    let live = client::read_live(&deps.env.auth_path);
+    if matches!(
+        run.restore_result.as_deref(),
+        Some("restored" | "already_origin")
+    ) && live.uid.as_deref() == run.origin_uid.as_deref()
+        && !live.logout_marker
+    {
+        let _ = app.with_db(|db| db.settle_all_pending_temporary());
+        service::prune_settled_snapshots(app, deps.env, "");
+        return Ok(RestoreOutcome {
+            ok: true,
+            code: "already_origin".to_string(),
+            detail: "客户端已经是最初的账号".to_string(),
+        });
+    }
     let Some(expected_sha) = run.origin_snapshot_sha256.as_deref() else {
         return Ok(RestoreOutcome {
             ok: false,
@@ -1582,6 +1597,8 @@ pub fn restore_origin(
     let live = client::read_live(&deps.env.auth_path);
     if live.uid.as_deref() == run.origin_uid.as_deref() && !live.logout_marker {
         let _ = app.with_db(|db| db.settle_all_pending_temporary());
+        let _ = std::fs::remove_file(Path::new(snapshot_path));
+        service::prune_settled_snapshots(app, deps.env, "");
         return Ok(RestoreOutcome {
             ok: true,
             code: "already_origin".to_string(),
@@ -1614,6 +1631,8 @@ pub fn restore_origin(
     let ok = after.uid.as_deref() == run.origin_uid.as_deref() && !after.logout_marker;
     if ok {
         let _ = app.with_db(|db| db.settle_all_pending_temporary());
+        let _ = std::fs::remove_file(Path::new(snapshot_path));
+        service::prune_settled_snapshots(app, deps.env, "");
     }
     Ok(RestoreOutcome {
         ok,

@@ -50,6 +50,11 @@ final class TravelAutomationService {
     /// 所有账号都关掉自动旅行之后调用，别留一个空转的看护任务。
     func stopIfIdle() {
         guard !Self.previouslyEnabled else { return }
+        stop()
+    }
+
+    /// App 退出前显式取消看护任务。
+    func stop() {
         watchdog?.cancel()
         watchdog = nil
     }

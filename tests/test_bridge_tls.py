@@ -121,7 +121,9 @@ class LanListenerTests(unittest.TestCase):
         material = bridge_tls.load_identity(self.root)
         context = bridge_tls.build_context(material)
         self.server = server.LanServer(("127.0.0.1", 0), server.LanHandler)
-        self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
+        self.server.socket = context.wrap_socket(
+            self.server.socket, server_side=True, do_handshake_on_connect=False
+        )
         self.port = self.server.server_address[1]
         self.worker = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.worker.start()
@@ -193,9 +195,9 @@ class LanListenerTests(unittest.TestCase):
         with self.assertWarns(DeprecationWarning):
             context.minimum_version = ssl.TLSVersion.TLSv1
             context.maximum_version = ssl.TLSVersion.TLSv1
-        raw = socket.create_connection(("127.0.0.1", self.port), timeout=5)
-        with self.assertRaises(ssl.SSLError):
-            context.wrap_socket(raw, server_hostname="localhost")
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as raw:
+            with self.assertRaises(ssl.SSLError):
+                context.wrap_socket(raw, server_hostname="localhost")
 
     def test_unknown_ca_and_wrong_hostname_are_refused(self):
         stranger = Path(self.directory.name) / "stranger"
@@ -205,9 +207,9 @@ class LanListenerTests(unittest.TestCase):
             self.request("GET", "/api/health/live", verify=True, hostname="wrong.example")
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         context.load_verify_locations(str(stranger / "ca.pem"))
-        raw = socket.create_connection(("127.0.0.1", self.port), timeout=5)
-        with self.assertRaises(ssl.SSLCertVerificationError):
-            context.wrap_socket(raw, server_hostname="localhost")
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as raw:
+            with self.assertRaises(ssl.SSLCertVerificationError):
+                context.wrap_socket(raw, server_hostname="localhost")
 
     def test_health_is_readable_but_status_needs_the_token(self):
         status, body = self.request("GET", "/api/health/live")
@@ -274,6 +276,14 @@ class LanListenerTests(unittest.TestCase):
             self.assertEqual(status, 403)
         status, _ = self.request("POST", "/api/pair", body=json.dumps({"code": "87654321"}))
         self.assertEqual(status, 429, "the correct code must not be usable after the limit")
+
+    def test_stalled_tcp_client_does_not_block_legitimate_https_request(self):
+        # A peer that opens TCP and never sends ClientHello must not stall the
+        # accept loop or prevent subsequent TLS clients from completing.
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5):
+            status, body = self.request("GET", "/api/health/live")
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)["protocol"], "aicc")
 
 
 def spki_of_peer(connection, root):

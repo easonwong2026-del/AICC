@@ -25,6 +25,8 @@ struct QoderDeviceAuthSheet: View {
     @State private var deadline: Date?
     @State private var now = Date()
     @State private var pollTask: Task<Void, Never>?
+    @State private var cachedQRURL: String?
+    @State private var cachedQRImage: NSImage?
 
     init(store: ConsoleStore, initialEdition: QoderEdition, onFinished: @escaping () -> Void) {
         self.store = store
@@ -52,8 +54,19 @@ struct QoderDeviceAuthSheet: View {
         .background(ConsoleTheme.canvas)
         .task { await begin() }
         .onDisappear { pollTask?.cancel() }
-        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { value in
-            now = value
+        .task(id: isTerminal) {
+            guard !isTerminal else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if Task.isCancelled { break }
+                now = Date()
+            }
+        }
+        .task(id: start?.trustedURL?.absoluteString) {
+            let nextURL = start?.trustedURL?.absoluteString
+            guard cachedQRURL != nextURL else { return }
+            cachedQRURL = nextURL
+            cachedQRImage = nextURL.flatMap(Self.qrImage(from:))
         }
     }
 
@@ -124,7 +137,9 @@ struct QoderDeviceAuthSheet: View {
                         .strokeBorder(ConsoleTheme.border, lineWidth: 1)
                 )
             // 二维码内容必须与打开的是同一个可信地址。
-            if let start, let url = start.trustedURL, let image = Self.qrImage(from: url.absoluteString) {
+            if let start,
+               let url = start.trustedURL,
+               let image = cachedQRImage ?? Self.qrImage(from: url.absoluteString) {
                 Image(nsImage: image)
                     .interpolation(.none)
                     .resizable()
