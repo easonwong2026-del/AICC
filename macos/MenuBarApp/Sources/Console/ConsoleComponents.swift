@@ -233,6 +233,92 @@ struct ConsoleDetailGroup<Content: View>: View {
     }
 }
 
+/// 整行可点击的折叠区：解决 macOS 原生 `DisclosureGroup` 仅小三角可点、点标题文字无响应的问题。
+struct ConsoleDisclosureSection<Content: View>: View {
+    let title: String
+    var summary: String?
+    private let externalExpanded: Binding<Bool>?
+    @State private var internalExpanded = false
+    @State private var hovered = false
+    @ViewBuilder var content: () -> Content
+
+    init(
+        _ title: String,
+        summary: String? = nil,
+        @ViewBuilder content: @escaping () -> Content
+    ) {
+        self.title = title
+        self.summary = summary
+        self.externalExpanded = nil
+        self.content = content
+    }
+
+    init(
+        _ title: String,
+        summary: String? = nil,
+        isExpanded: Binding<Bool>,
+        @ViewBuilder content: @escaping () -> Content
+    ) {
+        self.title = title
+        self.summary = summary
+        self.externalExpanded = isExpanded
+        self.content = content
+    }
+
+    private var isExpanded: Bool {
+        externalExpanded?.wrappedValue ?? internalExpanded
+    }
+
+    private func toggle() {
+        withAnimation(.easeInOut(duration: 0.16)) {
+            if let externalExpanded {
+                externalExpanded.wrappedValue.toggle()
+            } else {
+                internalExpanded.toggle()
+            }
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button(action: toggle) {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(ConsoleTheme.secondaryText)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .frame(width: 12)
+                    Text(title)
+                        .font(ConsoleType.sectionTitle)
+                        .foregroundStyle(ConsoleTheme.text)
+                    Spacer(minLength: 8)
+                    if let summary, !summary.isEmpty {
+                        Text(summary)
+                            .font(ConsoleType.caption)
+                            .foregroundStyle(ConsoleTheme.tertiaryText)
+                            .lineLimit(1)
+                    }
+                }
+                .padding(.vertical, 6)
+                .padding(.horizontal, 6)
+                .background(
+                    hovered ? ConsoleTheme.cardSubtle : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { hovered = $0 }
+            .padding(.horizontal, -6)
+
+            if isExpanded {
+                content()
+                    .padding(.top, ConsoleTheme.groupSpacing)
+            }
+        }
+    }
+}
+
 /// 详情里的一行 `标签 值`；值过长自动折行，不顶破卡片。
 struct ConsoleInfoRow: View {
     let label: String

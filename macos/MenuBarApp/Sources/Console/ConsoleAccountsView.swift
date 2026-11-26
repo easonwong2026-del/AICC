@@ -691,36 +691,41 @@ struct ConsoleAccountsView: View {
             }
             if let problem = account.authorizationProblem {
                 ConsoleInlineNotice(kind: .warning, message: problem)
+            } else if let travel = store.travelRows.first(where: { $0.accountId == account.id })?.status,
+                      travel.stage == .failed,
+                      let travelError = travel.lastError, !travelError.isEmpty {
+                ConsoleInlineNotice(
+                    kind: .warning,
+                    message: "自动旅行异常：\(travelError)",
+                    actionTitle: account.ownAuthorization == nil ? "添加自有授权" : nil,
+                    action: account.ownAuthorization == nil ? {
+                        activeSheet = .addAccount(ConsoleAddRequest(
+                            platform: account.isWorkbuddyAI ? .workbuddyAI : .workbuddyCN,
+                            method: .browser
+                        ))
+                    } : nil
+                )
             }
             if let notice = verifyNotice[account.id] {
                 ConsoleInlineNotice(kind: account.displayAuthTone == .error ? .error : .info, message: notice)
             }
             workbuddyActions(account, candidate: candidate, isLive: isLive)
             workbuddyToday(account)
-            DisclosureGroup("授权详情") {
-                workbuddyAuthorizations(account).padding(.top, ConsoleTheme.groupSpacing)
+            ConsoleDisclosureSection("授权详情", summary: account.activeSourceLabel) {
+                workbuddyAuthorizations(account)
             }
-            .font(ConsoleType.sectionTitle)
-            .foregroundStyle(ConsoleTheme.text)
             if account.supportsCNTasks {
-                DisclosureGroup(isExpanded: $rewardsExpanded) {
-                    rewardsBlock(for: account).padding(.top, ConsoleTheme.groupSpacing)
-                } label: {
-                    Text("奖励")
+                ConsoleDisclosureSection("奖励", isExpanded: $rewardsExpanded) {
+                    rewardsBlock(for: account)
                 }
-                .font(ConsoleType.sectionTitle)
-                .foregroundStyle(ConsoleTheme.text)
             }
-            DisclosureGroup("账号信息") {
+            ConsoleDisclosureSection("账号信息") {
                 VStack(alignment: .leading, spacing: 8) {
                     ConsoleInfoRow(label: "UID", value: account.uid, mono: true)
                     ConsoleInfoRow(label: "授权来源", value: account.activeSourceLabel)
                     ConsoleInfoRow(label: "更新时间", value: ConsoleFormat.shortTimestamp(account.updatedAt))
                 }
-                .padding(.top, ConsoleTheme.groupSpacing)
             }
-            .font(ConsoleType.sectionTitle)
-            .foregroundStyle(ConsoleTheme.text)
         }
     }
 
@@ -864,6 +869,22 @@ struct ConsoleAccountsView: View {
                         .font(ConsoleType.caption).foregroundStyle(ConsoleTheme.tertiaryText)
                         .help("Magpie 借用由 Magpie 刷新；其他访问令牌不在这里自动续期。")
                 }
+                if account.ownAuthorization == nil {
+                    HStack(alignment: .center, spacing: 10) {
+                        Text("仅有 Magpie 借用授权；若令牌被服务端拒绝，可补充自有授权实现自动刷新与长期切换。")
+                            .font(ConsoleType.caption)
+                            .foregroundStyle(ConsoleTheme.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 4)
+                        Button("添加自有授权") {
+                            activeSheet = .addAccount(ConsoleAddRequest(
+                                platform: account.isWorkbuddyAI ? .workbuddyAI : .workbuddyCN,
+                                method: .browser
+                            ))
+                        }
+                        .buttonStyle(ConsoleSecondaryButtonStyle())
+                    }
+                }
             }
         }
     }
@@ -934,7 +955,7 @@ struct ConsoleAccountsView: View {
                     }
                 }
             }
-            DisclosureGroup("授权详情") {
+            ConsoleDisclosureSection("授权详情") {
                 VStack(alignment: .leading, spacing: 12) {
                     ForEach(account.authorizations, id: \.source) { authorization in
                         HStack(spacing: 10) {
@@ -955,20 +976,14 @@ struct ConsoleAccountsView: View {
                             .buttonStyle(ConsoleSecondaryButtonStyle())
                     }
                 }
-                .padding(.top, ConsoleTheme.groupSpacing)
             }
-            .font(ConsoleType.sectionTitle)
-            .foregroundStyle(ConsoleTheme.text)
-            DisclosureGroup("账号信息") {
+            ConsoleDisclosureSection("账号信息") {
                 VStack(alignment: .leading, spacing: 8) {
                     ConsoleInfoRow(label: "UID", value: account.uid, mono: true)
                     ConsoleInfoRow(label: "邮箱", value: account.email ?? "—")
                     ConsoleInfoRow(label: "版本", value: edition.displayName)
                 }
-                .padding(.top, ConsoleTheme.groupSpacing)
             }
-            .font(ConsoleType.sectionTitle)
-            .foregroundStyle(ConsoleTheme.text)
         }
     }
 
@@ -1038,7 +1053,7 @@ struct ConsoleAccountsView: View {
                         .disabled(busy)
                 }
             }
-            DisclosureGroup("配置详情") {
+            ConsoleDisclosureSection("配置详情") {
                 VStack(alignment: .leading, spacing: 8) {
                     ConsoleInfoRow(label: "快照", value: profile.snapshotReady ? "已保存" : "尚未保存", valueTint: profile.snapshotReady ? ConsoleTheme.text : ConsoleTheme.warning)
                     ConsoleInfoRow(label: profile.identityLabel, value: profile.identityText ?? "—", mono: profile.accountUid != nil)
@@ -1050,10 +1065,7 @@ struct ConsoleAccountsView: View {
                     Button("检测认证文件") { Task { await store.qoderInspect(profile) } }
                         .buttonStyle(ConsoleSecondaryButtonStyle())
                 }
-                .padding(.top, ConsoleTheme.groupSpacing)
             }
-            .font(ConsoleType.sectionTitle)
-            .foregroundStyle(ConsoleTheme.text)
         }
     }
 
