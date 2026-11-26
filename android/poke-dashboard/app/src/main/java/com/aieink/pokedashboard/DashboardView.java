@@ -842,15 +842,19 @@ final class DashboardView extends View {
         outlinedRect(canvas, left, y, right - left, h, 2f, 14f, EinkTheme.INK);
 
         String title = data.offline ? "未连接 Mac AICC" : "Magpie 暂无额度";
-        String sub = data.offline
-                ? "请确认设备与 Mac 在同一局域网，并在 Mac 设置中开启「允许局域网设备连接」"
-                : "请在 Mac 端 Magpie 登录服务商，或调整设置中的服务商筛选";
-        text(canvas, title, left + 28f, y + 76f, 36f, EinkTheme.INK, true, Paint.Align.LEFT);
-        textFit(canvas, sub, left + 28f, y + 124f, right - left - 56f, 18f, EinkTheme.MUTED, true);
+        String line1 = data.offline
+                ? "请确认设备与 Mac 在同一局域网"
+                : "请在 Mac 端 Magpie 登录服务商";
+        String line2 = data.offline
+                ? "并在 Mac 设置中开启「允许局域网设备连接」"
+                : "或调整设置中的服务商筛选";
+        text(canvas, title, left + 28f, y + 74f, 36f, EinkTheme.INK, true, Paint.Align.LEFT);
+        textFit(canvas, line1, left + 28f, y + 122f, right - left - 56f, 19f, EinkTheme.MUTED, true);
+        textFit(canvas, line2, left + 28f, y + 150f, right - left - 56f, 19f, EinkTheme.MUTED, true);
 
         float btnY = y + h - 76f;
         float btnW = 152f;
-        drawOutlinedButton(canvas, left + 28f, btnY, "打开设置", 17f, 46f, false, btnW);
+        drawOutlinedButton(canvas, left + 28f, btnY, "打开设置", 17f, 46f, true, btnW);
         hitRegions.add(new HitRegion(left + 28f, btnY, left + 28f + btnW, btnY + 46f,
                 Action.OPEN_SETTINGS, null));
 

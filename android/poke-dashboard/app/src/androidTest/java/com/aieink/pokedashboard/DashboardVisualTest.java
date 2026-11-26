@@ -148,7 +148,7 @@ public final class DashboardVisualTest extends Instrumentation {
             android.app.Dialog dialog = ((MainActivity) activity).showSettings();
             android.view.View decor = dialog.getWindow().getDecorView();
             int width = (int) (activity.getResources().getDisplayMetrics().widthPixels * .93f);
-            int height = (int) (activity.getResources().getDisplayMetrics().heightPixels * .88f);
+            int height = (int) (activity.getResources().getDisplayMetrics().heightPixels * .91f);
             decor.measure(android.view.View.MeasureSpec.makeMeasureSpec(width, android.view.View.MeasureSpec.EXACTLY),
                     android.view.View.MeasureSpec.makeMeasureSpec(height, android.view.View.MeasureSpec.EXACTLY));
             decor.layout(0, 0, width, height);

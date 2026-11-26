@@ -75,14 +75,15 @@ final class SettingsDialog {
         LinearLayout panel = new LinearLayout(activity);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setBackground(boxDrawable(EinkTheme.PAPER, EinkTheme.INK, dp(3), dp(16)));
+        panel.setClipToOutline(true);
 
         // Header
         LinearLayout header = new LinearLayout(activity);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        header.setPadding(dp(18), dp(12), dp(18), dp(12));
+        header.setPadding(dp(16), dp(10), dp(16), dp(10));
 
-        TextView title = label("AICC 墨水屏设置", 21, EinkTheme.INK, true);
+        TextView title = label("AICC 墨水屏设置", 20, EinkTheme.INK, true);
         header.addView(title, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
         boolean paired = host.isPaired();
@@ -90,7 +91,7 @@ final class SettingsDialog {
         badge.setText(paired ? "已配对 · HTTPS" : "未配对");
         badge.setTextSize(12);
         badge.setTypeface(Typeface.DEFAULT_BOLD);
-        badge.setPadding(dp(10), dp(4), dp(10), dp(4));
+        badge.setPadding(dp(10), dp(3), dp(10), dp(3));
         if (paired) {
             badge.setTextColor(EinkTheme.PAPER);
             badge.setBackground(boxDrawable(EinkTheme.INK, EinkTheme.INK, 0, dp(6)));
@@ -105,7 +106,7 @@ final class SettingsDialog {
         // Scrollable content
         LinearLayout content = new LinearLayout(activity);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(18), dp(14), dp(18), dp(14));
+        content.setPadding(dp(16), dp(10), dp(16), dp(10));
 
         // Section 1: Server & TLS Pairing
         content.addView(sectionTitle("1. 服务器与安全配对"));
@@ -114,24 +115,24 @@ final class SettingsDialog {
         urlRow.setGravity(Gravity.CENTER_VERTICAL);
 
         EditText urlField = borderedInput(prefs.getString(MainActivity.KEY_URL, ""),
-                "https://192.168.x.x:8767", 15);
+                "https://192.168.x.x:8767", 14.5f);
         urlField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        LinearLayout.LayoutParams urlLp = new LinearLayout.LayoutParams(0, dp(42), 1f);
+        LinearLayout.LayoutParams urlLp = new LinearLayout.LayoutParams(0, dp(38), 1f);
         urlLp.rightMargin = dp(8);
         urlRow.addView(urlField, urlLp);
 
         Button discoverBtn = actionPillButton("自动发现", false);
-        urlRow.addView(discoverBtn, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(42)));
-        content.addView(urlRow, rowMargins(0, dp(8)));
+        urlRow.addView(discoverBtn, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(38)));
+        content.addView(urlRow, rowMargins(0, dp(6)));
 
         TextView fpBanner = new TextView(activity);
-        fpBanner.setTextSize(12.5f);
+        fpBanner.setTextSize(12f);
         fpBanner.setTextColor(EinkTheme.INK);
         fpBanner.setTypeface(Typeface.MONOSPACE);
-        fpBanner.setPadding(dp(10), dp(7), dp(10), dp(7));
+        fpBanner.setPadding(dp(10), dp(6), dp(10), dp(6));
         fpBanner.setBackground(boxDrawable(EinkTheme.PAPER_ALT, EinkTheme.PAPER_ALT, 0, dp(6)));
         updateFingerprintBanner(fpBanner, urlField.getText().toString());
-        content.addView(fpBanner, rowMargins(0, dp(8)));
+        content.addView(fpBanner, rowMargins(0, dp(6)));
 
         discoverBtn.setOnClickListener(v -> host.onDiscoverRequested(urlField,
                 () -> updateFingerprintBanner(fpBanner, urlField.getText().toString())));
@@ -140,10 +141,10 @@ final class SettingsDialog {
         pairRow.setOrientation(LinearLayout.HORIZONTAL);
         pairRow.setGravity(Gravity.CENTER_VERTICAL);
 
-        EditText codeField = borderedInput("", "输入 Mac 端 8 位配对码", 15);
+        EditText codeField = borderedInput("", "输入 Mac 端 8 位配对码", 14.5f);
         codeField.setInputType(InputType.TYPE_CLASS_NUMBER);
         codeField.setFilters(new InputFilter[]{new InputFilter.LengthFilter(8)});
-        LinearLayout.LayoutParams codeLp = new LinearLayout.LayoutParams(0, dp(42), 1f);
+        LinearLayout.LayoutParams codeLp = new LinearLayout.LayoutParams(0, dp(38), 1f);
         codeLp.rightMargin = dp(8);
         pairRow.addView(codeField, codeLp);
 
@@ -154,8 +155,8 @@ final class SettingsDialog {
                 pairBtn,
                 codeField,
                 dialog));
-        pairRow.addView(pairBtn, new LinearLayout.LayoutParams(dp(84), dp(42)));
-        content.addView(pairRow, rowMargins(0, dp(10)));
+        pairRow.addView(pairBtn, new LinearLayout.LayoutParams(dp(80), dp(38)));
+        content.addView(pairRow, rowMargins(0, dp(4)));
 
         content.addView(divider());
 
@@ -166,23 +167,23 @@ final class SettingsDialog {
         LinearLayout layoutSeg = segmentedTwo("瑞士网格", "桌搭时钟",
                 !DashboardData.LAYOUT_CLOCK.equals(selectedLayout),
                 isFirst -> selectedLayout = isFirst ? DashboardData.LAYOUT_GRID : DashboardData.LAYOUT_CLOCK);
-        LinearLayout.LayoutParams segLeftLp = new LinearLayout.LayoutParams(0, dp(40), 1f);
+        LinearLayout.LayoutParams segLeftLp = new LinearLayout.LayoutParams(0, dp(36), 1f);
         segLeftLp.rightMargin = dp(8);
         segRow.addView(layoutSeg, segLeftLp);
 
         LinearLayout sortSeg = segmentedTwo("低额优先", "按服务商",
                 !DashboardData.SORT_PROVIDER.equals(selectedSort),
                 isFirst -> selectedSort = isFirst ? DashboardData.SORT_LOWEST : DashboardData.SORT_PROVIDER);
-        segRow.addView(sortSeg, new LinearLayout.LayoutParams(0, dp(40), 1f));
-        content.addView(segRow, rowMargins(0, dp(10)));
+        segRow.addView(sortSeg, new LinearLayout.LayoutParams(0, dp(36), 1f));
+        content.addView(segRow, rowMargins(0, dp(8)));
 
         content.addView(sectionTitle("显示服务商与数量"));
-        content.addView(buildProviderChips(), rowMargins(0, dp(8)));
+        content.addView(buildProviderChips(), rowMargins(0, dp(6)));
 
         int modeIndex = "one".equals(selectedAccountMode) ? 1 : "two".equals(selectedAccountMode) ? 2 : 0;
         LinearLayout countSeg = segmentedThree("全部账号", "仅 1 个", "仅 2 个", modeIndex,
                 idx -> selectedAccountMode = idx == 1 ? "one" : idx == 2 ? "two" : "all");
-        content.addView(countSeg, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(38)));
+        content.addView(countSeg, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(34)));
         content.addView(divider());
 
         // Section 3: Refresh & Power
@@ -190,27 +191,27 @@ final class SettingsDialog {
         LinearLayout intervalRow = new LinearLayout(activity);
         intervalRow.setOrientation(LinearLayout.HORIZONTAL);
         intervalRow.setGravity(Gravity.CENTER_VERTICAL);
-        TextView intervalLabel = label("同步间隔（分钟）", 15, EinkTheme.INK, true);
+        TextView intervalLabel = label("同步间隔（分钟）", 14.5f, EinkTheme.INK, true);
         intervalRow.addView(intervalLabel);
 
         EditText intervalField = borderedInput(
                 String.valueOf(Math.max(1, Math.min(60, prefs.getInt("refresh_minutes", 5)))),
-                "5", 15);
+                "5", 14.5f);
         intervalField.setGravity(Gravity.CENTER);
         intervalField.setInputType(InputType.TYPE_CLASS_NUMBER);
-        LinearLayout.LayoutParams intLp = new LinearLayout.LayoutParams(dp(76), dp(38));
-        intLp.leftMargin = dp(10);
-        intLp.rightMargin = dp(10);
+        LinearLayout.LayoutParams intLp = new LinearLayout.LayoutParams(dp(68), dp(34));
+        intLp.leftMargin = dp(8);
+        intLp.rightMargin = dp(8);
         intervalRow.addView(intervalField, intLp);
-        intervalRow.addView(label("唤醒时立即同步", 13.5f, EinkTheme.MUTED, false));
-        content.addView(intervalRow, rowMargins(0, dp(8)));
+        intervalRow.addView(label("唤醒时立即同步", 13f, EinkTheme.MUTED, false));
+        content.addView(intervalRow, rowMargins(0, dp(4)));
 
         RadioGroup displayGroup = new RadioGroup(activity);
         displayGroup.setOrientation(RadioGroup.VERTICAL);
         RadioButton screenSaverRadio = new RadioButton(activity);
-        styleChoice(screenSaverRadio, "省电屏保：允许休眠，唤醒更新（推荐 · 需透明屏保）", 14.5f, true);
+        styleChoice(screenSaverRadio, "省电屏保：允许休眠，唤醒更新（推荐）", 14f, true);
         RadioButton alwaysOnRadio = new RadioButton(activity);
-        styleChoice(alwaysOnRadio, "桌面常亮：保持亮屏并按间隔自动刷新", 14.5f, false);
+        styleChoice(alwaysOnRadio, "桌面常亮：保持亮屏并按间隔自动刷新", 14f, false);
         displayGroup.addView(screenSaverRadio);
         displayGroup.addView(alwaysOnRadio);
         boolean keepAwake = prefs.getBoolean(MainActivity.KEY_KEEP_AWAKE, false);
@@ -221,13 +222,13 @@ final class SettingsDialog {
         LinearLayout checkRow = new LinearLayout(activity);
         checkRow.setOrientation(LinearLayout.HORIZONTAL);
         CheckBox showBattery = new CheckBox(activity);
-        styleChoice(showBattery, "右上角显示设备电量", 14.5f, false);
+        styleChoice(showBattery, "底栏/顶栏显示电量", 14f, false);
         showBattery.setChecked(prefs.getBoolean(MainActivity.KEY_SHOW_BATTERY, true));
         LinearLayout.LayoutParams cbLp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
         checkRow.addView(showBattery, cbLp);
 
         CheckBox autoStart = new CheckBox(activity);
-        styleChoice(autoStart, "开机自动启动", 14.5f, false);
+        styleChoice(autoStart, "开机自动启动", 14f, false);
         autoStart.setChecked(prefs.getBoolean("auto_start", true));
         checkRow.addView(autoStart, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         content.addView(checkRow);
@@ -242,14 +243,14 @@ final class SettingsDialog {
         LinearLayout actions = new LinearLayout(activity);
         actions.setOrientation(LinearLayout.HORIZONTAL);
 
-        Button cancelBtn = footerButton("取消", false);
+        Button cancelBtn = footerButton("取消", false, true, false);
         cancelBtn.setOnClickListener(v -> dialog.dismiss());
-        Button refreshBtn = footerButton("立即刷新", false);
+        Button refreshBtn = footerButton("立即刷新", false, false, false);
         refreshBtn.setOnClickListener(v -> {
             dialog.dismiss();
             host.onImmediateRefresh();
         });
-        Button saveBtn = footerButton("保存设置", true);
+        Button saveBtn = footerButton("保存设置", true, false, true);
         saveBtn.setOnClickListener(v -> {
             int minutes = 5;
             try {
@@ -274,14 +275,14 @@ final class SettingsDialog {
         actions.addView(refreshBtn, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
         actions.addView(verticalRule());
         actions.addView(saveBtn, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
-        panel.addView(actions, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(54)));
+        panel.addView(actions, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)));
 
         dialog.setContentView(panel);
         dialog.show();
         if (dialog.getWindow() != null) {
             dialog.getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
             int w = (int) (activity.getResources().getDisplayMetrics().widthPixels * 0.93f);
-            int h = (int) (activity.getResources().getDisplayMetrics().heightPixels * 0.88f);
+            int h = (int) (activity.getResources().getDisplayMetrics().heightPixels * 0.91f);
             dialog.getWindow().setLayout(w, h);
         }
         return dialog;
@@ -338,8 +339,8 @@ final class SettingsDialog {
             chip.setTextSize(13.5f);
             chip.setTypeface(Typeface.DEFAULT_BOLD);
             chip.setGravity(Gravity.CENTER);
-            chip.setPadding(dp(10), dp(6), dp(10), dp(6));
-            chip.setSingleLine(true);
+            chip.setPadding(dp(12), dp(5), dp(12), dp(5));
+            chip.setMaxLines(1);
             chip.setOnClickListener(v -> {
                 selectedProvider = chipValues.get(index);
                 refreshChips.run();
@@ -484,14 +485,22 @@ final class SettingsDialog {
         return btn;
     }
 
-    private Button footerButton(String text, boolean primary) {
+    private Button footerButton(String text, boolean primary, boolean roundBottomLeft, boolean roundBottomRight) {
         Button btn = new Button(activity);
         btn.setText(text);
-        btn.setTextSize(16);
+        btn.setTextSize(15.5f);
         btn.setTypeface(Typeface.DEFAULT_BOLD);
         btn.setAllCaps(false);
         btn.setTextColor(primary ? EinkTheme.PAPER : EinkTheme.INK);
-        btn.setBackgroundColor(primary ? EinkTheme.INK : EinkTheme.PAPER);
+        float r = dp(13);
+        GradientDrawable gd = new GradientDrawable();
+        gd.setColor(primary ? EinkTheme.INK : EinkTheme.PAPER);
+        gd.setCornerRadii(new float[]{
+                0f, 0f, 0f, 0f,
+                roundBottomRight ? r : 0f, roundBottomRight ? r : 0f,
+                roundBottomLeft ? r : 0f, roundBottomLeft ? r : 0f
+        });
+        btn.setBackground(gd);
         return btn;
     }
 
@@ -500,7 +509,8 @@ final class SettingsDialog {
         view.setTextSize(size);
         view.setTextColor(EinkTheme.INK);
         view.setTypeface(bold ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
-        view.setMinHeight(dp(34));
+        view.setMinHeight(dp(28));
+        view.setPadding(view.getPaddingLeft(), dp(2), view.getPaddingRight(), dp(2));
         view.setGravity(Gravity.CENTER_VERTICAL);
         if (view instanceof android.widget.CompoundButton) {
             ((android.widget.CompoundButton) view).setButtonTintList(ColorStateList.valueOf(EinkTheme.INK));
@@ -512,8 +522,8 @@ final class SettingsDialog {
         v.setBackgroundColor(EinkTheme.HAIR);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, Math.max(1, dp(1)));
-        lp.topMargin = dp(12);
-        lp.bottomMargin = dp(10);
+        lp.topMargin = dp(8);
+        lp.bottomMargin = dp(6);
         v.setLayoutParams(lp);
         return v;
     }
