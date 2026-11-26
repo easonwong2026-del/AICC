@@ -81,7 +81,7 @@ public final class DashboardDataTest {
         assertNull(account.primary());
     }
 
-    @Test public void onlyAccountsWithManyWindowsGetTheirOwnPage() throws Exception {
+    @Test public void dualModePagingAndDetailNavigationWorkCleanly() throws Exception {
         String wide = "{\"name\":\"Gemini 7 days\",\"remaining\":80},"
                 + "{\"name\":\"Gemini 5 hours\",\"remaining\":70},"
                 + "{\"name\":\"Claude 7 days\",\"remaining\":60}";
@@ -89,18 +89,28 @@ public final class DashboardDataTest {
                 card("codex", "subscription", "a***", "{\"name\":\"7 days\",\"remaining\":10},"
                         + "{\"name\":\"5 hours\",\"remaining\":20}"),
                 card("antigravity", "subscription", "b***", wide),
-                card("kiro", "subscription", "c***", "{\"name\":\"Monthly\",\"remaining\":90}"));
-        DashboardData all = DashboardData.parse(body, "all");
-        assertEquals(2, all.pageCount());
-        assertNull(all.detailAccount());
-        all.nextPage();
-        assertEquals("Antigravity · b***", all.detailAccount().title());
-        assertEquals(3, all.detailAccount().items.size());
-        all.nextPage();
-        assertEquals(0, all.page);
+                card("kiro", "subscription", "c***", "{\"name\":\"Monthly\",\"remaining\":90}"),
+                card("workbuddy", "subscription", "d***", "{\"name\":\"Credits\",\"remaining\":100}"),
+                card("workbuddy", "subscription", "e***", "{\"name\":\"Credits\",\"remaining\":100}"),
+                card("qoder", "subscription", "f***", "{\"name\":\"Credits\",\"remaining\":82}"),
+                card("zcode", "plan", "g***", "{\"name\":\"prompts\",\"remaining\":74}"));
+        DashboardData grid = DashboardData.parse(body, "all",
+                DashboardData.LAYOUT_GRID, DashboardData.SORT_LOWEST, "");
+        assertEquals(2, grid.pageCount());
+        assertEquals(6, grid.pageAccounts().size());
+        assertNull(grid.detailAccount());
 
-        DashboardData two = DashboardData.parse(body, "two");
-        assertEquals(2, two.pageCount());
+        grid.openDetail(grid.orderedAccounts().get(1));
+        assertNotEquals(null, grid.detailAccount());
+        assertEquals(3, grid.detailAccount().items.size());
+        grid.nextDetailAccount();
+        grid.closeDetail();
+        assertNull(grid.detailAccount());
+
+        DashboardData clock = DashboardData.parse(body, "all",
+                DashboardData.LAYOUT_CLOCK, DashboardData.SORT_LOWEST, "");
+        assertEquals(2, clock.pageCount());
+        assertEquals(4, clock.pageAccounts().size());
 
         DashboardData one = DashboardData.parse(body, "one");
         assertEquals(1, one.pageCount());
@@ -108,31 +118,59 @@ public final class DashboardDataTest {
         assertEquals(0, one.page);
     }
 
-    @Test public void theOverviewLeadsWithWhateverIsClosestToEmpty() throws Exception {
+    @Test public void theOverviewLeadsWithRealWindowsBeforeEstimatedOnes() throws Exception {
         String body = snapshot(
+                card("workbuddy", "subscription", "est***",
+                        "{\"name\":\"deepseek-v4.1 tokens (est.)\",\"remaining\":5}"),
                 card("codex", "subscription", "a***", "{\"name\":\"7 days\",\"remaining\":88}"),
-                card("workbuddy", "subscription", "b***",
-                        "{\"name\":\"Credits\",\"remaining\":99,\"remaining_text\":\"4650\",\"unit\":\"credits\",\"limit\":4727}"),
                 card("zcode", "plan", "c***", "{\"name\":\"prompts\",\"remaining\":12}"));
         DashboardData.Slot hero = DashboardData.parse(body, "all").hero();
         assertEquals("zcode", hero.account.provider);
         assertEquals(12.0, hero.item.remaining, 0.001);
+        assertTrue(DashboardData.parse(body, "all").accounts.get(0).primary().isEstimated());
     }
 
-    @Test public void summaryRowsSkipTheHeroAccountAndCapAtThree() throws Exception {
+    @Test public void pageOneDiversifiesProvidersAndFiltersCleanly() throws Exception {
         String body = snapshot(
-                card("codex", "subscription", "a***", "{\"name\":\"7 days\",\"remaining\":5}"),
-                card("workbuddy", "subscription", "b***", "{\"name\":\"Credits\",\"remaining\":60}"),
-                card("workbuddy", "subscription", "c***", "{\"name\":\"Credits\",\"remaining\":70}"),
-                card("kiro", "subscription", "d***", "{\"name\":\"Monthly\",\"remaining\":80}"),
-                card("zcode", "plan", "e***", "{\"name\":\"prompts\",\"remaining\":90}"));
-        DashboardData data = DashboardData.parse(body, "all");
-        assertEquals(4, data.summaryAccounts().size());
-        assertEquals(1, data.hiddenAccountCount());
-        for (DashboardData.Account account : data.summaryAccounts()) {
-            assertTrue(!"a***".equals(account.label));
+                card("codex", "subscription", "a***", "{\"name\":\"7 days\",\"remaining\":18}"),
+                card("antigravity", "subscription", "b***", "{\"name\":\"7 days\",\"remaining\":59}"),
+                card("workbuddy", "subscription", "w1***", "{\"name\":\"Credits\",\"remaining\":100}"),
+                card("workbuddy", "subscription", "w2***", "{\"name\":\"Credits\",\"remaining\":100}"),
+                card("workbuddy", "subscription", "w3***", "{\"name\":\"Credits\",\"remaining\":100}"),
+                card("qoder", "subscription", "q***", "{\"name\":\"Credits\",\"remaining\":100}"),
+                card("zcode", "plan", "z***", "{\"name\":\"prompts\",\"remaining\":100}"));
+        DashboardData grid = DashboardData.parse(body, "all",
+                DashboardData.LAYOUT_GRID, DashboardData.SORT_LOWEST, "");
+        java.util.List<DashboardData.Account> p1 = grid.pageAccounts();
+        assertEquals(6, p1.size());
+        // Slots 0..1 are lowest; slots 2..5 pick distinct providers before repeating WorkBuddy.
+        assertEquals("codex", p1.get(0).provider);
+        assertEquals("antigravity", p1.get(1).provider);
+        boolean sawQoder = false;
+        boolean sawZcode = false;
+        for (DashboardData.Account acc : p1) {
+            if ("qoder".equals(acc.provider)) sawQoder = true;
+            if ("zcode".equals(acc.provider)) sawZcode = true;
         }
-        assertEquals(4, data.providerCount());
+        assertTrue("Expected Qoder on page 1", sawQoder);
+        assertTrue("Expected ZCode on page 1", sawZcode);
+
+        DashboardData filtered = DashboardData.parse(body, "all",
+                DashboardData.LAYOUT_GRID, DashboardData.SORT_PROVIDER, "workbuddy");
+        assertEquals(3, filtered.orderedAccounts().size());
+        assertEquals(1, filtered.pageCount());
+    }
+
+    @Test public void detailLabelsNormalizeCreditVariants() {
+        DashboardData.Item base = new DashboardData.Item();
+        base.name = "Credits";
+        assertEquals("基础积分", base.detailLabel());
+        DashboardData.Item extra = new DashboardData.Item();
+        extra.name = "Extra credits";
+        assertEquals("额外积分（Extra credits）", extra.detailLabel());
+        DashboardData.Item total = new DashboardData.Item();
+        total.name = "Total credits";
+        assertEquals("总积分（Total credits）", total.detailLabel());
     }
 
     @Test public void resetsAreShownAsACountdownAndWindowsAreNamedInChinese() throws Exception {

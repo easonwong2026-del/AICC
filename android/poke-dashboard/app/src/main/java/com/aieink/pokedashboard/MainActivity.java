@@ -8,29 +8,18 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.res.Configuration;
-import android.content.res.ColorStateList;
-import android.graphics.Color;
-import android.graphics.drawable.ColorDrawable;
-import android.graphics.drawable.GradientDrawable;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
-import android.text.InputType;
 import android.view.View;
-import android.view.Gravity;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.EditText;
-import android.widget.LinearLayout;
-import android.widget.RadioButton;
-import android.widget.RadioGroup;
-import android.widget.ScrollView;
-import android.widget.TextView;
 import android.widget.Toast;
 
 import java.net.URL;
@@ -42,11 +31,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class MainActivity extends Activity {
     private static final String PREFS = "dashboard";
-    private static final String KEY_URL = "base_url";
-    private static final String KEY_HOST_ID = "host_id";
-    private static final String KEY_CACHE = "last_status";
-    private static final String KEY_KEEP_AWAKE = "keep_awake";
-    private static final String KEY_SHOW_BATTERY = "show_battery";
+    static final String KEY_URL = "base_url";
+    static final String KEY_HOST_ID = "host_id";
+    static final String KEY_CACHE = "last_status";
+    static final String KEY_KEEP_AWAKE = "keep_awake";
+    static final String KEY_SHOW_BATTERY = "show_battery";
+    static final String KEY_LAYOUT_MODE = "layout_mode";
+    static final String KEY_SORT_MODE = "sort_mode";
+    static final String KEY_PROVIDER_FILTER = "provider_filter";
     private static final String KEY_V11_INITIALIZED = "v11_initialized";
     private static final String TAG = "AICC Discovery";
     /** A bridge answers Empty until its first Magpie read lands; ask again soon. */
@@ -75,6 +67,10 @@ public final class MainActivity extends Activity {
                 updateBattery(intent);
                 return;
             }
+            if (Intent.ACTION_TIME_TICK.equals(action)) {
+                if (resumed) dashboard.refreshClock();
+                return;
+            }
             if (Intent.ACTION_SCREEN_OFF.equals(action)) {
                 handler.removeCallbacks(refreshLoop);
                 dashboard.settleForSleep();
@@ -83,6 +79,7 @@ public final class MainActivity extends Activity {
             if (Intent.ACTION_SCREEN_ON.equals(action) || Intent.ACTION_USER_PRESENT.equals(action)) {
                 scheduleImmersiveMode();
                 if (resumed) {
+                    dashboard.refreshClock();
                     handler.removeCallbacks(refreshLoop);
                     handler.post(refreshLoop);
                 }
@@ -103,10 +100,24 @@ public final class MainActivity extends Activity {
         preferences = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         initialiseV11Preferences();
         dashboard = new DashboardView(this);
-        dashboard.setOnClickListener(view -> dashboard.nextPage());
-        dashboard.setOnLongClickListener(view -> {
-            showSettings();
-            return true;
+        dashboard.setListener(new DashboardView.Listener() {
+            @Override public void onToggleLayoutMode() {
+                toggleLayoutMode();
+            }
+
+            @Override public void onManualRefresh() {
+                Toast.makeText(MainActivity.this, "正在刷新额度…", Toast.LENGTH_SHORT).show();
+                handler.removeCallbacks(refreshLoop);
+                handler.post(refreshLoop);
+            }
+
+            @Override public void onOpenSettings() {
+                showSettings();
+            }
+
+            @Override public void onStateChanged() {
+                lastRenderedStatus = dashboard.getData().renderKey;
+            }
         });
         setContentView(dashboard);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN
@@ -119,6 +130,7 @@ public final class MainActivity extends Activity {
         });
         IntentFilter deviceFilter = new IntentFilter();
         deviceFilter.addAction(Intent.ACTION_BATTERY_CHANGED);
+        deviceFilter.addAction(Intent.ACTION_TIME_TICK);
         deviceFilter.addAction(Intent.ACTION_SCREEN_OFF);
         deviceFilter.addAction(Intent.ACTION_SCREEN_ON);
         deviceFilter.addAction(Intent.ACTION_USER_PRESENT);
@@ -137,6 +149,7 @@ public final class MainActivity extends Activity {
         super.onResume();
         resumed = true;
         scheduleImmersiveMode();
+        dashboard.refreshClock();
         handler.removeCallbacks(refreshLoop);
         handler.post(refreshLoop);
     }
@@ -177,6 +190,49 @@ public final class MainActivity extends Activity {
         super.onConfigurationChanged(configuration);
         dashboard.invalidate();
         scheduleImmersiveMode();
+    }
+
+    private void toggleLayoutMode() {
+        String current = preferences.getString(KEY_LAYOUT_MODE, DashboardData.LAYOUT_GRID);
+        String next = DashboardData.LAYOUT_CLOCK.equals(current)
+                ? DashboardData.LAYOUT_GRID
+                : DashboardData.LAYOUT_CLOCK;
+        preferences.edit().putString(KEY_LAYOUT_MODE, next).apply();
+        reapplyFromCache(false);
+        Toast.makeText(this,
+                DashboardData.LAYOUT_CLOCK.equals(next) ? "已切换：桌搭时钟" : "已切换：瑞士网格",
+                Toast.LENGTH_SHORT).show();
+    }
+
+    private void reapplyFromCache(boolean preserveNavigation) {
+        DashboardData current = dashboard.getData();
+        String raw = preferences.getString(KEY_CACHE, null);
+        if (raw == null) {
+            current.layoutMode = preferences.getString(KEY_LAYOUT_MODE, DashboardData.LAYOUT_GRID);
+            current.sortMode = preferences.getString(KEY_SORT_MODE, DashboardData.SORT_LOWEST);
+            current.providerFilter = preferences.getString(KEY_PROVIDER_FILTER, "");
+            if (!preserveNavigation) {
+                current.page = 0;
+                current.selectedAccountId = null;
+            }
+            current.clampPage();
+            current.refreshRenderKey();
+            lastRenderedStatus = current.renderKey;
+            dashboard.setData(current);
+            return;
+        }
+        try {
+            DashboardData next = parseData(raw);
+            next.offline = current.offline;
+            if (preserveNavigation) {
+                next.page = current.page;
+                next.selectedAccountId = current.selectedAccountId;
+                next.clampPage();
+                next.refreshRenderKey();
+            }
+            lastRenderedStatus = next.renderKey;
+            dashboard.setData(next);
+        } catch (Exception ignored) { }
     }
 
     private void fetchStatus() {
@@ -223,7 +279,7 @@ public final class MainActivity extends Activity {
                     if (resumed) dashboard.setOffline(true);
                     if (resumed && alternatives.size() > 1 && !choicePromptShown) {
                         choicePromptShown = true;
-                        showServerChoices(alternatives, null);
+                        showServerChoices(alternatives, null, null);
                     }
                 }
             });
@@ -257,17 +313,24 @@ public final class MainActivity extends Activity {
         Log.i(TAG, "Candidate selected: " + candidate.url);
         if (urlField != null) urlField.setText(candidate.url);
         if (candidate.statusBody == null) {
-            // Defensive: a candidate without a snapshot must never be cached or
-            // compared, otherwise a single null turns into a crash on launch.
             dashboard.setOffline(true);
-            if (urlField != null) urlField.setText(candidate.url);
             return;
         }
         if (!java.util.Objects.equals(candidate.statusBody, preferences.getString(KEY_CACHE, null))) {
             preferences.edit().putString(KEY_CACHE, candidate.statusBody).apply();
         }
         if (resumed) {
-            try { candidate.data = parseData(candidate.statusBody); } catch (Exception ignored) { return; }
+            try {
+                candidate.data = parseData(candidate.statusBody);
+            } catch (Exception ignored) {
+                return;
+            }
+            DashboardData current = dashboard.getData();
+            candidate.data.page = current.page;
+            candidate.data.selectedAccountId = current.selectedAccountId;
+            candidate.data.clampPage();
+            candidate.data.refreshRenderKey();
+
             if (!candidate.data.renderKey.equals(lastRenderedStatus)) {
                 lastRenderedStatus = candidate.data.renderKey;
                 dashboard.setData(candidate.data);
@@ -285,9 +348,7 @@ public final class MainActivity extends Activity {
     /**
      * The bridge can only answer with the accounts it has read so far, which is
      * "none" for the first seconds after the Mac app starts (and for as long as
-     * Magpie is not up).  Waiting a full refresh interval would leave the panel
-     * saying "Magpie 暂无额度" with real quotas one read away, so poll again a
-     * few times before falling back to the normal schedule.
+     * Magpie is not up).  Poll again a few times before falling back.
      */
     private void retryWhenEmpty(boolean available) {
         if (available) { emptyRetries = 0; return; }
@@ -297,36 +358,33 @@ public final class MainActivity extends Activity {
         handler.postDelayed(refreshLoop, EMPTY_RETRY_MS);
     }
 
-    private void forceDiscovery(EditText urlField) {
+    private void forceDiscovery(EditText urlField, Runnable onDiscovered) {
         if (!fetching.compareAndSet(false, true)) {
             Toast.makeText(this, "正在同步，请稍后重试", Toast.LENGTH_SHORT).show();
             return;
         }
         network.execute(() -> {
             List<DiscoveryClient.Candidate> found = DiscoveryClient.findServers();
-            // Keep them: the pairing dialog needs this server's fingerprint, and
-            // the user is supposed to compare it with the Mac's settings page.
             discovered = found;
             fetching.set(false);
             if (destroyed) return;
             handler.post(() -> {
                 if (destroyed) return;
                 if (found.isEmpty()) {
-                    // 桥接默认只监听本机：局域网发现收不到响应时，多半是 Mac 上
-                    // 没打开「允许局域网设备连接」，这句话要直接告诉用户去哪儿开。
                     Toast.makeText(this,
                             "未找到 AICC。请在 Mac 的「设置 → 墨水屏连接」打开「允许局域网设备连接」，并确认在同一网络",
                             Toast.LENGTH_LONG).show();
                 } else if (found.size() == 1) {
                     selectServer(found.get(0), urlField);
+                    if (onDiscovered != null) onDiscovered.run();
                 } else {
-                    showServerChoices(found, urlField);
+                    showServerChoices(found, urlField, onDiscovered);
                 }
             });
         });
     }
 
-    private void showServerChoices(List<DiscoveryClient.Candidate> servers, EditText urlField) {
+    private void showServerChoices(List<DiscoveryClient.Candidate> servers, EditText urlField, Runnable onSelected) {
         String[] labels = new String[servers.size()];
         for (int index = 0; index < servers.size(); index++) {
             DiscoveryClient.Candidate server = servers.get(index);
@@ -336,17 +394,28 @@ public final class MainActivity extends Activity {
         }
         new android.app.AlertDialog.Builder(this)
                 .setTitle("选择 AICC 服务器")
-                .setItems(labels, (dialog, index) -> selectServer(servers.get(index), urlField))
+                .setItems(labels, (dialog, index) -> {
+                    selectServer(servers.get(index), urlField);
+                    if (onSelected != null) onSelected.run();
+                })
                 .setNegativeButton("取消", null)
                 .show();
     }
 
     private void loadCache() {
         String raw = preferences.getString(KEY_CACHE, null);
-        if (raw == null) return;
+        if (raw == null) {
+            DashboardData initial = dashboard.getData();
+            initial.layoutMode = preferences.getString(KEY_LAYOUT_MODE, DashboardData.LAYOUT_GRID);
+            initial.sortMode = preferences.getString(KEY_SORT_MODE, DashboardData.SORT_LOWEST);
+            initial.providerFilter = preferences.getString(KEY_PROVIDER_FILTER, "");
+            dashboard.setData(initial);
+            return;
+        }
         try {
             DashboardData data = parseData(raw);
             data.offline = true;
+            lastRenderedStatus = data.renderKey;
             dashboard.setData(data);
         } catch (Exception ignored) { }
     }
@@ -375,294 +444,149 @@ public final class MainActivity extends Activity {
     }
 
     Dialog showSettings() {
-        final int padding = dp(18);
-        final int ink = Color.rgb(17, 17, 17);
-        final int muted = Color.rgb(85, 85, 85);
-        Dialog dialog = new Dialog(this);
-        dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
-        dialog.setCanceledOnTouchOutside(true);
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(padding, dp(14), padding, 0);
-        panel.setBackground(outline(Color.WHITE, ink, dp(2), dp(14)));
-
-        TextView title = settingText("Magpie 墨水屏伴侣", 24, ink, true);
-        title.setGravity(Gravity.CENTER);
-        panel.addView(title, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(48)));
-        LinearLayout content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(4), 0, dp(4), 0);
-
-        TextView hint = settingText("电脑地址", 16, muted, false);
-        EditText url = new EditText(this);
-        styleInput(url, 17, ink);
-        url.setSingleLine(true);
-        url.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        url.setText(preferences.getString(KEY_URL, ""));
-        Button chooseServer = settingButton("选择服务器");
-        chooseServer.setOnClickListener(view -> forceDiscovery(url));
-        EditText code = new EditText(this);
-        styleInput(code, 20, ink);
-        code.setHint("Mac AICC 配对码（8 位）");
-        code.setInputType(InputType.TYPE_CLASS_NUMBER);
-        code.setFilters(new android.text.InputFilter[] { new android.text.InputFilter.LengthFilter(8) });
-        Button pair = settingButton("配对这台电脑");
-        pair.setOnClickListener(view -> {
-            String base = normaliseBaseUrl(url.getText().toString());
-            String pairingCode = code.getText().toString();
-            if (base == null || !pairingCode.matches("[0-9]{8}")) {
-                Toast.makeText(this, "请输入电脑地址和 8 位配对码", Toast.LENGTH_SHORT).show();
-                return;
+        return SettingsDialog.show(this, new SettingsDialog.Host() {
+            @Override public SharedPreferences prefs() {
+                return preferences;
             }
-            String pin = pinFor(base);
-            if (pin == null) {
-                Toast.makeText(this, "请先点「选择服务器」以读出该电脑的证书指纹", Toast.LENGTH_LONG).show();
-                return;
+
+            @Override public String currentPinFor(String baseUrl) {
+                return pinFor(baseUrl);
             }
-            // The fingerprint is the whole trust decision: it must be compared
-            // with the Mac's settings screen, not accepted because a broadcast
-            // said so. Nothing is sent until the user confirms it.
-            new android.app.AlertDialog.Builder(this)
-                    .setTitle("核对指纹")
-                    .setMessage("请确认下面这段与 Mac 上 AICC 设置页显示的指纹完全一致：\n\n"
-                            + formatPin(pin)
-                            + "\n\n不一致说明这台机器不是你的 Mac，请取消。")
-                    .setNegativeButton("取消", null)
-                    .setPositiveButton("一致，开始配对", (confirmed, which) -> {
-                        pair.setEnabled(false);
-                        network.execute(() -> {
-                            boolean success = false;
-                            String failure = "配对失败，请生成新配对码后重试";
-                            try {
-                                org.json.JSONObject result = DiscoveryClient.pair(base, pairingCode, pin);
-                                String token = result.getString("token");
-                                String host = result.getString("host_id");
-                                String caPem = result.optString("ca_pem", "");
-                                String returnedPin = result.optString("spki", pin);
-                                if (token.length() < 32 || host.isEmpty() || !caPem.contains("BEGIN CERTIFICATE")) {
-                                    throw new IllegalStateException("Incomplete pairing response");
+
+            @Override public boolean isPaired() {
+                return BridgeCredential.load(preferences) != null
+                        && BridgeCredential.identity(preferences) != null;
+            }
+
+            @Override public List<DashboardData.ProviderOption> availableProviders() {
+                return dashboard.getData().availableProviders();
+            }
+
+            @Override public int totalAccountCount() {
+                return dashboard.getData().accounts.size();
+            }
+
+            @Override public void onDiscoverRequested(EditText urlField, Runnable onDiscovered) {
+                forceDiscovery(urlField, onDiscovered);
+            }
+
+            @Override public void onPairRequested(String rawUrl, String pairingCode, Button pairButton,
+                                                  EditText codeField, Dialog dialog) {
+                String base = normaliseBaseUrl(rawUrl);
+                if (base == null || !pairingCode.matches("[0-9]{8}")) {
+                    Toast.makeText(MainActivity.this, "请输入电脑地址和 8 位配对码", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                String pin = pinFor(base);
+                if (pin == null) {
+                    Toast.makeText(MainActivity.this, "请先点「自动发现」以读出该电脑的证书指纹",
+                            Toast.LENGTH_LONG).show();
+                    return;
+                }
+                new android.app.AlertDialog.Builder(MainActivity.this)
+                        .setTitle("核对指纹")
+                        .setMessage("请确认下面这段与 Mac 上 AICC 设置页显示的指纹完全一致：\n\n"
+                                + formatPin(pin)
+                                + "\n\n不一致说明这台机器不是你的 Mac，请取消。")
+                        .setNegativeButton("取消", null)
+                        .setPositiveButton("一致，开始配对", (confirmed, which) -> {
+                            pairButton.setEnabled(false);
+                            network.execute(() -> {
+                                boolean success = false;
+                                String failure = "配对失败，请生成新配对码后重试";
+                                try {
+                                    org.json.JSONObject result = DiscoveryClient.pair(base, pairingCode, pin);
+                                    String token = result.getString("token");
+                                    String hostId = result.getString("host_id");
+                                    String caPem = result.optString("ca_pem", "");
+                                    String returnedPin = result.optString("spki", pin);
+                                    if (token.length() < 32 || hostId.isEmpty()
+                                            || !caPem.contains("BEGIN CERTIFICATE")) {
+                                        throw new IllegalStateException("Incomplete pairing response");
+                                    }
+                                    if (!returnedPin.equals(pin)) {
+                                        throw new IllegalStateException("Server identity changed during pairing");
+                                    }
+                                    BridgeCredential.save(preferences, token, hostId, pin, caPem);
+                                    preferences.edit().putString(KEY_HOST_ID, hostId).putString(KEY_URL, base)
+                                            .remove(KEY_CACHE).commit();
+                                    success = true;
+                                } catch (Exception error) {
+                                    Log.w(TAG, "Pairing failed: " + error.getClass().getSimpleName());
                                 }
-                                if (!returnedPin.equals(pin)) {
-                                    // The server answered with a different identity than
-                                    // the one the user confirmed: refuse, keep nothing.
-                                    throw new IllegalStateException("Server identity changed during pairing");
-                                }
-                                BridgeCredential.save(preferences, token, host, pin, caPem);
-                                preferences.edit().putString(KEY_HOST_ID, host).putString(KEY_URL, base)
-                                        .remove(KEY_CACHE).commit();
-                                success = true;
-                            } catch (Exception error) {
-                                Log.w(TAG, "Pairing failed: " + error.getClass().getSimpleName());
-                            }
-                            boolean paired = success;
-                            handler.post(() -> {
-                                if (destroyed) return;
-                                pair.setEnabled(true);
-                                code.setText("");
-                                Toast.makeText(this, paired ? "配对成功" : failure, Toast.LENGTH_LONG).show();
-                                if (paired) { dialog.dismiss(); fetchStatus(); }
+                                boolean paired = success;
+                                handler.post(() -> {
+                                    if (destroyed) return;
+                                    pairButton.setEnabled(true);
+                                    codeField.setText("");
+                                    Toast.makeText(MainActivity.this, paired ? "配对成功" : failure,
+                                            Toast.LENGTH_LONG).show();
+                                    if (paired) {
+                                        dialog.dismiss();
+                                        fetchStatus();
+                                    }
+                                });
                             });
-                        });
-                    })
-                    .show();
-        });
-        LinearLayout addressHeader = new LinearLayout(this);
-        addressHeader.setOrientation(LinearLayout.HORIZONTAL);
-        addressHeader.addView(hint, new LinearLayout.LayoutParams(0, dp(38), 1f));
-        addressHeader.addView(chooseServer, new LinearLayout.LayoutParams(dp(120), dp(38)));
+                        })
+                        .show();
+            }
 
-        TextView intervalHint = settingText("刷新间隔（分钟）", 16, muted, false);
-        EditText interval = new EditText(this);
-        styleInput(interval, 17, ink);
-        interval.setSingleLine(true);
-        interval.setInputType(InputType.TYPE_CLASS_NUMBER);
-        interval.setText(String.valueOf(refreshMinutes()));
-        android.widget.Spinner accountCount = new android.widget.Spinner(this);
-        accountCount.setAdapter(new android.widget.ArrayAdapter<String>(this,
-                android.R.layout.simple_spinner_dropdown_item, new String[] { "全部账号（4 个/页）", "1 个账号", "2 个账号" }));
-        String savedMode = preferences.getString("account_mode", "all");
-        accountCount.setSelection("one".equals(savedMode) ? 1 : "two".equals(savedMode) ? 2 : 0);
-
-        TextView modeHint = settingText("显示模式（省电模式需在 BOOX 中启用透明屏保）", 14, muted, false);
-        RadioGroup displayMode = new RadioGroup(this);
-        displayMode.setOrientation(RadioGroup.VERTICAL);
-        RadioButton screenSaverMode = new RadioButton(this);
-        styleChoice(screenSaverMode, "省电屏保：允许休眠，唤醒后立即更新\n（推荐）", 17, true);
-        RadioButton alwaysOnMode = new RadioButton(this);
-        styleChoice(alwaysOnMode, "桌面常亮：保持屏幕点亮并定时更新", 17, false);
-        displayMode.addView(screenSaverMode);
-        displayMode.addView(alwaysOnMode);
-        boolean keepAwake = preferences.getBoolean(KEY_KEEP_AWAKE, false);
-        screenSaverMode.setChecked(!keepAwake);
-        alwaysOnMode.setChecked(keepAwake);
-
-        android.widget.CheckBox showBattery = new android.widget.CheckBox(this);
-        styleChoice(showBattery, "在面板右上角显示 Poke4S 电量", 17, false);
-        showBattery.setChecked(preferences.getBoolean(KEY_SHOW_BATTERY, true));
-        android.widget.CheckBox autoStart = new android.widget.CheckBox(this);
-        styleChoice(autoStart, "开机后尝试自动启动", 17, false);
-        autoStart.setChecked(preferences.getBoolean("auto_start", true));
-
-        content.addView(addressHeader);
-        content.addView(url, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(42)));
-        content.addView(code, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)));
-        content.addView(pair);
-        content.addView(settingText("仅在可信局域网配对，不需要 Magpie 网关密钥。", 14, muted, false));
-        content.addView(settingDivider());
-        content.addView(intervalHint);
-        content.addView(interval, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(42)));
-        content.addView(settingText("显示账号", 16, muted, false));
-        content.addView(accountCount);
-        content.addView(settingDivider());
-        content.addView(modeHint);
-        content.addView(displayMode);
-        content.addView(showBattery);
-        content.addView(autoStart);
-
-        ScrollView scroll = new ScrollView(this);
-        scroll.setFillViewport(true);
-        scroll.addView(content);
-        panel.addView(scroll, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        panel.addView(settingDivider());
-        LinearLayout actions = new LinearLayout(this);
-        actions.setOrientation(LinearLayout.HORIZONTAL);
-        Button cancel = settingButton("取消");
-        cancel.setOnClickListener(view -> dialog.dismiss());
-        Button discover = settingButton("自动发现");
-        discover.setOnClickListener(view -> forceDiscovery(url));
-        Button save = settingButton("保存");
-        save.setOnClickListener(view -> {
-                    String base = normaliseBaseUrl(url.getText().toString());
-                    if (base != null) {
-                        try {
-                            URL parsed = new URL(base);
-                            if ((!"http".equals(parsed.getProtocol()) && !"https".equals(parsed.getProtocol()))
-                                    || parsed.getHost().isEmpty()) throw new IllegalArgumentException();
-                        } catch (Exception error) {
-                            Toast.makeText(this, "服务器地址无效", Toast.LENGTH_SHORT).show();
-                            return;
+            @Override public void onSaveSettings(String rawUrl, String layoutMode, String sortMode,
+                                                 String providerFilter, String accountMode,
+                                                 int intervalMinutes, boolean keepAwake,
+                                                 boolean showBattery, boolean autoStart, Dialog dialog) {
+                String base = normaliseBaseUrl(rawUrl);
+                if (base != null) {
+                    try {
+                        URL parsed = new URL(base);
+                        if ((!"http".equals(parsed.getProtocol()) && !"https".equals(parsed.getProtocol()))
+                                || parsed.getHost().isEmpty()) {
+                            throw new IllegalArgumentException();
                         }
+                    } catch (Exception error) {
+                        Toast.makeText(MainActivity.this, "服务器地址无效", Toast.LENGTH_SHORT).show();
+                        return;
                     }
-                    int minutes = 5;
-                    try { minutes = Integer.parseInt(interval.getText().toString()); }
-                    catch (NumberFormatException ignored) { }
-                    minutes = Math.max(1, Math.min(60, minutes));
-                    SharedPreferences.Editor editor = preferences.edit()
-                            .putString("account_mode", accountCount.getSelectedItemPosition() == 1 ? "one"
-                                    : accountCount.getSelectedItemPosition() == 2 ? "two" : "all")
-                            .putInt("refresh_minutes", minutes)
-                            .putBoolean(KEY_KEEP_AWAKE, alwaysOnMode.isChecked())
-                            .putBoolean(KEY_SHOW_BATTERY, showBattery.isChecked())
-                            .putBoolean("auto_start", autoStart.isChecked());
-                    if (base == null) editor.remove(KEY_URL).remove(KEY_HOST_ID);
-                    else {
-                        if (!base.equals(preferences.getString(KEY_URL, null))) editor.remove(KEY_HOST_ID);
-                        editor.putString(KEY_URL, base);
-                    }
-                    editor.apply();
-                    applyDisplayMode();
-                    updateBattery(registerReceiver(null,
-                            new IntentFilter(Intent.ACTION_BATTERY_CHANGED)));
-                    handler.removeCallbacks(refreshLoop);
-                    handler.post(refreshLoop);
-                    dialog.dismiss();
-        });
-        actions.addView(cancel, actionParams());
-        actions.addView(actionDivider());
-        actions.addView(discover, actionParams());
-        actions.addView(actionDivider());
-        actions.addView(save, actionParams());
-        panel.addView(actions, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(58)));
-        dialog.setContentView(panel);
-        dialog.show();
-        if (dialog.getWindow() != null) {
-            dialog.getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            dialog.getWindow().setLayout((int) (getResources().getDisplayMetrics().widthPixels * .94f),
-                    (int) (getResources().getDisplayMetrics().heightPixels * .78f));
-        }
-        return dialog;
-    }
+                }
+                SharedPreferences.Editor editor = preferences.edit()
+                        .putString(KEY_LAYOUT_MODE, layoutMode)
+                        .putString(KEY_SORT_MODE, sortMode)
+                        .putString(KEY_PROVIDER_FILTER, providerFilter == null ? "" : providerFilter)
+                        .putString("account_mode", accountMode)
+                        .putInt("refresh_minutes", intervalMinutes)
+                        .putBoolean(KEY_KEEP_AWAKE, keepAwake)
+                        .putBoolean(KEY_SHOW_BATTERY, showBattery)
+                        .putBoolean("auto_start", autoStart);
+                if (base == null) {
+                    editor.remove(KEY_URL).remove(KEY_HOST_ID);
+                } else {
+                    if (!base.equals(preferences.getString(KEY_URL, null))) editor.remove(KEY_HOST_ID);
+                    editor.putString(KEY_URL, base);
+                }
+                editor.apply();
+                applyDisplayMode();
+                updateBattery(registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED)));
+                reapplyFromCache(false);
+                handler.removeCallbacks(refreshLoop);
+                handler.post(refreshLoop);
+                dialog.dismiss();
+            }
 
-    private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
+            @Override public void onImmediateRefresh() {
+                handler.removeCallbacks(refreshLoop);
+                handler.post(refreshLoop);
+            }
+        });
     }
 
     private DashboardData parseData(String raw) throws Exception {
-        return DashboardData.parse(raw, preferences.getString("account_mode", "all"));
-    }
-
-    private GradientDrawable outline(int fill, int stroke, int strokeWidth, int radius) {
-        GradientDrawable drawable = new GradientDrawable();
-        drawable.setColor(fill);
-        drawable.setStroke(strokeWidth, stroke);
-        drawable.setCornerRadius(radius);
-        return drawable;
-    }
-
-    private TextView settingText(String value, int size, int color, boolean bold) {
-        TextView view = new TextView(this);
-        view.setText(value);
-        view.setTextSize(size);
-        view.setTextColor(color);
-        view.setGravity(Gravity.CENTER_VERTICAL);
-        view.setTypeface(bold ? android.graphics.Typeface.DEFAULT_BOLD : android.graphics.Typeface.DEFAULT);
-        return view;
-    }
-
-    private void styleInput(EditText input, int size, int color) {
-        input.setTextSize(size);
-        input.setTextColor(color);
-        input.setSingleLine(true);
-        input.setPadding(0, 0, 0, 0);
-        input.setBackgroundColor(Color.TRANSPARENT);
-    }
-
-    private void styleChoice(TextView view, String label, int size, boolean bold) {
-        view.setText(label);
-        view.setTextSize(size);
-        view.setTextColor(Color.rgb(17, 17, 17));
-        view.setTypeface(bold ? android.graphics.Typeface.DEFAULT_BOLD : android.graphics.Typeface.DEFAULT);
-        view.setMinHeight(dp(38));
-        view.setGravity(Gravity.CENTER_VERTICAL);
-        if (view instanceof android.widget.CompoundButton) {
-            ((android.widget.CompoundButton) view).setButtonTintList(ColorStateList.valueOf(Color.rgb(17, 17, 17)));
-        }
-    }
-
-    private View settingDivider() {
-        View divider = new View(this);
-        divider.setBackgroundColor(Color.rgb(150, 150, 150));
-        divider.setLayoutParams(new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, Math.max(1, dp(1))));
-        return divider;
-    }
-
-    private Button settingButton(String label) {
-        Button button = new Button(this);
-        button.setText(label);
-        button.setTextSize(17);
-        button.setTextColor(Color.rgb(17, 17, 17));
-        button.setAllCaps(false);
-        button.setBackgroundColor(Color.TRANSPARENT);
-        button.setPadding(0, 0, 0, 0);
-        return button;
-    }
-
-    private LinearLayout.LayoutParams actionParams() {
-        return new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
-    }
-
-    private View actionDivider() {
-        View divider = new View(this);
-        divider.setBackgroundColor(Color.rgb(17, 17, 17));
-        divider.setLayoutParams(new LinearLayout.LayoutParams(Math.max(1, dp(1)),
-                LinearLayout.LayoutParams.MATCH_PARENT));
-        return divider;
+        return DashboardData.parse(
+                raw,
+                preferences.getString("account_mode", "all"),
+                preferences.getString(KEY_LAYOUT_MODE, DashboardData.LAYOUT_GRID),
+                preferences.getString(KEY_SORT_MODE, DashboardData.SORT_LOWEST),
+                preferences.getString(KEY_PROVIDER_FILTER, "")
+        );
     }
 
     private int refreshMinutes() {
