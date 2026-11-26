@@ -8,15 +8,22 @@ import SwiftUI
 /// - 账号页需要双栏铺满高度，所以内容区不再套统一 ScrollView。
 struct MainConsoleView: View {
     @ObservedObject var store: ConsoleStore
+    @ObservedObject private var updateService = UpdateService.shared
     let openSettings: () -> Void
+    let openUpdateSettings: () -> Void
 
     @StateObject private var nav: ConsoleNavigation
     @State private var refreshing = false
     @State private var hoveredPage: ConsolePage?
 
-    init(store: ConsoleStore, openSettings: @escaping () -> Void) {
+    init(
+        store: ConsoleStore,
+        openSettings: @escaping () -> Void,
+        openUpdateSettings: (() -> Void)? = nil
+    ) {
         self.store = store
         self.openSettings = openSettings
+        self.openUpdateSettings = openUpdateSettings ?? openSettings
         // QA 钩子：截图/验收脚本用 `open --args -AICCConsolePage accounts` 指定初始分页。
         // 同时兼容环境变量，方便直接跑二进制。
         let requested = UserDefaults.standard.string(forKey: "AICCConsolePage")
@@ -69,6 +76,17 @@ struct MainConsoleView: View {
             .padding(.horizontal, 8)
 
             Spacer(minLength: 12)
+
+            if let update = updateService.visibleUpdate {
+                ConsoleInlineNotice(
+                    kind: .info,
+                    message: "发现新版本 v\(update.version)",
+                    actionTitle: "查看",
+                    action: openUpdateSettings
+                )
+                .padding(.horizontal, 12)
+                .padding(.bottom, store.connectionNotice == nil ? 16 : 8)
+            }
 
             if let connectionNotice = store.connectionNotice {
                 ConsoleInlineNotice(

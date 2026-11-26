@@ -11,6 +11,7 @@ final class ConsoleWindowCoordinator: NSObject, NSWindowDelegate {
     private let loginAtLaunch: LaunchAtLoginService
     private let store: ConsoleStore
     private let openSettings: () -> Void
+    private let openUpdateSettings: () -> Void
     private let onClose: () -> Void
 
     private var window: NSWindow?
@@ -25,6 +26,7 @@ final class ConsoleWindowCoordinator: NSObject, NSWindowDelegate {
         loginAtLaunch: LaunchAtLoginService,
         store: ConsoleStore,
         openSettings: @escaping () -> Void,
+        openUpdateSettings: (() -> Void)? = nil,
         onClose: @escaping () -> Void = {}
     ) {
         self.settings = settings
@@ -32,6 +34,7 @@ final class ConsoleWindowCoordinator: NSObject, NSWindowDelegate {
         self.loginAtLaunch = loginAtLaunch
         self.store = store
         self.openSettings = openSettings
+        self.openUpdateSettings = openUpdateSettings ?? openSettings
         self.onClose = onClose
         super.init()
         observeTheme()
@@ -70,7 +73,11 @@ final class ConsoleWindowCoordinator: NSObject, NSWindowDelegate {
 
     private func makeWindow() -> NSWindow {
         let hosting = NSHostingController(
-            rootView: MainConsoleView(store: store, openSettings: openSettings)
+            rootView: MainConsoleView(
+                store: store,
+                openSettings: openSettings,
+                openUpdateSettings: openUpdateSettings
+            )
                 .environmentObject(settings)
                 .environmentObject(server)
                 .environmentObject(loginAtLaunch)

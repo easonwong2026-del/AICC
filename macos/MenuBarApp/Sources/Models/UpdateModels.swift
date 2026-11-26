@@ -1,6 +1,6 @@
 import Foundation
 
-struct AppVersionInfo: Equatable {
+struct AppVersionInfo: Equatable, Sendable {
     static let fallbackValue = "—"
 
     let shortVersion: String
@@ -8,6 +8,19 @@ struct AppVersionInfo: Equatable {
 
     var version: String { shortVersion }
     var buildVersion: String { build }
+
+    var numericBuild: Int? {
+        guard let parsed = Int(build), parsed > 0 else { return nil }
+        return parsed
+    }
+
+    var displayText: String {
+        guard shortVersion != Self.fallbackValue else { return Self.fallbackValue }
+        if build != Self.fallbackValue {
+            return "v\(shortVersion) (Build \(build))"
+        }
+        return "v\(shortVersion)"
+    }
 
     init(shortVersion: String?, build: String?) {
         self.shortVersion = Self.normalized(shortVersion)
@@ -35,8 +48,61 @@ struct AppVersionInfo: Equatable {
     }
 }
 
-struct SemanticVersion: Comparable, Codable, CustomStringConvertible, Equatable, Hashable {
-    private enum PrereleaseIdentifier: Equatable, Hashable {
+struct SystemVersion: Comparable, CustomStringConvertible, Equatable, Hashable, Sendable {
+    let major: Int
+    let minor: Int
+    let patch: Int
+
+    init(major: Int, minor: Int = 0, patch: Int = 0) {
+        self.major = max(0, major)
+        self.minor = max(0, minor)
+        self.patch = max(0, patch)
+    }
+
+    init(_ version: OperatingSystemVersion) {
+        self.init(
+            major: version.majorVersion,
+            minor: version.minorVersion,
+            patch: version.patchVersion
+        )
+    }
+
+    init?(_ rawValue: String) {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let parts = trimmed.split(separator: ".", omittingEmptySubsequences: false)
+        guard (1...3).contains(parts.count) else { return nil }
+        var numbers: [Int] = []
+        for part in parts {
+            guard !part.isEmpty,
+                  part.unicodeScalars.allSatisfy({ (48...57).contains($0.value) }),
+                  let number = Int(part) else {
+                return nil
+            }
+            numbers.append(number)
+        }
+        self.major = numbers[0]
+        self.minor = numbers.count > 1 ? numbers[1] : 0
+        self.patch = numbers.count > 2 ? numbers[2] : 0
+    }
+
+    static var current: SystemVersion {
+        SystemVersion(ProcessInfo.processInfo.operatingSystemVersion)
+    }
+
+    var description: String {
+        patch > 0 ? "\(major).\(minor).\(patch)" : "\(major).\(minor)"
+    }
+
+    static func < (lhs: SystemVersion, rhs: SystemVersion) -> Bool {
+        if lhs.major != rhs.major { return lhs.major < rhs.major }
+        if lhs.minor != rhs.minor { return lhs.minor < rhs.minor }
+        return lhs.patch < rhs.patch
+    }
+}
+
+struct SemanticVersion: Comparable, Codable, CustomStringConvertible, Equatable, Hashable, Sendable {
+    private enum PrereleaseIdentifier: Equatable, Hashable, Sendable {
         case numeric(String)
         case text(String)
     }
@@ -79,11 +145,16 @@ struct SemanticVersion: Comparable, Codable, CustomStringConvertible, Equatable,
             let prereleasePart = versionParts[1]
             let identifiers = prereleasePart.split(separator: ".", omittingEmptySubsequences: false)
             guard !identifiers.isEmpty, identifiers.allSatisfy(Self.isValidIdentifier) else { return nil }
-            prereleaseIdentifiers = identifiers.map { identifier in
+            for identifier in identifiers {
                 if Self.isAllDigits(identifier) {
-                    return .numeric(String(identifier))
+                    // SemVer 2.0.0 §9: numeric prerelease identifiers MUST NOT include leading zeroes.
+                    if identifier.count > 1 && identifier.first == "0" {
+                        return nil
+                    }
+                    prereleaseIdentifiers.append(.numeric(String(identifier)))
+                } else {
+                    prereleaseIdentifiers.append(.text(String(identifier)))
                 }
-                return .text(String(identifier))
             }
         }
 
@@ -141,10 +212,11 @@ struct SemanticVersion: Comparable, Codable, CustomStringConvertible, Equatable,
     }
 
     init(from decoder: Decoder) throws {
-        let value = try decoder.singleValueContainer().decode(String.self)
+        let container = try decoder.singleValueContainer()
+        let value = try container.decode(String.self)
         guard let parsed = Self(value) else {
             throw DecodingError.dataCorruptedError(
-                in: try decoder.singleValueContainer(),
+                in: container,
                 debugDescription: "Invalid semantic version"
             )
         }
@@ -200,13 +272,40 @@ struct SemanticVersion: Comparable, Codable, CustomStringConvertible, Equatable,
     }
 }
 
-struct UpdateInfo: Codable, Equatable {
+struct UpdateInfo: Codable, Equatable, Sendable {
     let version: String
     let build: String?
     let minimumSystemVersion: String?
     let downloadURL: URL?
     let releaseNotesURL: URL?
     let publishedAt: String?
+    let sha256: String?
+    let releaseSummary: String?
+
+    var numericBuild: Int? {
+        guard let build, let parsed = Int(build), parsed > 0 else { return nil }
+        return parsed
+    }
+
+    var displayVersion: String {
+        if let build, !build.isEmpty {
+            return "v\(version) (Build \(build))"
+        }
+        return "v\(version)"
+    }
+
+    var formattedPublishedDate: String? {
+        guard let publishedAt, !publishedAt.isEmpty else { return nil }
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let parsed = iso.date(from: publishedAt) ?? ISO8601DateFormatter().date(from: publishedAt)
+        guard let parsed else { return nil }
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: parsed)
+    }
 
     init(
         version: String,
@@ -214,7 +313,9 @@ struct UpdateInfo: Codable, Equatable {
         minimumSystemVersion: String? = nil,
         downloadURL: URL? = nil,
         releaseNotesURL: URL? = nil,
-        publishedAt: String? = nil
+        publishedAt: String? = nil,
+        sha256: String? = nil,
+        releaseSummary: String? = nil
     ) {
         self.version = version
         self.build = build
@@ -222,42 +323,24 @@ struct UpdateInfo: Codable, Equatable {
         self.downloadURL = downloadURL
         self.releaseNotesURL = releaseNotesURL
         self.publishedAt = publishedAt
+        self.sha256 = sha256
+        self.releaseSummary = releaseSummary
     }
 
-    private enum CodingKeys: String, CodingKey, CaseIterable {
+    private enum CodingKeys: String, CodingKey {
         case version
         case build
         case minimumSystemVersion
         case downloadURL
         case releaseNotesURL
         case publishedAt
-    }
-
-    private struct AnyCodingKey: CodingKey {
-        let stringValue: String
-        let intValue: Int? = nil
-
-        init?(stringValue: String) {
-            self.stringValue = stringValue
-        }
-
-        init?(intValue: Int) {
-            return nil
-        }
+        case sha256
+        case releaseSummary
     }
 
     init(from decoder: Decoder) throws {
-        let allKeys = try decoder.container(keyedBy: AnyCodingKey.self)
-        let allowedKeys = Set(CodingKeys.allCases.map(\.stringValue))
-        guard allKeys.allKeys.allSatisfy({ allowedKeys.contains($0.stringValue) }) else {
-            throw DecodingError.dataCorrupted(
-                .init(
-                    codingPath: decoder.codingPath,
-                    debugDescription: "Update manifest contains unknown fields"
-                )
-            )
-        }
-
+        // Forward-compatible decoding: ignore unknown future keys (e.g. edSignature,
+        // rollout metadata) so older clients can safely read newer manifests.
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let version = try container.decode(String.self, forKey: .version)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -275,6 +358,8 @@ struct UpdateInfo: Codable, Equatable {
         self.downloadURL = try Self.decodeOptionalHTTPSURL(container, key: .downloadURL)
         self.releaseNotesURL = try Self.decodeOptionalHTTPSURL(container, key: .releaseNotesURL)
         self.publishedAt = try Self.decodeOptionalString(container, key: .publishedAt)
+        self.sha256 = try Self.decodeOptionalString(container, key: .sha256)
+        self.releaseSummary = try Self.decodeOptionalString(container, key: .releaseSummary)
     }
 
     private static func decodeOptionalString(
@@ -291,7 +376,9 @@ struct UpdateInfo: Codable, Equatable {
         key: CodingKeys
     ) throws -> URL? {
         guard let value = try container.decodeIfPresent(String.self, forKey: key) else { return nil }
-        guard let url = UpdateManifestConfiguration.httpsURL(value) else {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard let url = UpdateManifestConfiguration.httpsURL(trimmed) else {
             throw DecodingError.dataCorruptedError(
                 forKey: key,
                 in: container,
@@ -302,11 +389,12 @@ struct UpdateInfo: Codable, Equatable {
     }
 }
 
-enum UpdateCheckState: Equatable {
+enum UpdateCheckState: Equatable, Sendable {
     case idle
     case checking
     case upToDate
     case updateAvailable(UpdateInfo)
+    case incompatibleSystem(UpdateInfo, requiredVersion: String)
     case failed(String)
     case notConfigured
 }
@@ -318,11 +406,28 @@ enum UpdateManifestConfiguration {
 
     static let defaultReleasePageURL = URL(string: "https://github.com/easonwong2026-del/AICC/releases")!
 
+    static let defaultTrustedHosts: Set<String> = [
+        "github.com",
+        "raw.githubusercontent.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+        "codeload.github.com",
+    ]
+
+    #if DEBUG
+    static let defaultAllowEnvironmentOverride = true
+    #else
+    static let defaultAllowEnvironmentOverride = false
+    #endif
+
     static func manifestURL(
         bundle: Bundle = .main,
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        allowEnvironmentOverride: Bool = defaultAllowEnvironmentOverride
     ) -> URL? {
-        let environmentValue = environment[environmentKey].flatMap(Self.nonEmptyString)
+        let environmentValue = allowEnvironmentOverride
+            ? environment[environmentKey].flatMap(Self.nonEmptyString)
+            : nil
         let plistValue = (bundle.object(forInfoDictionaryKey: manifestInfoPlistKey) as? String)
             .flatMap(Self.nonEmptyString)
         return (environmentValue ?? plistValue).flatMap(Self.httpsURL)
@@ -350,6 +455,22 @@ enum UpdateManifestConfiguration {
             return nil
         }
         return url
+    }
+
+    static func trustedHosts(for manifestURL: URL?) -> Set<String> {
+        var hosts = defaultTrustedHosts
+        if let host = manifestURL?.host?.lowercased(), !host.isEmpty {
+            hosts.insert(host)
+        }
+        return hosts
+    }
+
+    static func isTrustedHTTPSURL(_ url: URL, allowedHosts: Set<String>) -> Bool {
+        guard let validated = httpsURL(url.absoluteString),
+              let host = validated.host?.lowercased() else {
+            return false
+        }
+        return allowedHosts.contains(host)
     }
 
     private static func nonEmptyString(_ value: String) -> String? {

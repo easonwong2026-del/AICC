@@ -8,7 +8,12 @@ struct SettingsRootView: View {
     let loginAtLaunch: LaunchAtLoginService
     @StateObject private var model: SettingsModel
 
-    init(settings: AppSettings, server: ServerManager, loginAtLaunch: LaunchAtLoginService) {
+    init(
+        settings: AppSettings,
+        server: ServerManager,
+        loginAtLaunch: LaunchAtLoginService,
+        navigation: SettingsNavigation
+    ) {
         self.settings = settings
         self.server = server
         self.loginAtLaunch = loginAtLaunch
@@ -17,7 +22,9 @@ struct SettingsRootView: View {
             settings: settings,
             server: server,
             loginAtLaunch: loginAtLaunch,
-            worker: .shared
+            worker: .shared,
+            updater: .shared,
+            navigation: navigation
         ))
     }
 
@@ -41,6 +48,7 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
     private let server: ServerManager
     private let loginAtLaunch: LaunchAtLoginService
     private let onClose: () -> Void
+    private let navigation = SettingsNavigation()
 
     private var window: NSWindow?
     var hasVisibleWindow: Bool { window?.isVisible == true }
@@ -64,7 +72,10 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
         observeSettings()
     }
 
-    func present() {
+    func present(category: SettingsCategory? = nil, checkForUpdates: Bool = false) {
+        if let category {
+            navigation.select(category)
+        }
         NSApp.activate(ignoringOtherApps: true)
 
         if let settingsWindow = window {
@@ -73,6 +84,9 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
             }
             settingsWindow.makeKeyAndOrderFront(nil)
             settingsWindow.orderFrontRegardless()
+            if checkForUpdates {
+                Task { _ = await UpdateService.shared.checkForUpdates(manual: true) }
+            }
             return
         }
 
@@ -83,6 +97,9 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
         settingsWindow.makeKeyAndOrderFront(nil)
         settingsWindow.orderFrontRegardless()
         updateWindowTitle()
+        if checkForUpdates {
+            Task { _ = await UpdateService.shared.checkForUpdates(manual: true) }
+        }
     }
 
     func tearDown() {
@@ -100,7 +117,8 @@ final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
         let rootView = SettingsRootView(
             settings: settings,
             server: server,
-            loginAtLaunch: loginAtLaunch
+            loginAtLaunch: loginAtLaunch,
+            navigation: navigation
         )
         let hostingController = NSHostingController(rootView: rootView)
         let settingsWindow = NSWindow(contentViewController: hostingController)

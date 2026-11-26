@@ -13,6 +13,7 @@ final class SettingsModel: ObservableObject {
     let server: ServerManager
     let loginAtLaunch: LaunchAtLoginService
     let worker: AccountWorkerManager
+    let updater: UpdateService
 
     /// Magpie 连接探测的最近结论。只在用户点「检查连接」后改变。
     @Published var connection = "未检查"
@@ -45,6 +46,7 @@ final class SettingsModel: ObservableObject {
     let navigation: SettingsNavigation
     private var pairingCodeExpiryTask: Task<Void, Never>?
     private var navigationObserver: AnyCancellable?
+    private var updateObserver: AnyCancellable?
 
     /// 一次性只读加载：切分类不会重跑。
     private var loadGate = SettingsLoadGate()
@@ -54,15 +56,20 @@ final class SettingsModel: ObservableObject {
         server: ServerManager,
         loginAtLaunch: LaunchAtLoginService,
         worker: AccountWorkerManager,
+        updater: UpdateService? = nil,
         navigation: SettingsNavigation = SettingsNavigation()
     ) {
         self.settings = settings
         self.server = server
         self.loginAtLaunch = loginAtLaunch
         self.worker = worker
+        self.updater = updater ?? .shared
         self.navigation = navigation
-        // 转发导航的变更，视图只订阅 model 一个对象。
+        // 转发导航与更新服务的变更，视图只订阅 model 一个对象。
         navigationObserver = navigation.objectWillChange.sink { [weak self] in
+            self?.objectWillChange.send()
+        }
+        updateObserver = self.updater.objectWillChange.sink { [weak self] in
             self?.objectWillChange.send()
         }
     }
@@ -105,6 +112,41 @@ final class SettingsModel: ObservableObject {
     var tlsPhase: SettingsTLSResetFlow { tlsReset }
 
     var isBusy: Bool { busy || tlsReset.isBusy || worker.credentialMigrationBusy }
+
+    var appVersionDisplay: String { updater.currentVersion.displayText }
+
+    var updateState: UpdateCheckState { updater.state }
+
+    var updateLastCheckedText: String? {
+        guard let date = updater.lastCheckedAt else { return nil }
+        let elapsed = max(0, Int(Date().timeIntervalSince(date)))
+        if elapsed < 60 { return "刚刚检查" }
+        if elapsed < 3600 { return "\(elapsed / 60) 分钟前检查" }
+        if elapsed < 86400 { return "\(elapsed / 3600) 小时前检查" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        return "上次检查 \(formatter.string(from: date))"
+    }
+
+    func checkForUpdates() async {
+        _ = await updater.checkForUpdates(manual: true)
+    }
+
+    func openUpdateDownload(_ info: UpdateInfo) {
+        NSWorkspace.shared.open(updater.preferredDownloadURL(for: info))
+    }
+
+    func openUpdateReleaseNotes(_ info: UpdateInfo) {
+        NSWorkspace.shared.open(updater.preferredReleaseNotesURL(for: info))
+    }
+
+    func openReleasePage() {
+        NSWorkspace.shared.open(updater.releasePageURL)
+    }
+
+    func ignoreUpdate(_ info: UpdateInfo) {
+        updater.ignoreUpdate(info)
+    }
 
     // MARK: - 首次加载（只读）
 

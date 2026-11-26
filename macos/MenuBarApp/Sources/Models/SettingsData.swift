@@ -47,6 +47,10 @@ class AppSettings: ObservableObject {
     @Published var debugMode: Bool {
         didSet { UserDefaults.standard.set(debugMode, forKey: "debugMode") }
     }
+    /// 启动后在后台静默检查更新（每 24 小时最多一次，不弹窗打扰）。默认开。
+    @Published var autoCheckUpdates: Bool {
+        didSet { UserDefaults.standard.set(autoCheckUpdates, forKey: "autoCheckUpdates") }
+    }
     var preferredColorScheme: ColorScheme? {
         switch AppThemeMode(rawValue: themeMode) ?? .system {
         case .light: return .light
@@ -89,6 +93,7 @@ class AppSettings: ObservableObject {
         themeMode = defaults.string(forKey: "themeMode") ?? "system"
         languageCode = defaults.string(forKey: "languageCode") ?? AppLanguage.system.rawValue
         debugMode = defaults.bool(forKey: "debugMode")
+        autoCheckUpdates = defaults.object(forKey: "autoCheckUpdates") as? Bool ?? true
         publishWidgetSettings()
     }
     static let shared = AppSettings()
