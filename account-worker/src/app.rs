@@ -1,7 +1,7 @@
 //! Worker 运行状态：路径、数据库句柄、凭据后端。
 //!
 //! 数据库是**懒打开**的：`health` 必须在数据库坏掉时仍能回答，
-//! 所以打不开只记进 `db_last_error`，不让整个进程起不来。
+//! 所以打不开时不让整个进程起不来。
 
 use std::sync::Mutex;
 use std::time::Instant;
@@ -19,7 +19,6 @@ pub struct App {
     pub secure: SecureStore,
     started_at: Instant,
     db: Mutex<Option<Db>>,
-    db_last_error: Mutex<Option<String>>,
     last_secure_probe: Mutex<Option<Value>>,
 }
 
@@ -30,7 +29,6 @@ impl App {
             secure: SecureStore::from_env(),
             started_at: Instant::now(),
             db: Mutex::new(None),
-            db_last_error: Mutex::new(None),
             last_secure_probe: Mutex::new(None),
         }
     }
@@ -55,14 +53,8 @@ impl App {
             match Db::open(&self.paths.db_path) {
                 Ok(db) => {
                     *guard = Some(db);
-                    if let Ok(mut err) = self.db_last_error.lock() {
-                        *err = None;
-                    }
                 }
                 Err(err) => {
-                    if let Ok(mut slot) = self.db_last_error.lock() {
-                        *slot = Some(err.message.clone());
-                    }
                     return Err(err);
                 }
             }

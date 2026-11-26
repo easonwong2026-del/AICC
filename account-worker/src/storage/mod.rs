@@ -1168,15 +1168,6 @@ impl Db {
         Ok(n > 0)
     }
 
-    #[allow(dead_code)] // PR2 接线时使用
-    pub fn set_auth_status(&self, id: &str, status: &str) -> RpcResult<()> {
-        self.conn.execute(
-            "UPDATE accounts SET auth_status = ?1, updated_at = ?2 WHERE id = ?3",
-            params![status, now_rfc3339(), id],
-        )?;
-        Ok(())
-    }
-
     pub fn list_groups(&self) -> RpcResult<Vec<Value>> {
         let mut stmt = self.conn.prepare(
             "SELECT g.id, g.name, g.sort_order, COUNT(a.id)

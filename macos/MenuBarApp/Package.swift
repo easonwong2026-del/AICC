@@ -28,7 +28,6 @@ let package = Package(
                 "Services/SingleInstanceService.swift",
                 "Services/WidgetHealthService.swift",
                 "Settings",
-                "Views",
             ],
             sources: [
                 "AccountCenter/AccountWorkerClient.swift",
@@ -82,6 +81,7 @@ let package = Package(
             sources: [
                 "AccountWorkerClientTests.swift",
                 "AccountWorkerProtocolTests.swift",
+                "ActivityModelsTests.swift",
                 "ConsoleModelsTests.swift",
                 "ConsoleNavigationTests.swift",
                 "ConsoleAccountsRefreshTests.swift",
@@ -117,6 +117,7 @@ let package = Package(
                 "UpdateServiceTests.swift",
                 "UsageModelTests.swift",
                 "WidgetInstallationTests.swift",
+                "WorkerQuotaModelsTests.swift",
             ]
         ),
     ]

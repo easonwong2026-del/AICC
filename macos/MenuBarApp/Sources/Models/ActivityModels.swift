@@ -392,6 +392,7 @@ struct ActivityFleetState: Equatable {
     }
 }
 
+#if DEBUG || AICC_VISUAL_TEST
 extension ActivityFleetState {
     /// 视觉回归与单测样本：**不是真实账号数据**。
     ///
@@ -534,3 +535,4 @@ extension ActivityFleetState {
         )
     }
 }
+#endif

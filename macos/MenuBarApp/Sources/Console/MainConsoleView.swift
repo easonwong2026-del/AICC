@@ -323,30 +323,4 @@ extension ConsoleStore {
         return nil
         #endif
     }
-
-    var workerHealthText: String {
-        if case .running(let health) = worker.state {
-            return health.isHealthy ? "账号助手正常" : "账号助手降级"
-        }
-        return "账号助手未就绪"
-    }
-
-    var workerHealthColor: Color {
-        if case .running(let health) = worker.state {
-            return health.isHealthy ? ConsoleTheme.success : ConsoleTheme.warning
-        }
-        return ConsoleTheme.tertiaryText
-    }
-
-    var magpieHealthText: String {
-        guard let snapshot else { return "Magpie 未检查" }
-        if !snapshot.available { return "Magpie 不可用" }
-        return snapshot.stale ? "Magpie 缓存中" : "Magpie 正常"
-    }
-
-    var magpieHealthColor: Color {
-        guard let snapshot else { return ConsoleTheme.tertiaryText }
-        if !snapshot.available { return ConsoleTheme.danger }
-        return snapshot.stale ? ConsoleTheme.warning : ConsoleTheme.success
-    }
 }

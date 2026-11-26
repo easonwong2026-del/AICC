@@ -115,6 +115,7 @@ enum WidgetHealthService {
         } else {
             try? data.write(to: url)
         }
+        LogFileLimiter.trimIfNeeded(url)
     }
 
     @discardableResult

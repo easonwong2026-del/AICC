@@ -70,15 +70,6 @@ struct ConsoleSummaryMetric: View {
 
 // MARK: - 分组标题
 
-struct ConsoleSectionTitle: View {
-    let title: String
-    var detail: String?
-
-    var body: some View {
-        ConsoleSectionHeader(title: title, detail: detail) { EmptyView() }
-    }
-}
-
 /// 分组标题 + 右侧操作。四个页面统一用它起头。
 struct ConsoleSectionHeader<Trailing: View>: View {
     let title: String
@@ -99,41 +90,6 @@ struct ConsoleSectionHeader<Trailing: View>: View {
             }
             Spacer(minLength: 8)
             trailing
-        }
-    }
-}
-
-// MARK: - 统计卡
-
-struct ConsoleStatTile: View {
-    let caption: String
-    let value: String
-    var hint: String?
-    var tone: Color = ConsoleTheme.text
-    /// 值不是数字（如 `—`）时不再放大，避免看起来像有数据。
-    var emphasized: Bool = true
-
-    var body: some View {
-        ConsoleCard(padding: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(caption)
-                    .font(ConsoleType.small)
-                    .foregroundStyle(ConsoleTheme.secondaryText)
-                    .lineLimit(1)
-                Text(value)
-                    .font(emphasized ? ConsoleType.metric : ConsoleType.metricSmall)
-                    .monospacedDigit()
-                    .foregroundStyle(tone)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                if let hint {
-                    Text(hint)
-                        .font(ConsoleType.caption)
-                        .foregroundStyle(ConsoleTheme.tertiaryText)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
         }
     }
 }
@@ -547,13 +503,5 @@ enum ConsoleFormat {
     /// UID 只露前 8 位：够认人，又不至于把整串带进截图。
     static func maskedUID(_ uid: String) -> String {
         uid.count <= 8 ? uid : String(uid.prefix(8)) + "…"
-    }
-
-    static func maskedEmail(_ email: String) -> String {
-        guard let at = email.firstIndex(of: "@") else { return maskedUID(email) }
-        let name = email[email.startIndex..<at]
-        let domain = email[at...]
-        guard name.count > 2 else { return "\(name.first ?? "*")***\(domain)" }
-        return "\(name.prefix(2))***\(domain)"
     }
 }
