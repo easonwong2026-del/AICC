@@ -438,6 +438,16 @@ impl super::Db {
         )?)
     }
 
+    /// 把所有待还原的临时登录记录标成已结算（例如自动轮换已恢复原账号，或用户已手动换号）。
+    pub fn settle_all_pending_temporary(&self) -> RpcResult<usize> {
+        Ok(self.conn.execute(
+            "UPDATE workbuddy_switch_journal
+                SET restore_state = ?2, updated_at = ?3
+              WHERE temporary = 1 AND restore_state = ?1",
+            params![RESTORE_PENDING, RESTORE_DONE, now_rfc3339()],
+        )?)
+    }
+
     /// 改恢复状态。`done` 表示"这条不再提供恢复"。
     pub fn set_restore_state(&self, id: &str, state: &str) -> RpcResult<()> {
         let changed = self.conn.execute(

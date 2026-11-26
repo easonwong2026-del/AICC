@@ -154,11 +154,16 @@ pub fn status(app: &App, control: &dyn ClientControl, env: &SwitchEnv) -> RpcRes
     let recent = app.with_db(|db| db.wb_switch_journals(5))?;
     let temporary_restore = app.with_db(|db| db.pending_temporary_restore())?;
 
+    // 只在客户端仍处于该临时账号或已掉线（未登录）时保留恢复入口；
+    // 若已登录成另一个账号（例如轮换已恢复原账号或手动换号），旧临时记录不再对外暴露。
+    let active_temporary_restore = temporary_restore.filter(|journal| {
+        !live.logged_in() || live.uid.as_deref() == Some(journal.target_uid.as_str())
+    });
     // 临时登录是否正作用在当前登录账号上：是的话界面要标"临时登录"，并且一直给恢复入口。
-    let live_temporary = temporary_restore
-        .as_ref()
-        .filter(|journal| live.uid.as_deref() == Some(journal.target_uid.as_str()));
-    let restore_available = open.is_some() || temporary_restore.is_some();
+    let live_temporary = active_temporary_restore.as_ref().filter(|journal| {
+        live.logged_in() && live.uid.as_deref() == Some(journal.target_uid.as_str())
+    });
+    let restore_available = open.is_some() || active_temporary_restore.is_some();
 
     Ok(json!({
         "ok": true,
@@ -194,7 +199,7 @@ pub fn status(app: &App, control: &dyn ClientControl, env: &SwitchEnv) -> RpcRes
         },
         "candidates": candidates,
         "pendingSwitch": open,
-        "temporaryRestore": temporary_restore,
+        "temporaryRestore": active_temporary_restore,
         "restoreAvailable": restore_available,
         "lastSwitch": latest,
         "recent": recent,
@@ -2258,6 +2263,33 @@ mod tests {
             after["temporaryRestore"]["targetUid"], "uid-b",
             "待还原的临时登录必须能被界面找到"
         );
+
+        // 客户端掉线（写出退出标记）：临时令牌过期时，恢复入口必须仍然保留。
+        std::fs::write(client::logout_marker_path(&h.env.auth_path), "logged-out").unwrap();
+        let logged_out = status(&h.app, &control, &h.env).unwrap();
+        assert_eq!(logged_out["live"]["loggedIn"], false);
+        assert_eq!(logged_out["live"]["temporary"], false);
+        assert_eq!(logged_out["restoreAvailable"], true);
+        assert_eq!(logged_out["temporaryRestore"]["targetUid"], "uid-b");
+
+        // 客户端已切到另一个账号（例如自动轮换已恢复原账号，或用户手动换号）：
+        // 旧的临时记录不能再贴到当前登录账号上。
+        std::fs::remove_file(client::logout_marker_path(&h.env.auth_path)).unwrap();
+        std::fs::write(
+            &h.env.auth_path,
+            serde_json::to_vec(&json!({
+                "account": { "uid": "uid-a" },
+                "auth": { "accessToken": "AT-A", "refreshToken": "RT-A" }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let other_account = status(&h.app, &control, &h.env).unwrap();
+        assert_eq!(other_account["live"]["loggedIn"], true);
+        assert_eq!(other_account["live"]["uid"], "uid-a");
+        assert_eq!(other_account["live"]["temporary"], false);
+        assert_eq!(other_account["restoreAvailable"], false);
+        assert_eq!(other_account["temporaryRestore"], Value::Null);
         magpie::test_reset();
     }
 

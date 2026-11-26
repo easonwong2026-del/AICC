@@ -715,7 +715,9 @@ async fn advance_with_depth(
                 }
                 StepGate::Halt { detail } => {
                     app.with_db(|db| {
-                        db.set_rotation_state(&run.id, STATE_COMPLETED, Some(&detail))
+                        db.set_rotation_state(&run.id, STATE_COMPLETED, Some(&detail))?;
+                        let _ = db.settle_all_pending_temporary();
+                        Ok::<(), RpcError>(())
                     })?;
                     Ok(json!({ "status": STATE_COMPLETED, "runId": run.id, "detail": detail }))
                 }
@@ -1425,7 +1427,11 @@ async fn dwelling(
 ) -> RpcResult<Value> {
     // 用户中途自己换了账号：立即停止，不覆盖。
     if let Some(reason) = user_diverged(app, deps, run) {
-        app.with_db(|db| db.set_rotation_state(&run.id, STATE_COMPLETED, Some(&reason)))?;
+        app.with_db(|db| {
+            db.set_rotation_state(&run.id, STATE_COMPLETED, Some(&reason))?;
+            let _ = db.settle_all_pending_temporary();
+            Ok::<(), RpcError>(())
+        })?;
         return Ok(json!({ "status": STATE_COMPLETED, "runId": run.id, "detail": reason }));
     }
 
@@ -1575,6 +1581,7 @@ pub fn restore_origin(
 
     let live = client::read_live(&deps.env.auth_path);
     if live.uid.as_deref() == run.origin_uid.as_deref() && !live.logout_marker {
+        let _ = app.with_db(|db| db.settle_all_pending_temporary());
         return Ok(RestoreOutcome {
             ok: true,
             code: "already_origin".to_string(),
@@ -1605,7 +1612,9 @@ pub fn restore_origin(
 
     let after = client::read_live(&deps.env.auth_path);
     let ok = after.uid.as_deref() == run.origin_uid.as_deref() && !after.logout_marker;
-    let _ = app;
+    if ok {
+        let _ = app.with_db(|db| db.settle_all_pending_temporary());
+    }
     Ok(RestoreOutcome {
         ok,
         code: if ok {
