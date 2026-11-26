@@ -83,18 +83,19 @@ without touching it:
 
 ## E-ink APK
 
-The APK reads the same generic snapshot through the paired, read-only bridge: multiple providers, multiple accounts,
-subscription windows, credits, plans and balances, with real cached/offline/failed state. Cards are four per page,
-1/2/all counts are configurable, all-accounts mode pages on tap, and the panel only redraws when the content actually
-changes. BOOX flash calibration, sleep pause and wake refresh are preserved.
+The **1.2.8** APK (`versionCode 14`, signed with `CN=AICC Release`) reads the same generic snapshot through the paired, read-only HTTPS bridge and offers a switchable **Dual-Mode UI**:
+
+- **Swiss Grid (default):** two low-quota focus cards plus a provider-diversified `2×2` grid (6 cards per page), clear bottom pagination controls, and bold borders + inverted badges for low/failed windows.
+- **Desk Clock:** oversized tabular `HH:mm` clock, date/fleet status, inverted alert pill, and a `2×2` core-quota grid. Switchable via the header pill, footer button, or Settings.
+- **Account Detail & Offline Signaling:** tap any card for a top-aligned, full-width window breakdown with `Prev / Next` account switching; offline state renders an inverted `OFFLINE` header pill and a dashed retry banner.
+- **Settings:** bordered inputs, TLS 1.3 fingerprint display, layout/sort toggles, provider filter chips, and 1/2/all account counts. BOOX flash calibration, sleep pause, and wake refresh are preserved.
 
 Devices declare `X-AICC-Schema: 3`; the bridge serves the old `codex` shape only when explicitly asked (`?format=2`).
 Local control stays on loopback HTTP (`127.0.0.1:8765`), while LAN access listens on **HTTPS (`0.0.0.0:8767`, TLS 1.3 preferred)**
 with **root certificate SPKI pinning** confirmed during pairing (see [BRIDGE_TLS](docs/BRIDGE_TLS.md)).
 Bridge credentials are separate from Magpie's gateway key, stored in a `0600` file at
 `~/Library/Application Support/AICC-Dashboard/bridge-token` (passed to Python on stdin), and encrypted on Android with
-Android Keystore (`usesCleartextTraffic="false"`, backup disabled). LAN HTTPS Android code is merged on `main`;
-signed `1.2.8` APK packaging is pending JDK 17 setup on the signing machine.
+Android Keystore (`usesCleartextTraffic="false"`, backup disabled). `AICC-Poke4S-1.2.8.apk` is published with [v2.14.1](https://github.com/easonwong2026-del/AICC/releases/tag/v2.14.1).
 
 ## Build and acceptance
 

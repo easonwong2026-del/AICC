@@ -106,5 +106,5 @@ Mac `192.168.0.14`（AICC 2.12.2 自带运行时 + 根证书 gen 2）／POKE4S `
 ## 状态
 
 - Swift 端开关语义、指纹展示、`tls.ensure` / `tls.reset` 与重置重启桥接已合入 `main`。
-- Android 正式客户端的 HTTPS 发现、首次指纹核对 UI、SPKI pinning 与 `usesCleartextTraffic="false"` 已合入 `main` 并通过 POKE4S 真机 Wi-Fi 验收（见上表）。
-- 待补齐项：在签名机配置 JDK 17 后打包并发布带签名的 `1.2.8` APK 资产（详见 Issue #78）。
+- Android 正式客户端的 HTTPS 发现、首次指纹核对 UI、SPKI pinning 与 `usesCleartextTraffic="false"` 已合入 `main`。
+- 正式签名版 `AICC-Poke4S-1.2.8.apk`（`versionCode 14`，`CN=AICC Release`，含双模式 UI 重构，PR #126）已随 `v2.14.1` Release 发布，并在 POKE4S 真机 Wi-Fi 环境下完成配对与实时数据端到端验收（Issue #78 已闭环）。

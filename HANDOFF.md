@@ -15,7 +15,7 @@
 | macOS 桌面小组件 | 稳定 | Small / Medium 通用额度卡片 + Large 四页看板（深链翻页） |
 | Rust `account-worker` | 稳定 | 账号、签到、成长、旅行、Credits、夜间轮换、凭据存储、TLS 证书管理 |
 | 内置 Python 桥接 | 稳定 | 本机 `127.0.0.1:8765` HTTP；局域网 `0.0.0.0:8767` HTTPS（TLS 1.3 + SPKI Pinning） |
-| Android 墨水屏（POKE4S） | 源码已切 HTTPS，待发新包 | `main` 已合入 HTTPS + SPKI Pinning，签名的 `1.2.8` APK 待配置 JDK 17 后打包发布 |
+| Android 墨水屏（POKE4S） | 已发布（1.2.8 / Build 14） | 双模式 UI（瑞士网格 + 桌搭时钟）、HTTPS 8767 + SPKI Pinning，已由 `CN=AICC Release` 签名并挂入 `v2.14.1` Release |
 
 ---
 
@@ -81,7 +81,6 @@ bash scripts/smoke-test-board-visual.sh
 
 ## 5. 下一步 Backlog（P1 / P2）
 
-1. **Android 签发 `1.2.8` APK**：在打包机安装 JDK 17 后用 `~/Library/Application Support/AICC-Dashboard/android/aicc-release.keystore` 打包并挂到 Release，关闭 Issue #78。
-2. **结构拆分（PR-D）**：按业务域拆分 `account-worker/src/handlers.rs`（7,200+ 行）与 Swift 大文件，降低后续变更回归成本。
-3. **瘦身与内存收尾（PR-B3 / PR-C）**：评估 Rust `opt-level = "z"`，以及关闭桥接时不常驻 Python 进程（预计可省 24–29 MB 内存）。
-4. **长期路线择一推进**：Developer ID 公证分发 / Android 通用客户端与手机小组件（#13）/ 新平台额度与账号接入（#14）。
+1. **结构拆分（PR-D）**：按业务域拆分 `account-worker/src/handlers.rs`（7,200+ 行）与 Swift 大文件，降低后续变更回归成本。
+2. **瘦身与内存收尾（PR-B3 / PR-C）**：评估 Rust `opt-level = "z"`，以及关闭桥接时不常驻 Python 进程（预计可省 24–29 MB 内存）。
+3. **长期路线择一推进**：Developer ID 公证分发 / Android 通用客户端与手机小组件（#13）/ 新平台额度与账号接入（#14）。

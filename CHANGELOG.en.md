@@ -13,6 +13,12 @@ This file summarizes the current and recent public releases. The Chinese changel
 - **10-minute foreground refresh & state consistency (#125):** unified `ConsoleAccountsRefreshCoordinator` and `ConsoleAccountsAutoRefreshScheduler`, separated `lastSuccessAt` / `lastAttemptAt` / `lastError`, added spin prevention and lazy worker failure lookup, and aligned authorization rows with fleet summary status.
 - **Read-only cache & polish (#125):** added `MagpieLoginsCache` (`OnceCell`) in `account-worker`, sidebar attention badges, shortcuts (`⌘R`, `⌘,`, `⌘1–⌘4`), native hover feedback and Qoder banner dismissal.
 
+### E-ink APK (1.2.8 / #126)
+
+- **Dual-mode UI redesign:** switchable between Swiss Grid (two focus cards + `2×2` provider-diversified grid, 6 cards per page) and Desk Clock (oversized tabular clock + alert pill + `2×2` core cards).
+- **Direct touch navigation & account detail page:** tap any card to open a top-aligned, full-width detail page with `Prev / Next` account switching and normalized credit labels; clear bottom pagination replaces single-direction blind tapping; explicit inverted `OFFLINE` pill and dashed retry banner.
+- **Redesigned Settings & signed HTTPS APK:** bordered inputs, TLS 1.3 fingerprint banner, layout/sort/provider filters; shipped as `AICC-Poke4S-1.2.8.apk` (`versionCode 14`, `CN=AICC Release`) with LAN HTTPS + SPKI pinning verified on POKE4S.
+
 ## 2.14.0 - 2026-11-22
 
 ### UI V5 & Menu Bar (#115–#121)
