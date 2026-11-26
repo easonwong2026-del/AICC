@@ -84,10 +84,6 @@ impl ErrorKind {
     }
 
     /// 值得等下一轮再试的错误。授权类错误不在此列：重试只会继续 401。
-    ///
-    /// #68 的重试策略直接用它；#67 只读阶段还没有调用方，但语义要现在钉住，
-    /// 免得将来某处手写 `kind != Unauthorized` 又把 5xx 当成登录失效。
-    #[allow(dead_code)]
     pub fn retryable(self) -> bool {
         matches!(self, Self::RateLimited | Self::Server | Self::Network)
     }

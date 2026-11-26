@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 
+#if AICC_VISUAL_TEST
 /// 总览页的**「成长活跃」区块**（PR #103）。
 ///
 /// 回答一件事：四个账号今天的热力墙亮了没有，没亮的该去哪个客户端补一次真实任务。
@@ -209,6 +210,7 @@ struct ConsoleActivityBlock: View {
         }
     }
 }
+#endif
 
 // MARK: - 打开官方客户端
 

@@ -439,6 +439,7 @@ struct RewardStatusResult: Equatable {
         accounts.first { $0.accountId == id }
     }
 
+#if DEBUG || AICC_VISUAL_TEST
     /// 给预览、视觉回归与单测用的固定数据。**不是真实响应**，值也不代表任何账号。
     ///
     /// `accountId` 可覆盖：视觉回归要把这份数据挂到样本账号上，单测则用默认值。
@@ -496,4 +497,5 @@ struct RewardStatusResult: Equatable {
     }
 
     static let mock: RewardStatusResult = mock()
+#endif
 }

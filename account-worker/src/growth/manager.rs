@@ -641,11 +641,7 @@ fn raw_status_name(status: TaskStatus) -> &'static str {
 }
 
 /// 一轮里"要不要真的写"：只有存在待接单或待领奖的任务时才写。
-///
-/// 这个判断让默认关闭状态下的监控也能派上用场：只读轮询照样能算出
-/// "有 3 个任务可以接"，界面就能提示用户去开开关。
-// 目前只有测试在用；#69 的批量计划会直接拿它算"这一轮值不值得发请求"。
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn plan_of(tasks: &[GrowthTask]) -> (usize, usize) {
     let mut acceptable = 0;
     let mut claimable = 0;
