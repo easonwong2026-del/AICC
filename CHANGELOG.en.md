@@ -4,6 +4,14 @@
 
 This file summarizes the current and recent public releases. The Chinese changelog contains the older detailed history.
 
+## 2.15.1 - 2026-11-27
+
+### Console Disclosure Fix & Magpie 401 Fallback Clarity (#132)
+
+- **Full-row clickable disclosure sections:** replaced all 6 macOS native `DisclosureGroup` sections (`授权详情`, `奖励`, `账号信息`, `配置详情`) with `ConsoleDisclosureSection` so clicking anywhere on the header row toggles smoothly with hover feedback and a rotating chevron.
+- **Direct own-authorization shortcut:** accounts that only have a Magpie borrowed authorization now surface an "添加自有授权" button directly inside `授权详情` and on the inline travel-failure notice.
+- **Smarter stale-Magpie 401 handling:** when Buddy Travel gets HTTP 401 and `resync_magpie_access` reads back the exact same token, `account-worker` immediately falls back to a usable `own` authorization if present, or reports a clear localized explanation instead of raw HTML 401 output.
+
 ## 2.15.0 - 2026-11-26
 
 ### In-App Update Checker & Experience (#131)
